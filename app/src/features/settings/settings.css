@@ -1,0 +1,61 @@
+.settings-secret,
+.settings-copy-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.settings-secret code,
+.settings-copy-cell code,
+.settings-break {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.settings-copy-cell > .cluster,
+.settings-secret > .cluster {
+  flex-shrink: 0;
+}
+.settings-account {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding-block: 8px;
+}
+.settings-account > :first-child {
+  flex: 1;
+}
+.settings-reputation {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr .75fr 1.5fr;
+  gap: 24px;
+}
+.settings-reputation > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+}
+.settings-row-actions {
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+.settings-payload {
+  max-height: 55vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+@media (max-width: 900px) {
+  .settings-reputation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .settings-account { flex-wrap: wrap; }
+  .settings-account > :first-child { flex-basis: 100%; }
+  .settings-reputation { grid-template-columns: 1fr; }
+}

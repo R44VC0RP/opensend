@@ -1,0 +1,17 @@
+.audience-page { min-width: 0; }
+.audience-search { width: 320px; max-width: 100%; }
+.audience-summary { min-height: 58px; padding-block: var(--space-16); border-bottom: 1px solid var(--color-border); gap: var(--space-24); }
+.audience-properties { padding-block: var(--space-16); }
+.audience-properties dl { display: grid; grid-template-columns: 164px minmax(0, 1fr); margin: 0; }
+.audience-properties dt, .audience-properties dd { margin: 0; padding-block: var(--space-12); overflow-wrap: anywhere; }
+.audience-properties dt { color: var(--color-muted); }
+.audience-editor { padding-top: var(--space-24); }
+.audience-name { max-width: 480px; }
+.audience-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px; gap: var(--space-12); align-items: start; }
+.audience-rule-remove { margin-top: var(--space-24); }
+@media (max-width: 800px) {
+  .audience-rule { grid-template-columns: minmax(0, 1fr) 34px; }
+  .audience-rule > .ui-field { grid-column: 1; }
+  .audience-rule-remove { grid-column: 2; grid-row: 1; }
+  .audience-properties dl { grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); }
+}

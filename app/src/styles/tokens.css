@@ -1,0 +1,70 @@
+@font-face {
+  font-family: 'OpenTUI Mono';
+  src: url('/fonts/opentui-regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'OpenTUI Mono';
+  src: url('/fonts/opentui-bold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+:root {
+  --color-canvas: #F6F6F6;
+  --color-surface: #FFFFFF;
+  --color-text: #181818;
+  --color-muted: #707070;
+  --color-border: #E8E8E8;
+  --color-accent: #315EFB;
+  --color-active-bg: #F0F3FF;
+  --color-success: #2E7D5E;
+  --color-success-marker: #378767;
+  --color-warning: #A85E30;
+  --color-warning-marker: #B66A39;
+  --color-danger: #995168;
+  --color-complaint: var(--color-danger);
+  --color-danger-marker: var(--color-danger);
+  --color-info: var(--color-accent);
+  --color-info-marker: var(--color-accent);
+  --color-neutral-marker: var(--color-muted);
+  --color-overlay: rgb(24 24 24 / 28%);
+  --color-shadow: rgb(24 24 24 / 12%);
+  --color-transparent: transparent;
+  --color-on-accent: var(--color-surface);
+  --color-focus: var(--color-accent);
+  --font-body: 'OpenTUI Mono', monospace;
+  --font-email: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 22px;
+  --text-xl: 32px;
+  --leading-xs: 18px;
+  --leading-sm: 20px;
+  --leading-lg: 28px;
+  --leading-xl: 36px;
+  --font-weight-regular: 400;
+  --font-weight-bold: 700;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-28: 28px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+  --control-height: 34px;
+  --row-height: 48px;
+  --row-height-lg: 64px;
+  --sidebar-width: 208px;
+  --motion-duration: 120ms;
+  --shadow-popover: 0 4px 16px var(--color-shadow);
+  --shadow-dialog: 0 12px 40px var(--color-shadow);
+}
