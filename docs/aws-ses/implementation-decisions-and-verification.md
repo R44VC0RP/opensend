@@ -2,21 +2,24 @@
 
 [Hub](README.md) · Prepared 2026-09-08 · **No API has been implemented and none of the AWS integration checks below has been run.**
 
-This turns the reference research into a later build checklist. Recommendations are provisional; the user has not selected a hosting stack, customer connection model or campaign consent authority.
+This turns the reference research into a later build checklist. The initial scope is now a deployment-managed, environment-configured AWS connection and OpenSend-owned marketing consent with a hosted one-click unsubscribe page. The hosting stack remains undecided. [Root TODO](../../todo.md) records the selected defaults and deferred UI work; those decisions supersede the earlier alternatives in the research documents.
 
 ## Decisions that change the API/data model
 
 | Decision | Recommended starting point | Why / reference |
 | --- | --- | --- |
 | SES interface | SES API v2, current server-side SDK; classic SES only for missing legacy capabilities | [API inventory](api-and-sdk-inventory.md) |
-| Customer connection | Cross-account role with unique ExternalId; separately supported explicit key fallback | [Credentials and IAM](credentials-and-iam.md) |
-| Send scope | Every request resolves an authorized connection + AWS account + region + optional tenant | [Accounts/regions](accounts-regions-and-onboarding.md) |
-| Marketing unsubscribe | Choose SES-managed single-recipient `SendEmail` or OpenSend-managed bulk unsubscribe explicitly | [Marketing tradeoff](marketing-consent-and-suppression.md) |
-| Delivery telemetry | Required configuration set and authenticated, durable downstream event ingestion | [Delivery/events](delivery-events-and-observability.md) |
+| AWS connection — selected | Deployment-managed environment configuration; attached workload role preferred where available; customer wizard deferred | [Root TODO](../../todo.md), [credentials](credentials-and-iam.md) |
+| Send scope | Every request resolves the configured account + authorized region and workspace; never arbitrary caller credentials/endpoints | [Accounts/regions](accounts-regions-and-onboarding.md) |
+| Marketing unsubscribe — selected | OpenSend-owned consent; hosted immediate all-marketing opt-out per workspace across regions, plus RFC 8058 POST support | [Root TODO](../../todo.md), [marketing tradeoff](marketing-consent-and-suppression.md) |
+| Delivery telemetry — selected | Ingest all ten relevant SES categories; expose all to webhooks, default seven processing/delivery events and opt-in engagement/subscription | [Root TODO](../../todo.md), [delivery/events](delivery-events-and-observability.md) |
 | Retry contract | Application idempotency plus explicit ambiguous provider outcomes, not “exactly once” | [Sending/templates](sending-and-templates.md) |
 | Bulk contract | One recipient per job; batch as an execution detail; persist per-entry results | [Sending/templates](sending-and-templates.md) |
-| Templates | App-owned immutable versions, explicit regional deployment or inline content | [Sending/templates](sending-and-templates.md) |
-| Isolation | Customer AWS accounts initially; SES tenants an explicit optional capability | [Accounts/regions](accounts-regions-and-onboarding.md) |
+| Templates — selected | SES-compatible syntax, fallback data before sending, immutable campaign versions internally; no library UI required | [Sending/templates](sending-and-templates.md) |
+| Retention — selected | 30-day detailed logs/content; persistent minimal engagement timestamps and coverage metadata for contact-lifetime segmentation, consent/suppression separate | [Root TODO](../../todo.md) |
+| Test keys — selected | Local simulated lifecycle; no SES send or production-state mutation; real campaign test sends are separate | [Root TODO](../../todo.md) |
+| Attachments — required | Campaign upload/remove/review/test and transactional API support; private assets and encoded-size validation | [Root TODO](../../todo.md), [sending/templates](sending-and-templates.md) |
+| Isolation | One deployment-managed AWS connection initially; workspace data/keys remain scoped; multi-account enrollment and SES tenants are later capabilities | [Accounts/regions](accounts-regions-and-onboarding.md) |
 | Costs | Selected plan + add-ons, not a fixed universal send price | [Limits/costs](limits-costs-and-operations.md) |
 
 ### Minimum logical records (proposal, not a database schema)
@@ -39,7 +42,7 @@ These records deliberately separate the OpenSend tenant from the AWS account and
 | --- | --- | --- |
 | Connect/read | Validate identity/account/region, discover quotas/identities/templates/configuration | No sends, DNS writes, production requests or paid-feature activation |
 | Transactional | Single sends, templates, attachments, idempotency, events and suppression | No uncontrolled marketing imports |
-| Marketing | Campaign queues, bulk, segmentation, consent/unsubscribe, pause/cancel | Must settle consent authority and provider requirements first |
+| Marketing | Campaign queues, bulk, segmentation, consent/unsubscribe, pause/cancel | OpenSend-owned consent selected; provider compliance and runtime verification remain required |
 | Administrative | Identity setup, template deployment, configuration sets, event provisioning, imports | Separate permissions and explicit writes |
 | Advanced | SES tenants, multi-region routing, validation, VDM, dedicated IPs, archiving | Availability, cost, IAM and acceptance checks per feature |
 
@@ -83,9 +86,9 @@ These are planned observable checks, **not newly created test files**. Use a cus
 
 | Scenario | Required observation | Environment / caution |
 | --- | --- | --- |
-| Managed SES unsubscribe | Single-recipient headers + footer + actual preference update | Easy DKIM setup and approved recipient |
-| Custom bulk unsubscribe | Correct per-recipient signed token, delivered headers, one-click POST, future suppression | No auth required to opt out; no open redirect |
-| GET link scanner / repeated POST | No accidental GET unsubscribe; POST idempotent | RFC 8058 path distinct from preferences page |
+| Managed SES unsubscribe (alternative, not initial scope) | Single-recipient headers + footer + actual preference update | Only if this deferred alternative is adopted |
+| Hosted footer unsubscribe | Single footer click persists workspace-wide marketing opt-out and shows success, without login or second confirmation | User-requested state-changing navigation; scanner-followed links can trigger opt-outs |
+| Provider one-click POST / repeated requests | Authenticated opaque token, delivered headers, idempotent opt-out and no contact enumeration | RFC 8058 POST path distinct from footer navigation; no redirect to arbitrary URLs |
 | Unsubscribe after campaign enqueue | Remaining sends blocked at dispatch | Consistency/race test |
 | Re-import previously unsubscribed address | Opt-out not silently erased | Explicit resubscription path separate |
 | Transactional after marketing opt-out | Only genuinely transactional purpose permitted | Hard-bounce safety still applied |
@@ -98,6 +101,9 @@ These are planned observable checks, **not newly created test files**. Use a cus
 
 | Scenario | Required observation | Environment / caution |
 | --- | --- | --- |
+| Test-key requests | Explicitly simulated records; no SES sending and no production consent, metrics or suppression changes | Not evidence of AWS integration correctness |
+| 30-day detail expiry / 90-day segment | Old detail expires, retained timestamps keep rules correct, unknown import history is not treated as 90-day inactivity | Consent/suppression independent of log retention |
+| Webhook defaults and added event types | Seven default operational categories; optional opens/clicks/subscriptions; hosted opt-outs emit normalized subscription events | Tracking controls and bot filtering respected |
 | Simulator success/bounce/complaint | Authenticated event captured once in projection | Does not prove VDM or actual suppression insertion |
 | Duplicate/out-of-order provider events | Correct lifecycle, no lost legitimate repeat opens/clicks | Replay captured redacted payloads |
 | `isBotEvent` absent/Likely/Unlikely | Raw and filtered engagement remain distinct | Do not use as boolean |

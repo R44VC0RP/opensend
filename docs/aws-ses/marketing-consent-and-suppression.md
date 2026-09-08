@@ -2,6 +2,8 @@
 
 [Hub](README.md) · Researched 2026-09-08 · AWS facts below are sourced; OpenSend recommendations are design proposals, not implemented behavior.
 
+**Selected initial scope:** OpenSend owns consent and provides an immediate hosted footer unsubscribe across all marketing in the workspace, plus the separate RFC 8058 POST mechanism. The user selected a single click with no confirmation; this supersedes the safe-GET preference-page recommendation below for the footer action. Scanner-triggered opt-outs are a known tradeoff. See [root TODO](../../todo.md) for the current contract; SES-managed subscription remains a researched alternative, not the initial implementation.
+
 ## SES is transport plus some list management—not a campaign platform
 
 SES provides contact lists, topics, contact preferences, list imports and managed subscription handling. It does not turn a contact list into a scheduled campaign by itself. `ListContacts` can retrieve topic subscribers; the application submits send requests. [M1]

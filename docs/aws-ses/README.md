@@ -4,6 +4,8 @@
 
 Two independent research workers covered sending/SDKs and credentials/account-region onboarding; the coordinating researcher covered events, marketing, suppression, operations and the build checklist. Existing design files are outside this documentation change.
 
+**Current build decisions:** see the [root TODO](../../todo.md) and [decision document](implementation-decisions-and-verification.md). Initial AWS access is environment-configured; the customer connection wizard and standalone template library are deferred. OpenSend will own marketing unsubscribe, attachment controls are required, and test API keys will simulate rather than send.
+
 ## Start here
 
 1. Read [implementation decisions](implementation-decisions-and-verification.md) for the API-shaping choices and unresolved items.
