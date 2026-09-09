@@ -160,7 +160,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', {}, signal), contacts: []} as any }
     },
     keys: {
-      list: async (signal, cursor) => { const result = await keyCall(`/api-keys?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
+      list: async (signal, cursor, includeRevoked = true) => { const result = await keyCall(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
       create: async (input, signal) => { const result = await keyCall('/api-keys', 'POST', {name: input.name, environment: input.environment ?? 'test', permissions: [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key, secret} as any },
       revoke: async (id, signal) => { await keyCall(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },

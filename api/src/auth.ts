@@ -51,9 +51,9 @@ export function registerAuth(app: App) {
     const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
     return c.json({ ...keyView(key!), secret }, 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
     const auth = manageKeys(c); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, auth.workspaceId), q.cursor ? gt(apiKeys.id, q.cursor) : undefined)).orderBy(apiKeys.id).limit(q.limit + 1);
+    const rows = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, auth.workspaceId), q.includeRevoked === 'false' ? isNull(apiKeys.revokedAt) : undefined, q.cursor ? gt(apiKeys.id, q.cursor) : undefined)).orderBy(apiKeys.id).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {

@@ -285,8 +285,32 @@ describe('Public contract and authentication', () => {
     }
     page(await http('GET', '/v1/contacts', key.secret));
     error(await http('POST', '/v1/api-keys', key.secret, { name: unique('forbidden'), environment: 'test', permissions: ['manage'], domains: [] }), 403);
+    error(await http('GET', '/v1/api-keys?includeRevoked=false', key.secret), 403);
     ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]);
     error(await http('GET', '/v1/contacts', key.secret), 401);
+
+    const fixtures = [await keyFixture(t, { permissions: ['read'] }), await keyFixture(t, { permissions: ['read'] }), await keyFixture(t, { permissions: ['read'] })].sort((a, b) => a.id.localeCompare(b.id));
+    const revoked = fixtures[0]!;
+    ok(await http('POST', `/v1/api-keys/${revoked.id}/revoke`, MANAGER), [200, 204]);
+    const history = await allPages('/v1/api-keys?includeRevoked=true', MANAGER);
+    assert.deepEqual((await allPages('/v1/api-keys', MANAGER)).map(row => row.id), history.map(row => row.id), 'Omitting includeRevoked must preserve the public API’s full-history default.');
+    assert.ok(history.find(row => row.id === key.id)?.revokedAt);
+    assert.ok(history.find(row => row.id === revoked.id)?.revokedAt);
+    const active = await allPages('/v1/api-keys?includeRevoked=false', MANAGER);
+    assert.deepEqual(active.map(row => row.id), history.filter(row => row.revokedAt === null).map(row => row.id), 'Active-only listing must exclude revoked keys and retain every active key.');
+    for (const fixture of fixtures.slice(1)) assert.ok(active.some(row => row.id === fixture.id));
+
+    const revokedIndex = history.findIndex(row => row.id === revoked.id);
+    const cursor = history[revokedIndex - 1]?.id;
+    const expected = history.slice(revokedIndex).filter(row => row.revokedAt === null);
+    assert.ok(expected.length >= 2, 'The revoked row must sort before at least two active fixture keys.');
+    const first = await http('GET', `/v1/api-keys?includeRevoked=false&limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, MANAGER);
+    assert.deepEqual(page(first).map(row => row.id), [expected[0]!.id], 'Revoked rows must be filtered before the page limit, not removed from an already limited page.');
+    assert.equal(first.body.nextCursor, expected[0]!.id);
+    const second = await http('GET', `/v1/api-keys?includeRevoked=false&limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`, MANAGER);
+    assert.deepEqual(page(second).map(row => row.id), [expected[1]!.id]);
+    assert.equal(second.body.nextCursor, expected.length > 2 ? expected[1]!.id : null);
+    error(await http('GET', '/v1/api-keys?includeRevoked=invalid', MANAGER), 422);
   });
 });
 

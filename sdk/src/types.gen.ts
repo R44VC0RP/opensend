@@ -818,6 +818,7 @@ export type ListApiKeysData = {
     query?: {
         cursor?: string;
         limit?: number;
+        includeRevoked?: 'true' | 'false';
     };
     url: '/v1/api-keys';
 };

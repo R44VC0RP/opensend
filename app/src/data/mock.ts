@@ -553,7 +553,7 @@ export function createMockApi(): OpenSendApi {
       preview: (input, signal) => run(signal, false, s => audience(segmentContacts(s, validateSegment(s, input)))),
     },
     keys: {
-      list: signal => run(signal, false, s => s.keys),
+      list: (signal, _cursor, includeRevoked = true) => run(signal, false, s => s.keys.filter(key => includeRevoked || !key.revokedAt)),
       create: (input, signal) => run(signal, true, s => {
         const name = text(input.name, 'name', 100)
         if (input.permission !== 'send' && input.permission !== 'read') invalid('permission', 'Choose send or read permission.')
@@ -563,7 +563,7 @@ export function createMockApi(): OpenSendApi {
         s.keys.push(key)
         return { key, secret }
       }),
-      revoke: (keyId, signal) => run(signal, true, s => { find(s.keys, keyId, 'API key'); s.keys = s.keys.filter(key => key.id !== keyId) }),
+      revoke: (keyId, signal) => run(signal, true, s => { const key = find(s.keys, keyId, 'API key'); key.revokedAt ??= now() }),
     },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),

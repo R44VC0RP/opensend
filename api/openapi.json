@@ -3851,6 +3851,19 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "true"
+            },
+            "required": false,
+            "name": "includeRevoked",
+            "in": "query"
           }
         ],
         "responses": {

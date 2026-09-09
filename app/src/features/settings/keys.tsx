@@ -10,7 +10,8 @@ import { settingsColumns } from './skeletons'
 export function ApiKeysPage() {
   const api = useApi()
   const [cursor, setCursor] = useState<string | undefined>()
-  const keys = useApiQuery(['keys', cursor], (api, signal) => api.keys.list(signal, cursor))
+  const [showRevoked, setShowRevoked] = useState(false)
+  const keys = useApiQuery(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked))
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
   const revoke = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
   const [open, setOpen] = useState(false)
@@ -54,8 +55,8 @@ export function ApiKeysPage() {
     } catch { /* The mutation error is shown in the form. */ }
   }
   return <div className="stack">
-    <PageHeader title="API keys" actions={<Button variant="primary" onClick={openCreate}>Create key</Button>} />
-    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No API keys" action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
+    <PageHeader title="API keys" actions={<div className="cluster"><Checkbox label="Show revoked" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); setCursor(undefined)}} /><Button variant="primary" onClick={openCreate}>Create key</Button></div>} />
+    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
       { ...settingsColumns.keys[0], render: row => <>{row.name}<div className="muted">{row.environment ?? 'Demo'}</div></> },
       { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
       { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</> },
