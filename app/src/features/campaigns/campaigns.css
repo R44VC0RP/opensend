@@ -46,9 +46,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .campaign-compose-preview { transition: none; } }
 .campaign-compose-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
-.campaign-compose-plain { flex: 1; display: flex; flex-direction: column; gap: var(--space-8); min-height: 280px; }
-.campaign-compose-plain > .ui-field { flex: 1; }
-.campaign-compose-plain textarea { flex: 1; min-height: 240px; resize: none; font-family: var(--font-email); font-size: 16px; line-height: 1.6; }
 .campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--page-gap); }
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-16); }
 .composer-loading { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }

@@ -329,14 +329,14 @@ export type Campaign = {
 };
 
 /**
- * Drafts may omit sender, subject, content and audience until review. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
+ * Drafts may omit sender, subject, content and audience until review. Content is HTML only; there is no separate plain-text body. For a plain-looking email, send simple HTML such as paragraphs with line breaks. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
  */
 export type CampaignDraftInput = {
     name: string;
     from?: string | '';
     fromName?: string;
     /**
-     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
      */
     previewText?: string;
     editor?: CampaignEditor;
@@ -344,7 +344,6 @@ export type CampaignDraftInput = {
     region: string;
     subject?: string | '';
     html?: string;
-    text?: string;
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -359,7 +358,7 @@ export type CampaignDraftInput = {
 };
 
 /**
- * Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML/text remain the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.
+ * Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML remains the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.
  */
 export type CampaignEditor = {
     format: 'react-email';
@@ -374,7 +373,7 @@ export type CreateCampaignInput = {
     from?: string | '';
     fromName?: string;
     /**
-     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
      */
     previewText?: string;
     editor?: CampaignEditor;
@@ -385,7 +384,6 @@ export type CreateCampaignInput = {
     region?: string;
     subject?: string | '';
     html?: string;
-    text?: string;
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -448,7 +446,7 @@ export type CampaignDraftSummary = {
     fromName?: string;
     subject?: string | '';
     /**
-     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
      */
     previewText?: string;
     audience?: {
@@ -478,7 +476,7 @@ export type CampaignUpdateInput = {
         from?: string | '';
         fromName?: string;
         /**
-         * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+         * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
          */
         previewText?: string;
         editor?: CampaignEditor;
@@ -489,7 +487,6 @@ export type CampaignUpdateInput = {
         region?: string;
         subject?: string | '';
         html?: string;
-        text?: string;
         attachments?: Array<string>;
         tracking?: boolean;
         audience?: {

@@ -1481,7 +1481,7 @@ describe('Dashboard API capabilities', () => {
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, {
-      html: `<p>${'x'.repeat(64 * 1024)}</p>`, text: 'Full draft content stays available.',
+      html: `<p>${'x'.repeat(64 * 1024)}</p>`,
       editor: { format: 'react-email', version: 1, document: { content: 'x'.repeat(16 * 1024) } },
     });
     const path = `/v1/campaigns/${campaign.id}`;
@@ -1897,11 +1897,11 @@ describe('Bounded campaign admission', () => {
     for (const contact of contacts) ok(await consent(key.secret, contact.id, 'subscribed'));
 
     const expansionList = await resource(t, key.secret, '/v1/lists', { name: unique('expanded-budget') });
-    ok(await http('POST', `/v1/lists/${expansionList.id}/members`, key.secret, { contactIds: contacts.slice(0, 17).map(contact => contact.id) }));
-    // Each body remains below 512 KiB. Seventeen recipients expand two 500 KiB
-    // parts beyond the 16 MiB test budget from a request smaller than 10 KiB.
+    ok(await http('POST', `/v1/lists/${expansionList.id}/members`, key.secret, { contactIds: contacts.slice(0, 34).map(contact => contact.id) }));
+    // The body remains below 512 KiB. Thirty-four recipients expand a 500 KiB
+    // HTML part beyond the 16 MiB test budget from a request smaller than 10 KiB.
     const expansion = await campaignFixture(t, key.secret, { listId: expansionList.id }, {
-      subject: 'Bounded expansion', html: '{{chunk}}'.repeat(256), text: '{{chunk}}'.repeat(256), defaults: { chunk: 'x'.repeat(2000) },
+      subject: 'Bounded expansion', html: '{{chunk}}'.repeat(256), defaults: { chunk: 'x'.repeat(2000) },
     });
     const before = ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails;
     error(await http('POST', `/v1/campaigns/${expansion.id}/review`, key.secret, { revision: expansion.revision }, {}, 15_000), 413, 'EXPANDED_CAMPAIGN_TOO_LARGE');
@@ -1969,7 +1969,7 @@ describe('Personalization context boundaries', () => {
       assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
     }
     const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
-      html: '<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style><a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a>', text: 'Plain {{name}}: {{firstName}}',
+      html: '<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style><a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a><p>Plain {{name}}: {{firstName}}</p>',
     });
     const review = ok(await http('POST', `/v1/campaigns/${valid.id}/review`, key.secret, { revision: valid.revision }));
     ok(await http('POST', `/v1/campaigns/${valid.id}/schedule`, key.secret, {
@@ -1983,7 +1983,7 @@ describe('Personalization context boundaries', () => {
     assert.ok(content.html.includes('title="https://example.com onmouseover=alert(1)"'), 'The injected attribute-shaped value must remain inside the quoted title, not become an event handler.');
     assert.ok(content.html.includes('>Name {{literal}}</a>'));
     assert.ok(content.html.includes('href="https://example.com:443/account">metadata: literal text</a>'), 'Validate complete URLs after interpolation, without rejecting harmless text values.');
-    assert.ok(content.text.startsWith('Plain Name {{literal}}: https://example.com onmouseover=alert(1)'), 'Recipient data containing braces must not be parsed recursively, including in plain text.');
+    assert.ok(content.html.includes('<p>Plain Name {{literal}}: https://example.com onmouseover=alert(1)</p>'), 'Recipient data containing braces must not be parsed recursively.');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { ...contact.properties, url: 'javascript:alert(1)' } }));
     const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<a href="{{url}}">Quoted but unsafe URL</a>' });
     error(await http('POST', `/v1/campaigns/${unsafeUrl.id}/review`, key.secret, { revision: unsafeUrl.revision }), 422, 'UNSAFE_HTML_URL');

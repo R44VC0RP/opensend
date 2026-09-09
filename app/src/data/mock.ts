@@ -264,7 +264,6 @@ function validateDraft(value: unknown): Record<string, any> {
   const draft = copyJson(value, 'draft', 1_500_000)
   if (!isRecord(draft) || (draft.audience !== undefined && !isRecord(draft.audience))) return invalid('draft', 'Draft metadata and its audience must be JSON objects.')
   if (draft.html !== undefined) text(draft.html, 'html', 500_000, true)
-  if (draft.text !== undefined) text(draft.text, 'text', 500_000, true)
   if (draft.editor !== undefined) validateEditor(draft.editor)
   return draft
 }

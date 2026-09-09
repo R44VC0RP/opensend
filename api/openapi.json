@@ -1662,7 +1662,7 @@
           "previewText": {
             "type": "string",
             "maxLength": 200,
-            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
           },
           "editor": {
             "$ref": "#/components/schemas/CampaignEditor"
@@ -1699,10 +1699,6 @@
             "default": ""
           },
           "html": {
-            "type": "string",
-            "maxLength": 524288
-          },
-          "text": {
             "type": "string",
             "maxLength": 524288
           },
@@ -1782,7 +1778,7 @@
           "region"
         ],
         "additionalProperties": false,
-        "description": "Drafts may omit sender, subject, content and audience until review. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
+        "description": "Drafts may omit sender, subject, content and audience until review. Content is HTML only; there is no separate plain-text body. For a plain-looking email, send simple HTML such as paragraphs with line breaks. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
       },
       "CampaignEditor": {
         "type": [
@@ -1813,7 +1809,7 @@
           "document"
         ],
         "additionalProperties": false,
-        "description": "Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML/text remain the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes."
+        "description": "Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML remains the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -1846,7 +1842,7 @@
           "previewText": {
             "type": "string",
             "maxLength": 200,
-            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
           },
           "editor": {
             "$ref": "#/components/schemas/CampaignEditor"
@@ -1884,10 +1880,6 @@
             "default": ""
           },
           "html": {
-            "type": "string",
-            "maxLength": 524288
-          },
-          "text": {
             "type": "string",
             "maxLength": 524288
           },
@@ -2170,7 +2162,7 @@
           "previewText": {
             "type": "string",
             "maxLength": 200,
-            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
           },
           "audience": {
             "type": "object",
@@ -2295,7 +2287,7 @@
               "previewText": {
                 "type": "string",
                 "maxLength": 200,
-                "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+                "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
               },
               "editor": {
                 "$ref": "#/components/schemas/CampaignEditor"
@@ -2333,10 +2325,6 @@
                 "default": ""
               },
               "html": {
-                "type": "string",
-                "maxLength": 524288
-              },
-              "text": {
                 "type": "string",
                 "maxLength": 524288
               },

@@ -25,7 +25,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : 'So
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 const campaignRoute = (campaign: Pick<Campaign, 'id' | 'regionId'>, view: 'edit' | 'review', environment?: 'live' | 'test') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}?${new URLSearchParams({region: campaign.regionId, ...(environment ? {environment} : {})})}`
 function campaignReadinessError(campaign: Campaign) {
-  const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && !String(campaign.draft?.text ?? '').trim() && 'email content'].filter(Boolean)
+  const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
   return missing.length ? `Complete the draft before reviewing or sending: add ${missing.join(', ')}.` : ''
 }
 const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.revision ?? 1) < (baseline.revision ?? 1) || ((candidate.revision ?? 1) === (baseline.revision ?? 1) && Date.parse(candidate.updatedAt) < Date.parse(baseline.updatedAt))
@@ -79,12 +79,11 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   const [accepted, setAccepted] = useState(initial)
   const acceptedRef = useRef(initial)
   const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' })
-  const textOnly = Boolean(form.draft?.text && !form.draft?.html)
   const composer = useRef<EmailComposerRef>(null)
   const attachments = useRef<CampaignAttachmentsRef>(null)
   const [generation, setGeneration] = useState(0)
-  const [composerReady, setComposerReady] = useState(textOnly)
-  const readyRef = useRef(textOnly)
+  const [composerReady, setComposerReady] = useState(false)
+  const readyRef = useRef(false)
   const [dirty, setDirty] = useState(false)
   const dirtyRef = useRef(false)
   const busyRef = useRef(false)
@@ -134,7 +133,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     setForm(campaignInput(next))
     dirtyRef.current = false
     setDirty(false)
-    readyRef.current = Boolean(next.draft?.text && !next.draft?.html)
+    readyRef.current = false
     setComposerReady(readyRef.current)
     setGeneration(value => value + 1)
     setPreviewOpen(Boolean(next.previewText))
@@ -186,8 +185,8 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     busyRef.current = true
     setPreparing(true)
     try {
-      const draft = textOnly ? {html: '', editor: form.editor ?? null, inlineAttachmentIds: [] as string[]} : await composer.current?.prepare()
-      if (next !== 'edit' && !(textOnly ? String(form.draft?.text ?? '').trim() : draft?.html.trim())) throw new Error('Add some email content before continuing.')
+      const draft = await composer.current?.prepare()
+      if (next !== 'edit' && !draft?.html.trim()) throw new Error('Add some email content before continuing.')
       const saved = await saveMutation.mutateAsync({ ...form, ...draft, attachments: [...new Set([...(form.attachments ?? []), ...(draft?.inlineAttachmentIds ?? [])])], name: form.name.trim(), subject: form.subject.trim(), fromName: form.fromName.trim(), fromEmail: form.fromEmail.trim(), regionId: form.regionId.trim() })
       acceptedRef.current = saved
       setAccepted(saved)
@@ -231,7 +230,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
             </div>
             <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="campaign-subject">Subject</label><Input id="campaign-subject" placeholder="Add a subject" value={form.subject} onChange={event => change('subject', event.target.value)} disabled={controlsDisabled} /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled={controlsDisabled} aria-expanded={previewOpen} aria-controls="campaign-preview-row" onClick={() => {setPreviewOpen(!previewOpen); if (!previewOpen) requestAnimationFrame(() => previewInput.current?.focus({preventScroll: true}))}}>Preview text</Button></div>
           </div>
-          {textOnly ? <div className="campaign-compose-plain">{api.attachments && <div className="cluster"><Button variant="ghost" size="sm" disabled={controlsDisabled} onClick={() => {markDirty(); attachments.current?.open()}}>Attachment</Button></div>}<Field label="Plain-text body" hint="Read-only; preserved when saved."><textarea className="ui-input" value={String(form.draft?.text ?? '')} readOnly /></Field></div> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>}
+          <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
         </div>
       </div>
@@ -347,7 +346,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       <section className="campaign-fields">
         <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
         <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd><dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
-        <EmailPreview html={campaign.html} title="Campaign email preview" editor={campaign.editor} attachmentIds={campaign.attachments} />{!campaign.html && campaign.draft?.text && <pre className="message-source">{String(campaign.draft.text)}</pre>}
+        <EmailPreview html={campaign.html} title="Campaign email preview" editor={campaign.editor} attachmentIds={campaign.attachments} />
       </section>
     </div>
     {draft && <section className="section campaign-delivery">

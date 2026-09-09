@@ -115,7 +115,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       save: async (input, signal) => {
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
-        const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, previewText: input.previewText, subject: input.subject, ...(input.html ? {html: input.html} : existing.text && !existing.html ? {} : {html: input.html}), editor: input.editor ?? null, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
+        const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, previewText: input.previewText, subject: input.subject, html: input.html, editor: input.editor ?? null, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
         return mapCampaign(await call(input.id ? `/campaigns/${idPath(input.id)}` : '/campaigns', input.id ? 'PATCH' : 'POST', input.id ? {revision: input.revision, draft} : draft, signal))
       },
