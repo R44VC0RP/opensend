@@ -126,7 +126,7 @@ HTTP, Queue, and scheduled handlers share the outbox. Queue messages are wakeups
 
 ### Automatic deployments
 
-To enable automatic deployments, connect `R44VC0RP/opensend` in the Worker's **Settings → Builds** and authorize the Cloudflare GitHub App. Use production branch `main`, root directory `api`, build command `npm ci && npm ci --prefix ../app && npm run check && npm run build --prefix ../app`, and deploy command `npx wrangler deploy`. Leave non-production branch builds disabled until they have separate database, bucket, queue, and credentials. Schema migrations remain an explicit step using the migration role, not an automatic side effect of deploying code.
+Pushes to `main` deploy through [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml): it installs both packages, type-checks the API, builds the dashboard, and runs `wrangler deploy` from `api/`. It needs a `CLOUDFLARE_API_TOKEN` repository secret created from the **Edit Cloudflare Workers** token template, scoped to this account. Other branches do not deploy; give them separate database, bucket, queue, and credentials before enabling that. Schema migrations remain an explicit step using the migration role, not an automatic side effect of deploying code.
 
 The XML-builder alias in Wrangler selects the AWS SDK's non-browser parser: Workers do not provide `DOMParser`. Outbound certificate, confirmation, and webhook requests use manual redirect handling and reject non-success responses without following redirects.
 
