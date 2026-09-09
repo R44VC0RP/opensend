@@ -3,7 +3,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useRegion } from '../data/context'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
-import { Button, EmptyState, ErrorState, Field, Select, Skeleton, SkeletonText } from './ui'
+import { Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 
@@ -49,7 +49,7 @@ export function AppShell() {
       <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
-        <Field label="Viewing region" htmlFor="sidebar-view-region"><Select id="sidebar-view-region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} /></Field>
+        <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />
         {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
       </div>
