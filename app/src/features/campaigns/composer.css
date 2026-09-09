@@ -4,7 +4,8 @@
 .composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-inline: calc(-1 * var(--space-8)); }
 .composer-tools .cluster { flex-wrap: nowrap; gap: var(--space-4); }
 .composer-history { margin-left: auto; }
-.composer-conversion { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); }
+.composer-conversion { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-height: 28px; }
+.email-composer .composer-imported-preview { flex: 1 0 300px; min-height: 300px; height: auto; }
 .composer-visual { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
 .composer-visual[hidden] { display: none; }
 .composer-canvas { position: relative; display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; min-height: 260px; padding: 0; background: var(--color-email-surface); color: var(--color-email-text); }

@@ -71,7 +71,7 @@ function inertDocument(document: Record<string, unknown>): boolean {
   }
   return true;
 }
-const Editor = z.object({ format: z.literal('react-email'), version: z.literal(1), document: z.record(z.string(), z.unknown()) }).strict().refine(value => inertDocument(value.document) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= 256 * 1024, 'Editor metadata must be inert JSON, at most 256 KiB UTF-8, 32 document levels and 20,000 values.').describe('Inert editor metadata; never executed or rendered by the server. HTML/text remain the sendable content.').openapi('CampaignEditor');
+const Editor = z.object({ format: z.literal('react-email'), version: z.literal(1), document: z.record(z.string(), z.unknown()) }).strict().refine(value => inertDocument(value.document) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= 256 * 1024, 'Editor metadata must be inert JSON, at most 256 KiB UTF-8, 32 document levels and 20,000 values.').describe('Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML/text remain the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.').openapi('CampaignEditor');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
 const Data = z.record(z.string().max(120), Scalar).default({});
 const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(value => {
@@ -106,6 +106,7 @@ const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'com
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
 const Campaign = z.object({ id: z.string(), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
+const CampaignState = Campaign.pick({ id: true, environment: true, revision: true, updatedAt: true, status: true, reviewId: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = z.object({ name: CampaignInput.shape.name, region: Region, from: Address, fromName: FromName.optional(), subject: Subject, previewText: PreviewText.optional(), audience: AudienceSpec.pick({ listId: true, segmentId: true }) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal, case-insensitive recipient (To/Cc/Bcc), subject or ID text.').openapi('ListEmailsQuery');
@@ -131,6 +132,11 @@ const emailColumns = {
   errorCode: emails.errorCode, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
 function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+// Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
+const campaignStateColumns = {
+  id: campaigns.id, environment: campaigns.environment, revision: campaigns.revision, updatedAt: campaigns.updatedAt,
+  status: campaigns.status, reviewId: campaigns.reviewId, scheduledAt: campaigns.scheduledAt, archivedAt: campaigns.archivedAt,
+};
 // Project the bounded list draft in PostgreSQL, before driver JSON parsing or application allocation.
 const campaignSummaryColumns = {
   id: campaigns.id, environment: campaigns.environment, revision: campaigns.revision, status: campaigns.status,
@@ -526,9 +532,23 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row]))[0]!), 200);
   });
-  app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
+    const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);
+    return c.json(CampaignState.parse(row ?? notFound('Campaign')), 200);
+  });
+  app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', description: 'Replace the draft at the current revision. HTML is authoritative for the HTML body; editor metadata must match it and is never rendered by the server. When HTML changes, unchanged retained editor metadata is cleared; supply matching new metadata to preserve visual editing, or omit/null editor for HTML-only edits.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id; sender(c.env, a, input.draft.from, input.draft.region);
-    const row = await c.env.db.transaction(async db => { await assertRegionEnabled(db, a.workspaceId, input.draft.region); const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
+    const row = await c.env.db.transaction(async db => {
+      await assertRegionEnabled(db, a.workspaceId, input.draft.region);
+      const current = await findCampaign(db, a, campaignId, true);
+      sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision);
+      await attachmentRows(db, a, input.draft.attachments, true);
+      await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
+      await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
+      const draft = input.draft.html !== current.draft.html && input.draft.editor != null && canonical(input.draft.editor) === canonical(current.draft.editor) ? { ...input.draft, editor: null } : input.draft;
+      const [updated] = await db.update(campaigns).set({ draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
+      return updated;
+    });
     return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row!]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery status and history. Scheduled or sending campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, reviewed, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {

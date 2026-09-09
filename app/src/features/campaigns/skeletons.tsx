@@ -28,7 +28,7 @@ export function ComposerSkeleton() {
   return <LoadingRegion label="Loading composer" className="composer-loading"><div className="composer-skeleton-tools"><ControlSkeleton width={90} /><ControlSkeleton width={28} /><ControlSkeleton width={28} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
 }
 
-export function CampaignEditorSkeleton({ isNew = false }: { isNew?: boolean }) {
+export function CampaignEditorSkeleton() {
   return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
     <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
       <div className="campaign-compose-metadata" aria-hidden="true">
@@ -37,7 +37,6 @@ export function CampaignEditorSkeleton({ isNew = false }: { isNew?: boolean }) {
       </div>
       <ComposerSkeleton />
     </div></div>
-    <div className="campaign-compose-footer"><div className="campaign-compose-controls"><Button variant="ghost" disabled>Attach file</Button><div className="campaign-compose-actions"><Button variant="ghost" disabled title={isNew ? 'Save your draft first' : undefined}>Send test</Button><Button disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div></div></div>
   </LoadingRegion>
 }
 
@@ -49,8 +48,8 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <TableSkeleton columns={campaignColumns} rows={4} pagination />
   </>
   if (kind === 'editor') return <div className="campaign-compose-page">
-    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" />
-    <CampaignEditorSkeleton isNew={isNew} />
+    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions"><Button variant="ghost" disabled>Send test</Button><Button disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
+    <CampaignEditorSkeleton />
   </div>
   return <>
     <PageHeader title={<SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<SkeletonText width={65} lineHeight={18} />} />

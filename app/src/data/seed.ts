@@ -3,6 +3,8 @@ import type { ApiKey, AudienceList, Campaign, Contact, Domain, Email, RegionCata
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
 
+export interface DemoAttachment { id: string; filename: string; contentType: string; size: number; disposition: 'attachment' | 'inline'; contentId?: string; content: string }
+
 export interface DemoState {
   version: 1
   workspace: Workspace
@@ -13,6 +15,7 @@ export interface DemoState {
   segments: Segment[]
   emails: Email[]
   campaigns: Campaign[]
+  attachments?: DemoAttachment[]
   domains: Domain[]
   keys: ApiKey[]
   webhooks: Webhook[]

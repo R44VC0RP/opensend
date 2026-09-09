@@ -17,11 +17,18 @@ body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-me
 body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: var(--color-text); }
 .campaign-compose-page > .ui-page-header, .campaign-compose-page > .ui-alert { flex-shrink: 0; }
 .campaign-compose-page > .ui-page-header { margin-bottom: var(--space-8); }
+.campaign-compose-page > .ui-page-header h1 { font-family: 'OpenTUI Mono', monospace; font-size: var(--text-sm); line-height: var(--leading-sm); letter-spacing: normal; }
+.campaign-sync-status { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-6); width: 144px; flex-shrink: 0; color: var(--color-muted); font-size: var(--text-xs); white-space: nowrap; }
+.campaign-sync-status .ui-button { height: 28px; padding: 0; color: inherit; }
+.campaign-sync-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+.campaign-sync-status[data-state='live'] .campaign-sync-dot { background: var(--color-success); }
+.campaign-sync-status[data-state='changed'] .campaign-sync-dot { background: var(--color-warning); }
+.campaign-sync-status[data-state='offline'] .campaign-sync-dot { background: var(--color-danger); }
 .campaign-compose-page > .ui-alert { margin-bottom: var(--space-16); }
 /* The email paper stays light; the surrounding application retains its theme. */
 .campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F6F6F6; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E8E8E8; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-email-surface); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
 .campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
-.campaign-compose-sheet, .campaign-compose-controls { width: 100%; max-width: 632px; margin-inline: auto; }
+.campaign-compose-sheet { width: 100%; max-width: 632px; margin-inline: auto; }
 .campaign-compose-sheet { display: flex; flex-direction: column; min-height: 100%; padding: var(--space-16); }
 .campaign-compose-metadata { flex-shrink: 0; margin-bottom: var(--space-4); }
 .campaign-compose-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; min-height: 38px; gap: var(--space-8); border-bottom: 1px solid var(--color-border); }
@@ -38,16 +45,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-feedback { padding-block: var(--space-8); }
 .campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
 @media (prefers-reduced-motion: reduce) { .campaign-compose-preview { transition: none; } }
-.campaign-compose-footer { flex-shrink: 0; border-top: 1px solid var(--color-border); }
-.campaign-compose-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-16); }
-.campaign-compose-actions { grid-column: 2; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
-.campaign-compose-attach { grid-column: 1; margin-inline-start: calc(-1 * var(--space-12)); }
-.campaign-compose-attachments { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-8); list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; }
-.campaign-compose-attachments > li { display: flex; align-items: center; gap: var(--space-6); min-width: 0; padding-inline-start: var(--space-8); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); }
-.campaign-compose-attachments > li > svg, .campaign-compose-attachments .ui-icon-button { flex-shrink: 0; }
-.campaign-attachment-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.campaign-compose-attachment-status { grid-column: 1 / -1; }
-.campaign-compose-plain { flex: 1; display: flex; min-height: 280px; }
+.campaign-compose-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
+.campaign-compose-plain { flex: 1; display: flex; flex-direction: column; gap: var(--space-8); min-height: 280px; }
 .campaign-compose-plain > .ui-field { flex: 1; }
 .campaign-compose-plain textarea { flex: 1; min-height: 240px; resize: none; font-family: var(--font-email); font-size: 16px; line-height: 1.6; }
 .campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--page-gap); }

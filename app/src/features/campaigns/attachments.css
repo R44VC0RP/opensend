@@ -1,0 +1,7 @@
+.campaign-file-blocks { flex-shrink: 0; list-style: none; margin: var(--space-16) 0 0; padding: 0; color: var(--color-email-text); font-family: var(--font-email); font-size: var(--text-md); letter-spacing: var(--tracking-email); }
+.campaign-file-blocks > li { display: flex; align-items: center; gap: var(--space-12); min-width: 0; min-height: var(--row-height); border-top: 1px solid var(--color-border); }
+.campaign-file-blocks > li > svg { flex-shrink: 0; color: var(--color-muted); }
+.campaign-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-file-size { flex-shrink: 0; color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.campaign-file-blocks .ui-icon-button { flex-shrink: 0; width: 40px; height: 40px; color: var(--color-muted); }
+@media (pointer: coarse) { .campaign-file-blocks .ui-icon-button { width: 44px; height: 44px; } }

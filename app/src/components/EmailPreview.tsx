@@ -12,8 +12,8 @@ export function htmlToText(html: string): string {
   return (email.body.textContent ?? '').replace(/[\t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export type EmailPreviewProps = { html: string; title?: string; className?: string; editor?: CampaignEditorMetadata | null; attachmentIds?: string[] };
-export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [] }: EmailPreviewProps) {
+export type EmailPreviewProps = { html: string; title?: string; className?: string; editor?: CampaignEditorMetadata | null; attachmentIds?: string[]; respectStyles?: boolean };
+export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], respectStyles = false }: EmailPreviewProps) {
   const api = useApi();
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: OpenSendApi; sources: Map<string, string>} | null>(null);
@@ -72,10 +72,10 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     const style = email.createElement('style');
     // Reuse the browser's cached font files without opening network access inside the sandbox.
     const fontFaces = fonts.map((source, index) => `@font-face { font-family: 'Inter'; src: url('${source}') format('woff2'); font-style: ${index === 0 ? 'normal' : 'italic'}; font-weight: 100 900; font-display: swap; }`).join(' ');
-    style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } html { color-scheme: light; background: var(--color-surface); color: var(--color-text); } body { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; } body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; } img { max-width: 100%; height: auto; }`;
+    style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
-  }, [html, sources, fonts]);
+  }, [html, sources, fonts, respectStyles]);
   return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;

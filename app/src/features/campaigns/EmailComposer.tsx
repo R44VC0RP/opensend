@@ -2,9 +2,10 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { composeReactEmail, isDocumentVisuallyEmpty } from '@react-email/editor/core'
-import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Plus, Redo2, Type, Undo2 } from 'lucide-react'
+import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, Type, Undo2 } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
+import { EmailPreview } from '../../components/EmailPreview'
 import type { CampaignEditorMetadata } from '../../data/types'
 import { prepareEditorContent, prepareLocalImage, sanitizeEditorDocument, inlineImageSources, inlineImageReferences, inlineImageHash, replaceImageSource, replaceEditorImageSources, loadInlineAttachments, cidImageSources, type InlineImageReference } from './composer-content'
 import '@react-email/editor/themes/default.css'
@@ -12,10 +13,10 @@ import './composer.css'
 
 type Draft = { html: string; editor: CampaignEditorMetadata | null; inlineAttachmentIds?: string[] }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
-type Props = { attachmentIds?: string[]; initialHtml: string; initialEditor?: CampaignEditorMetadata | null; disabled?: boolean; onReady: () => void; onDirty: () => void }
+type Props = { attachmentIds?: string[]; initialHtml: string; initialEditor?: CampaignEditorMetadata | null; disabled?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
-export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], initialHtml, initialEditor, disabled = false, onReady, onDirty }, ref) {
+export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], initialHtml, initialEditor, disabled = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
   const inlineReferences = useRef<InlineImageReference[]>(inlineImageReferences(initialEditor?.document))
   const ownedInline = useRef(new Set<string>())
@@ -29,6 +30,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [generation, setGeneration] = useState(0)
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState(false)
+  const busyListener = useRef(onBusy)
+  busyListener.current = onBusy
   const [error, setError] = useState('')
   const [convert, setConvert] = useState(false)
   const editor = useRef<EmailEditorRef>(null)
@@ -179,9 +182,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const upload = useCallback(async (file: File) => {
     uploads.current += 1
     setBusy(true)
+    busyListener.current?.(true)
     try { return await prepareLocalImage(file) }
     catch (cause) { const message = cause instanceof Error ? cause.message : 'Could not load this image.'; setError(message); throw new Error(message) }
-    finally { uploads.current -= 1; if (!uploads.current) setBusy(false) }
+    finally { uploads.current -= 1; if (!uploads.current) { setBusy(false); busyListener.current?.(false) } }
   }, [])
   async function insertImage(file?: File) {
     if (!file || locked || sourceRef.current !== 'compose') return
@@ -236,12 +240,13 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     } else if (locked) { event.preventDefault(); event.stopPropagation() }
   }}>
     <div className="composer-toolbar">
-      <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
+      {source === 'html' ? <div className="composer-conversion"><span className="muted">Custom HTML</span><div className="cluster">{onAttach && <Button size="sm" variant="ghost" disabled={locked} onClick={onAttach}><Paperclip size={16} />Attachment</Button>}<Button size="sm" disabled={locked} onClick={() => setConvert(true)}>Edit as blocks</Button></div></div> : <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
         <DropdownMenu trigger={<Button size="sm" variant="ghost" disabled={locked || source !== 'compose' || !ready}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
           { label: 'Text', icon: <Type size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setParagraph().run()) },
           { label: 'Heading', icon: <Heading2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHeading({ level: 2 }).run()) },
           { label: 'Button', icon: <MousePointer2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setButton().run()) },
-          { label: 'Image', icon: <ImagePlus size={16} />, onSelect: () => fileInput.current?.click() },
+          { label: 'Image', icon: <ImagePlus size={16} />, onSelect: () => { onDirty(); fileInput.current?.click() } },
+          { label: 'Attachment', icon: <Paperclip size={16} />, disabled: !onAttach, onSelect: () => onAttach?.() },
           { label: 'Bullet list', icon: <List size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().toggleBulletList().run()) },
           { label: 'Divider', icon: <Minus size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHorizontalRule().run()) },
           { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
@@ -250,10 +255,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         {busy && <span className="muted" role="status">Preparing…</span>}
         <div className="cluster composer-history"><IconButton size="sm" label="Undo" disabled={locked || source !== 'compose' || !ready} onClick={() => command(e => e.chain().focus().undo().run())}><Undo2 size={16} /></IconButton><IconButton size="sm" label="Redo" disabled={locked || source !== 'compose' || !ready} onClick={() => command(e => e.chain().focus().redo().run())}><Redo2 size={16} /></IconButton></div>
         <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
-      </div>
+      </div>}
     </div>
-    {source === 'html' && <Alert tone="info"><div className="composer-conversion"><span>This email uses custom HTML. Convert it to edit in the composer.</span><Button size="sm" disabled={locked} onClick={() => setConvert(true)}>Convert to blocks</Button></div></Alert>}
     {error && <Alert tone="danger">{error}</Alert>}
+    {source === 'html' && <EmailPreview html={preservedHtml.current} attachmentIds={attachmentIds} respectStyles title="Campaign content" className="composer-imported-preview" />}
     <div hidden={source !== 'compose'} className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}

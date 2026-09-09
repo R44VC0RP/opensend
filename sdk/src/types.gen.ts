@@ -355,7 +355,7 @@ export type CampaignDraftInput = {
 };
 
 /**
- * Inert editor metadata; never executed or rendered by the server. HTML/text remain the sendable content.
+ * Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML/text remain the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.
  */
 export type CampaignEditor = {
     format: 'react-email';
@@ -417,6 +417,20 @@ export type CampaignDraftSummary = {
         listId: string;
         segmentId?: string;
     };
+};
+
+/**
+ * Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.
+ */
+export type CampaignState = {
+    id: string;
+    environment: 'live' | 'test';
+    revision: number;
+    updatedAt: string;
+    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+    reviewId: string | null;
+    scheduledAt: string | null;
+    archivedAt: string | null;
 };
 
 export type CampaignUpdateInput = {
@@ -3678,6 +3692,69 @@ export type UpdateCampaignResponses = {
 };
 
 export type UpdateCampaignResponse = UpdateCampaignResponses[keyof UpdateCampaignResponses];
+
+export type GetCampaignStateData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/state';
+};
+
+export type GetCampaignStateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignStateError = GetCampaignStateErrors[keyof GetCampaignStateErrors];
+
+export type GetCampaignStateResponses = {
+    /**
+     * Success
+     */
+    200: CampaignState;
+};
+
+export type GetCampaignStateResponse = GetCampaignStateResponses[keyof GetCampaignStateResponses];
 
 export type SetCampaignArchivedData = {
     body: CampaignArchiveInput;

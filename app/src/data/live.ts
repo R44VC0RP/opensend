@@ -110,6 +110,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
     },
     campaigns: {
       list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, status: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,
+      state: (id, signal) => call(`/campaigns/${idPath(id)}/state`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),
       save: async (input, signal) => {
         const existing = input.draft ?? {}

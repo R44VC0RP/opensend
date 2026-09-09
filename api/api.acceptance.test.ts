@@ -253,7 +253,7 @@ describe('Public contract and authentication', () => {
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
-      '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/review': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
+      '/v1/campaigns/{id}/state': ['get'], '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/review': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
     };
     for (const [path, methods] of Object.entries(contract)) for (const method of methods) {
       const operation = document.paths[path]?.[method];
@@ -704,8 +704,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 65);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);
+    assert.equal(catalog.tools.length, 66);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 26);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
@@ -744,6 +744,20 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(archiveTool.outputSchema.anyOf[0].properties.response.$ref, '#/$defs/Campaign');
     assert.ok(archiveTool.outputSchema.$defs.Campaign.required.includes('archivedAt'));
     assert.deepEqual(tools.get('listCampaigns')!.inputSchema.properties.archived.enum, ['true', 'false']);
+    const stateTool = tools.get('getCampaignState');
+    assert.ok(stateTool);
+    assert.equal(stateTool.annotations.readOnlyHint, true);
+    assert.deepEqual(stateTool.inputSchema.required, ['id']);
+    assert.equal(stateTool.inputSchema.properties.id.type, 'string');
+    assert.equal(stateTool.inputSchema.properties.confirm, undefined);
+    assert.equal(stateTool.outputSchema.anyOf[0].properties.response.$ref, '#/$defs/CampaignState');
+    const stateSchema = stateTool.outputSchema.$defs.CampaignState;
+    const stateFields = ['id', 'environment', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
+    assert.deepEqual(Object.keys(stateSchema.properties).sort(), [...stateFields].sort());
+    assert.deepEqual([...stateSchema.required].sort(), [...stateFields].sort());
+    assert.equal(stateSchema.properties.revision.type, 'integer');
+    assert.equal(stateSchema.properties.updatedAt.type, 'string');
+    assert.deepEqual(stateSchema.properties.status.enum, ['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
 
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
@@ -790,10 +804,16 @@ describe('Hosted MCP OAuth and tools', () => {
     const detail = await callTool(token, 'getCampaign', { id: campaign.id });
     assert.equal(detail.draft.html, campaign.draft.html);
     assert.equal(detail.archivedAt, null);
+    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), Object.fromEntries(stateFields.map(field => [field, detail[field]])));
+    const missingState = await rpc(token, 'tools/call', { name: 'getCampaignState', arguments: { id: unique('missing') } });
+    assert.equal(missingState.isError, true, redact(missingState));
+    assert.equal(missingState.structuredContent.status, 404);
+    assert.equal(missingState.structuredContent.error.code, 'NOT_FOUND');
     cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
     const archived = await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: true }, confirm: true });
     assert.equal(typeof archived.archivedAt, 'string');
     assert.deepEqual(archived.draft, detail.draft);
+    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), Object.fromEntries(stateFields.map(field => [field, archived[field]])));
     assert.deepEqual((await callTool(token, 'listCampaigns', { search: campaign.draft.name })).data, []);
     assert.equal((await callTool(token, 'listCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
     assert.equal((await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
@@ -803,9 +823,13 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 25);
+    assert.equal(catalog.tools.length, 26);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContacts'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCampaignState'));
+    const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
+    const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
+    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), ok(await http('GET', `/v1/campaigns/${campaign.id}/state`, MANAGER)));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'setCampaignArchived'));
     const archiveDenied = await rpc(token, 'tools/call', { name: 'setCampaignArchived', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
     assert.equal(archiveDenied.isError, true, redact(archiveDenied));
@@ -1416,6 +1440,123 @@ describe('Private attachment assets and campaign revisions', () => {
 });
 
 describe('Dashboard API capabilities', () => {
+  test('campaign state is compact, scoped and tracks draft review archive and status changes without sending', async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    const reader = await keyFixture(t, { permissions: ['read'] });
+    const sender = await keyFixture(t, { permissions: ['send'] });
+    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('state-audience') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, {
+      html: `<p>${'x'.repeat(64 * 1024)}</p>`, text: 'Full draft content stays available.',
+      editor: { format: 'react-email', version: 1, document: { content: 'x'.repeat(16 * 1024) } },
+    });
+    const path = `/v1/campaigns/${campaign.id}`;
+    cleanup(t, async () => {
+      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [campaign.id, list.workspaceId]);
+    });
+    const stateFields = ['id', 'environment', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
+    const project = (value: Json) => Object.fromEntries(stateFields.map(field => [field, value[field]]));
+    const initial = await http('GET', `${path}/state`, reader.secret);
+    assert.deepEqual(ok(initial), project(campaign));
+    assert.equal(initial.headers.get('cache-control'), 'no-store');
+    assert.ok(Buffer.byteLength(JSON.stringify(initial.body)) < 1000, 'Polling must not transfer draft bodies, editor metadata or counts.');
+    assert.deepEqual(ok(await http('GET', path, reader.secret)), campaign, 'The full campaign read must remain unchanged.');
+    error(await http('GET', `${path}/state`), 401, 'AUTH_REQUIRED');
+    error(await http('GET', `${path}/state`, 'not-a-valid-key'), 401);
+    error(await http('GET', `${path}/state`, sender.secret), 403, 'PERMISSION_DENIED');
+    error(await http('GET', `${path}/state`, live.secret), 404, 'NOT_FOUND');
+    error(await http('GET', `/v1/campaigns/${unique('missing')}/state`, reader.secret), 404, 'NOT_FOUND');
+    const foreignId = unique('foreign-campaign'), foreignWorkspace = unique('foreign-workspace');
+    cleanup(t, async () => { await db.query("DELETE FROM sending_campaigns WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [foreignId, foreignWorkspace]); });
+    await db.query("INSERT INTO sending_campaigns (id, workspace_id, environment, draft) VALUES ($1,$2,'test',$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
+    error(await http('GET', `/v1/campaigns/${foreignId}/state`, reader.secret), 404, 'NOT_FOUND');
+
+    const reviewed = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
+    const reviewState = ok(await http('GET', `${path}/state`, reader.secret));
+    assert.deepEqual(reviewState, project(ok(await http('GET', path, reader.secret))));
+    assert.equal(reviewState.revision, campaign.revision);
+    assert.equal(reviewState.status, 'reviewed');
+    assert.equal(reviewState.reviewId, reviewed.id);
+    assert.notDeepEqual(reviewState, initial.body, 'Review changes must be visible even without a draft revision change.');
+    const reviewedAgain = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
+    const repeatedReviewState = ok(await http('GET', `${path}/state`, reader.secret));
+    assert.equal(repeatedReviewState.revision, reviewState.revision);
+    assert.equal(repeatedReviewState.status, reviewState.status);
+    assert.equal(repeatedReviewState.reviewId, reviewedAgain.id);
+    assert.notEqual(repeatedReviewState.reviewId, reviewState.reviewId);
+    const archived = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true }));
+    const archivedState = ok(await http('GET', `${path}/state`, reader.secret));
+    assert.deepEqual(archivedState, project(archived));
+    assert.equal(archivedState.revision, repeatedReviewState.revision);
+    assert.equal(archivedState.status, repeatedReviewState.status);
+    assert.equal(typeof archivedState.archivedAt, 'string');
+    const restored = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
+    assert.deepEqual(ok(await http('GET', `${path}/state`, reader.secret)), project(restored));
+    assert.equal(restored.archivedAt, null);
+    const updated = ok(await http('PATCH', path, key.secret, { revision: restored.revision, draft: { ...restored.draft, subject: 'Updated externally' } }));
+    const updatedState = ok(await http('GET', `${path}/state`, reader.secret));
+    assert.deepEqual(updatedState, project(updated));
+    assert.equal(updatedState.revision, campaign.revision + 1);
+    assert.equal(updatedState.status, 'draft');
+    assert.equal(updatedState.reviewId, null);
+
+    // Seed only state, never emails or dispatch jobs, to exercise each delivery lifecycle value.
+    const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
+    for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 AND environment = 'test' RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
+      assert.equal(seeded.rowCount, 1);
+      const state = ok(await http('GET', `${path}/state`, reader.secret));
+      assert.deepEqual(state, project(ok(await http('GET', path, reader.secret))));
+      assert.equal(state.status, status);
+      assert.equal(state.revision, updatedState.revision);
+      assert.equal(Date.parse(state.scheduledAt), Date.parse(scheduledAt));
+      assert.ok(Date.parse(state.updatedAt) > Date.parse(updatedState.updatedAt));
+    }
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
+  });
+
+  test('campaign HTML edits clear unchanged editor metadata and preserve newly supplied metadata', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('editor-coherence') });
+    const editor = { format: 'react-email', version: 1, document: { type: 'Email', children: [{ type: 'Text', props: { children: 'Original' } }] } };
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Original</p>', editor });
+    const path = `/v1/campaigns/${campaign.id}`;
+    const unchanged = ok(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, subject: 'Metadata retained' } }));
+    assert.deepEqual(unchanged.draft.editor, editor, 'An edit that leaves HTML unchanged must retain supplied metadata.');
+    // JSON object key order is immaterial when deciding whether retained metadata changed.
+    const reorderedEditor = { version: 1, document: { children: [{ props: { children: 'Original' }, type: 'Text' }], type: 'Email' }, format: 'react-email' };
+    const htmlOnly = ok(await http('PATCH', path, key.secret, { revision: unchanged.revision, draft: { ...unchanged.draft, html: '<p>Changed by API</p>', editor: reorderedEditor } }));
+    assert.equal(htmlOnly.draft.html, '<p>Changed by API</p>');
+    assert.equal(htmlOnly.draft.editor, null);
+    assert.equal(htmlOnly.revision, unchanged.revision + 1);
+    assert.deepEqual(ok(await http('GET', path, key.secret)), htmlOnly, 'Cleared metadata and new HTML must persist together.');
+    error(await http('PATCH', path, key.secret, { revision: unchanged.revision, draft: unchanged.draft }), 409, 'STALE_CAMPAIGN_REVISION');
+
+    const metadataOnly = ok(await http('PATCH', path, key.secret, { revision: htmlOnly.revision, draft: { ...htmlOnly.draft, editor } }));
+    assert.deepEqual(metadataOnly.draft.editor, editor, 'Metadata-only updates remain allowed; the server does not render editor JSON.');
+    assert.equal(metadataOnly.draft.html, htmlOnly.draft.html);
+    const newEditor = { ...editor, document: { ...editor.document, children: [{ type: 'Text', props: { children: 'New visual revision' } }] } };
+    const bothChanged = ok(await http('PATCH', path, key.secret, { revision: metadataOnly.revision, draft: { ...metadataOnly.draft, html: '<p>New visual revision</p>', editor: newEditor } }));
+    assert.equal(bothChanged.draft.html, '<p>New visual revision</p>');
+    assert.deepEqual(bothChanged.draft.editor, newEditor);
+    assert.deepEqual(ok(await http('GET', path, key.secret)), bothChanged);
+
+    const { editor: _editor, ...withoutEditor } = bothChanged.draft;
+    const omitted = ok(await http('PATCH', path, key.secret, { revision: bothChanged.revision, draft: { ...withoutEditor, html: '<p>HTML without metadata</p>' } }));
+    assert.equal(omitted.draft.editor, undefined);
+    assert.equal(omitted.draft.html, '<p>HTML without metadata</p>');
+    const restored = ok(await http('PATCH', path, key.secret, { revision: omitted.revision, draft: { ...omitted.draft, editor: newEditor } }));
+    const cleared = ok(await http('PATCH', path, key.secret, { revision: restored.revision, draft: { ...restored.draft, html: '<p>Explicit HTML-only revision</p>', editor: null } }));
+    assert.equal(cleared.draft.editor, null);
+    assert.equal(cleared.draft.html, '<p>Explicit HTML-only revision</p>');
+    assert.deepEqual(ok(await http('GET', path, key.secret)), cleared);
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
+  });
+
   test('campaign archive filters lists, binds pagination and restores unchanged reviewed drafts', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('archive-audience') });

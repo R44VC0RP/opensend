@@ -1,9 +1,14 @@
 import { ApiError } from './types'
 import type { AudienceList, AudiencePreview, Campaign, CampaignEditorMetadata, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { createSeed } from './seed'
-import type { DemoState } from './seed'
+import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+const ATTACHMENT_EXTENSIONS = ['pdf', 'txt', 'csv', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ics', 'docx', 'xlsx', 'pptx']
+const ATTACHMENT_FILENAME = /^[^\x00-\x1f\x7f/\\]+$/
+const ATTACHMENT_CONTENT_TYPE = /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/
+const ATTACHMENT_CONTENT_ID = /^[a-zA-Z0-9_.@-]+$/
 const EVENTS: WebhookEvent[] = ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed', 'email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
 const CONTACT_STATUSES = ['unknown', 'subscribed', 'unsubscribed', 'suppressed']
 const CONNECTABLE_REGIONS: Record<string, string> = {
@@ -94,6 +99,22 @@ function find<T extends { id: string }>(items: T[], value: string, label: string
   if (!item) throw new ApiError(`${label} “${value}” was not found.`, 'not_found')
   return item
 }
+function findAttachment(state: DemoState, attachmentId: string): DemoAttachment {
+  const attachment = state.attachments?.find(row => row.id === attachmentId)
+  if (!attachment) throw new ApiError('One or more attachments were not found.', 'ATTACHMENT_NOT_FOUND', {}, undefined, 404)
+  return attachment
+}
+function attachmentMetadata({ content: _content, ...metadata }: DemoAttachment) { return metadata }
+function validateAttachments(state: DemoState, input: unknown): string[] {
+  if (!Array.isArray(input) || input.length > 20 || !input.every(value => typeof value === 'string')) invalid('attachments', 'Use at most 20 attachment IDs.')
+  const ids = input as string[]
+  if (new Set(ids).size !== ids.length) throw new ApiError('An attachment can appear only once per message.', 'DUPLICATE_ATTACHMENT', {}, undefined, 422)
+  const rows = ids.map(attachmentId => findAttachment(state, attachmentId))
+  if (rows.reduce((sum, row) => sum + row.size, 0) > MAX_ATTACHMENT_BYTES) throw new ApiError('Combined attachments may not exceed 8 MiB of decoded data.', 'ATTACHMENT_LIMIT_EXCEEDED', {}, undefined, 413)
+  const contentIds = rows.flatMap(row => row.contentId ? [row.contentId] : [])
+  if (new Set(contentIds).size !== contentIds.length) throw new ApiError('Inline content IDs must be unique.', 'DUPLICATE_CONTENT_ID', {}, undefined, 422)
+  return [...ids]
+}
 function checkRegion(state: DemoState, regionId: string) { return find(state.regions, regionId, 'Region') }
 function filterRegion(state: DemoState, regionId?: string) { if (regionId !== undefined) checkRegion(state, regionId) }
 function page<T>(items: T[], input: PageRequest = {}, searchable: (item: T) => string = () => '', facets?: Record<string, number>): PageResult<T> {
@@ -170,7 +191,7 @@ function segmentTotals(state: DemoState, segment: Segment): Segment {
   return { ...segment, matched: result.matched, eligible: result.eligible }
 }
 function campaignTotals(state: DemoState, campaign: Campaign): Campaign {
-  return { ...campaign, archivedAt: campaign.archivedAt ?? null, ...(campaign.status === 'sent' ? {} : { recipients: campaignAudience(state, campaign.listId, campaign.segmentId).eligible }) }
+  return { ...campaign, revision: campaign.revision ?? 1, archivedAt: campaign.archivedAt ?? null, ...(campaign.status === 'sent' ? {} : { recipients: campaignAudience(state, campaign.listId, campaign.segmentId).eligible }) }
 }
 function requireUnarchived(campaign: Campaign) {
   if (campaign.archivedAt != null) throw new ApiError('Restore this campaign before editing, reviewing, testing, or sending it.', 'CAMPAIGN_ARCHIVED', {}, undefined, 409)
@@ -179,63 +200,88 @@ function validateSender(state: DemoState, campaign: CampaignInput) {
   const senderDomain = campaign.fromEmail.split('@')[1]
   if (!state.domains.some(domain => domain.regionId === campaign.regionId && domain.status === 'verified' && domain.name === senderDomain)) invalid('fromEmail', 'Verify the sender domain in this region before sending.')
 }
-function validateEditor(value: unknown): CampaignEditorMetadata | null {
-  if (value === null) return null
+function copyJson(value: unknown, field = 'editor', maxCharacters = 262_144): unknown {
+  const label = field === 'editor' ? 'Editor' : 'Draft'
+  const maxDepth = field === 'editor' ? 50 : 51
+  const maxNodes = field === 'editor' ? 5000 : 10000
+  const nodeError = `${label} data must contain no more than ${maxNodes.toLocaleString('en-US')} values.`
+  const sizeError = `${label} data must serialize to ${maxCharacters.toLocaleString('en-US')} characters or fewer.`
   const ancestors = new Set<object>()
   let nodes = 0
   let characters = 0
   function copy(value: unknown, depth: number): unknown {
-    if (depth > 50) invalid('editor', 'Editor data must be no more than 50 levels deep.')
-    if (++nodes > 5000) invalid('editor', 'Editor data must contain no more than 5,000 values.')
+    if (depth > maxDepth) invalid(field, `${label} data must be no more than ${maxDepth} levels deep.`)
+    if (++nodes > maxNodes) invalid(field, nodeError)
     if (typeof value === 'string') {
       characters += value.length
-      if (characters > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
+      if (characters > maxCharacters) invalid(field, sizeError)
       return value
     }
     if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value
-    if (typeof value !== 'object') return invalid('editor', 'Editor data must contain only plain JSON values.')
+    if (typeof value !== 'object') return invalid(field, `${label} data must contain only plain JSON values.`)
     const array = Array.isArray(value)
     const prototype = Object.getPrototypeOf(value)
-    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) invalid('editor', 'Editor data must contain only plain JSON objects and arrays.')
-    if (ancestors.has(value)) invalid('editor', 'Editor data cannot contain circular references.')
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) invalid(field, `${label} data must contain only plain JSON objects and arrays.`)
+    if (ancestors.has(value)) invalid(field, `${label} data cannot contain circular references.`)
     ancestors.add(value)
     const keys = Reflect.ownKeys(value)
-    if (keys.length > 5001 || (array && value.length > 5000)) invalid('editor', 'Editor data must contain no more than 5,000 values.')
+    if (keys.length > maxNodes + 1 || (array && value.length > maxNodes)) invalid(field, nodeError)
     const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null)
     let entries = 0
     for (const key of keys) {
       if (array && key === 'length') continue
-      if (typeof key !== 'string') return invalid('editor', 'Editor data cannot contain symbol keys.')
+      if (typeof key !== 'string') return invalid(field, `${label} data cannot contain symbol keys.`)
       const descriptor = Object.getOwnPropertyDescriptor(value, key)!
-      if (!descriptor.enumerable || !('value' in descriptor)) invalid('editor', 'Editor data cannot contain accessors or hidden properties.')
-      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) invalid('editor', 'Editor arrays cannot contain named properties.')
+      if (!descriptor.enumerable || !('value' in descriptor)) invalid(field, `${label} data cannot contain accessors or hidden properties.`)
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) invalid(field, `${label} arrays cannot contain named properties.`)
       if (!array) characters += key.length
-      if (characters > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
+      if (characters > maxCharacters) invalid(field, sizeError)
       Object.defineProperty(result, key, { value: copy(descriptor.value, depth + 1), enumerable: true, writable: true, configurable: true })
       entries++
     }
-    if (array && entries !== value.length) invalid('editor', 'Editor arrays cannot contain empty slots.')
+    if (array && entries !== value.length) invalid(field, `${label} arrays cannot contain empty slots.`)
     ancestors.delete(value)
     return result
   }
   // Copy inert JSON only; never call toJSON, an accessor, an editor, or a renderer.
-  const clean = copy(value, 0)
+  const serialized = JSON.stringify(copy(value, 0))
+  if (serialized.length > maxCharacters) invalid(field, sizeError)
+  return JSON.parse(serialized)
+}
+function validateEditor(value: unknown): CampaignEditorMetadata | null {
+  if (value === null) return null
+  const clean = copyJson(value)
   if (!isRecord(clean) || clean.format !== 'react-email' || clean.version !== 1) return invalid('editor', 'Editor data must use react-email format version 1.')
   if (!isRecord(clean.document) || clean.document.type !== 'doc' || (Object.hasOwn(clean.document, 'content') && !Array.isArray(clean.document.content))) invalid('editor', 'Editor document must have type “doc” and an optional content array.')
-  const serialized = JSON.stringify(clean)
-  if (serialized.length > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
-  return JSON.parse(serialized) as CampaignEditorMetadata
+  return clean as CampaignEditorMetadata
 }
 function validEditor(value: unknown): boolean {
   if (value === undefined) return true
   try { validateEditor(value); return true } catch { return false }
 }
-function validateCampaign(state: DemoState, input: CampaignInput): CampaignInput {
+function validateDraft(value: unknown): Record<string, any> {
+  // Full drafts include bodies as well as editor metadata; keep both bounded and inert.
+  const draft = copyJson(value, 'draft', 1_500_000)
+  if (!isRecord(draft) || (draft.audience !== undefined && !isRecord(draft.audience))) return invalid('draft', 'Draft metadata and its audience must be JSON objects.')
+  if (draft.html !== undefined) text(draft.html, 'html', 500_000, true)
+  if (draft.text !== undefined) text(draft.text, 'text', 500_000, true)
+  if (draft.editor !== undefined) validateEditor(draft.editor)
+  return draft
+}
+function validateCampaign(state: DemoState, input: CampaignInput, existing?: Campaign): CampaignInput {
   enabledRegion(state, input.regionId)
   checkRegion(state, input.regionId)
   find(state.lists, input.listId, 'List')
   if (input.segmentId !== null) find(state.segments, input.segmentId, 'Segment')
-  return { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), ...(input.editor !== undefined ? { editor: validateEditor(input.editor) } : {}) }
+  const metadata = validateDraft(input.draft ?? existing?.draft ?? {})
+  const attachments = validateAttachments(state, input.attachments ?? metadata.attachments ?? existing?.attachments ?? [])
+  let editor = input.editor !== undefined ? validateEditor(input.editor) : existing?.editor !== undefined ? existing.editor : metadata.editor
+  // HTML-only external edits cannot keep blocks that would silently replace that HTML.
+  if (existing && input.html !== existing.html && (input.editor === undefined || JSON.stringify(editor ?? null) === JSON.stringify(existing.editor ?? null))) editor = null
+  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), attachments, ...(editor !== undefined ? { editor: validateEditor(editor) } : {}) }
+  const { segmentId: _oldSegment, ...audience } = metadata.audience ?? {}
+  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, editor: clean.editor ?? null, attachments, audience: { ...audience, listId: clean.listId, ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
+  return clean
 }
 function validDateTime(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value)
@@ -254,8 +300,16 @@ function delay(signal?: AbortSignal): Promise<void> {
 }
 
 // Validate persisted structure and references before admitting it into the adapter.
-// Corrupt or obsolete snapshots are reset as a whole, never partially merged.
+// Snapshots are admitted as a whole; invalid external updates retain the last valid state.
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
+function validStoredAttachment(value: unknown): value is DemoAttachment {
+  if (!isRecord(value) || typeof value.id !== 'string' || !value.id || typeof value.filename !== 'string' || !value.filename || value.filename.length > 200 || !ATTACHMENT_FILENAME.test(value.filename) || !ATTACHMENT_EXTENSIONS.includes(value.filename.split('.').pop()!.toLowerCase())) return false
+  if (typeof value.contentType !== 'string' || value.contentType.length > 100 || !ATTACHMENT_CONTENT_TYPE.test(value.contentType) || !['attachment', 'inline'].includes(String(value.disposition))) return false
+  if (value.contentId !== undefined && (typeof value.contentId !== 'string' || value.contentId.length > 120 || !ATTACHMENT_CONTENT_ID.test(value.contentId))) return false
+  if (value.disposition === 'inline' && !value.contentId) return false
+  if (typeof value.size !== 'number' || !Number.isInteger(value.size) || value.size < 1 || value.size > MAX_ATTACHMENT_BYTES || typeof value.content !== 'string' || value.content.length !== Math.ceil(value.size / 3) * 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value.content)) return false
+  try { const decoded = atob(value.content); return decoded.length === value.size && btoa(decoded) === value.content } catch { return false }
+}
 function validSnapshot(value: unknown): value is DemoState {
   if (!isRecord(value) || value.version !== 1) return false
   const arrays = ['regions', 'contacts', 'lists', 'segments', 'emails', 'campaigns', 'domains', 'keys', 'webhooks']
@@ -268,6 +322,15 @@ function validSnapshot(value: unknown): value is DemoState {
   const records = (v: unknown): v is Record<string, unknown>[] => Array.isArray(v) && v.every(isRecord)
   if (!arrays.every(key => rows(key).every(row => typeof row.id === 'string') && new Set(rows(key).map(row => row.id)).size === rows(key).length)) return false
   const references = (key: string, ref: unknown) => rows(key).some(row => row.id === ref)
+  if (value.attachments !== undefined && (!Array.isArray(value.attachments) || !value.attachments.every(validStoredAttachment) || new Set(value.attachments.map(row => row.id)).size !== value.attachments.length)) return false
+  const attachmentIds = (ids: unknown) => {
+    if (ids === undefined) return true
+    try { validateAttachments(value as unknown as DemoState, ids); return true } catch { return false }
+  }
+  const draft = (metadata: unknown) => {
+    if (metadata === undefined) return true
+    try { const clean = validateDraft(metadata); return attachmentIds(clean.attachments) } catch { return false }
+  }
   if (value.regionSetup !== undefined) {
     const setup = value.regionSetup
     const nullableString = (v: unknown) => v === null || typeof v === 'string'
@@ -294,59 +357,102 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('lists').every(row => strings(row, ['name']) && numbers(row, ['total', 'subscribed', 'unsubscribed', 'suppressed']) && date(row.createdAt))) return false
   if (!rows('contacts').every(row => strings(row, ['email', 'name', 'country', 'status']) && CONTACT_STATUSES.includes(String(row.status)) && stringArray(row.listIds) && row.listIds.every(ref => references('lists', ref)) && date(row.createdAt) && (row.lastOpenedAt === null || date(row.lastOpenedAt)) && isRecord(row.consent) && strings(row.consent, ['source']) && (row.consent.at === null || date(row.consent.at)))) return false
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
-  if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
-  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && validEditor(row.editor))) return false
+  if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && attachmentIds(row.attachments) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
+  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft) && validEditor(row.editor))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
 }
 
+function parseSnapshot(stored: string): DemoState | undefined {
+  try {
+    const parsed: unknown = JSON.parse(stored)
+    // Preserve legacy restrictions by resolving IDs, never by defaulting missing domains to all.
+    if (isRecord(parsed) && Array.isArray(parsed.keys) && Array.isArray(parsed.domains)) {
+      const domains = parsed.domains.filter(isRecord)
+      for (const key of parsed.keys.filter(isRecord)) {
+        if (Object.hasOwn(key, 'domains')) continue
+        if (key.domainId === null) key.domains = []
+        else {
+          const domain = domains.find(domain => domain.id === key.domainId)
+          if (typeof domain?.name === 'string') key.domains = [domain.name]
+        }
+        if (Array.isArray(key.domains)) delete key.domainId
+      }
+    }
+    return validSnapshot(parsed) ? parsed : undefined
+  } catch { return undefined }
+}
+
 export function createMockApi(): OpenSendApi {
-  let state = createSeed()
+  let state: DemoState | undefined
   let storage: Storage | undefined
   let storageError = false
+  let snapshotExpected = false
   try {
     // A non-browser runtime can use the same adapter in memory for direct checks.
     storage = typeof localStorage === 'undefined' ? undefined : localStorage
     const stored = storage?.getItem(STORAGE_KEY)
-    if (stored) {
-      try {
-        const parsed: unknown = JSON.parse(stored)
-        // Preserve legacy restrictions by resolving IDs, never by defaulting missing domains to all.
-        if (isRecord(parsed) && Array.isArray(parsed.keys) && Array.isArray(parsed.domains)) {
-          const domains = parsed.domains.filter(isRecord)
-          for (const key of parsed.keys.filter(isRecord)) {
-            if (Object.hasOwn(key, 'domains')) continue
-            if (key.domainId === null) key.domains = []
-            else {
-              const domain = domains.find(domain => domain.id === key.domainId)
-              if (typeof domain?.name === 'string') key.domains = [domain.name]
-            }
-            if (Array.isArray(key.domains)) delete key.domainId
-          }
-        }
-        if (!validSnapshot(parsed)) throw new Error('Invalid demo snapshot')
-        state = parsed
-      } catch {
-        console.warn('OpenSend demo data was invalid or outdated. Using a fresh demo dataset.')
-      }
-    }
+    snapshotExpected = stored != null
+    // Seed only an unused storage key, never an existing snapshot we cannot read.
+    state = stored == null ? createSeed() : parseSnapshot(stored)
   } catch { storageError = true }
   async function run<T>(signal: AbortSignal | undefined, mutate: boolean, operation: (draft: DemoState) => T): Promise<T> {
     await delay(signal)
     if (storageError) throw new ApiError('Demo storage is unavailable. Allow local storage and reload to continue.', 'unavailable')
+    // Read after the delay so another adapter/tab's save is visible before any mutation.
+    let stored: string | null | undefined
+    try { stored = storage?.getItem(STORAGE_KEY) }
+    catch { throw new ApiError('Demo storage is unavailable. Allow local storage and reload to continue.', 'unavailable') }
+    const latest = stored == null ? undefined : parseSnapshot(stored)
+    if (latest) state = latest
+    const unreadable = stored != null && !latest
+    const removed = stored == null && snapshotExpected
+    if (stored != null) snapshotExpected = true
+    // Reads can retain a known-good snapshot. Writes must not replace unknown updates
+    // or resurrect externally removed data; an invalid startup has no read fallback.
+    if (!state || (mutate && (unreadable || removed))) throw new ApiError('Existing demo data could not be loaded safely. Stored data has been left unchanged; restore a compatible snapshot before saving.', 'DEMO_SNAPSHOT_UNREADABLE', {}, undefined, 409)
     const draft = clone(state)
     const result = operation(draft)
     if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
     if (mutate) {
-      try { storage?.setItem(STORAGE_KEY, JSON.stringify(draft)) }
-      catch { throw new ApiError('Could not save demo changes to local storage. Free storage space or enable local storage, then try again.', 'unavailable') }
+      try {
+        if (storage && storage.getItem(STORAGE_KEY) !== stored) throw new ApiError('Demo storage changed before these changes could be saved. Reload the latest data and try again.', 'DEMO_SNAPSHOT_CHANGED', {}, undefined, 409)
+        storage?.setItem(STORAGE_KEY, JSON.stringify(draft))
+      } catch (error) {
+        if (error instanceof ApiError) throw error
+        throw new ApiError('Could not save demo changes to local storage. Free storage space or enable local storage, then try again.', 'unavailable')
+      }
+      snapshotExpected = Boolean(storage)
       state = draft
     }
     return clone(result)
   }
   return {
     mode: 'demo',
+    attachments: {
+      upload: async (file, inline) => {
+        if (!file.name || file.name.length > 200 || !ATTACHMENT_FILENAME.test(file.name)) invalid('filename', 'Use a filename of 1–200 characters without control characters or path separators.')
+        if (!ATTACHMENT_EXTENSIONS.includes(file.name.split('.').pop()!.toLowerCase())) throw new ApiError('This initial release allows PDF, text, CSV, JSON, common raster images, ICS, and modern Office documents.', 'UNSUPPORTED_ATTACHMENT_TYPE', {}, undefined, 422)
+        const contentType = file.type || 'application/octet-stream'
+        if (contentType.length > 100 || !ATTACHMENT_CONTENT_TYPE.test(contentType)) invalid('contentType', 'Use a valid attachment content type.')
+        if (inline && (typeof inline.contentId !== 'string' || inline.contentId.length > 120 || !ATTACHMENT_CONTENT_ID.test(inline.contentId))) invalid('contentId', 'Inline attachments require a content ID of 1–120 letters, digits, underscores, dots, @ signs, or hyphens.')
+        if (!file.size || file.size > MAX_ATTACHMENT_BYTES) throw new ApiError('Attachments must be nonempty and at most 8 MiB decoded.', 'ATTACHMENT_LIMIT_EXCEEDED', {}, undefined, 413)
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        if (!bytes.length || bytes.length > MAX_ATTACHMENT_BYTES) throw new ApiError('Attachments must be nonempty and at most 8 MiB decoded.', 'ATTACHMENT_LIMIT_EXCEEDED', {}, undefined, 413)
+        let binary = ''
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
+        const attachment: DemoAttachment = { id: id('attachment'), filename: file.name, contentType, size: bytes.length, disposition: inline ? 'inline' : 'attachment', ...(inline ? { contentId: inline.contentId } : {}), content: btoa(binary) }
+        return run(undefined, true, s => { (s.attachments ??= []).push(attachment); return attachmentMetadata(attachment) })
+      },
+      get: (attachmentId, signal) => run(signal, false, s => attachmentMetadata(findAttachment(s, attachmentId))),
+      content: (attachmentId, signal) => run(signal, false, s => { const row = findAttachment(s, attachmentId); return { id: row.id, filename: row.filename, contentType: row.contentType, content: row.content } }),
+      remove: attachmentId => run(undefined, true, s => {
+        findAttachment(s, attachmentId)
+        if (s.campaigns.some(campaign => campaign.attachments?.includes(attachmentId) || campaign.draft?.attachments?.includes(attachmentId)) || s.emails.some(email => email.attachments?.includes(attachmentId))) throw new ApiError('Remove this attachment from all drafts first; queued and retained emails keep their immutable attachment references.', 'ATTACHMENT_IN_USE', {}, undefined, 409)
+        s.attachments = s.attachments!.filter(row => row.id !== attachmentId)
+      }),
+    },
     regions: {
       list: signal => run(signal, true, s => catalog(s, true)),
       configure: (region, input, signal) => run(signal, true, s => {
@@ -418,6 +524,10 @@ export function createMockApi(): OpenSendApi {
     campaigns: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.campaigns.filter(c => (c.archivedAt != null) === (input.archived === true) && (!input.regionId || c.regionId === input.regionId) && (!input.status || c.status === input.status) && (!input.listId || c.listId === input.listId) && (!input.segmentId || c.segmentId === input.segmentId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(c => campaignTotals(s, c)), input, c => `${c.name} ${c.subject}`) }),
       get: (campaignId, signal) => run(signal, false, s => campaignTotals(s, find(s.campaigns, campaignId, 'Campaign'))),
+      state: (campaignId, signal) => run(signal, false, s => {
+        const campaign = find(s.campaigns, campaignId, 'Campaign')
+        return { id: campaign.id, revision: campaign.revision ?? 1, updatedAt: campaign.updatedAt, status: campaign.status, reviewId: campaign.reviewId ?? null, scheduledAt: campaign.scheduledAt, archivedAt: campaign.archivedAt ?? null }
+      }),
       setArchived: (input, signal) => run(signal, true, s => {
         const campaign = find(s.campaigns, input.id, 'Campaign')
         if (typeof input.archived !== 'boolean') invalid('archived', 'Choose whether to archive or restore the campaign.')
@@ -433,8 +543,10 @@ export function createMockApi(): OpenSendApi {
         if (existing) requireUnarchived(existing)
         if (existing && existing.status !== 'draft') throw new ApiError('Only draft campaigns can be edited.', 'conflict')
         if (existing && existing.regionId !== input.regionId) invalid('regionId', 'A campaign cannot be moved between regions.')
-        const clean = validateCampaign(s, input)
-        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(existing?.editor !== undefined ? { editor: existing.editor } : {}), ...clean }
+        if (input.revision !== undefined && (!Number.isInteger(input.revision) || input.revision < 1)) invalid('revision', 'Campaign revision must be a positive integer.')
+        if (existing && input.revision !== undefined && input.revision !== (existing.revision ?? 1)) throw new ApiError('This campaign changed. Reload it before saving.', 'STALE_CAMPAIGN_REVISION', {}, undefined, 409)
+        const clean = validateCampaign(s, input, existing)
+        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...clean }
         campaign.recipients = campaignAudience(s, campaign.listId, campaign.segmentId).eligible
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)
@@ -473,7 +585,7 @@ export function createMockApi(): OpenSendApi {
           region.sent24h += result.eligible
           for (const contact of result.contacts.filter(c => c.status === 'subscribed')) {
             const emailId = id('em')
-            s.emails.push({ id: emailId, regionId: campaign.regionId, to: contact.email, from: campaign.fromEmail, subject: campaign.subject, html: campaign.html, stream: 'marketing', status: 'delivered', sentAt: campaign.updatedAt, events: [{ id: `${emailId}_send`, type: 'send', at: campaign.updatedAt, description: 'Demo campaign send simulated; no email was transmitted.' }, { id: `${emailId}_delivered`, type: 'delivered', at: campaign.updatedAt, description: 'Demo delivery simulated.' }] })
+            s.emails.push({ id: emailId, regionId: campaign.regionId, to: contact.email, from: campaign.fromEmail, subject: campaign.subject, html: campaign.html, attachments: [...(campaign.attachments ?? [])], stream: 'marketing', status: 'delivered', sentAt: campaign.updatedAt, events: [{ id: `${emailId}_send`, type: 'send', at: campaign.updatedAt, description: 'Demo campaign send simulated; no email was transmitted.' }, { id: `${emailId}_delivered`, type: 'delivered', at: campaign.updatedAt, description: 'Demo delivery simulated.' }] })
           }
         }
         return campaign
