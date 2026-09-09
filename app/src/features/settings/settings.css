@@ -42,8 +42,8 @@
 .settings-discovery-section { gap: var(--space-16); min-width: 0; }
 .settings-discovery-section + .settings-discovery-section { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
 .settings-discovery-section h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
-.settings-discovery-section .ui-table { min-width: 760px; }
-.settings-discovery-section .ui-table th:first-child { width: 32%; }
+.settings-aws-details .ui-table { min-width: 760px; }
+.settings-discovery-section .ui-table th:first-child { width: 50%; }
 .settings-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-20) var(--space-24); margin: 0; }
 .settings-facts > div { min-width: 0; }
 .settings-facts dt { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); margin-bottom: var(--space-6); }
@@ -71,6 +71,13 @@
   overflow-wrap: anywhere;
   margin: 0;
 }
+.settings-default-region { width: 320px; max-width: 100%; }
+.settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
+.settings-region-link:hover { text-decoration-color: currentColor; }
+.settings-account-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.settings-aws-details { border-top: 1px solid var(--color-border); padding-top: var(--space-8); }
+.settings-aws-details > summary { width: fit-content; padding-block: var(--space-8); cursor: pointer; }
+.settings-aws-details > .stack { padding-top: var(--space-20); }
 @media (max-width: 900px) {
   .settings-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

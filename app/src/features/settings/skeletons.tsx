@@ -24,11 +24,9 @@ export const settingsColumns = {
     { key: 'status', label: 'Status', width: 115 },
   ],
   regions: [
-    { key: 'region', label: 'Region', width: '16%' },
-    { key: 'enabled', label: 'Status', width: '14%', skeleton: twoLines },
-    { key: 'discovery', label: 'Discovery', width: '18%' },
-    { key: 'provisioning', label: 'Provisioning', width: '17%' },
-    { key: 'actions', label: '', align: 'right', width: 322, skeleton: <div className="cluster settings-row-actions"><ControlSkeleton width={76} /><ControlSkeleton width={114} /><ControlSkeleton width={76} /></div> },
+    { key: 'region', label: 'Region', width: '45%' },
+    { key: 'status', label: 'Status' },
+    { key: 'actions', label: '', align: 'right', width: 120, skeleton: <ControlSkeleton width={76} /> },
   ],
   configurationSets: [
     {key: 'name', label: 'Configuration set', width: '44%', skeleton: twoLines},
@@ -36,7 +34,7 @@ export const settingsColumns = {
     {key: 'owned', label: 'Owned', width: '9%'},
     {key: 'sending', label: 'Sending', width: '12%'},
     {key: 'destination', label: 'Destination', width: '14%'},
-    {key: 'wired', label: 'Wiring', width: '12%'},
+    {key: 'wired', label: 'Connection', width: '12%'},
   ],
   webhooks: [
     { key: 'name', label: 'Name / Endpoint URL', width: '34%', skeleton: twoLines },
@@ -60,19 +58,20 @@ function RouteTabs({ value }: { value: 'ses' | 'webhooks' }) {
 }
 
 export function RegionDiscoverySkeleton() {
-  return <LoadingRegion label="Inspecting live AWS resources" className="settings-loading-body">
-    <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts">{['AWS account', 'Access', 'Sending', 'Enforcement', 'Sent in last 24h / quota', 'Maximum send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
-    <div className="stack settings-discovery-section"><h3>Discovered domains</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Domain'}, {key: 'status', label: 'Verification'}, {key: 'sending', label: 'Sending'}]} /></div>
-    <div className="stack settings-discovery-section"><h3>Configuration sets</h3><TableSkeleton rowSize="large" rows={2} columns={settingsColumns.configurationSets} /><SkeletonText width={380} /></div>
-    <div className="stack settings-discovery-section"><h3>SNS feedback</h3><dl className="settings-facts">{['Topic name', 'Topic ARN', 'Exists', 'Owned', 'Policy', 'Subscription', 'Raw message delivery', 'Other HTTPS subscriptions', 'Feedback URL'].map(name => <div key={name} className={['Topic name', 'Topic ARN', 'Feedback URL'].includes(name) ? 'settings-fact-wide' : undefined}><dt>{name}</dt><dd><SkeletonText width={name === 'Topic ARN' || name === 'Feedback URL' ? 440 : 140} /></dd></div>)}</dl></div>
+  return <LoadingRegion label="Checking AWS" className="settings-loading-body">
+    <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">{['AWS account', 'SES access', 'Sent / daily quota', 'Send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
+    <div className="stack settings-discovery-section"><h3>Domains</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Domain'}, {key: 'status', label: 'Status'}]} /></div>
+    <div className="stack settings-discovery-section"><h3>Configuration sets</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Stream'}, {key: 'status', label: 'Status'}]} /></div>
+    <div className="stack settings-discovery-section"><h3>Feedback</h3><dl className="settings-facts"><div><dt>Event delivery</dt><dd><SkeletonText width={120} /></dd></div><div className="settings-fact-wide"><dt>Callback URL</dt><dd><SkeletonText width={440} /></dd></div></dl></div>
+    <div className="settings-aws-details"><SkeletonText width={90} /></div>
   </LoadingRegion>
 }
 
 export function SettingsBodySkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading workspace and sending regions" className="settings-loading-body">
-    <section className="section stack"><SectionHeader title="Sending regions" actions={<div className="cluster"><ControlSkeleton width={148} /><ControlSkeleton width={132} /></div>} /><TableSkeleton columns={settingsColumns.regions} rows={3} rowSize="large" /><p className="muted">Region settings are shared by Live and Test. Discovery only reads live AWS; provisioning requires confirmation.</p></section>
-    <section className="section stack settings-region-detail"><SectionHeader title={`${regionId} · SES setup`} actions={<div className="cluster"><ControlSkeleton width={160} /><ControlSkeleton width={180} /></div>} /><div className="cluster settings-discovery-state"><Skeleton width={112} /><SkeletonText width={240} /></div><RegionDiscoverySkeleton /></section>
-    <section className="section stack"><SectionHeader title="Workspace" actions={<ControlSkeleton width={146} />} /><FieldSkeleton label="Workspace name" /></section>
+    <section className="section stack"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used when no region is specified. Applies to Live and Test.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} rowSize="large" /></section>
+    <section className="section stack settings-region-detail"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={112} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><RegionDiscoverySkeleton /></section>
+    <section className="section stack"><SectionHeader title="Workspace" actions={<ControlSkeleton width={70} />} /><FieldSkeleton label="Name" /></section>
   </LoadingRegion>
 }
 
@@ -109,7 +108,7 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   const { regionId } = useRegion()
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings/webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
-  if (kind === 'ses') return <LoadingRegion className="stack settings-ses" label="Loading settings"><PageHeader title="Settings" actions={<ControlSkeleton width={180} />} /><RouteTabs value="ses" /><SettingsBodySkeleton regionId={regionId} /></LoadingRegion>
+  if (kind === 'ses') return <LoadingRegion className="stack settings-ses" label="Loading settings"><PageHeader title="Settings" /><RouteTabs value="ses" /><SettingsBodySkeleton regionId={regionId} /></LoadingRegion>
   if (kind === 'webhooks') return <LoadingRegion className="stack" label="Loading webhooks"><PageHeader title="Settings" actions={<ControlSkeleton width={120} />} /><RouteTabs value="webhooks" /><SectionHeader title={<SkeletonText width={110} />} actions={<span className="muted">Workspace-wide · All regions</span>} /><TableSkeleton columns={settingsColumns.webhooks} rows={3} rowSize="large" /></LoadingRegion>
   return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'API keys' : 'Domains'} actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><div className="page-toolbar muted">{kind === 'keys' ? `Workspace-wide keys · Domain restrictions available in ${regionId}` : `Sending region · ${regionId}`}</div><TableSkeleton columns={settingsColumns[kind]} rows={3} rowSize={kind === 'domains' ? 'large' : 'default'} pagination={kind === 'domains'} /></LoadingRegion>
 }
