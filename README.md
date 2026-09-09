@@ -21,6 +21,42 @@ The screenshots above remain visual references. Start with simulated sending; `E
 
 For editing the dashboard, use the [local development setup](api/README.md#local-development): Vite on **5173**, API on **8793**, and a Google callback through **5173**. Do not mix these URLs with the Docker setup.
 
+## TypeScript SDK
+
+Install [`opensend-js`](https://www.npmjs.com/package/opensend-js) from npm:
+
+```sh
+npm install opensend-js
+```
+
+Use ESM imports on your server. Set `OPENSEND_BASE_URL` to your installation's public URL and `OPENSEND_API_KEY` to an API key from its dashboard. Start with a test key to simulate sending without calling SES.
+
+```ts
+import { sendEmail } from 'opensend-js';
+import { createClient } from 'opensend-js/client';
+
+const client = createClient({
+  baseUrl: process.env.OPENSEND_BASE_URL!,
+  auth: scheme => scheme.scheme === 'bearer' ? process.env.OPENSEND_API_KEY : undefined,
+});
+
+const { data } = await sendEmail({
+  client,
+  headers: { 'Idempotency-Key': 'order-4821-receipt' },
+  body: {
+    from: 'receipts@example.com',
+    to: ['recipient@example.com'],
+    subject: 'Your receipt',
+    text: 'Thank you for your order.',
+  },
+  throwOnError: true,
+});
+
+console.log(data.id);
+```
+
+The installation's default SES region is used unless you pass `region`. Keep API keys out of browser bundles. A queued response is not a delivery confirmation; use message status or webhooks to track the outcome. See the [SDK guide](sdk/README.md) for more operations, errors, and retry behavior.
+
 ## Deployment and verification
 
 Use ordinary PostgreSQL and private S3-compatible storage, or provision [Cloudflare Workers, Hyperdrive, R2, and Queue resources](api/README.md#cloudflare). Remote PostgreSQL requires verified TLS. The Cloudflare configuration is a template, not a deployed service.
