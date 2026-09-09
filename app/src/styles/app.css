@@ -68,7 +68,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .stream-track span { display: block; height: 100%; background: var(--color-accent); }
 .stream-track--marketing span { opacity: .38; }
 .sending-streams > .ui-button { margin-top: var(--space-12); }
-.search-box { display: flex; align-items: center; position: relative; min-width: 280px; }
+.search-box { display: flex; align-items: center; position: relative; width: 392px; max-width: 100%; min-width: 220px; flex-shrink: 1; }
 .search-box > svg { position: absolute; left: var(--space-12); color: var(--color-muted); pointer-events: none; }
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }
 .table-summary { display: flex; justify-content: space-between; padding-bottom: var(--space-16); color: var(--color-muted); font-size: var(--text-xs); }
