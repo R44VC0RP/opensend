@@ -14,10 +14,19 @@ export async function enqueue(db: DbExecutor, input: { type: string; workspaceId
 export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1) {
   const claimed = await runtime.db.execute<{
     id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
-  }>(sql`WITH due AS (
-    SELECT id FROM jobs WHERE workspace_id = ${runtime.config.workspaceId}
-      AND ((status = 'pending' AND available_at <= now()) OR (status = 'running' AND lease_until < now()))
-    ORDER BY CASE WHEN type = 'operation.ses' THEN 0 WHEN type = 'email.dispatch' THEN 1 ELSE 2 END, available_at, id FOR UPDATE SKIP LOCKED LIMIT ${limit}
+  }>(sql`WITH rotation AS (
+    INSERT INTO job_schedule(workspace_id, turn)
+      SELECT ${runtime.config.workspaceId}, 1 WHERE EXISTS (
+        SELECT 1 FROM jobs WHERE workspace_id = ${runtime.config.workspaceId}
+          AND ((status = 'pending' AND available_at <= now()) OR (status = 'running' AND lease_until < now()))
+      )
+    ON CONFLICT (workspace_id) DO UPDATE SET turn = (job_schedule.turn + 1) % 4 RETURNING turn
+  ), due AS (
+    SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
+      AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+    ORDER BY CASE WHEN j.environment = CASE WHEN r.turn = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
+      CASE WHEN j.type = 'operation.ses' THEN 0 WHEN j.type = 'email.dispatch' THEN 1 ELSE 2 END,
+      j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT ${limit}
   ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
     FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
   for (const job of claimed.rows) {

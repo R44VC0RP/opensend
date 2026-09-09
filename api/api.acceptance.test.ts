@@ -1,6 +1,7 @@
 import { describe, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import pg from 'pg';
 
 // Run against the actual server and its normal background-job runner:
 // ADMIN_API_KEY=... API_BASE_URL=http://127.0.0.1:8787 npx tsx --test api.acceptance.test.ts
@@ -16,6 +17,12 @@ const secrets = new Set<string>([ADMIN]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
 const address = () => `${unique('acceptance')}@example.com`;
 const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
+// npm test loads .env. Remote APIs require an explicitly paired fixture database;
+// never silently arrange a remote API's fixtures in the developer's default DB.
+const LOCAL_API = ['localhost', '127.0.0.1'].includes(new URL(BASE).hostname);
+const FIXTURE_DATABASE_URL = process.env.API_FIXTURE_DATABASE_URL || (LOCAL_API ? process.env.DATABASE_URL : undefined);
+const DATABASE_FIXTURE_SKIP = !LOCAL_API && !process.env.API_FIXTURE_DATABASE_URL
+  ? 'Remote API: set API_FIXTURE_DATABASE_URL to its explicitly paired database to run scoped source-fixture regressions.' : false;
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
@@ -33,6 +40,13 @@ function cleanup(t: TestContext, action: () => Promise<void>) {
     });
   }
   stack.push(action);
+}
+async function fixtureDatabase(t: TestContext): Promise<pg.Client> {
+  assert.ok(FIXTURE_DATABASE_URL, 'Scoped database fixtures require DATABASE_URL for a local API or an explicit API_FIXTURE_DATABASE_URL.');
+  const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
+  await db.connect();
+  cleanup(t, async () => { await db.end(); });
+  return db;
 }
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
   const created = ok(await http('POST', path, key, body), 201);
@@ -349,6 +363,44 @@ describe('Lists, compound segments, imports and exports', () => {
   });
 });
 
+describe('Import property boundaries', () => {
+  test('CSV merges allow 50 properties, reject the 51st, and roll back every row in a failed commit', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('property-boundary') });
+    const properties = Object.fromEntries(Array.from({ length: 49 }, (_, index) => [`field${index}`, `value${index}`]));
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Before import', properties });
+    const boundary = ok(await http('POST', '/v1/contact-imports', key.secret, {
+      csv: `Email,Plan\n${contact.email},pro\n`, mapping: { email: 'Email', plan: 'Plan' }, listId: list.id,
+    }), 201);
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${boundary.id}/commit`, key.secret)).imported, 1);
+    const atLimit = ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret));
+    assert.deepEqual(atLimit.properties, { ...properties, plan: 'pro' });
+    assert.equal(Object.keys(atLimit.properties).length, 50);
+    const earlier = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Must roll back', properties: { existing: true } });
+    const overflow = ok(await http('POST', '/v1/contact-imports', key.secret, {
+      csv: `Email,Name,Country\n${earlier.email},Changed first,US\n${contact.email},Changed second,CA\n`,
+      mapping: { email: 'Email', name: 'Name', country: 'Country' }, listId: list.id,
+    }), 201);
+    assert.equal(overflow.errors.length, 0, 'Each CSV row is individually valid; only merging with the existing 50 properties exceeds the limit.');
+    error(await http('POST', `/v1/contact-imports/${overflow.id}/commit`, key.secret), 422, 'IMPORT_PROPERTIES_INVALID');
+    const unchanged = ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret));
+    assert.deepEqual(unchanged.properties, atLimit.properties);
+    assert.equal(unchanged.name, 'Before import');
+    const rolledBack = ok(await http('GET', `/v1/contacts/${earlier.id}`, key.secret));
+    assert.equal(rolledBack.name, 'Must roll back');
+    assert.deepEqual(rolledBack.properties, { existing: true });
+    assert.deepEqual(page(await http('GET', `/v1/lists/${list.id}/members`, key.secret)).map(row => row.id), [contact.id], 'Failed commit must also roll back membership added by earlier rows.');
+    const report = ok(await http('GET', `/v1/contact-imports/${overflow.id}`, key.secret));
+    assert.equal(report.status, 'preview');
+    assert.equal(report.imported, 0);
+    const replacement = ok(await http('POST', '/v1/contact-imports', key.secret, {
+      csv: `Email,Plan\n${contact.email},enterprise\n`, mapping: { email: 'Email', plan: 'Plan' },
+    }), 201);
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${replacement.id}/commit`, key.secret)).imported, 1);
+    assert.deepEqual(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).properties, { ...properties, plan: 'enterprise' }, 'Replacing a property at the 50-property boundary remains supported.');
+  });
+});
+
 describe('Transactional sending, idempotency and scoped authorization', () => {
   test('test sends have a persisted simulated lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
@@ -501,9 +553,184 @@ describe('Private attachment assets and campaign revisions', () => {
   });
 });
 
+describe('Bounded campaign admission', () => {
+  test('expanded content and 101 pending test recipients fail atomically; exactly 100 fit and cancellation releases capacity', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('pending-boundary') });
+    // One small CSV plus sequential consent writes exercises the real API without
+    // a high-concurrency load test, private fixtures, or fabricated consent in SQL.
+    const addresses = Array.from({ length: 101 }, () => address());
+    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, {
+      csv: `Email\n${addresses.join('\n')}\n`, mapping: { email: 'Email' }, listId: list.id,
+    }), 201);
+    assert.equal(preview.errors.length, 0);
+    assert.equal(ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret)).imported, 101);
+    const contacts = await allPages(`/v1/lists/${list.id}/members`, key.secret);
+    assert.equal(contacts.length, 101);
+    for (const contact of contacts) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${contact.id}`, key.secret), [200, 404]); });
+    for (const contact of contacts) ok(await consent(key.secret, contact.id, 'subscribed'));
+
+    const expansionList = await resource(t, key.secret, '/v1/lists', { name: unique('expanded-budget') });
+    ok(await http('POST', `/v1/lists/${expansionList.id}/members`, key.secret, { contactIds: contacts.slice(0, 17).map(contact => contact.id) }));
+    // Each body remains below 512 KiB. Seventeen recipients expand two 500 KiB
+    // parts beyond the 16 MiB test budget from a request smaller than 10 KiB.
+    const expansion = await campaignFixture(t, key.secret, { listId: expansionList.id }, {
+      subject: 'Bounded expansion', html: '{{chunk}}'.repeat(256), text: '{{chunk}}'.repeat(256), defaults: { chunk: 'x'.repeat(2000) },
+    });
+    const before = ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails;
+    error(await http('POST', `/v1/campaigns/${expansion.id}/review`, key.secret, { revision: expansion.revision }, {}, 15_000), 413, 'EXPANDED_CAMPAIGN_TOO_LARGE');
+    const rejectedExpansion = ok(await http('GET', `/v1/campaigns/${expansion.id}`, key.secret));
+    assert.equal(rejectedExpansion.status, 'draft');
+    assert.equal(rejectedExpansion.reviewId, null);
+    assert.equal(page(await http('GET', `/v1/emails?campaignId=${expansion.id}`, key.secret)).length, 0);
+    assert.equal(ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails, before, 'Rejected expansion must not create partial email metrics.');
+
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }, {}, 15_000));
+    assert.equal(review.eligible, 101);
+    const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
+    const denied = error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, {
+      revision: campaign.revision, reviewId: review.id, scheduledAt,
+    }, {}, 15_000), 429, 'PENDING_EMAIL_LIMIT_EXCEEDED');
+    assert.equal(denied.retryable, true);
+    const rejectedAdmission = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+    assert.equal(rejectedAdmission.status, 'reviewed');
+    assert.equal(rejectedAdmission.reviewId, review.id);
+    assert.equal(rejectedAdmission.scheduledAt, null);
+    assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
+    assert.equal(ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails, before, 'Rejected admission must leave the email counter unchanged.');
+    ok(await http('DELETE', `/v1/lists/${list.id}/members/${contacts[0].id}`, key.secret));
+    const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: campaign.draft }));
+    const atLimit = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }, {}, 15_000));
+    assert.equal(atLimit.eligible, 100);
+    const scheduled = ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, {
+      revision: revised.revision, reviewId: atLimit.id, scheduledAt,
+    }, {}, 15_000), 202);
+    assert.equal(scheduled.queued, 100, 'The failed 101-recipient admission must not reserve any of the key’s 100 available slots.');
+    const queued = await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret);
+    assert.equal(queued.length, 100);
+    assert.ok(queued.every(message => message.status === 'queued' && message.environment === 'test' && message.providerId === null));
+    error(await http('POST', '/v1/emails/send', key.secret, mail()), 429, 'PENDING_EMAIL_LIMIT_EXCEEDED');
+    assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret)).canceled, 100);
+    const released = ok(await http('POST', '/v1/emails/send', key.secret, mail()), 202);
+    assert.equal((await poll(`/v1/emails/${released.id}`, key.secret, body => body.status === 'simulated')).providerId, null);
+  });
+});
+
+describe('Personalization context boundaries', () => {
+  test('unquoted and executable placeholders fail review, while quoted URLs and literal-brace recipient data render safely', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('template-context') });
+    const contact = await resource(t, key.secret, '/v1/contacts', {
+      email: address(), name: 'Name {{literal}}', properties: {
+        firstName: 'https://example.com onmouseover=alert(1)', url: 'https://example.com/path?q=one&next=two', port: 443, note: 'metadata: literal text',
+      },
+    });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    for (const html of [
+      '<a href={{firstName}}>Injected attribute</a>',
+      '<script>const name = "{{firstName}}";</script>',
+      '<style>.name { content: "{{firstName}}"; }</style>',
+      '<a href="https://example.com" onclick="{{firstName}}">Event handler</a>',
+      '<!-- {{firstName}} --><p>Comment context</p>',
+    ]) {
+      const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html });
+      error(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }), 422, 'UNSAFE_TEMPLATE_CONTEXT');
+      const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+      assert.equal(unchanged.status, 'draft');
+      assert.equal(unchanged.reviewId, null);
+      assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
+    }
+    const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
+      html: '<a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a>', text: 'Plain {{name}}: {{firstName}}',
+    });
+    const review = ok(await http('POST', `/v1/campaigns/${valid.id}/review`, key.secret, { revision: valid.revision }));
+    ok(await http('POST', `/v1/campaigns/${valid.id}/schedule`, key.secret, {
+      revision: valid.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
+    }), 202);
+    const messages = page(await http('GET', `/v1/emails?campaignId=${valid.id}`, key.secret));
+    assert.equal(messages.length, 1);
+    const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
+    assert.ok(content.html.includes('href="https://example.com/path?q=one&amp;next=two"'), 'Quoted URL substitutions must remain supported and escape the URL’s ampersand.');
+    assert.ok(content.html.includes('title="https://example.com onmouseover=alert(1)"'), 'The injected attribute-shaped value must remain inside the quoted title, not become an event handler.');
+    assert.ok(content.html.includes('>Name {{literal}}</a>'));
+    assert.ok(content.html.includes('href="https://example.com:443/account">metadata: literal text</a>'), 'Validate complete URLs after interpolation, without rejecting harmless text values.');
+    assert.ok(content.text.startsWith('Plain Name {{literal}}: https://example.com onmouseover=alert(1)'), 'Recipient data containing braces must not be parsed recursively, including in plain text.');
+    ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { ...contact.properties, url: 'javascript:alert(1)' } }));
+    const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<a href="{{url}}">Quoted but unsafe URL</a>' });
+    error(await http('POST', `/v1/campaigns/${unsafeUrl.id}/review`, key.secret, { revision: unsafeUrl.revision }), 422, 'UNSAFE_HTML_URL');
+    assert.equal(ok(await http('GET', `/v1/campaigns/${unsafeUrl.id}`, key.secret)).status, 'draft');
+  });
+});
+
+describe('Campaign authorization and dispatch credentials', () => {
+  test('domain-restricted send keys cannot retarget, delete or cancel another sender domain’s campaign', async t => {
+    const owner = await keyFixture(t);
+    const restricted = await keyFixture(t, { permissions: ['send'], domains: ['allowed.example.com'] });
+    const list = await resource(t, owner.secret, '/v1/lists', { name: unique('domain-authorization') });
+    const contact = await resource(t, owner.secret, '/v1/contacts', { email: address() });
+    ok(await consent(owner.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, owner.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, restricted.secret, {
+      revision: campaign.revision, draft: { ...campaign.draft, from: 'sender@allowed.example.com' },
+    }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
+    assert.equal(unchanged.status, 'draft');
+    assert.equal(unchanged.revision, campaign.revision);
+    assert.deepEqual(unchanged.draft, campaign.draft);
+    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, owner.secret, { revision: campaign.revision }));
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, owner.secret, {
+      revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
+    }), 202);
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
+    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret)).status, 'scheduled');
+    const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret));
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].status, 'queued', 'Unauthorized cancellation must not touch already queued messages.');
+    assert.equal(messages[0].from, 'sender@example.com');
+  });
+
+  test('revoking the originating test send key stops its future scheduled job before simulation or SES acceptance', async t => {
+    const owner = await keyFixture(t);
+    const origin = await keyFixture(t, { permissions: ['send'] });
+    const reader = await keyFixture(t, { permissions: ['read'] });
+    const list = await resource(t, owner.secret, '/v1/lists', { name: unique('revoked-origin') });
+    const contact = await resource(t, owner.secret, '/v1/contacts', { email: address() });
+    ok(await consent(owner.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, owner.secret, { contactIds: [contact.id] }));
+    // A persisted test key owns the campaign; a different persisted test key
+    // originates the queued job. The bootstrap live identity never schedules it.
+    const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
+    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, origin.secret, { revision: campaign.revision }));
+    const dueAt = Date.now() + 3_000;
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, origin.secret, {
+      revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(dueAt).toISOString(),
+    }), 202);
+    const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret));
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].status, 'queued');
+    assert.equal(messages[0].environment, 'test');
+    ok(await http('POST', `/v1/api-keys/${origin.id}/revoke`, ADMIN), [200, 204]);
+    assert.ok(Date.now() < dueAt, 'Revocation must finish before the scheduled job becomes due; otherwise this scenario cannot prove a dispatch-time credential check.');
+    const blocked = await poll(`/v1/emails/${messages[0].id}`, reader.secret, body => ['canceled', 'suppressed'].includes(body.status));
+    assert.equal(blocked.errorCode, 'ORIGIN_KEY_REVOKED');
+    assert.equal(blocked.providerId, null);
+    assert.equal(blocked.attemptStartedAt, null, 'Revoked credentials must be checked before attempting dispatch.');
+    assert.equal(blocked.simulated, true);
+    const events = page(await http('GET', `/v1/emails/${messages[0].id}/events`, reader.secret));
+    assert.ok(!events.some(event => ['accepted', 'send', 'sent', 'delivery', 'simulated'].includes(event.type)), 'Revoked-origin work must never reach SES acceptance or even a successful test simulation.');
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).marketingConsent, 'subscribed', 'This failure must come from revocation, not a consent change.');
+  });
+});
+
 describe('Hosted unsubscribe and dispatch-time consent', () => {
   test('footer GET and provider POST are idempotent, private, environment-isolated, and block queued marketing but not transactional mail', async t => {
     const key = await keyFixture(t);
+    const reader = await keyFixture(t, { permissions: ['read'] });
     const live = await keyFixture(t, { environment: 'live' });
     const email = address();
     const contact = await resource(t, key.secret, '/v1/contacts', { email });
@@ -527,6 +754,18 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.notEqual(url.hostname, 'attacker.invalid', 'Unsubscribe host must come from deployment configuration, not caller headers.');
     assert.ok(!url.href.includes(email) && !url.searchParams.has('email'), 'The capability URL must not disclose an email address.');
     const path = `${url.pathname}${url.search}`;
+    const token = url.pathname.split('/').at(-1)!;
+    assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
+    const redacted = ok(await http('GET', `/v1/emails/${queued[0].id}/content`, reader.secret));
+    assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
+    assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
+    assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');
+    assert.equal(redacted.subject, content.subject, 'Redaction must preserve ordinary readable message content.');
+    const head = await http('HEAD', path);
+    assert.equal(head.status, 405, diagnostic(head));
+    assert.equal(head.body, '', 'HEAD responses must have no body.');
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed', 'A HEAD probe must not unsubscribe a contact.');
+    assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret)).length, 1, 'A HEAD probe must not append consent audit history.');
     assert.ok(Date.now() < dueAt, 'Fixture setup exceeded its scheduling window before unsubscribe; no dispatch-consent claim can be made.');
     const first = await http('GET', path);
     const html = ok(first);
@@ -540,7 +779,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'unsubscribed');
     assert.equal(ok(await http('GET', `/v1/contacts/${production.id}`, live.secret)).marketingConsent, 'unknown');
     const audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret));
-    assert.equal(audit.filter(row => row.source === 'hosted-unsubscribe' && row.status === 'unsubscribed').length, 1, 'Repeated capability use must not duplicate the consent decision.');
+    assert.equal(audit.filter(row => row.source === 'footer-get' && row.status === 'unsubscribed').length, 1, 'The footer navigation must be attributed to footer-get, not provider one-click consent.');
+    assert.equal(audit.filter(row => row.status === 'unsubscribed').length, 1, 'Repeated GET and POST capability use must not duplicate or rewrite the original consent decision.');
     const last = path.at(-1)!;
     const tampered = `${path.slice(0, -1)}${last === '0' ? '1' : '0'}`;
     const invalid = error(await http('GET', tampered), 404, 'NOT_FOUND');
@@ -555,6 +795,152 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.ok(!campaignEvents.some(event => ['accepted', 'delivery', 'simulated'].includes(event.type)), 'Opt-out must be checked before even simulated marketing dispatch.');
     const transactional = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: email })), 202);
     assert.equal((await poll(`/v1/emails/${transactional.id}`, key.secret, body => body.status === 'simulated')).status, 'simulated');
+  });
+
+  test('a first-use RFC 8058 POST records its own source independently of footer GET', async t => {
+    const key = await keyFixture(t);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing' })), 202);
+    const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, key.secret));
+    const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
+    assert.ok(match, 'Marketing content must include a one-click capability URL.');
+    const url = new URL(match[1]);
+    secrets.add(url.pathname.split('/').at(-1)!);
+    const path = `${url.pathname}${url.search}`;
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed');
+    const first = await http('POST', path, undefined, 'List-Unsubscribe=One-Click', { 'content-type': 'application/x-www-form-urlencoded' });
+    assert.match(ok(first), /unsubscribed/i);
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'unsubscribed');
+    let audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret));
+    assert.equal(audit.filter(row => row.source === 'rfc8058-post' && row.status === 'unsubscribed').length, 1);
+    assert.equal(audit.filter(row => row.source === 'footer-get').length, 0);
+    ok(await http('POST', path, undefined, 'List-Unsubscribe=One-Click', { 'content-type': 'application/x-www-form-urlencoded' }));
+    ok(await http('GET', path));
+    audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret));
+    assert.equal(audit.length, 2, 'Initial subscription plus first provider POST must remain the only consent decisions after repeated POST and GET.');
+    assert.equal(audit.filter(row => row.source === 'rfc8058-post').length, 1);
+    assert.equal(audit.filter(row => row.source === 'footer-get').length, 0, 'Later footer navigation must not relabel provider-originated consent.');
+  });
+});
+
+describe('Scoped database source fixtures with HTTP security assertions', () => {
+  test('email events and webhook delivery list/detail recursively redact unsubscribe capabilities for readers only', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const db = await fixtureDatabase(t);
+    const manager = await keyFixture(t);
+    const reader = await keyFixture(t, { permissions: ['read'] });
+    const contact = await resource(t, manager.secret, '/v1/contacts', { email: address() });
+    ok(await consent(manager.secret, contact.id, 'subscribed'));
+    const queued = ok(await http('POST', '/v1/emails/send', manager.secret, mail({ to: contact.email, kind: 'marketing' })), 202);
+    await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'simulated');
+    const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, manager.secret));
+    const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
+    assert.ok(match, 'A real test-marketing snapshot must supply this fixture’s owned unsubscribe capability.');
+    const capabilityUrl = match[1];
+    const token = new URL(capabilityUrl).pathname.split('/').at(-1)!;
+    secrets.add(token);
+    assert.ok(/^u_[0-9a-f]{64}$/.test(token), 'Fixture capability must have the application-owned token format.');
+    const endpoint = await resource(t, manager.secret, '/v1/webhooks', { url: `https://example.com/hooks/${unique('redaction')}`, paused: true });
+    // Before any SQL writes, prove that this DB contains the exact HTTP-created
+    // test email, its originating key, and our paused endpoint in the same scope.
+    const matched = await db.query(`SELECT e.id FROM sending_emails e
+      JOIN api_keys k ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id AND k.environment = e.environment
+      JOIN operation_webhooks w ON w.workspace_id = e.workspace_id AND w.environment = e.environment
+      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND e.actor_key_id = $4
+        AND w.id = $5 AND w.paused = true AND w.url = $6`,
+    [queued.id, contact.workspaceId, 'test', manager.id, endpoint.id, endpoint.url]);
+    assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created email/key/paused endpoint; no synthetic rows were inserted.');
+    const eventId = unique('acceptance-click');
+    const operationId = unique('acceptance-operation');
+    const deliveryId = unique('acceptance-delivery');
+    const data = { emailId: queued.id, link: capabilityUrl, nested: { links: [capabilityUrl, { link: capabilityUrl }], label: 'ordinary click metadata', [`key-${token}`]: token }, values: [7, true, null] };
+    const payload = { id: operationId, type: 'email.clicked', createdAt: new Date().toISOString(), workspaceId: contact.workspaceId, environment: 'test', region: REGION, data };
+    // Only event-source arrangement uses SQL: no SNS signature claim, provider
+    // request, dispatch job, or webhook callback is manufactured or performed.
+    await db.query('BEGIN');
+    try {
+      await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [eventId, contact.workspaceId, 'test', queued.id, 'click', JSON.stringify(data), true]);
+      await db.query(`INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [operationId, contact.workspaceId, 'test', payload.type, REGION, JSON.stringify(data), payload.createdAt]);
+      await db.query(`INSERT INTO operation_deliveries (id, workspace_id, environment, webhook_id, event_id, payload, synthetic, status)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`, [deliveryId, contact.workspaceId, 'test', endpoint.id, operationId, JSON.stringify(payload), true, 'paused']);
+      await db.query('COMMIT');
+    } catch (cause) {
+      await db.query('ROLLBACK');
+      throw cause;
+    }
+    cleanup(t, async () => {
+      await db.query('DELETE FROM operation_deliveries WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND webhook_id = $4 AND event_id = $5', [deliveryId, contact.workspaceId, 'test', endpoint.id, operationId]);
+      await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [operationId, contact.workspaceId, 'test']);
+      await db.query('DELETE FROM sending_email_events WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND email_id = $4', [eventId, contact.workspaceId, 'test', queued.id]);
+    });
+    const observations: Array<{ route: string; managed: Json; readable: Json }> = [];
+    const managerEvents = await allPages(`/v1/emails/${queued.id}/events`, manager.secret);
+    const readerEvents = await allPages(`/v1/emails/${queued.id}/events`, reader.secret);
+    const managerEvent = managerEvents.find(row => row.id === eventId);
+    const readerEvent = readerEvents.find(row => row.id === eventId);
+    assert.ok(managerEvent && readerEvent, 'Both scopes must be able to observe the same persisted synthetic email event.');
+    observations.push({ route: 'email events', managed: managerEvent.data, readable: readerEvent.data });
+    const managerDeliveries = await allPages(`/v1/webhooks/${endpoint.id}/deliveries`, manager.secret);
+    const readerDeliveries = await allPages(`/v1/webhooks/${endpoint.id}/deliveries`, reader.secret);
+    const managerDelivery = managerDeliveries.find(row => row.id === deliveryId);
+    const readerDelivery = readerDeliveries.find(row => row.id === deliveryId);
+    assert.ok(managerDelivery && readerDelivery, 'Both delivery lists must contain the exact inserted fixture.');
+    observations.push({ route: 'webhook delivery list', managed: managerDelivery.payload.data, readable: readerDelivery.payload.data });
+    const managerDetail = ok(await http('GET', `/v1/webhooks/${endpoint.id}/deliveries/${deliveryId}`, manager.secret));
+    const readerDetail = ok(await http('GET', `/v1/webhooks/${endpoint.id}/deliveries/${deliveryId}`, reader.secret));
+    assert.equal(managerDetail.status, 'paused');
+    assert.equal(managerDetail.attemptCount, 0);
+    assert.deepEqual(managerDetail.attempts, [], 'The fixture must not make any webhook deliveries.');
+    observations.push({ route: 'webhook delivery detail', managed: managerDetail.payload.data, readable: readerDetail.payload.data });
+    const safeData = JSON.parse(JSON.stringify(data).replaceAll(token, '[redacted]'));
+    for (const observation of observations) {
+      assert.deepEqual(observation.managed, data, `${observation.route}: manage access must retain the complete original payload, including nested capabilities and property names.`);
+      assert.ok(!JSON.stringify(observation.readable).includes(token), `${observation.route}: read-only access must not reveal a valid capability, including nested values.`);
+      assert.deepEqual(observation.readable, safeData, `${observation.route}: recursive redaction must preserve non-capability fields and JSON types.`);
+    }
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, manager.secret)).marketingConsent, 'subscribed', 'Reading redacted event metadata must not consume the underlying capability.');
+  });
+
+  test('a test key at its seeded 600-request budget receives HTTP 429 and recovers after its own budget resets', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    let fixtureWorkspace: string | undefined;
+    cleanup(t, async () => {
+      // Registered before the contact: delete its cleanup request's budget too,
+      // after contact deletion but before key revocation. No writes if DB matching failed.
+      if (fixtureWorkspace) await db.query('DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = $2', [fixtureWorkspace, key.id]);
+    });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email })), 202);
+    const matched = await db.query(`SELECT e.id FROM sending_emails e JOIN api_keys k
+      ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id AND k.environment = e.environment
+      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND k.id = $4`, [queued.id, contact.workspaceId, 'test', key.id]);
+    assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created test email/key; no request budget was seeded.');
+    fixtureWorkspace = contact.workspaceId;
+    // This cleanup is registered after the key/contact fixtures, so it restores
+    // access before their HTTP cleanup and never touches another key’s budget.
+    cleanup(t, async () => { await db.query('DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = $2', [contact.workspaceId, key.id]); });
+    let limited: Reply | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const seeded = await db.query(`INSERT INTO api_request_budgets (workspace_id, key_id, window_start, used)
+        VALUES ($1, $2, date_trunc('minute', now()), $3)
+        ON CONFLICT (workspace_id, key_id) DO UPDATE SET window_start = excluded.window_start, used = excluded.used
+        RETURNING window_start`, [contact.workspaceId, key.id, 600]);
+      limited = await http('GET', `/v1/contacts/${contact.id}`, key.secret);
+      if (limited.status === 429) break;
+      const current = await db.query('SELECT window_start FROM api_request_budgets WHERE workspace_id = $1 AND key_id = $2', [contact.workspaceId, key.id]);
+      assert.equal(current.rowCount, 1);
+      if (new Date(current.rows[0].window_start).getTime() === new Date(seeded.rows[0].window_start).getTime()) break;
+      // At most one retry, only for an observed real minute rollover between
+      // seeding and HTTP admission; never loop through 600 requests.
+    }
+    assert.ok(limited);
+    assert.equal(error(limited, 429, 'REQUEST_RATE_LIMITED').retryable, true);
+    assert.equal(limited.headers.get('retry-after'), '60');
+    await db.query('DELETE FROM api_request_budgets WHERE workspace_id = $1 AND key_id = $2', [contact.workspaceId, key.id]);
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).id, contact.id, 'Resetting this fixture key’s budget must restore access without replacing the key.');
   });
 });
 
@@ -630,8 +1016,9 @@ describe('Operational configuration and public event boundaries', () => {
   });
 });
 
-// This is the only deliberate skip. Enabling it authorizes one real SES email,
-// not a campaign or webhook delivery. Missing explicit recipient/from is a failure.
+// Live sending remains opt-in, separately from the remote database-fixture skips.
+// Enabling this authorizes one real SES email, not a campaign or webhook delivery.
+// Missing explicit recipient/from is a failure.
 test('LIVE SES: one explicitly authorized recipient reaches provider acceptance (not a delivery claim)', { skip: process.env.LIVE_SES_TEST !== '1' ? 'Set LIVE_SES_TEST=1, SES_TEST_RECIPIENT and SES_TEST_FROM to authorize one real email.' : false }, async t => {
   const to = process.env.SES_TEST_RECIPIENT;
   const from = process.env.SES_TEST_FROM;

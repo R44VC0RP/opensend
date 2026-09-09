@@ -1522,7 +1522,8 @@
           "subject",
           "audience"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "description": "Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
       },
       "CampaignUpdateInput": {
         "type": "object",
@@ -7742,6 +7743,7 @@
     "/v1/emails/{id}/content": {
       "get": {
         "operationId": "getEmailContent",
+        "description": "Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.",
         "tags": [
           "Emails"
         ],

@@ -4,7 +4,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, region, response, security, log, type App, type Actor, type Ctx, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, log, type App, type Actor, type Ctx, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -56,18 +56,37 @@ function webhookUrl(runtime: Runtime, value: string) {
   if (!runtime.config.webhookAllowedHosts.map(h => h.toLowerCase()).includes(host)) throw new ApiError(422, 'WEBHOOK_HOST_NOT_ALLOWED', 'The endpoint hostname must be in the deployment administrator’s trusted webhook allowlist.', 'url');
   return url.toString();
 }
-async function encryptionKey(runtime: Runtime) {
-  const value = runtime.config.encryptionKey;
+async function encryptionKey(value: string) {
   if (!/^[0-9a-f]{64}$/i.test(value)) throw new ApiError(503, 'ENCRYPTION_NOT_CONFIGURED', 'A 32-byte hexadecimal encryption key is required.');
-  return crypto.subtle.importKey('raw', Uint8Array.from(value.match(/../g)!, h => parseInt(h, 16)), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  const bytes = unhex(value);
+  return { id: hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).slice(0, 16), key: await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']) };
 }
 const hex = (value: Uint8Array) => Array.from(value, b => b.toString(16).padStart(2, '0')).join('');
 const unhex = (value: string) => Uint8Array.from(value.match(/../g) ?? [], h => parseInt(h, 16));
-async function encrypt(runtime: Runtime, secret: string, binding: string) { const iv = crypto.getRandomValues(new Uint8Array(12)); const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, await encryptionKey(runtime), new TextEncoder().encode(secret)); return `${hex(iv)}.${hex(new Uint8Array(encrypted))}`; }
-async function decrypt(runtime: Runtime, ciphertext: string, binding: string) { const [iv, value] = ciphertext.split('.'); return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unhex(iv!), additionalData: new TextEncoder().encode(binding) }, await encryptionKey(runtime), unhex(value!))); }
+async function encrypt(runtime: Runtime, secret: string, binding: string) {
+  const current = await encryptionKey(runtime.config.encryptionKey), iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, current.key, new TextEncoder().encode(secret));
+  return `v1.${current.id}.${hex(iv)}.${hex(new Uint8Array(encrypted))}`;
+}
+async function decrypt(runtime: Runtime, ciphertext: string, binding: string) {
+  const parts = ciphertext.split('.'), versioned = parts.length === 4 && parts[0] === 'v1';
+  const [iv, value] = versioned ? parts.slice(2) : parts;
+  const rotationRequired = () => new ApiError(503, 'KEY_ROTATION_REQUIRED', 'The webhook secret cannot be decrypted with configured keys. Restore its encryption key or rotate the webhook secret.');
+  if ((!versioned && parts.length !== 2) || !/^[a-f0-9]{24}$/i.test(iv ?? '') || !/^(?:[a-f0-9]{2}){16,}$/i.test(value ?? '')) throw rotationRequired();
+  const keys = [await encryptionKey(runtime.config.encryptionKey)];
+  if (runtime.config.previousEncryptionKey) keys.push(await encryptionKey(runtime.config.previousEncryptionKey));
+  for (const candidate of keys) {
+    if (versioned && candidate.id !== parts[1]) continue;
+    try { return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unhex(iv!), additionalData: new TextEncoder().encode(binding) }, candidate.key, unhex(value!))); } catch { /* Legacy envelopes may belong to the previous key. */ }
+  }
+  throw rotationRequired();
+}
 function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
 async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
 const secretBinding = (a: Pick<Actor, 'workspaceId' | 'environment'>, webhookId: string) => `${a.workspaceId}:${a.environment}:${webhookId}`;
+function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
+  return a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } };
+}
 
 export async function publishEvent(runtime: Runtime, event: PublishedEvent): Promise<void> {
   if (!eventTypes.includes(event.type)) throw new ApiError(422, 'INVALID_EVENT_TYPE', 'Unknown webhook event type.');
@@ -78,7 +97,7 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent): Pro
     for (const endpoint of endpoints) {
       if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
       // Simulated emails must never enter a live-configured endpoint, even if a caller supplied a wrong mode.
-      if (event.environment === 'live' && (event.id.startsWith('os_test_') || event.data.emailId?.startsWith('os_test_') || event.data.simulated === true)) continue;
+      if (event.environment === 'live' && event.data.simulated === true) continue;
       const deliveryId = id('whd');
       await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event });
       await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
@@ -190,11 +209,11 @@ export function registerOperations(app: App) {
     return c.json({ id: deliveryId, status: 'pending' as const }, 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
-    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'); const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), q.cursor ? lt(deliveries.id, q.cursor) : undefined)).orderBy(desc(deliveries.id)).limit(q.limit + 1); return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'); const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), q.cursor ? lt(deliveries.id, q.cursor) : undefined)).orderBy(desc(deliveries.id)).limit(q.limit + 1); return c.json({ data: rows.slice(0, q.limit).map(row => visibleDelivery(row, a)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   const deliveryParams = z.object({ id: z.string(), deliveryId: z.string() }).openapi('WebhookDeliveryParams');
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries/{deliveryId}', operationId: 'getWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 200: response(deliverySchema.extend({ attempts: z.array(attemptSchema) }).openapi('WebhookDeliveryDetail')), ...errors } }), async c => {
-    const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...row, attempts }, 200);
+    const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...visibleDelivery(row, a), attempts }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/deliveries/{deliveryId}/retry', operationId: 'retryWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), p = c.req.valid('param'); await getWebhook(c.env, a, p.id);
@@ -251,6 +270,11 @@ async function verifySns(runtime: Runtime, envelope: SnsEnvelope) {
   if (!verify(envelope.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1', Buffer.from(canonical), cert.publicKey, signature)) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature verification failed.');
   return trusted;
 }
+function verifySesAccount(runtime: Runtime, message: unknown) {
+  const accountId = (message as { mail?: { sendingAccountId?: unknown } } | null)?.mail?.sendingAccountId;
+  // SNS topics can receive cross-account SES events; only an explicit SES account binding is authoritative.
+  if (runtime.config.awsAccountId && accountId !== runtime.config.awsAccountId) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this deployment.');
+}
 function registerPublicEvents(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(z.object({ accepted: z.boolean() }).openapi('SnsAccepted')), ...errors } }), async c => {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
@@ -266,18 +290,24 @@ function registerPublicEvents(app: App) {
       return c.json({ accepted: true }, 202);
     }
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
+    verifySesAccount(c.env, message);
     await c.env.db.transaction(async tx => {
       const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, workspaceId: c.env.config.workspaceId, environment: 'live' }).onConflictDoNothing().returning(); if (!inserted.length) return;
       await enqueue(tx, { type: 'operation.ses', workspaceId: c.env.config.workspaceId, environment: 'live', payload: { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region } });
     });
     return c.json({ accepted: true }, 202);
   });
+  // Hono matches HEAD as GET; intercept the original method before the mutating GET route.
+  app.use('/unsubscribe/:token', async (c, next) => {
+    if (c.req.method === 'HEAD') { c.header('Allow', 'GET, POST'); c.header('Cache-Control', 'no-store'); throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Use GET or POST to unsubscribe.'); }
+    await next();
+  });
   const tokenParams = z.object({ token: z.string().regex(/^u_[a-f0-9]{64}$/) }).openapi('UnsubscribeToken');
   for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: 'Marketing consent is now unsubscribed.', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...errors } }), async c => {
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
     const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
     // The audience helper commits consent, audit, and the subscription event outbox atomically.
-    await recordUnsubscribe(c.env, token.workspaceId, token.environment, token.email);
+    await recordUnsubscribe(c.env, token.workspaceId, token.environment, token.email, method === 'get' ? 'footer-get' : 'rfc8058-post');
     return c.html('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unsubscribed</title><body style="font-family:Helvetica Neue,sans-serif;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">You’re unsubscribed</h1><p>You will no longer receive marketing emails from this workspace.</p></main></body></html>', 200);
   });
 }
@@ -309,16 +339,16 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
       await tx.update(deliveries).set({ status: locked ? 'paused' : 'failed', lastError: locked ? 'ENDPOINT_PAUSED' : 'ENDPOINT_DELETED', updatedAt: now() }).where(where); return true;
     }); if (stopped) return;
   }
-  if (delivery.payload.environment !== job.environment || (job.environment === 'live' && !delivery.synthetic && (delivery.payload.id.startsWith('os_test_') || delivery.payload.data.emailId?.startsWith('os_test_') || delivery.payload.data.simulated === true))) throw new ApiError(403, 'WEBHOOK_ENVIRONMENT_MISMATCH', 'Test events cannot be delivered to live endpoints.');
-  const start = Date.now(); let statusCode: number | null = null, error: string | null = null;
+  const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
+    if (delivery.payload.environment !== job.environment || (job.environment === 'live' && !delivery.synthetic && delivery.payload.data.simulated === true)) throw new ApiError(403, 'WEBHOOK_ENVIRONMENT_MISMATCH', 'Test events cannot be delivered to live endpoints.');
     const url = webhookUrl(runtime, endpoint.url), secret = await decrypt(runtime, endpoint.encryptedSecret, secretBinding(job, endpoint.id));
     const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.eventId}.${timestamp}.${body}`);
     const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
     statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';
-  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; }
-  const retry = Boolean(error) && job.attempts < MAX_ATTEMPTS;
+  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
+  const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
   await runtime.db.transaction(async tx => {
     await tx.insert(deliveryAttempts).values({ id: id('wha'), workspaceId: job.workspaceId, environment: job.environment, deliveryId: delivery.id, statusCode, error, durationMs: Date.now() - start });
     await tx.update(deliveries).set({ attemptCount: sql`${deliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: now() }).where(where);
@@ -330,6 +360,7 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
   if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const [receipt] = await runtime.db.select().from(snsReceipts).where(receiptWhere); if (!receipt || receipt.processedAt) return;
+  verifySesAccount(runtime, payload.message);
   const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
   const [email] = await runtime.db.select().from(emails).where(and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId)));
@@ -339,7 +370,7 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
     const preferences = data.subscription?.newTopicPreferences;
     // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
     if (preferences?.unsubscribeAll === true && email.to.length === 1 && !email.cc.length && !email.bcc.length) {
-      await recordUnsubscribe(runtime, job.workspaceId, job.environment, email.to[0]!);
+      await recordUnsubscribe(runtime, job.workspaceId, job.environment, email.to[0]!, 'ses-subscription');
     } else {
       await publishEvent(runtime, { id: `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`, type: 'contact.subscription_changed', createdAt: receipt.createdAt, workspaceId: job.workspaceId, environment: job.environment, region: email.region, data: { emailId: email.id, source: 'ses', preferences: preferences ?? null, appliedToWorkspaceConsent: false } });
     }

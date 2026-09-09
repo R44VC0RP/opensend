@@ -20,5 +20,12 @@
     "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3, "max_concurrency": 2 }]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
-  "observability": { "enabled": true, "head_sampling_rate": 1 }
+  "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } }],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  }
 }

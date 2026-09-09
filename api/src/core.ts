@@ -22,6 +22,8 @@ export interface Config {
   regions: string[];
   liveEnabled: boolean;
   encryptionKey: string;
+  previousEncryptionKey?: string;
+  awsAccountId?: string;
   snsTopicArns: string[];
   webhookAllowedHosts: string[];
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -71,3 +73,18 @@ export function randomSecret(prefix: string) {
   return prefix + Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
 }
 export function notFound(entity: string): never { throw new ApiError(404, 'NOT_FOUND', `${entity} was not found.`); }
+export const redactCapabilityText = (value: string) => value.replace(/u_[0-9a-f]{64}/g, '[redacted]');
+export function redactCapabilityData(value: Record<string, unknown>): Record<string, unknown> {
+  const redact = (item: unknown): unknown => {
+    if (typeof item === 'string') return redactCapabilityText(item);
+    if (Array.isArray(item)) return item.map(redact);
+    if (item !== null && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, child]) => [redactCapabilityText(key), redact(child)]));
+    return item;
+  };
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactCapabilityText(key), redact(item)]));
+}
+export function admissionDenied(): Response {
+  const requestId = id('req');
+  log('warn', { requestId, code: 'ADMISSION_RATE_LIMITED', operation: 'admission' });
+  return Response.json({ error: { code: 'ADMISSION_RATE_LIMITED', message: 'Too many requests from this connection. Retry after one minute.', requestId, retryable: true } }, { status: 429, headers: { 'x-request-id': requestId, 'retry-after': '60', 'cache-control': 'no-store' } });
+}

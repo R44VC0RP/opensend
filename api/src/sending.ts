@@ -1,8 +1,11 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, gt, inArray } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { Buffer } from 'node:buffer';
+import { parse, type DefaultTreeAdapterMap } from 'parse5';
+import { apiKeys } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -12,6 +15,26 @@ import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
 const MAX_BODY = 512 * 1024;
+const SENDING_LIMITS = {
+  test: { pending: 500, keyPending: 100, storedAttachmentBytes: 64 * 1024 * 1024, expandedCampaignBytes: 16 * 1024 * 1024 },
+  live: { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 },
+} as const;
+// All admissions take this transaction-scoped lock before campaign/attachment locks.
+// Dispatch only reduces admission counts, so it need not take this lock.
+async function lockAdmission(db: DbExecutor, a: Actor) {
+  await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`sending:${a.workspaceId}:${a.environment}`}, 0))`);
+}
+async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
+  const limits = SENDING_LIMITS[a.environment];
+  const [counts] = await db.select({ total: sql<number>`count(*)::int`, key: sql<number>`count(*) filter (where ${emails.actorKeyId} = ${a.keyId})::int` }).from(emails).where(and(scope(emails, a), inArray(emails.status, ['queued', 'attempting'])));
+  if (Number(counts!.total) + incoming > limits.pending || Number(counts!.key) + incoming > limits.keyPending) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the ${a.environment} outstanding email limit (${limits.pending} per environment, ${limits.keyPending} per key). Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
+}
+function campaignBytes(a: Actor, total: number, snapshot: EmailSnapshot) {
+  // Reserve footer/header space in reviews too, where unsubscribe tokens are not issued.
+  const next = total + Buffer.byteLength(JSON.stringify(snapshot), 'utf8') + 2048;
+  if (next > SENDING_LIMITS[a.environment].expandedCampaignBytes) throw new ApiError(413, 'EXPANDED_CAMPAIGN_TOO_LARGE', `Expanded campaign content exceeds the ${SENDING_LIMITS[a.environment].expandedCampaignBytes / 1024 / 1024} MiB ${a.environment} limit. Reduce the audience or personalized content.`);
+  return next;
+}
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
@@ -43,7 +66,7 @@ const EmailContent = z.object({ subject: z.string(), html: z.string().nullable()
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string(), environment: z.enum(['live', 'test']) }).openapi('Attachment');
 const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
-const CampaignInput = z.object({ name: z.string().min(1).max(200), from: Address, replyTo: z.array(Address).max(10).default([]), region: Region, subject: Subject, html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: AudienceSpec, defaults: Data }).strict().refine(v => !!v.html || !!v.text, 'Provide html or text.').openapi('CampaignDraftInput');
+const CampaignInput = z.object({ name: z.string().min(1).max(200), from: Address, replyTo: z.array(Address).max(10).default([]), region: Region, subject: Subject, html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: AudienceSpec, defaults: Data }).strict().refine(v => !!v.html || !!v.text, 'Provide html or text.').describe('Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
 const Campaign = z.object({ id: z.string(), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']), reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Campaign');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).openapi('CampaignAudienceCounts');
 const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), revision: z.number().int(), contentHash: z.string(), createdAt: z.string() }).openapi('CampaignReview');
@@ -71,10 +94,11 @@ function canonical(value: unknown): string {
 }
 async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>): Promise<T> {
   const key = c.req.header('Idempotency-Key');
-  if (key === undefined) return c.env.db.transaction(work);
+  if (key === undefined) return c.env.db.transaction(async db => { await lockAdmission(db, a); return work(db); });
   if (key.length > 200 || !/^[\x21-\x7e]+$/.test(key)) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
   const requestHash = await digest(canonical(body));
   return c.env.db.transaction(async db => {
+    await lockAdmission(db, a);
     const identity = { workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, path: c.req.path, requestKey: key };
     const inserted = await db.insert(sendingIdempotency).values({ ...identity, requestHash }).onConflictDoNothing().returning();
     const where = and(scope(sendingIdempotency, a), eq(sendingIdempotency.actorKeyId, a.keyId), eq(sendingIdempotency.path, c.req.path), eq(sendingIdempotency.requestKey, key));
@@ -118,24 +142,77 @@ async function linkAttachments(db: DbExecutor, a: Actor, ids: string[], ownerTyp
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, environment: a.environment, attachmentId, ownerType, ownerId }))).onConflictDoNothing();
 }
 function escaped(value: string) { return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!); }
-function safeData(data: Record<string, unknown>) {
-  for (const value of Object.values(data)) if (typeof value === 'string' && /(?:javascript|vbscript|data)\s*:/i.test(value)) throw new ApiError(422, 'UNSAFE_TEMPLATE_VALUE', 'Template values may not contain active-content URL schemes.');
+const URL_ATTRIBUTES = new Set(['href', 'src', 'action', 'formaction', 'poster', 'background', 'cite', 'longdesc', 'data', 'codebase', 'profile', 'manifest', 'xlink:href']);
+const TEXT_ATTRIBUTES = new Set(['title', 'alt', 'aria-label', 'aria-description']);
+const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'iframe', 'xmp', 'noembed', 'noframes', 'noscript', 'plaintext']);
+function validateUrl(value: string) {
+  // The HTML parser has already decoded all character references (not just a regex subset).
+  const normalized = value.replace(/[\x00-\x20\x7f]/g, '');
+  let url: URL;
+  try { url = new URL(normalized, 'https://template.invalid/'); } catch { throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML contains an invalid URL.'); }
+  if (!['http:', 'https:', 'mailto:', 'tel:', 'cid:'].includes(url.protocol)) throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML URLs must use HTTP(S), mailto, tel, CID, or relative references.');
+}
+function inspectHtml(source: string, template = false) {
+  const safe: { start: number; end: number }[] = [];
+  const stack: { node: DefaultTreeAdapterMap['node']; unsafe: boolean }[] = [{ node: parse(source, { sourceCodeLocationInfo: true }), unsafe: false }];
+  while (stack.length) {
+    const { node, unsafe } = stack.pop()!;
+    const element = 'tagName' in node ? node : undefined;
+    const blocked = unsafe || !!element && (RAW_TEXT_ELEMENTS.has(element.tagName) || element.namespaceURI !== 'http://www.w3.org/1999/xhtml');
+    if (node.nodeName === '#text' && !blocked && node.sourceCodeLocation) {
+      const { startOffset: start, endOffset: end } = node.sourceCodeLocation;
+      // HTML error recovery can coalesce text across ignored markup. Never trust such a
+      // broad location as a text-only range; literal less-than signs should use &lt;.
+      if (!source.slice(start, end).includes('<')) safe.push({ start, end });
+    }
+    if (element) {
+      for (const attr of element.attrs) {
+        const name = attr.prefix ? `${attr.prefix}:${attr.name}` : attr.name;
+        // Template structure is checked before rendering; validate complete URLs only after substitution.
+        if (!template && URL_ATTRIBUTES.has(name)) validateUrl(attr.value);
+        if (!template && ['srcset', 'imagesrcset', 'ping', 'archive'].includes(name)) {
+          const urls = name.endsWith('srcset') ? attr.value.split(',').map(part => part.trim().split(/\s+/)[0]!) : attr.value.trim().split(/\s+/);
+          for (const url of urls) if (url) validateUrl(url);
+        }
+        if (template && !blocked && (URL_ATTRIBUTES.has(name) || TEXT_ATTRIBUTES.has(name))) {
+          const location = element.sourceCodeLocation?.attrs?.[name];
+          if (!location) continue;
+          const original = source.slice(location.startOffset, location.endOffset);
+          // Parser offsets identify the attribute; this only checks its lexical quoting, never parses HTML.
+          const quoted = original.match(/^[^\s=]+\s*=\s*(["'])/);
+          if (quoted && original.endsWith(quoted[1]!)) safe.push({ start: location.startOffset + quoted[0].length, end: location.endOffset - 1 });
+        }
+      }
+    }
+    if ('childNodes' in node) for (const child of node.childNodes) stack.push({ node: child, unsafe: blocked });
+    if (element && 'content' in element) stack.push({ node: (element as DefaultTreeAdapterMap['template']).content, unsafe: blocked });
+  }
+  safe.sort((a, b) => a.start - b.start); let rangeIndex = 0;
+  if (template) for (const match of source.matchAll(/{{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*}}/g)) {
+    while (safe[rangeIndex] && safe[rangeIndex]!.end <= match.index) rangeIndex++;
+    const range = safe[rangeIndex];
+    if (!range || match.index < range.start || match.index + match[0].length > range.end) throw new ApiError(422, 'UNSAFE_TEMPLATE_CONTEXT', 'Campaign placeholders require HTML text nodes or quoted URL/title/alt/aria-label/aria-description attributes. Unquoted attributes, tag names, comments, script/style, event handlers and foreign markup are unsupported.');
+  }
 }
 function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean): string | undefined {
   if (!source) return source;
   const unsupported = source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, '');
   if (unsupported.includes('{{') || unsupported.includes('}}')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
-  return source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, (_token, key: string) => {
-    if (!(key in values) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `A value is required for ${key}.`, key);
-    return html ? escaped(String(values[key])) : String(values[key]);
-  });
+  if (html) inspectHtml(source, true);
+  let result = ''; let offset = 0;
+  for (const match of source.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)) {
+    const key = match[1]!;
+    if (!Object.hasOwn(values, key) || values[key] === undefined || values[key] === null) throw new ApiError(422, 'MISSING_TEMPLATE_VARIABLE', `A value is required for ${key}.`, key);
+    const value = html ? escaped(String(values[key])) : String(values[key]);
+    const prefix = source.slice(offset, match.index);
+    if (result.length + prefix.length + value.length > MAX_BODY) throw new ApiError(413, 'RENDERED_CONTENT_TOO_LARGE', 'A personalized body part exceeds 512 KiB characters. Reduce the content or repeated substitutions.');
+    result += prefix + value; offset = match.index + match[0].length;
+  }
+  if (result.length + source.length - offset > MAX_BODY) throw new ApiError(413, 'RENDERED_CONTENT_TOO_LARGE', 'A personalized body part exceeds 512 KiB characters. Reduce the content or repeated substitutions.');
+  return result + source.slice(offset);
 }
 function validateHtmlUrls(html: string | undefined) {
-  if (!html) return;
-  for (const match of html.matchAll(/\b(?:href|src|action)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) {
-    const url = (match[1] ?? match[2] ?? match[3] ?? '').replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (_m, hex: string | undefined, decimal: string | undefined) => { const n = parseInt(hex ?? decimal ?? '', hex ? 16 : 10); return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '\ufffd'; }).replace(/&colon;/gi, ':').replace(/&(?:tab|newline);/gi, '').replace(/[\x00-\x20\x7f]/g, '');
-    if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !/^(?:https?|mailto|tel|cid):/i.test(url)) throw new ApiError(422, 'UNSAFE_HTML_URL', 'HTML URLs must use HTTP(S), mailto, tel, CID, or relative references.');
-  }
+  if (html) inspectHtml(html);
 }
 function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const bytes = new TextEncoder().encode((snapshot.raw ?? '') + (snapshot.html ?? '') + (snapshot.text ?? '') + snapshot.subject).length;
@@ -196,7 +273,6 @@ function editable(row: typeof campaigns.$inferSelect, revision?: number) {
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
-    safeData(values);
     const parsed = SendInput.safeParse({ from: draft.from, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: interpolate(draft.html, values, true), text: interpolate(draft.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
@@ -205,7 +281,7 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
     return await prepare(runtime, db, a, parsed.data, preview, lockedAttachments);
   } catch (error) {
     // Add only a contact identifier to known local validation failures; never rewrite database/provider errors.
-    if (error instanceof ApiError && ['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_VALUE', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE'].includes(error.code)) throw new ApiError(error.status, error.code, `Contact ${contact.id}: ${error.message}`, 'contactId', error.retryable);
+    if (error instanceof ApiError && ['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE'].includes(error.code)) throw new ApiError(error.status, error.code, `Contact ${contact.id}: ${error.message}`, 'contactId', error.retryable);
     throw error;
   }
 }
@@ -213,13 +289,23 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { body: json(SendInput) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    const result = await idempotent(c, a, input, async db => queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')));
+    const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); return queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')); });
     wake(c.env); return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', tags: ['Emails'], security, request: { body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (input.emails.reduce((n, e) => n + (e.html?.length ?? 0) + (e.text?.length ?? 0), 0) > 2 * 1024 * 1024) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', 'Combined batch body content may not exceed 2 MiB.');
-    const result = await idempotent(c, a, input, async db => { const data = []; for (const mail of input.emails) data.push(await queueEmail(db, a, await prepare(c.env, db, a, mail), undefined, undefined, c.get('requestId'))); return { data }; });
+    const result = await idempotent(c, a, input, async db => {
+      await checkPending(db, a, input.emails.length);
+      const snapshots: EmailSnapshot[] = []; let expandedBytes = 0;
+      for (const mail of input.emails) {
+        const snapshot = await prepare(c.env, db, a, mail);
+        expandedBytes += Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
+        if (expandedBytes > SENDING_LIMITS[a.environment].expandedCampaignBytes) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS[a.environment].expandedCampaignBytes / 1024 / 1024} MiB ${a.environment} limit. Submit smaller batches.`);
+        snapshots.push(snapshot);
+      }
+      const data = []; for (const snapshot of snapshots) data.push(await queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId'))); return { data };
+    });
     wake(c.env); return c.json(BatchReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: PageQuery.extend({ campaignId: z.string().optional(), status: Status.optional() }) }, responses: { 200: response(page(Email)), ...errors } }), async c => {
@@ -227,14 +313,18 @@ export function registerSending(app: App) {
     return c.json({ data: rows.slice(0, q.limit).map(r => Email.parse(r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => c.json(Email.parse(await findEmail(c.env.db, actor(c), c.req.valid('param').id)), 200));
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
-    const row = await findEmail(c.env.db, actor(c), c.req.valid('param').id); const s = row.snapshot;
-    return c.json(EmailContent.parse({ subject: s.subject, html: s.html ?? null, text: s.text ?? null, raw: s.raw ?? null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }), 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
+    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id); const s = row.snapshot;
+    const manage = a.permissions.includes('manage');
+    // App-owned capabilities only, not a general sanitizer for transactional bearer links.
+    // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
+    const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
+    return c.json(EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query');
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse(r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse({ ...r, data: a.permissions.includes('manage') ? r.data : redactCapabilityData(r.data) })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { body: json(AttachmentInput) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
@@ -244,11 +334,12 @@ export function registerSending(app: App) {
     if (input.content.length > Math.ceil(MAX_ATTACHMENTS / 3) * 4) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB decoded.');
     // Flat character validation avoids stack exhaustion from repeated regex groups on large uploads.
     if (input.content.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.content)) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be standard padded base64.');
-    let binary: string;
-    try { binary = atob(input.content); } catch { throw new ApiError(422, 'INVALID_BASE64', 'Attachment content is not valid base64.'); }
-    if (!binary.length || binary.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
-    const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+    const bytes = Buffer.from(input.content, 'base64');
+    if (bytes.toString('base64') !== input.content) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be canonical padded base64.');
+    if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
     const result = await idempotent(c, a, { ...input, content: await digest(input.content) }, async db => {
+      const [usage] = await db.select({ bytes: sql<string>`coalesce(sum(${attachments.size}), 0)` }).from(attachments).where(scope(attachments, a));
+      if (Number(usage!.bytes) + bytes.length > SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413, 'STORED_ATTACHMENT_LIMIT_EXCEEDED', `Stored attachments exceed the ${SENDING_LIMITS[a.environment].storedAttachmentBytes / 1024 / 1024} MiB ${a.environment} limit. Delete unused attachments before uploading more.`);
       const attachmentId = id('attachment'); const storageKey = `${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
       await c.env.storage.put(storageKey, bytes, input.contentType);
       try {
@@ -283,12 +374,12 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => c.json(Campaign.parse(await findCampaign(c.env.db, actor(c), c.req.valid('param').id)), 200));
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id; sender(c.env, a, input.draft.from, input.draft.region);
-    const row = await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
+    const row = await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
     return c.json(Campaign.parse(row), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/campaigns/{id}', operationId: 'deleteCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
-    await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); editable(current); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
+    await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/audience-preview', operationId: 'previewCampaignAudience', tags: ['Campaigns'], security, responses: { 200: response(AudienceCounts), ...errors }, request: { params: IdParams } }), async c => {
@@ -296,7 +387,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
+    const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); const row = await findCampaign(db, a, campaignId, true); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
     wake(c.env); return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/review', operationId: 'reviewCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 200: response(Review), ...errors } }), async c => {
@@ -306,7 +397,8 @@ export function registerSending(app: App) {
       const audience = await getAudience(c.env, a, row.draft.audience, 1000, db);
       if (!audience.contacts.length) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
       const lockedAttachments = await attachmentRows(db, a, row.draft.attachments, true);
-      for (const contact of audience.contacts) await campaignMessage(c.env, db, a, row.draft, contact, false, true, lockedAttachments);
+      let expandedBytes = 0;
+      for (const contact of audience.contacts) expandedBytes = campaignBytes(a, expandedBytes, await campaignMessage(c.env, db, a, row.draft, contact, false, true, lockedAttachments));
       const reviewId = id('review'); const contentHash = await digest(canonical({ draft: row.draft, recipients: audience.contacts }));
       const [review] = await db.insert(campaignReviews).values({ id: reviewId, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: audience.contacts, matched: audience.matched, eligible: audience.eligible, suppressed: audience.suppressed, unsubscribed: audience.unsubscribed, contentHash }).returning();
       await db.update(campaigns).set({ status: 'reviewed', reviewId, updatedAt: now() }).where(campaignWhere(a, campaignId)); return Review.parse(review);
@@ -321,7 +413,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); const canceled = await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(scope(emails, a), eq(emails.campaignId, campaignId), eq(emails.status, 'queued'))).returning({ id: emails.id }); const inFlight = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))); await db.update(campaigns).set({ status: 'canceled', updatedAt: now() }).where(campaignWhere(a, campaignId)); return { id: campaignId, status: 'canceled' as const, canceled: canceled.length, inFlight: inFlight.length }; });
+    const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); sender(c.env, a, row.draft.from, row.draft.region); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); const canceled = await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(scope(emails, a), eq(emails.campaignId, campaignId), eq(emails.status, 'queued'))).returning({ id: emails.id }); const inFlight = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))); await db.update(campaigns).set({ status: 'canceled', updatedAt: now() }).where(campaignWhere(a, campaignId)); return { id: campaignId, status: 'canceled' as const, canceled: canceled.length, inFlight: inFlight.length }; });
     return c.json(CampaignCanceled.parse(result), 200);
   });
 }
@@ -334,8 +426,14 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (!review) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'The selected review is no longer current.');
   if (review.contentHash !== await digest(canonical({ draft: review.draft, recipients: review.recipients }))) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'The reviewed content or recipients changed; review the campaign again.');
   sender(runtime, a, review.draft.from, review.draft.region);
+  await checkPending(db, a, review.recipients.length);
   const lockedAttachments = await attachmentRows(db, a, review.draft.attachments, true);
-  for (const contact of review.recipients) await queueEmail(db, a, await campaignMessage(runtime, db, a, review.draft, contact, false, false, lockedAttachments), campaignId, input.scheduledAt, requestId, lockedAttachments);
+  const snapshots: EmailSnapshot[] = []; let expandedBytes = 0;
+  for (const contact of review.recipients) {
+    const snapshot = await campaignMessage(runtime, db, a, review.draft, contact, false, false, lockedAttachments);
+    expandedBytes = campaignBytes(a, expandedBytes, snapshot); snapshots.push(snapshot);
+  }
+  for (const snapshot of snapshots) await queueEmail(db, a, snapshot, campaignId, input.scheduledAt, requestId, lockedAttachments);
   const status = input.scheduledAt ? 'scheduled' as const : 'sending' as const;
   await db.update(campaigns).set({ status, scheduledAt: input.scheduledAt ?? null, updatedAt: now() }).where(campaignWhere(a, campaignId));
   return { id: campaignId, status, queued: review.recipients.length, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
@@ -390,6 +488,18 @@ async function deferDispatch(runtime: Runtime, a: Actor, mail: typeof emails.$in
     if (changed.length) await enqueue(db, { type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { ...payload, version: mail.dispatchVersion + 1 }, availableAt });
   });
 }
+async function originAllowed(runtime: Runtime, db: DbExecutor, mail: typeof emails.$inferSelect) {
+  // Bind bootstrap jobs to the current credential generation, so env-key rotation contains queued work too.
+  if (mail.actorKeyId.startsWith('bootstrap_')) return mail.workspaceId === runtime.config.workspaceId && mail.environment === 'live' && mail.actorKeyId === `bootstrap_${(await digest(runtime.config.adminToken)).slice(0, 24)}`;
+  // Legacy unbound "bootstrap" jobs cannot prove their originating credential is still valid.
+  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('update');
+  // FOR UPDATE serializes with revocation/permission updates through the durable attempt claim,
+  // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
+  return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && (!key.domains.length || key.domains.some(domain => domain.toLowerCase() === mail.snapshot.from.split('@')[1]!.toLowerCase()));
+}
+async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails.$inferSelect) {
+  return db.update(emails).set({ status: 'canceled', errorCode: 'ORIGIN_KEY_REVOKED', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
+}
 const dispatch: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.emailId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Email dispatch requires emailId.');
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
@@ -402,6 +512,9 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     await finishCampaign(runtime, a, mail.campaignId); return;
   }
   if (mail.status !== 'queued') return;
+  // Fail closed before storage/SES preflight as well as at the final atomic claim.
+  const authorized = await runtime.db.transaction(async db => { if (await originAllowed(runtime, db, mail)) return true; await cancelRevokedOrigin(db, a, mail); return false; });
+  if (!authorized) { await finishCampaign(runtime, a, mail.campaignId); return; }
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
   const s = mail.snapshot;
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
@@ -420,6 +533,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   }
   if (ses) { const availableAt = await reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses); if (availableAt) { await deferDispatch(runtime, a, mail, payload, availableAt); return; } }
   const claimed = await runtime.db.transaction(async db => {
+    if (!await originAllowed(runtime, db, mail)) return cancelRevokedOrigin(db, a, mail);
     if (mail.campaignId) { const campaign = await findCampaign(db, a, mail.campaignId, true); if (campaign.status === 'canceled') return []; if (campaign.status === 'scheduled') await db.update(campaigns).set({ status: 'sending', updatedAt: now() }).where(campaignWhere(a, mail.campaignId)); }
     const destinations = [...s.to, ...s.cc, ...s.bcc].map(email => email.toLowerCase());
     const consent = await db.select().from(contacts).where(and(scope(contacts, a), inArray(contacts.email, destinations))).orderBy(asc(contacts.id)).for('update');
@@ -431,6 +545,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   });
   if (!claimed.length) return;
   mail = claimed[0]!;
+  if (mail.status === 'canceled') { await finishCampaign(runtime, a, mail.campaignId); return; }
   if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishCampaign(runtime, a, mail.campaignId); return; }
   if (!ses) {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'simulated', externalId: `simulated:${mail.id}`, data: { stage: 'validated', providerCalled: false, deliveryObserved: false } });

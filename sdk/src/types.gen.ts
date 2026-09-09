@@ -267,6 +267,9 @@ export type Campaign = {
     updatedAt: string;
 };
 
+/**
+ * Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
+ */
 export type CampaignDraftInput = {
     name: string;
     from: string;

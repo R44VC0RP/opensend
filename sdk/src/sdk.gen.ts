@@ -274,6 +274,9 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
     ...options
 });
 
+/**
+ * Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.
+ */
 export const getEmailContent = <ThrowOnError extends boolean = false>(options: Options<GetEmailContentData, ThrowOnError>): RequestResult<GetEmailContentResponses, GetEmailContentErrors, ThrowOnError> => (options.client ?? client).get<GetEmailContentResponses, GetEmailContentErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/v1/emails/{id}/content',

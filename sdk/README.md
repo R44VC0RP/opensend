@@ -33,7 +33,7 @@ const message = await getEmail({
 
 Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
-The generated exports include contacts, lists, segments, campaigns, attachments, keys, webhooks, settings and message logs. Cursor responses use `nextCursor`. Error bodies include a stable `error.code` and `error.requestId`.
+The generated exports include contacts, lists, segments, campaigns, attachments, keys, webhooks, settings and message logs. Cursor responses use `nextCursor`. Error bodies include a stable `error.code` and `error.requestId`. Read-level responses redact app unsubscribe capabilities from content/events/delivery payloads and withhold raw MIME; management access is required for unredacted content. A key revoked before dispatch no longer authorizes its queued sends. Request/resource limits return explicit 429/413 errors; do not retry permanent configuration errors blindly.
 
 Stored-template data follows SES rendering semantics: nested JSON is supported, but SES does not escape HTML substitutions. Escape untrusted data for its HTML context before submission. Test keys never invoke the real SES renderer.
 

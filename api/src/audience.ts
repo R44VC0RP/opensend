@@ -87,7 +87,7 @@ export async function canMarket(runtime: Runtime, identity: Actor, email: string
   const [row] = await runtime.db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
   return !!row && !row.deletedAt && !row.suppressed && row.marketingConsent === 'subscribed';
 }
-export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, environment: Mode, email: string): Promise<{ contactId: string; changed: boolean }> {
+export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, environment: Mode, email: string, source: 'footer-get' | 'rfc8058-post' | 'ses-subscription' = 'footer-get'): Promise<{ contactId: string; changed: boolean }> {
   const normalized = Email.safeParse(email);
   if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
   return runtime.db.transaction(async tx => {
@@ -99,8 +99,9 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
     const now = new Date().toISOString();
     await tx.update(contacts).set({ marketingConsent: 'unsubscribed', updatedAt: now }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
     const auditId = id('cns');
-    await tx.insert(consentAudit).values({ id: auditId, ...identity, contactId: contact.id, email: normalized.data, status: 'unsubscribed', source: 'hosted-unsubscribe', occurredAt: now });
-    await enqueue(tx, { type: 'operation.publish', ...identity, payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: now, ...identity, region: null, data: { contactId: contact.id, status: 'unsubscribed' } } } });
+    const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'GET request presented a valid footer unsubscribe token; no human identity asserted.';
+    await tx.insert(consentAudit).values({ id: auditId, ...identity, contactId: contact.id, email: normalized.data, status: 'unsubscribed', source, evidence, actorKeyId: null, occurredAt: now });
+    await enqueue(tx, { type: 'operation.publish', ...identity, payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: now, ...identity, region: null, data: { contactId: contact.id, status: 'unsubscribed', source } } } });
     return { contactId: contact.id, changed: true };
   });
 }
@@ -250,6 +251,9 @@ export function registerAudience(app: App) {
       if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('update'); if (!list) notFound('List'); }
       for (const row of job.rows) {
         const [contact] = await tx.insert(contacts).values({ id: id('con'), ...scopeValues(identity), email: row.email, name: row.name, properties: row.properties }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { ...(row.name !== undefined ? { name: row.name } : {}), properties: sql`${contacts.properties} || ${JSON.stringify(row.properties)}::jsonb`, deletedAt: null, updatedAt: new Date().toISOString() } }).returning();
+        // The upsert locks the current profile, so concurrent imports cannot bypass the merged limit.
+        // Rejecting here rolls back this entire commit, including earlier rows and restorations.
+        if (!Properties.safeParse(contact!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
         if (job.listId) await tx.insert(listMembers).values({ ...scopeValues(identity), listId: job.listId, contactId: contact!.id }).onConflictDoNothing();
       }
       const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return updated!;

@@ -2,9 +2,9 @@ import { Client } from 'pg';
 import { readdir, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { log } from './core.js';
+import { postgresConnection } from './adapters/node.js';
 
-if (!process.env.DATABASE_URL) throw new Error('CONFIG_INVALID: DATABASE_URL is required for migrations.');
-const client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 10000 });
+const client = new Client(postgresConnection(process.env.DATABASE_URL));
 await client.connect();
 try {
   await client.query('SELECT pg_advisory_lock(78291344)');

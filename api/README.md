@@ -52,7 +52,7 @@ Required Worker secrets: `ADMIN_API_KEY`, `ENCRYPTION_KEY`. When deliberately en
 
 `npm run cf:check` bundles a deployment dry run without deploying. For local Workers, set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` securely to the local database URL, then run `npm run cf:dev -- --port 8794`. Match `PUBLIC_URL` to the runtime you are exercising. Local Hyperdrive does not test production pooling/caching; see [local development](https://developers.cloudflare.com/hyperdrive/configuration/local-development/).
 
-The Worker has HTTP, Queue and scheduled handlers. Queue messages are wakeups only; committed jobs survive a lost wakeup. Cron recovers due jobs and performs hourly retention. Each invocation processes one leased job, avoiding overlapping transactions on a single Workers database connection. SES feedback gets priority, then email dispatch, then outgoing callbacks. PostgreSQL transactions/leases—not process-local state—control dispatch.
+The Worker has HTTP, Queue and scheduled handlers. Queue messages are wakeups only; committed jobs survive a lost wakeup. Cron recovers due jobs and performs hourly retention. Each invocation processes one leased job. A Postgres rotation gives live/test work a 3:1 preference with fallback when one environment is empty; within that environment, SES feedback precedes email dispatch and callbacks. Workers use a request-local lazy pool, so health/OpenAPI and missing/malformed-auth requests open no database connection. PostgreSQL transactions/leases—not process-local state—control dispatch.
 
 ## Contract and SDK
 
@@ -89,10 +89,39 @@ Examples: `AUTH_INVALID`, `PERMISSION_DENIED`, `VALIDATION_FAILED`, `CAMPAIGN_RE
 
 Detailed email/event/webhook logs expire after 30 days. Active jobs, campaign drafts, contact engagement timestamps, consent/suppression, idempotency results and valid unsubscribe links are separate. Unreferenced old attachment metadata is removed transactionally and storage deletion is queued durably. Failed storage-deletion jobs retain their object keys for recovery. Imported contact copies and retained campaign revisions require a later explicit data-lifecycle policy; do not claim that deleting a profile purges every audit/safety record.
 
+## Security hardening
+
+Run migration `005_security_budgets.sql` with `npm run migrate` before starting this version. It adds request budgets and the persistent live/test scheduler rotation; it does not delete application data.
+
+- Campaign update/delete/cancel checks the **existing** sender scope. Dispatch rechecks the originating key under a row lock before committing an attempt. Revocation or permission loss cancels queued work with `ORIGIN_KEY_REVOKED`; it cannot recall in-flight or accepted mail. Bootstrap jobs are bound to the current admin-key fingerprint, so admin-key rotation also contains queued work. Legacy unbound `bootstrap` jobs fail closed after upgrade.
+- Non-manage readers receive app unsubscribe capabilities redacted from message content, event data and webhook-delivery payloads, including nested fields/property names. Encoded raw MIME is withheld. This is not a general sanitizer for arbitrary third-party password-reset links: grant content-read access only to trusted integrations. HEAD unsubscribe returns 405 without changing consent. Audit sources distinguish `footer-get`, `rfc8058-post` and `ses-subscription`.
+- Campaign placeholders are parsed with parse5 and limited to text nodes and explicitly supported quoted attributes. Unquoted attributes, comments, executable contexts and foreign markup are rejected. Complete URL values are validated **after** interpolation. Stored SES templates retain their separate, documented caller-escaping contract. Imports reject merged property maps above 50 properties atomically.
+- Request and resource budgets are enforced in Postgres, with transactional admission locks for pending email and attachment quotas. These bound the primary amplification paths; test mode still consumes real infrastructure and is not a billing sandbox. Read/write database access and general test-management activity still require trusted credentials and operational monitoring.
+- Cloudflare invocation URL logs and traces are disabled; sanitized application logs remain enabled. Coarse admission limits run before DB access: 6,000 requests/minute per connection peer/process on Node, or per Cloudflare IP/location using its approximate limiter. Node does not trust forwarded-IP headers. Use properly configured proxy/WAF limits for distributed abuse and validate every external log sink. Remote Node/migration Postgres URLs require `sslmode=verify-full`; only localhost and the local Compose `postgres` host may omit TLS.
+
+| Budget | Test | Live |
+| --- | --- | --- |
+| Authenticated requests per key/minute | 600 | 1,200 (bootstrap: 2,400) |
+| Outstanding emails per key | 100 | 2,000 |
+| Outstanding emails per environment | 500 | 10,000 |
+| Stored attachment bytes per environment | 64 MiB | 1 GiB |
+| Expanded content per campaign/batch | 16 MiB | 128 MiB |
+
+Budgets are initial code constants, not paid-plan entitlements. Cancellation releases pending capacity; attachment deletion releases stored-byte capacity. They do not promise unlimited throughput or total isolation of shared database CPU/storage.
+
+### Encryption and notification setup
+
+New webhook ciphertext includes a version and key identifier. To transition encryption keys, retain the old key as `PREVIOUS_ENCRYPTION_KEY` while setting the new `ENCRYPTION_KEY`. Both are 64 hex characters. Existing legacy ciphertext and prior-key records remain readable during the transition. Rotate endpoint signing secrets and update their consumers before retiring the previous encryption key; do not discard it while old ciphertext remains. Lost/unavailable keys produce `KEY_ROTATION_REQUIRED`, and permanent configuration errors terminate webhook jobs rather than repeatedly retrying them.
+
+When `SNS_TOPIC_ARNS` is nonempty, `AWS_ACCOUNT_ID` is required. SES notifications must include that sending account ID at ingestion and processing; cross-account topic ownership is not mistaken for sender identity. This supplements, but does not replace, a restrictive topic publish policy. Prefer SNS SignatureVersion 2. SignatureVersion 1 remains compatible; an arbitrary short freshness cutoff was not added because it can discard legitimate delayed feedback. Validate genuine SNS retries and publisher permissions in the deployment environment.
+
+**Release gates:** verify disabled Hyperdrive query caching in the actual provisioned connection, public HTTPS, private buckets, proxy/log-export redaction, least-privilege IAM/database/SNS policies, and authentic SES/SNS/webhook delivery. Local checks cannot certify these remote settings. Immediate footer GET unsubscribe and scanner-triggered opt-outs remain intentional.
+
 ## Verification performed
 
-- Single acceptance file: 15 normal HTTP scenarios passed; the one live-SES scenario is explicitly skipped unless `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT` and `SES_TEST_FROM` authorize it.
+- Single acceptance file: 23 local HTTP/security scenarios passed; the one live-SES scenario is explicitly skipped unless `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT` and `SES_TEST_FROM` authorize it. Two historical-source fixtures arrange only exact HTTP-created test records in the matching local DB, then assert behavior over HTTP; remote runs require `API_FIXTURE_DATABASE_URL` or explicitly skip those fixtures.
 - Strict API type check, OpenAPI/SDK generation and SDK compilation passed.
 - Docker image built; generated SDK exercised authentication, Postgres, attachment storage and simulated submission against Node, Docker and local Workers. Docker and local Workers job execution also verified.
 - Wrangler deployment dry run passed. No Cloudflare deployment, remote database migration, real SES send or public webhook test was performed.
-- Two Fable 5.1 reviewers inspected complexity and safety. Their actionable fixes were integrated; protections were not removed merely to reduce line count. No additional test files were introduced.
+- Two Fable 5.1 reviewers inspected the initial implementation; subsequent independent general/Fable blue-team findings drove the hardening above. A focused follow-up review found validation-order/fixture issues that were corrected. No additional test files were introduced.
+- Security runtime probes verified current/previous/legacy encryption transitions, terminal webhook configuration failure with zero outbound calls, live/live/live/test dispatch preference, storage-budget rejection before object writes, and queued bootstrap-job cancellation after admin-key rotation. Workers health/OpenAPI and missing/malformed-auth responses succeeded against an intentionally unavailable database. The hardened Docker image passed SDK/Postgres and HEAD-admission smoke checks.

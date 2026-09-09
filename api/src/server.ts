@@ -1,11 +1,21 @@
 import { serve } from '@hono/node-server';
 import { app } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
-import { ApiError, log } from './core.js';
+import { admissionDenied, ApiError, log } from './core.js';
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
-  const server = serve({ fetch: request => app.fetch(request, runtime), port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
+  // Coarse per-process admission guard; trusted proxy/WAF controls remain necessary for distributed abuse.
+  const peers = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
+  const server = serve({ fetch: (request, connection) => {
+    const current = Math.floor(Date.now() / 60000);
+    if (current !== minute) { peers.clear(); minute = current; }
+    const address = connection.incoming.socket.remoteAddress ?? 'unknown';
+    const key = peers.has(address) || peers.size < 1024 ? address : 'overflow';
+    const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
+    if (count > 6000) return admissionDenied();
+    return app.fetch(request, runtime);
+  }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
   });
   server.on('error', error => {

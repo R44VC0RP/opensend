@@ -23,6 +23,7 @@
     "@smithy/fetch-http-handler": "^5.8.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.7",
+    "parse5": "^8.0.1",
     "pg": "^8.23.0",
     "zod": "^4.5.4"
   },
