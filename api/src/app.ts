@@ -9,6 +9,8 @@ import { registerAudience } from './audience.js';
 import { registerSending } from './sending.js';
 import { registerOperations } from './operations.js';
 import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
+import { registerMcp } from './mcp.js';
+import { registerMcpAuth } from './mcp-auth.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -49,7 +51,8 @@ export function createApp() {
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
-  registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app); registerSesRegions(app);
+  registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app); registerSesRegions(app);
+  registerMcp(app);
   app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending.' } });
   return app;
 }

@@ -5,6 +5,7 @@ import { apiKeys, jobs } from './db/core.js';
 import { domains } from './db/operations.js';
 import { sesRegions } from './db/ses-regions.js';
 import { isApprovedUser } from './google-auth.js';
+import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
 import { assertProvisionable, discoverSes, provisionSes, SesDiscoverySchema, type SesDiscovery } from './ses-setup.js';
 import { assertRegionEnabled, configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
@@ -82,6 +83,10 @@ export function registerSesRegions(app: App) {
 }
 async function approvedOrigin(runtime: Runtime, keyId: string) {
   if (keyId.startsWith('user_')) return isApprovedUser(runtime, keyId.slice(5));
+  if (keyId.startsWith('mcp_')) {
+    const grant = await getMcpGrantActor(runtime, keyId);
+    return !!grant && grant.environment === 'live' && grant.permissions.includes('manage') && !grant.domains.length;
+  }
   const [key] = await runtime.db.select().from(apiKeys).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, runtime.config.workspaceId), eq(apiKeys.environment, 'live'), isNull(apiKeys.revokedAt))).limit(1);
   return Boolean(key?.permissions.includes('manage') && !key.domains.length);
 }

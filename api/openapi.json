@@ -2161,24 +2161,27 @@
         "additionalProperties": false
       },
       "CampaignScheduleInput": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CampaignSendInput"
+        "type": "object",
+        "properties": {
+          "reviewId": {
+            "type": "string",
+            "minLength": 1
           },
-          {
-            "type": "object",
-            "properties": {
-              "scheduledAt": {
-                "type": "string",
-                "format": "date-time"
-              }
-            },
-            "required": [
-              "scheduledAt"
-            ],
-            "additionalProperties": false
+          "revision": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          },
+          "scheduledAt": {
+            "type": "string",
+            "format": "date-time"
           }
-        ]
+        },
+        "required": [
+          "reviewId",
+          "revision",
+          "scheduledAt"
+        ],
+        "additionalProperties": false
       },
       "CampaignCanceled": {
         "type": "object",

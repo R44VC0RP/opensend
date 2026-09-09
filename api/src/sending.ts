@@ -9,6 +9,7 @@ import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, 
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
+import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
@@ -114,7 +115,7 @@ const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), r
 const Revision = z.object({ revision: z.number().int().positive() }).strict().openapi('CampaignRevisionInput');
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: CampaignInput }).strict().openapi('CampaignUpdateInput');
 const CampaignSend = z.object({ reviewId: z.string().min(1), revision: z.number().int().positive() }).strict().openapi('CampaignSendInput');
-const CampaignSchedule = CampaignSend.extend({ scheduledAt: z.string().datetime({ offset: true }) }).openapi('CampaignScheduleInput');
+const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), status: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
@@ -642,6 +643,12 @@ async function originAllowed(runtime: Runtime, db: DbExecutor, mail: typeof emai
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
   // Re-check its current allowlist approval under the same transaction lock as the attempt claim.
   if (mail.actorKeyId.startsWith('user_')) return mail.workspaceId === runtime.config.workspaceId && (mail.environment === 'live' || mail.environment === 'test') && await isApprovedUser(runtime, mail.actorKeyId.slice(5), db);
+  if (mail.actorKeyId.startsWith('mcp_')) {
+    const grant = await getMcpGrantActor(runtime, mail.actorKeyId, db);
+    return !!grant && grant.workspaceId === mail.workspaceId && (mail.environment === 'test' || grant.environment === mail.environment) &&
+      (grant.permissions.includes('manage') || grant.permissions.includes('send')) &&
+      (!grant.domains.length || grant.domains.some(domain => domain.toLowerCase() === mail.snapshot.from.split('@')[1]!.toLowerCase()));
+  }
   // Removed bootstrap origins fail closed; only durable API keys are accepted below.
   const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('update');
   // FOR UPDATE serializes with revocation/permission updates through the durable attempt claim,

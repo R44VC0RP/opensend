@@ -3,6 +3,9 @@ import { betterAuth } from 'better-auth';
 import { APIError } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { google, verifyGoogleIdToken } from 'better-auth/social-providers';
+import { jwt } from 'better-auth/plugins';
+import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
+import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, ne } from 'drizzle-orm';
 import { ApiError, errors, log, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
@@ -46,7 +49,8 @@ export function createAuth(runtime: Runtime) {
   const noTokens = { accessToken: null, refreshToken: null, idToken: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null, scope: null, password: null };
   return betterAuth({
     appName: 'OpenSend', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
-    database: drizzleAdapter(runtime.db, { provider: 'pg', schema: googleAuthSchema, transaction: true }),
+    database: drizzleAdapter(runtime.db, { provider: 'pg', schema: { ...googleAuthSchema, ...mcpAuthSchema }, transaction: true }),
+    plugins: [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime)],
     trustedOrigins: [origin],
     emailAndPassword: { enabled: false, disableSignUp: true },
     socialProviders: {
@@ -122,7 +126,10 @@ export function createAuth(runtime: Runtime) {
       } } },
     },
     logger: { disabled: true },
-    onAPIError: { errorURL: `${origin}/api/auth/error`, onError: () => log('warn', { operation: 'google-auth', code: 'AUTH_FAILED' }) },
+    // Returning from onError still lets better-call console.error the raw error
+    // (including SQL parameters). Rethrow to our sanitized route boundaries;
+    // better-call continues to serialize protocol APIErrors and redirects.
+    onAPIError: { throw: true, errorURL: `${origin}/api/auth/error` },
   });
 }
 
@@ -146,13 +153,15 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
   }
 }
 
-// Deliberately expose no password, profile-update, account-linking or token endpoints.
+// The dashboard exposes no password, profile-update, account-linking, or session
+// JWT endpoints. The separate MCP allowlist owns only OAuth protocol endpoints.
 const SignIn = z.object({ provider: z.literal('google'), callbackURL: z.string().optional(), newUserCallbackURL: z.string().optional(), errorCallbackURL: z.string().optional(), disableRedirect: z.boolean().optional() }).strict();
 export function registerGoogleAuth(app: App) {
-  app.on(['GET', 'POST'], '/api/auth/*', async c => {
+  app.on(['GET', 'POST', 'OPTIONS'], '/api/auth/*', async (c, next) => {
+    const path = c.req.path.slice('/api/auth'.length);
+    if (isMcpAuthPath(path)) return next();
     requireConfigured(c.env);
     c.header('Cache-Control', 'no-store');
-    const path = c.req.path.slice('/api/auth'.length);
     const method = c.req.method;
     if (path === '/error' && method === 'GET') return c.redirect(`${new URL(c.env.config.publicUrl).origin}/?auth=error`, 302);
     if (!((path === '/sign-in/social' && method === 'POST') || (path === '/callback/google' && method === 'GET') ||

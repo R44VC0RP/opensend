@@ -12,7 +12,7 @@
   "assets": {
     "directory": "../app/dist",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json"]
+    "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json"]
   },
   "vars": {
     "PUBLIC_URL": "https://opensend.anoma.ly",

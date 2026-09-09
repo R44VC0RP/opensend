@@ -1,59 +1,46 @@
 # OpenSend MCP
 
-A local stdio MCP server for operating OpenSend through its HTTP API. It has no database, filesystem-data, dashboard-session, AWS, or admin-key access. Tool names and request schemas come from the running API's OpenAPI document, not copied DTOs.
+Connect an MCP client to **`https://YOUR_OPENSEND_DOMAIN/mcp`**. The hosted endpoint is part of the OpenSend API; it does not require a local process or an API key. This installation uses **https://opensend.anoma.ly/mcp**.
 
-## Start from zero
+## Connect
 
-1. Run the OpenSend API. Sign into its dashboard with Google and mint a scoped **test** API key (`os_test_…`). Use only the permissions and domain access your agent needs; a `read` key is enough for inspection. Never use `ADMIN_API_KEY`, a Google token, or a dashboard cookie.
-2. Build this package with Node.js 22 or newer:
+1. Add the HTTPS URL as a remote HTTP MCP server in your client.
+2. Start OAuth authorization. OpenSend reuses your dashboard's Google session in the same browser/profile. If you are signed out, use the normal Google sign-in.
+3. Review the client, requested permissions, and test/live environment, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
 
-   ```sh
-   cd /absolute/path/to/opensend/mcp
-   npm ci
-   npm run build
-   ```
+The server exposes ordinary named tools, each with `inputSchema`, `outputSchema`, and structured results. Code-mode clients can consume those tools directly. OpenSend does not add a `search`/`execute` wrapper or run arbitrary agent code.
 
-3. Add a stdio server to your MCP client's configuration. Replace the paths and environment placeholders locally; do not paste real credentials into chat or version control:
+## Permissions
 
-   ```json
-   {
-     "mcpServers": {
-       "opensend": {
-         "command": "node",
-         "args": ["/absolute/path/to/opensend/mcp/dist/server.js"],
-         "env": {
-           "OPENSEND_API_URL": "http://localhost:8793",
-           "OPENSEND_API_KEY": "<scoped-os_test_-key>",
-           "OPENSEND_MCP_ALLOW_WRITES": "false"
-         }
-       }
-     }
-   }
-   ```
+OAuth scopes map to the existing API permissions:
 
-   This is a generic MCP configuration example; your client's configuration format may differ. The server does not register itself or change any client/global configuration. Prefer your client's secret/environment mechanism rather than saving a key in shared JSON. The MCP process does not load `.env` files.
+| Scope | Access |
+| --- | --- |
+| `opensend:read` | Read contacts, email, delivery, and account data where API rules permit. |
+| `opensend:send` | Send email and use operations requiring send permission. |
+| `opensend:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
+| `opensend:live` | Use the live environment. Without this scope, the connection uses test mode. |
+| `offline_access` | Obtain a rotating refresh token, valid for up to 30 days. |
 
-4. Connect the client and call `listContacts` with `{ "query": { "limit": 10 } }`. Read tools are listed by default. To intentionally allow mutations, set `OPENSEND_MCP_ALLOW_WRITES` to the exact string `true`, restart the MCP process, and pass `confirm: true` on **every** write call. This includes preview endpoints implemented as POST. The API still enforces the supplied key's scopes; enabling writes grants no additional API permissions.
+Authorization without an explicit scope requests test-mode read access. Writable connections additionally require `opensend:send` or `opensend:manage`; every non-GET operation still requires literal `confirm: true`, including POST previews. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
-For a manual stdio launch with environment variables already supplied by your shell/secret manager, run `node dist/server.js`. Stdout is exclusively MCP protocol traffic; startup diagnostics go to stderr without raw exceptions or credentials. No HTTP MCP listener, hosted OAuth service, Docker service, deployment, or public endpoint is needed.
+Authenticated dashboard clients can inspect their approvals with `GET /api/auth/oauth2/get-consents` and revoke one with `POST /api/auth/oauth2/delete-consent` and JSON `{ "id": "consent-id" }`. Revocation requires the dashboard session and canonical Origin. These are not MCP tools.
 
-## Tool arguments and results
+## Arguments and results
 
-Each operation accepts only the relevant parts of this envelope:
+`tools/list` provides the exact schemas. Arguments use the relevant fields of this envelope:
 
 ```json
 {
   "path": { "id": "resource_id" },
-  "query": { "limit": 10, "cursor": "cursor-from-previous-response" },
+  "query": { "limit": 10, "cursor": "previous-cursor" },
   "body": {},
   "idempotencyKey": "caller-generated-stable-key",
   "confirm": true
 }
 ```
 
-`tools/list` provides the exact schema for each operation. Omit unused fields; unknown fields are rejected. `body` uses the API's request schema, including local shared components represented as per-tool `$defs`. Local validation checks schema structure; API validation remains authoritative for formats and business rules. Path values must be individual URL-safe resource IDs, never URLs, encoded paths, separators, `.` or `..`. No arbitrary headers or URL overrides are accepted.
-
-Every result includes a JSON text representation and the same `structuredContent`:
+Results contain matching JSON text and `structuredContent`. Each tool's output schema describes its successful API response and the existing error envelopes:
 
 ```json
 {
@@ -63,23 +50,18 @@ Every result includes a JSON text representation and the same `structuredContent
 }
 ```
 
-API failures set `isError: true` and include the API's `error` object/code alongside its original response. MCP validation/configuration/transport failures use stable codes such as `INVALID_ARGUMENTS`, `INVALID_PATH`, `TOOL_UNAVAILABLE`, `CONFIRMATION_REQUIRED`, and `API_UNREACHABLE`; errors before an HTTP response have null status/requestId. The configured API key is redacted from returned API content.
+Errors set `isError: true` and include `error.code` and `error.message`. A local failure may omit `response`, and `status`/`requestId` may be null. Use the presence of `error`, not HTTP status alone, to distinguish failures: response-validation failures can retain the upstream 2xx status.
 
-Pagination is explicit: pass `response.nextCursor` to the next call's `query.cursor`. The server fetches one page per call, never exhausts all pages automatically. It never retries requests. `idempotencyKey` is forwarded unchanged as `Idempotency-Key`; support and replay semantics belong to the API. If a write times out, its outcome may be unknown: reconcile resource state or reuse the supported idempotency key, rather than inventing a fresh write. HTTP 202 means queued, not delivered.
+Pagination is explicit: pass `response.nextCursor` as the next call's `query.cursor`. Requests are not retried automatically. `idempotencyKey` is forwarded as `Idempotency-Key`; API replay semantics remain authoritative. A failed or interrupted write can have an uncertain outcome. Reconcile state before retrying. HTTP 202 means queued, not delivered.
 
-## Safety boundaries
+## Hosting and safety
 
-- `OPENSEND_API_URL` must be an HTTPS **origin**, without path, query, fragment or URL credentials. Plain HTTP is allowed only for `localhost`, `127.0.0.1`, or `[::1]`. All API requests stay on that configured origin; redirects are refused, including OpenAPI and health requests. Only the operator should select the origin. Health/service-title checks detect accidental misconfiguration, not malicious servers or DNS changes.
-- Startup checks `/health` for `service: opensend` and `status: ok`, then reads `/openapi.json` expecting OpenSend API `0.1.0` / OpenAPI `3.1.0`. Restart to discover API changes. Metadata discovery sends no key; API operation requests use the scoped bearer key. No provider/admin credential is accepted.
-- Only `/v1/` operations explicitly declaring bearer authentication are eligible. Provider SNS ingress, unsubscribe links, auth/dashboard routes, API-key creation, and webhook-secret reveal/rotation are excluded even with writes enabled. These exclusions are MCP safety defaults, **not API permission revocation**: the same key may have broader capabilities when used directly. Secret management stays in the authenticated dashboard/direct authorized API workflow. Webhook creation remains available because it returns metadata, not its signing secret. Read tools may return private email/contact content; connect only trusted agents.
-- All writes require both the environment opt-in and a literal `confirm: true`; annotations alone are not the enforcement. For validation use a scoped `os_test_` key: OpenSend itself simulates sending. MCP has no pretend dry-run flag and cannot guarantee that other write operations (for example webhook tests) have no external effects. Never test against real recipients or public webhook endpoints unless deliberately authorized.
-- OpenAPI is limited to 2 MiB, 100,000 structural nodes, depth 64, 256 tools, 512 KiB per input schema and 4 MiB per tool catalog. External/dynamic references and recursive request schemas are rejected. Arguments and responses are limited to 16 MiB; requests time out after 30 seconds. API/schema descriptions and all returned content are untrusted data, never agent instructions.
+- OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
+- HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
+- Credential creation, webhook-secret reveal/rotation, SNS ingress, authentication routes, and unsubscribe links remain excluded. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
+- Test-mode email sending is simulated by the API. Test mode is not a universal dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
+- Request and response limits, safe single-segment path validation, per-principal API rate limits, output validation, and credential redaction remain enforced. API descriptions and returned data are untrusted content, not agent instructions.
 
-## Development verification
+Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
-```sh
-npm run check
-npm run build
-```
-
-Use an MCP SDK `Client` with `StdioClientTransport` to exercise the built server against the real local API. Check `tools/list`, a scoped-key read, read-only write rejection, confirmation rejection in write mode, and traversal/unknown-argument rejection. Sending checks must use test-key simulation only. No separate test files or fixtures are required.
+The existing `mcp/src/server.ts` stdio launcher remains available for older local integrations. It uses a scoped API key, `OPENSEND_API_URL`, and `OPENSEND_MCP_ALLOW_WRITES`; it is not required for hosted OAuth connections.

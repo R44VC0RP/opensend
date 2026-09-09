@@ -59,7 +59,14 @@ export type Contact = {
     updatedAt: string;
 };
 
-export type ContactListRead = ContactList & {
+export type ContactListRead = {
+    name: string;
+    description?: string;
+    id: string;
+    workspaceId: string;
+    environment: 'live' | 'test';
+    createdAt: string;
+    updatedAt: string;
     /**
      * Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.
      */
@@ -454,7 +461,9 @@ export type CampaignSendInput = {
     revision: number;
 };
 
-export type CampaignScheduleInput = CampaignSendInput & {
+export type CampaignScheduleInput = {
+    reviewId: string;
+    revision: number;
     scheduledAt: string;
 };
 

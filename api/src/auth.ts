@@ -2,13 +2,26 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security } from './core.js';
-import type { App, AppEnv } from './core.js';
+import type { Actor, App, AppEnv, Runtime } from './core.js';
 import { apiKeys } from './db/core.js';
 import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
 
+// A private symbol carries server-authorized identity through request-cloning middleware.
+// HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
+const delegatedActor = Symbol('mcpActor');
+type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
+export async function dispatchAsActor(app: App, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
+  if (!identity.keyId.startsWith('mcp_') || identity.workspaceId !== runtime.config.workspaceId) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
+  const delegatedRuntime: DelegatedRuntime = { ...runtime, [delegatedActor]: identity };
+  return await app.fetch(request, delegatedRuntime);
+}
+
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');
-  if (authorization !== undefined) {
+  if (delegated) {
+    c.set('actor', delegated);
+  } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (os_(?:test|live)_[0-9a-f]{64})$/i)?.[1];
     if (!token) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
     const hash = await digest(token);
