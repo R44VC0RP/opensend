@@ -1,7 +1,7 @@
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { loadConfig } from '../config.js';
-import { ApiError } from '../core.js';
+import { ApiError, log } from '../core.js';
 import type { Runtime } from '../core.js';
 import { s3Storage } from './storage.js';
 export function postgresConnection(connectionString: string | undefined) {
@@ -14,5 +14,8 @@ export function postgresConnection(connectionString: string | undefined) {
 }
 export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {
   const pool = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 10, idleTimeoutMillis: 30000 });
+  // pg evicts failed idle clients, but an unhandled pool error also terminates Node.
+  // Keep the API/runner alive to reconnect; never log the error's client/config data.
+  pool.on('error', () => log('error', { code: 'POSTGRES_POOL_ERROR', message: 'An idle PostgreSQL connection failed; the pool will reconnect.' }));
   return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env) }, close: () => pool.end() };
 }
