@@ -15,12 +15,13 @@ export const contactColumns: SkeletonColumn[] = [
 ]
 export const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: '38%' }, contactColumns[4]]
 export const listColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Name', width: '27%' },
-  { key: 'subscribed', label: 'Subscribed', width: '14%' },
-  { key: 'suppressed', label: 'Suppressed', width: '14%' },
-  { key: 'unsubscribed', label: 'Unsubscribed', width: '15%' },
-  { key: 'total', label: 'Total contacts', width: '15%' },
-  { key: 'created', label: 'Created', width: '15%' },
+  { key: 'name', label: 'Name', width: '24%' },
+  { key: 'subscribed', label: 'Subscribed', width: '12%' },
+  { key: 'suppressed', label: 'Suppressed', width: '12%' },
+  { key: 'unsubscribed', label: 'Unsubscribed', width: '13%' },
+  { key: 'unknown', label: 'Unknown consent', width: '14%' },
+  { key: 'total', label: 'Total contacts', width: '12%' },
+  { key: 'created', label: 'Created', width: '13%' },
 ]
 export const segmentColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Name', width: '30%' },
