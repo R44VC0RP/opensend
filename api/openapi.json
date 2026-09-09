@@ -317,48 +317,76 @@
         ]
       },
       "ContactListRead": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ContactList"
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
           },
-          {
+          "description": {
+            "type": "string",
+            "maxLength": 2000,
+            "default": ""
+          },
+          "id": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "live",
+              "test"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "counts": {
             "type": "object",
             "properties": {
-              "counts": {
-                "type": "object",
-                "properties": {
-                  "total": {
-                    "type": "integer"
-                  },
-                  "subscribed": {
-                    "type": "integer"
-                  },
-                  "unsubscribed": {
-                    "type": "integer"
-                  },
-                  "unknown": {
-                    "type": "integer"
-                  },
-                  "suppressed": {
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "total",
-                  "subscribed",
-                  "unsubscribed",
-                  "unknown",
-                  "suppressed"
-                ],
-                "description": "Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total."
+              "total": {
+                "type": "integer"
+              },
+              "subscribed": {
+                "type": "integer"
+              },
+              "unsubscribed": {
+                "type": "integer"
+              },
+              "unknown": {
+                "type": "integer"
+              },
+              "suppressed": {
+                "type": "integer"
               }
             },
             "required": [
-              "counts"
+              "total",
+              "subscribed",
+              "unsubscribed",
+              "unknown",
+              "suppressed"
             ],
-            "additionalProperties": false
+            "description": "Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total."
           }
-        ]
+        },
+        "required": [
+          "name",
+          "id",
+          "workspaceId",
+          "environment",
+          "createdAt",
+          "updatedAt",
+          "counts"
+        ],
+        "additionalProperties": false
       },
       "ContactList": {
         "type": "object",
