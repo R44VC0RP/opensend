@@ -5,6 +5,8 @@ import type { App } from './core.js';
 type ObjectValue = Record<string, any>;
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
+const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
+export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
@@ -212,7 +214,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const queryParameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p)).filter(p => p.in === 'query').map(p => p.name as string);
       const tool: Tool = {
         name,
-        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions and environment are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
+        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions and environment are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
         inputSchema: inputSchema(spec, item as ObjectValue, operation, write),
         outputSchema: outputSchema(spec, operation),
         annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true },
