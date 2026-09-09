@@ -129,6 +129,6 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
         {formatSender(sender)}
       </button>)}
     </div>}
-    {showError && <div id={errorId} className="campaign-sender-error">{error}</div>}
+    {showError && <span id={errorId} className="sr-only">{error}</span>}
   </div>
 }

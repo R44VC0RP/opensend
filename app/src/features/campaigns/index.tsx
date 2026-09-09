@@ -7,7 +7,7 @@ import type { Campaign, CampaignInput, CampaignReview as ReviewResult, Attachmen
 import {
   Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
   Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
-  StatusBadge, Tabs,
+  StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, percent, time } from '../../lib/format'
@@ -83,6 +83,7 @@ function RegionMismatch({ campaign }: { campaign: Campaign }) {
 }
 
 function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regionId: string }) {
+  const toast = useToast()
   const testEnvironment = useApi().environment === 'test'
   const regionCatalog = useRegionCatalog()
   const {setRegionId} = useRegion()
@@ -125,7 +126,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     if (guard.current || pending || !composerReady) return
     setError('')
     if (!form.name.trim() || !form.subject.trim()) { setError('Enter a campaign name and subject.'); return }
-    if (!emailIsValid(form.fromEmail)) { setError('Enter a valid sender email address.'); return }
+    if (!emailIsValid(form.fromEmail)) { toast('Enter a valid sender email address.', 'error'); return }
     if (!form.regionId.trim() || form.regionId.trim().length > 40) {setError('Enter a region identifier of 1–40 characters.'); return}
     if (!form.listId) { setError('Choose a recipient list.'); return }
     guard.current = true

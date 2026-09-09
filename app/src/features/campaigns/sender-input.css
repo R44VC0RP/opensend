@@ -2,4 +2,3 @@
 .campaign-sender-options { position: absolute; z-index: 90; inset-inline: 0; top: calc(100% + var(--space-4)); max-height: min(280px, 40vh); overflow-y: auto; overscroll-behavior: contain; padding: var(--space-4); background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); box-shadow: 0 4px 12px color-mix(in srgb, var(--color-text) 10%, transparent); }
 .campaign-sender-option { display: block; width: 100%; min-height: 44px; padding: var(--space-8); border: 0; border-radius: 2px; background: transparent; color: inherit; font: inherit; line-height: var(--leading-sm); text-align: left; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
 .campaign-sender-option[aria-selected='true'] { background: var(--color-active-bg); }
-.campaign-sender-error { padding-bottom: var(--space-8); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); }
