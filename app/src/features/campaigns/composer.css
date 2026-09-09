@@ -1,6 +1,7 @@
 .email-composer { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
 .composer-toolbar { flex-shrink: 0; padding-block: var(--space-8); margin-bottom: var(--space-8); }
-.composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
+/* Pull the ghost buttons out by their own padding so the first and last icons sit on the text column edges. */
+.composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-inline: calc(-1 * var(--space-8)); }
 .composer-tools .cluster { flex-wrap: nowrap; gap: var(--space-4); }
 .composer-history { margin-left: auto; }
 .composer-conversion { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); }
@@ -9,7 +10,8 @@
 .composer-canvas { position: relative; display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; min-height: 260px; padding: 0; background: var(--color-email-surface); color: var(--color-email-text); }
 .composer-starting { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--space-16); }
 .composer-document { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
-.composer-document .tiptap { flex: 1 0 auto; min-height: 260px; width: 100%; max-width: 600px; margin: 0 auto; color: var(--color-email-text); font-family: var(--font-email); font-size: 16px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
+/* The editor theme converts its px sizes to em against a 14px root; keep that root so a 16px paragraph edits at 16px. */
+.composer-document .tiptap { flex: 1 0 auto; min-height: 260px; width: 100%; max-width: 600px; margin: 0 auto; color: var(--color-email-text); font-family: var(--font-email); font-size: 14px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
 /* The sheet owns editor spacing; keep the export theme's container padding unchanged. */
 .composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { padding: 0; }
 .composer-document .tiptap * { font-family: var(--font-email); }
@@ -17,6 +19,10 @@
 :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-slash-command]) { visibility: hidden; pointer-events: none; }
 .composer-document .tiptap h1, .composer-document .tiptap h2, .composer-document .tiptap h3 { color: inherit; }
+/* Converted paragraphs retain node-paragraph; its later theme rule must not override heading metrics. */
+.composer-document .tiptap.ProseMirror h1.node-h1.node-paragraph { font-size: 26px; line-height: 1.25; margin: 0 0 20px; }
+.composer-document .tiptap.ProseMirror h2.node-h2.node-paragraph { font-size: 22px; line-height: 1.3; margin: 24px 0 12px; }
+.composer-document .tiptap.ProseMirror h3.node-h3.node-paragraph { font-size: 18px; line-height: 1.4; margin: 20px 0 12px; }
 .composer-document .tiptap p.is-empty::before { color: var(--color-email-text); opacity: .6; }
 .composer-document .tiptap img { max-width: 100%; height: auto; }
 .composer-document .tiptap .ProseMirror-selectednode { outline: 1px solid var(--color-muted); outline-offset: 3px; }

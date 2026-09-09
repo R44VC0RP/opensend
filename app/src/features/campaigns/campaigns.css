@@ -3,7 +3,8 @@
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
 .page-surface:has(.campaign-compose-page) { padding: var(--space-16); }
-.campaign-compose-page { --font-body: var(--font-email); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
+/* Anchored menus keep the application theme even when they open from the light email sheet. */
+.campaign-compose-page { --font-body: var(--font-email); --campaign-menu-surface: var(--color-surface); --campaign-menu-text: var(--color-text); --campaign-menu-border: var(--color-border); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
 .campaign-compose-page, .campaign-compose-page * { letter-spacing: var(--tracking-email); }
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) { --font-body: var(--font-email); --color-focus: var(--color-muted); --color-active-bg: color-mix(in srgb, var(--color-text) 8%, var(--color-surface)); font-family: var(--font-body); font-size: var(--text-md); }
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]),
@@ -24,11 +25,12 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-sheet { display: flex; flex-direction: column; min-height: 100%; padding: var(--space-16); }
 .campaign-compose-metadata { flex-shrink: 0; margin-bottom: var(--space-4); }
 .campaign-compose-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; min-height: 38px; gap: var(--space-8); border-bottom: 1px solid var(--color-border); }
-.campaign-compose-row > label { color: var(--color-muted); font-size: var(--text-xs); }
+.campaign-compose-row > :is(label, span) { color: var(--color-muted); font-size: var(--text-xs); }
 .campaign-compose-row .ui-input { height: 36px; padding: var(--space-4) 0; border: 0; border-radius: 0; background: transparent; }
 .campaign-compose-subject { grid-template-columns: 56px minmax(0, 1fr) auto; }
 .campaign-compose-subject input { font-size: var(--text-md); }
-.campaign-preview-toggle { color: var(--color-muted); }
+/* Ghost buttons hang out by their own padding so labels align with the row's right edge and the text column. */
+.campaign-preview-toggle { color: var(--color-muted); margin-inline-end: calc(-1 * var(--space-8)); }
 .campaign-preview-toggle[aria-expanded='true'] { color: var(--color-text); }
 .campaign-compose-preview { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out; }
 .campaign-compose-preview[data-open] { grid-template-rows: 1fr; opacity: 1; }
@@ -39,7 +41,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-footer { flex-shrink: 0; border-top: 1px solid var(--color-border); }
 .campaign-compose-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-16); }
 .campaign-compose-actions { grid-column: 2; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
-.campaign-compose-attach { grid-column: 1; }
+.campaign-compose-attach { grid-column: 1; margin-inline-start: calc(-1 * var(--space-12)); }
 .campaign-compose-attachments { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-8); list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; }
 .campaign-compose-attachments > li { display: flex; align-items: center; gap: var(--space-6); min-width: 0; padding-inline-start: var(--space-8); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); }
 .campaign-compose-attachments > li > svg, .campaign-compose-attachments .ui-icon-button { flex-shrink: 0; }

@@ -115,6 +115,11 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const result = await composeReactEmail({ editor: instance.editor })
     // React Email emits JSON-LD metadata, but the public send contract forbids all script tags.
     let html = result.html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    // React Email serializes theme sizes as em relative to 14px. Supply that same
+    // base in the delivered HTML, not just the editor, so previews and mail agree.
+    html = html.replace(/<body\b[^>]*>/i, tag => /\bstyle="/i.test(tag)
+      ? tag.replace(/\bstyle="([^"]*)"/i, (_, styles: string) => `style="${styles};font-size:14px"`)
+      : tag.replace(/>$/, ' style="font-size:14px">'))
     const fontBase = new URL('/fonts/', window.location.origin).href
     html = html.replace('</head>', `<style data-opensend-fonts="true">@font-face{font-family:Inter;src:url('${fontBase}inter-variable.woff2') format('woff2');font-style:normal;font-weight:100 900}@font-face{font-family:Inter;src:url('${fontBase}inter-variable-italic.woff2') format('woff2');font-style:italic;font-weight:100 900}</style></head>`)
     for (const [localSource, cid] of resolvedImageSources.current) html = replaceImageSource(html, localSource, cid)
@@ -184,13 +189,33 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setError('')
     try {
       const { url } = await upload(file)
-      command(e => e.chain().focus().insertContent({ type: 'image', attrs: { src: url, alt: file.name.replace(/\.[^.]+$/, ''), width: '100%' } }).run(), true)
+      command(e => e.chain().focus().insertContent({ type: 'image', attrs: { src: url, alt: file.name.replace(/\.[^.]+$/, ''), width: '100%' } }).run(), true, true)
     } catch { /* Shown inline by the upload callback. */ }
     finally { setBusy(false); if (fileInput.current) fileInput.current.value = '' }
   }
-  function command(run: (value: NonNullable<EmailEditorRef['editor']>) => void, insert = false) {
+  // Opening the Insert menu blurs the editor, which resets its selection to the document
+  // start. Remember the caret while focused so menu insertions land where the user was.
+  const caret = useRef<{ from: number; to: number; node: boolean } | null>(null)
+  function trackCaret(instance: EmailEditorRef) {
+    caret.current = null
+    instance.editor?.on('transaction', ({ editor: value }) => {
+      if (!value.isFocused) return
+      const selection = value.state.selection
+      caret.current = { from: selection.from, to: selection.to, node: selection.toJSON().type === 'node' }
+    })
+  }
+  // The menu returns focus to its trigger in a queued task after closing; run the
+  // insertion after that so the caret lands in the new block instead of on the button.
+  function insertFromMenu(run: (value: NonNullable<EmailEditorRef['editor']>) => void) {
+    setTimeout(() => setTimeout(() => command(run, true, true), 0), 0)
+  }
+  function command(run: (value: NonNullable<EmailEditorRef['editor']>) => void, insert = false, restoreCaret = false) {
     if (locked || sourceRef.current !== 'compose' || !ready || !editor.current?.editor) return
     const instance = editor.current.editor
+    if (restoreCaret && caret.current && !instance.isFocused) {
+      try { if (caret.current.node) instance.commands.setNodeSelection(caret.current.from); else instance.commands.focus(caret.current.to) }
+      catch { /* The remembered position no longer exists; insert at the current selection. */ }
+    }
     const selection = instance.state.selection
     // Insert after selected media instead of replacing it with the new block.
     if (insert && selection.toJSON().type === 'node') {
@@ -213,13 +238,13 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     <div className="composer-toolbar">
       <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
         <DropdownMenu trigger={<Button size="sm" variant="ghost" disabled={locked || source !== 'compose' || !ready}><Plus size={16} />Insert<ChevronDown size={14} /></Button>} items={[
-          { label: 'Text', icon: <Type size={16} />, onSelect: () => command(e => e.chain().focus().setParagraph().run(), true) },
-          { label: 'Heading', icon: <Heading2 size={16} />, onSelect: () => command(e => e.chain().focus().setHeading({ level: 2 }).run(), true) },
-          { label: 'Button', icon: <MousePointer2 size={16} />, onSelect: () => command(e => e.chain().focus().setButton().run(), true) },
+          { label: 'Text', icon: <Type size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setParagraph().run()) },
+          { label: 'Heading', icon: <Heading2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHeading({ level: 2 }).run()) },
+          { label: 'Button', icon: <MousePointer2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setButton().run()) },
           { label: 'Image', icon: <ImagePlus size={16} />, onSelect: () => fileInput.current?.click() },
-          { label: 'Bullet list', icon: <List size={16} />, onSelect: () => command(e => e.chain().focus().toggleBulletList().run(), true) },
-          { label: 'Divider', icon: <Minus size={16} />, onSelect: () => command(e => e.chain().focus().setHorizontalRule().run(), true) },
-          { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => command(e => e.chain().focus().insertColumns(2).run(), true) },
+          { label: 'Bullet list', icon: <List size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().toggleBulletList().run()) },
+          { label: 'Divider', icon: <Minus size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHorizontalRule().run()) },
+          { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
         ]} />
         <div className="cluster"><IconButton size="sm" label="Bold" disabled={locked || source !== 'compose' || !ready} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Bold size={16} /></IconButton><IconButton size="sm" label="Italic" disabled={locked || source !== 'compose' || !ready} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Italic size={16} /></IconButton></div>
         {busy && <span className="muted" role="status">Preparing…</span>}
@@ -232,7 +257,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     <div hidden={source !== 'compose'} className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); setReady(!hydrating); if (!hydrating) onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
+        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
       </div>
     </div>
     <ConfirmDialog open={convert} onOpenChange={setConvert} title="Convert HTML to visual blocks?" description="Custom HTML and styles may not convert exactly. The original HTML is kept until you edit the blocks." confirmLabel="Convert to blocks" onConfirm={openVisual} />
