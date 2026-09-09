@@ -94,6 +94,7 @@
 .settings-key-domains { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; margin: 0; padding: 0; border: 0; }
 .settings-key-domains > legend { padding: 0; margin-bottom: var(--space-12); }
 .settings-key-domains p { margin: 0; }
+.settings-key-all-domains { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-8); }
 .settings-key-domain-options { display: flex; flex-direction: column; gap: var(--space-12); max-height: 180px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: var(--space-12) 2px 2px; }
 .settings-key-domain-options .ui-check-field { flex-shrink: 0; }
 .settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }

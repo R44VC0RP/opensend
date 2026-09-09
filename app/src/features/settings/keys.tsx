@@ -72,8 +72,7 @@ export function ApiKeysPage() {
         <Field label="Permission" htmlFor="key-permission"><Select id="key-permission" value={permission} onValueChange={value => setPermission(value as ApiKeyInput['permission'])} disabled={create.isPending} options={[{ value: 'send', label: 'Sending access' }, { value: 'read', label: 'Read only' }]} /></Field>
         <fieldset className="settings-key-domains" disabled={create.isPending} aria-describedby={domainError || fieldError(create.error, 'domains') ? 'key-domain-error' : undefined}>
           <legend className="ui-field__label">Domains</legend>
-          <Checkbox label="All domains" checked={allDomains} onCheckedChange={checked => {setAllDomains(checked); setSelectedDomains([]); setDomainError('')}} disabled={create.isPending} />
-          {allDomains && <p className="ui-field__hint">Includes future domains.</p>}
+          <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes future domains.</span></span>} checked={allDomains} onCheckedChange={checked => {setAllDomains(checked); setSelectedDomains([]); setDomainError('')}} disabled={create.isPending} />
           <div className="settings-key-domain-options">
             {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains available.</p> : domains.map(name => <Checkbox key={name} label={name} checked={!allDomains && selectedDomains.includes(name)} onCheckedChange={checked => toggleDomain(name, checked)} disabled={create.isPending || !selectedDomains.includes(name) && selectedDomains.length >= 50} />)}
           </div>
