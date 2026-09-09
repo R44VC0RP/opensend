@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApiQuery, useRegion } from '../../data/context'
@@ -34,20 +34,36 @@ function Metric({ title, value, note, tone }: { title: string; value: string; no
 function niceMax(value: number) { if (value <= 1) return 1; const base = 10 ** Math.floor(Math.log10(value)); return Math.ceil(value / base) * base }
 function ActivityChart({ points }: { points: ChartPoint[] }) {
   const [active, setActive] = useState<number | null>(null)
+  const container = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(1080)
+  useLayoutEffect(() => {
+    const element = container.current
+    if (!element) return
+    const measure = (value: number) => setWidth(Math.max(1, value))
+    measure(element.getBoundingClientRect().width)
+    const observer = new ResizeObserver(([entry]) => measure(entry.contentRect.width))
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [points.length])
   if (!points.length) return <EmptyState title="No activity" />
-  const left = 52, right = 1016, top = 30, bottom = 218
+  const left = 52, right = width - 64, top = 30, bottom = 218
+  const selectedPoint = active === null ? undefined : points[active]
   const maxSent = niceMax(Math.max(...points.map(p => p.sent)))
   const maxException = Math.max(3, niceMax(Math.max(...points.map(p => Math.max(p.bounced, p.complaints)))))
   const x = (i: number) => left + i * (right - left) / Math.max(1, points.length - 1)
   const y = (value: number, max: number) => bottom - value / max * (bottom - top)
   const line = (key: 'sent' | 'bounced' | 'complaints', max: number) => points.map((p, i) => `${i ? 'L' : 'M'} ${x(i)} ${y(p[key], max)}`).join(' ')
   const tickIndices = [...new Set([0, ...Array.from({ length: 6 }, (_, i) => Math.round((i + 1) * (points.length - 1) / 6))])]
-  return <div className="activity-chart" onMouseLeave={() => setActive(null)}><svg viewBox="0 0 1080 260" role="img" aria-label="Email activity. Sends use the left scale; bounces and complaints use the right scale.">
-    <text x={0} y={12} className="chart-label">Sent</text><text x={1078} y={12} textAnchor="end" className="chart-label">Exceptions</text>
-    {[0, 1, 2, 3].map(i => <g key={i}><line x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" /><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text><text x={1078} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text></g>)}
+  return <div ref={container} className="activity-chart" onMouseLeave={() => setActive(null)}><svg viewBox={`0 0 ${width} 260`} role="img" aria-label="Email activity. Sends use the left scale; bounces and complaints use the right scale.">
+    <text x={0} y={12} className="chart-label">Sent</text><text x={width - 2} y={12} textAnchor="end" className="chart-label">Exceptions</text>
+    {[0, 1, 2, 3].map(i => <g key={i}><line x1={left} x2={right} y1={top + i * (bottom - top) / 3} y2={top + i * (bottom - top) / 3} className="chart-grid" /><text x={0} y={top + i * (bottom - top) / 3 + 4} className="chart-label">{number(Math.round(maxSent * (1 - i / 3)))}</text><text x={width - 2} y={top + i * (bottom - top) / 3 + 4} textAnchor="end" className="chart-label">{number(Math.round(maxException * (1 - i / 3)))}</text></g>)}
     <path d={`${line('sent', maxSent)} L${right} ${bottom} L${left} ${bottom} Z`} className="chart-fill" /><path d={line('sent', maxSent)} className="chart-line chart-line--sent" /><path d={line('bounced', maxException)} className="chart-line chart-line--bounces" /><path d={line('complaints', maxException)} className="chart-line chart-line--complaints" />
     {tickIndices.map(i => <text key={i} x={x(i)} y={247} textAnchor="middle" className="chart-label">{date(points[i].at, { month: 'short', day: 'numeric', timeZone: 'UTC' })}</text>)}
-    {points.map((p, i) => <rect key={p.at} x={x(i) - 12} y={top} width={24} height={bottom - top} fill="transparent" tabIndex={0} role="button" aria-label={`${date(p.at)}: ${number(p.sent)} sent, ${p.bounced} bounces, ${p.complaints} complaints`} onMouseEnter={() => setActive(i)} onFocus={() => setActive(i)} onBlur={() => setActive(null)} />)}
-    {active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
-  </svg>{active !== null && <div className="chart-tooltip" role="status"><strong>{date(points[active].at)}</strong><span>Sent <b>{number(points[active].sent)}</b></span><span>Bounces <b>{number(points[active].bounced)}</b></span><span>Complaints <b>{number(points[active].complaints)}</b></span></div>}</div>
+    {points.map((p, i) => {
+      const start = i === 0 ? left : (x(i - 1) + x(i)) / 2
+      const end = i === points.length - 1 ? right : (x(i) + x(i + 1)) / 2
+      return <rect key={p.at} x={start} y={top} width={Math.max(0, end - start)} height={bottom - top} fill="transparent" tabIndex={0} role="button" aria-label={`${date(p.at)}: ${number(p.sent)} sent, ${p.bounced} bounces, ${p.complaints} complaints`} onMouseEnter={() => setActive(i)} onFocus={() => setActive(i)} onBlur={() => setActive(null)} />
+    })}
+    {selectedPoint && active !== null && <line x1={x(active)} x2={x(active)} y1={top} y2={bottom} className="chart-crosshair" />}
+  </svg>{selectedPoint && <div className="chart-tooltip" role="status"><strong>{date(selectedPoint.at)}</strong><span>Sent <b>{number(selectedPoint.sent)}</b></span><span>Bounces <b>{number(selectedPoint.bounced)}</b></span><span>Complaints <b>{number(selectedPoint.complaints)}</b></span></div>}</div>
 }

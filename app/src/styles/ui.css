@@ -58,7 +58,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-tabs { display: flex; align-items: center; gap: var(--space-6); min-height: var(--row-height-lg); padding-block: var(--space-12); border-bottom: 1px solid var(--color-border); overflow-x: auto; }
 .ui-tab { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: var(--control-height); padding: 0 var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-transparent); color: var(--color-muted); white-space: nowrap; }
 .ui-tab[aria-selected='true'] { color: var(--color-surface); background: var(--color-text); }
-.ui-tab:hover { color: var(--color-text); }
+.ui-tab:hover:not([aria-selected='true']) { color: var(--color-text); }
 .ui-tab__count { font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .ui-dialog-overlay { position: fixed; inset: 0; z-index: 80; background: var(--color-overlay); animation: ui-appear var(--motion-duration) ease-out; }
 .ui-dialog { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 81; width: min(520px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); display: flex; flex-direction: column; padding: var(--space-24); background: var(--color-surface); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); font-family: var(--font-body); animation: ui-appear var(--motion-duration) ease-out; }

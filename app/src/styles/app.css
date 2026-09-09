@@ -48,7 +48,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .legend-bounces { background: var(--color-warning-marker); }
 .legend-complaints { background: var(--color-complaint); }
 .activity-chart { position: relative; width: 100%; }
-.activity-chart > svg { display: block; width: 100%; min-height: 240px; max-height: 290px; }
+.activity-chart > svg { display: block; width: 100%; height: 260px; }
 .chart-label { fill: var(--color-muted); font-family: var(--font-body); font-size: 12px; }
 .chart-grid { stroke: var(--color-border); stroke-dasharray: 3 5; }
 .chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
