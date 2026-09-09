@@ -9,7 +9,7 @@ const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<{ identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void> } | null>(null)
 export const useSession = () => useContext(SessionContext)
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
-  const environment = 'live' as const
+  const [environment] = useState<'live' | 'test'>(() => new URLSearchParams(window.location.search).get('environment') === 'test' ? 'test' : 'live')
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment])
   const cache = useQueryClient()
@@ -23,7 +23,20 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
-    try { const result = await request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: window.location.origin, errorCallbackURL: `${window.location.origin}/?auth=error`}}); const url = new URL(result.url); if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.'); window.location.assign(url.href) }
+    try {
+      // Assign path components rather than resolving an untrusted redirect parameter.
+      const callback = new URL(window.location.origin)
+      callback.pathname = window.location.pathname
+      callback.search = window.location.search
+      callback.hash = window.location.hash
+      callback.searchParams.delete('auth')
+      const errorCallback = new URL(callback)
+      errorCallback.searchParams.set('auth', 'error')
+      const result = await request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href}})
+      const url = new URL(result.url)
+      if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.')
+      window.location.assign(url.href)
+    }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const error = authError ?? identity.error
@@ -58,6 +71,8 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
 const RegionContext = createContext<{ regionId: string; setRegionId: (id: string) => void } | null>(null)
 export function RegionProvider({ children }: { children: ReactNode }) {
   const [regionId, setRegion] = useState(() => {
+    const linked = new URLSearchParams(window.location.search).get('region')
+    if (linked && /^[a-z0-9-]{1,40}$/.test(linked)) return linked
     try { return localStorage.getItem('opensend.region') || '' } catch { return '' }
   })
   function setRegionId(id: string) {

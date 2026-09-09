@@ -101,20 +101,23 @@ const EmailContent = z.object({ subject: z.string(), html: z.string().nullable()
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string(), environment: z.enum(['live', 'test']) }).openapi('Attachment');
 const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
-const CampaignInput = z.object({ name: z.string().min(1).max(200), from: Address, fromName: FromName.optional(), previewText: PreviewText.optional(), editor: Editor.nullable().optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: Subject, html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: AudienceSpec, defaults: Data }).strict().refine(v => !!v.html || !!v.text, 'Provide html or text.').describe('Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
+const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
+const CampaignInput = z.object({ name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), editor: Editor.nullable().optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), html: z.string().max(MAX_BODY).optional(), text: z.string().max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data }).strict().describe('Drafts may omit sender, subject, content and audience until review. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
+const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.') }).strict().openapi('CreateCampaignInput');
+const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim() || !!v.text?.trim(), { message: 'Provide html or text before reviewing.', path: ['html'] });
 const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
-const Campaign = z.object({ id: z.string(), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
+const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
 const CampaignState = Campaign.pick({ id: true, environment: true, revision: true, updatedAt: true, status: true, reviewId: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
-const CampaignDraftSummary = z.object({ name: CampaignInput.shape.name, region: Region, from: Address, fromName: FromName.optional(), subject: Subject, previewText: PreviewText.optional(), audience: AudienceSpec.pick({ listId: true, segmentId: true }) }).strict().openapi('CampaignDraftSummary');
+const CampaignDraftSummary = CampaignInput.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal, case-insensitive recipient (To/Cc/Bcc), subject or ID text.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), status: CampaignStatus.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters and environment. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).openapi('CampaignAudienceCounts');
 const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), revision: z.number().int(), contentHash: z.string(), createdAt: z.string() }).openapi('CampaignReview');
 const Revision = z.object({ revision: z.number().int().positive() }).strict().openapi('CampaignRevisionInput');
-const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: CampaignInput }).strict().openapi('CampaignUpdateInput');
+const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Keeps the campaign’s current region when omitted.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
 const CampaignSend = z.object({ reviewId: z.string().min(1), revision: z.number().int().positive() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
@@ -147,13 +150,20 @@ const campaignSummaryColumns = {
     'audience', jsonb_build_object('listId', ${campaigns.draft}->'audience'->'listId', 'segmentId', ${campaigns.draft}->'audience'->'segmentId')
   ))`,
 };
-async function campaignViews<T extends { id: string }>(db: DbExecutor, a: Actor, rows: T[]) {
+function campaignUrl(runtime: Runtime, row: { id: string; environment: Mode; status: string; draft: { region: string } }) {
+  const view = ['draft', 'reviewed'].includes(row.status) ? 'edit' : 'review';
+  const url = new URL(`/campaigns/${encodeURIComponent(row.id)}/${view}`, runtime.config.publicUrl);
+  url.searchParams.set('environment', row.environment);
+  url.searchParams.set('region', row.draft.region);
+  return url.href;
+}
+async function campaignViews<T extends { id: string; environment: Mode; status: string; draft: { region: string } }>(runtime: Runtime, a: Actor, rows: T[]) {
   if (!rows.length) return [];
-  const grouped = await db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  const grouped = await runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
-    return { ...row, counts };
+    return { ...row, url: campaignUrl(runtime, row), counts };
   });
 }
 async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
@@ -180,6 +190,23 @@ function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string
   region(runtime, selectedRegion);
   const domain = from.split('@')[1]!.toLowerCase();
   if (a.domains.length && !a.domains.some(d => d.toLowerCase() === domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain.', 'from');
+}
+function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
+  region(runtime, draft.region);
+  if (draft.from) sender(runtime, a, draft.from, draft.region);
+}
+function readyCampaign(draft: CampaignDraft) {
+  const parsed = CampaignReady.safeParse(draft);
+  if (!parsed.success) {
+    const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))];
+    throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', `Complete these campaign fields before review: ${fields.join(', ')}.`, fields.join(', '));
+  }
+  return parsed.data;
+}
+function campaignAudience(draft: CampaignDraft) {
+  const parsed = AudienceSpec.safeParse(draft.audience);
+  if (!parsed.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before previewing or reviewing this campaign.', 'audience.listId');
+  return parsed.data;
 }
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
@@ -401,7 +428,7 @@ function editable(row: typeof campaigns.$inferSelect, revision?: number) {
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(draft.html, values, true), draft.previewText), text: interpolate(draft.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(draft.html || undefined, values, true), draft.previewText), text: interpolate(draft.text || undefined, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
@@ -511,10 +538,16 @@ export function registerSending(app: App) {
       await db.delete(attachments).where(and(scope(attachments, a), eq(attachments.id, attachmentId)));
     }); return c.json({ id: attachmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', tags: ['Campaigns'], security, request: { body: json(CampaignInput) }, responses: { 201: response(Campaign), ...errors } }), async c => {
-    const a = actor(c, 'send'); const draft = c.req.valid('json'); sender(c.env, a, draft.from, draft.region);
-    const result = await idempotent(c, a, draft, async db => { await assertRegionEnabled(db, a.workspaceId, draft.region); const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId); const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning(); return Campaign.parse({ ...row, counts: emptyCounts() }); });
-    return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null }), 201);
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create an unfinished campaign with only a name. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing; sender, subject, content and audience are required at review, not creation.', tags: ['Campaigns'], security, request: { body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
+    const a = actor(c, 'send'); const input = c.req.valid('json');
+    const result = await idempotent(c, a, input, async db => {
+      const draft = { ...input, region: await assertRegionEnabled(db, a.workspaceId, input.region) };
+      draftSender(c.env, a, draft);
+      const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
+      const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning();
+      return { ...row!, counts: emptyCounts() };
+    });
+    return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result) }), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
@@ -526,50 +559,51 @@ export function registerSending(app: App) {
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.status ? eq(campaigns.status, q.status) : undefined,
       search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
     )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1);
-    return c.json({ data: (await campaignViews(c.env.db, a, rows.slice(0, q.limit))).map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    return c.json({ data: (await campaignViews(c.env, a, rows.slice(0, q.limit))).map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row]))[0]!), 200);
+    return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);
     return c.json(CampaignState.parse(row ?? notFound('Campaign')), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', description: 'Replace the draft at the current revision. HTML is authoritative for the HTML body; editor metadata must match it and is never rendered by the server. When HTML changes, unchanged retained editor metadata is cleared; supply matching new metadata to preserve visual editing, or omit/null editor for HTML-only edits.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id; sender(c.env, a, input.draft.from, input.draft.region);
+    const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     const row = await c.env.db.transaction(async db => {
-      await assertRegionEnabled(db, a.workspaceId, input.draft.region);
       const current = await findCampaign(db, a, campaignId, true);
-      sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision);
+      const selectedRegion = await assertRegionEnabled(db, a.workspaceId, input.draft.region ?? current.draft.region);
+      draftSender(c.env, a, { ...input.draft, region: selectedRegion });
+      draftSender(c.env, a, current.draft); editable(current, input.revision);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
-      const draft = input.draft.html !== current.draft.html && input.draft.editor != null && canonical(input.draft.editor) === canonical(current.draft.editor) ? { ...input.draft, editor: null } : input.draft;
+      const draft = { ...input.draft, region: selectedRegion, ...(input.draft.html !== current.draft.html && input.draft.editor != null && canonical(input.draft.editor) === canonical(current.draft.editor) ? { editor: null } : {}) };
       const [updated] = await db.update(campaigns).set({ draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
       return updated;
     });
-    return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row!]))[0]!), 200);
+    return c.json(Campaign.parse((await campaignViews(c.env, a, [row!]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}/archive', operationId: 'setCampaignArchived', description: 'Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery status and history. Scheduled or sending campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, reviewed, tested or sent until restored.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignArchive) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'), campaignId = c.req.valid('param').id, input = c.req.valid('json');
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
-      sender(c.env, a, current.draft.from, current.draft.region);
+      draftSender(c.env, a, current.draft);
       if (input.archived && ['scheduled', 'sending'].includes(current.status)) throw new ApiError(409, 'CAMPAIGN_ACTIVE', 'Cancel or finish sending this campaign before archiving it.');
       if (Boolean(current.archivedAt) === input.archived) return current;
       const [updated] = await db.update(campaigns).set({ archivedAt: input.archived ? now() : null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
       return updated!;
     });
-    return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row]))[0]!), 200);
+    return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/campaigns/{id}', operationId: 'deleteCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
-    await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
+    await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, current.draft); editable(current); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/audience-preview', operationId: 'previewCampaignAudience', tags: ['Campaigns'], security, responses: { 200: response(AudienceCounts), ...errors }, request: { params: IdParams } }), async c => {
-    const a = actor(c); const row = await findCampaign(c.env.db, a, c.req.valid('param').id); const result = await getAudience(c.env, a, row.draft.audience, 1000); return c.json(AudienceCounts.parse(result), 200);
+    const a = actor(c); const row = await findCampaign(c.env.db, a, c.req.valid('param').id); const result = await getAudience(c.env, a, campaignAudience(row.draft), 1000); return c.json(AudienceCounts.parse(result), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
@@ -579,8 +613,9 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/review', operationId: 'reviewCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 200: response(Review), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
-      const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision); sender(c.env, a, row.draft.from, row.draft.region);
-      const audience = await getAudience(c.env, a, row.draft.audience, 1000, db);
+      const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
+      const draft = readyCampaign(row.draft); sender(c.env, a, draft.from, draft.region);
+      const audience = await getAudience(c.env, a, draft.audience, 1000, db);
       if (!audience.contacts.length) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
       const lockedAttachments = await attachmentRows(db, a, row.draft.attachments, true);
       let expandedBytes = 0;
@@ -599,7 +634,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); sender(c.env, a, row.draft.from, row.draft.region); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); const canceled = await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(scope(emails, a), eq(emails.campaignId, campaignId), eq(emails.status, 'queued'))).returning({ id: emails.id }); const inFlight = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))); await db.update(campaigns).set({ status: 'canceled', updatedAt: now() }).where(campaignWhere(a, campaignId)); return { id: campaignId, status: 'canceled' as const, canceled: canceled.length, inFlight: inFlight.length }; });
+    const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, row.draft); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); const canceled = await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(scope(emails, a), eq(emails.campaignId, campaignId), eq(emails.status, 'queued'))).returning({ id: emails.id }); const inFlight = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['attempting', 'accepted', 'sent', 'delivered', 'acceptance_unknown']))); await db.update(campaigns).set({ status: 'canceled', updatedAt: now() }).where(campaignWhere(a, campaignId)); return { id: campaignId, status: 'canceled' as const, canceled: canceled.length, inFlight: inFlight.length }; });
     return c.json(CampaignCanceled.parse(result), 200);
   });
 }

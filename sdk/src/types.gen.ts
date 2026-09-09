@@ -291,6 +291,10 @@ export type DeletedSendingResource = {
 
 export type Campaign = {
     id: string;
+    /**
+     * Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.
+     */
+    url: string;
     environment: 'live' | 'test';
     revision: number;
     draft: CampaignDraftInput;
@@ -325,11 +329,11 @@ export type Campaign = {
 };
 
 /**
- * Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
+ * Drafts may omit sender, subject, content and audience until review. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
  */
 export type CampaignDraftInput = {
     name: string;
-    from: string;
+    from?: string | '';
     fromName?: string;
     /**
      * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
@@ -338,13 +342,13 @@ export type CampaignDraftInput = {
     editor?: CampaignEditor;
     replyTo?: Array<string>;
     region: string;
-    subject: string;
+    subject?: string | '';
     html?: string;
     text?: string;
     attachments?: Array<string>;
     tracking?: boolean;
-    audience: {
-        listId: string;
+    audience?: {
+        listId?: string;
         segmentId?: string;
         excludeListIds?: Array<string>;
         excludeSegmentIds?: Array<string>;
@@ -365,11 +369,45 @@ export type CampaignEditor = {
     };
 } | null;
 
+export type CreateCampaignInput = {
+    name: string;
+    from?: string | '';
+    fromName?: string;
+    /**
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     */
+    previewText?: string;
+    editor?: CampaignEditor;
+    replyTo?: Array<string>;
+    /**
+     * Defaults to the installation’s persisted default region when omitted.
+     */
+    region?: string;
+    subject?: string | '';
+    html?: string;
+    text?: string;
+    attachments?: Array<string>;
+    tracking?: boolean;
+    audience?: {
+        listId?: string;
+        segmentId?: string;
+        excludeListIds?: Array<string>;
+        excludeSegmentIds?: Array<string>;
+    };
+    defaults?: {
+        [key: string]: string | number | boolean | null;
+    };
+};
+
 /**
  * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.
  */
 export type CampaignSummary = {
     id: string;
+    /**
+     * Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.
+     */
+    url: string;
     environment: 'live' | 'test';
     revision: number;
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
@@ -406,15 +444,15 @@ export type CampaignSummary = {
 export type CampaignDraftSummary = {
     name: string;
     region: string;
-    from: string;
+    from?: string | '';
     fromName?: string;
-    subject: string;
+    subject?: string | '';
     /**
      * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
      */
     previewText?: string;
-    audience: {
-        listId: string;
+    audience?: {
+        listId?: string;
         segmentId?: string;
     };
 };
@@ -435,7 +473,35 @@ export type CampaignState = {
 
 export type CampaignUpdateInput = {
     revision: number;
-    draft: CampaignDraftInput;
+    draft: {
+        name: string;
+        from?: string | '';
+        fromName?: string;
+        /**
+         * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+         */
+        previewText?: string;
+        editor?: CampaignEditor;
+        replyTo?: Array<string>;
+        /**
+         * Keeps the campaign’s current region when omitted.
+         */
+        region?: string;
+        subject?: string | '';
+        html?: string;
+        text?: string;
+        attachments?: Array<string>;
+        tracking?: boolean;
+        audience?: {
+            listId?: string;
+            segmentId?: string;
+            excludeListIds?: Array<string>;
+            excludeSegmentIds?: Array<string>;
+        };
+        defaults?: {
+            [key: string]: string | number | boolean | null;
+        };
+    };
 };
 
 export type CampaignArchiveInput = {
@@ -3444,7 +3510,7 @@ export type ListCampaignsResponses = {
 export type ListCampaignsResponse = ListCampaignsResponses[keyof ListCampaignsResponses];
 
 export type CreateCampaignData = {
-    body: CampaignDraftInput;
+    body: CreateCampaignInput;
     path?: never;
     query?: never;
     url: '/v1/campaigns';

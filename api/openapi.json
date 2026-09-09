@@ -1487,6 +1487,11 @@
           "id": {
             "type": "string"
           },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review."
+          },
           "environment": {
             "type": "string",
             "enum": [
@@ -1613,6 +1618,7 @@
         },
         "required": [
           "id",
+          "url",
           "environment",
           "revision",
           "draft",
@@ -1634,9 +1640,20 @@
             "maxLength": 200
           },
           "from": {
-            "type": "string",
-            "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 254,
+                "pattern": "^[\\x21-\\x7e]+$"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
           },
           "fromName": {
             "type": "string",
@@ -1666,18 +1683,27 @@
             "maxLength": 40
           },
           "subject": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 998
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
           },
           "html": {
             "type": "string",
-            "minLength": 1,
             "maxLength": 524288
           },
           "text": {
             "type": "string",
-            "minLength": 1,
             "maxLength": 524288
           },
           "attachments": {
@@ -1726,9 +1752,7 @@
                 "maxItems": 20
               }
             },
-            "required": [
-              "listId"
-            ],
+            "default": {},
             "additionalProperties": false
           },
           "defaults": {
@@ -1755,13 +1779,10 @@
         },
         "required": [
           "name",
-          "from",
-          "region",
-          "subject",
-          "audience"
+          "region"
         ],
         "additionalProperties": false,
-        "description": "Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
+        "description": "Drafts may omit sender, subject, content and audience until review. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
       },
       "CampaignEditor": {
         "type": [
@@ -1794,11 +1815,168 @@
         "additionalProperties": false,
         "description": "Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML/text remain the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes."
       },
+      "CreateCampaignInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 254,
+                "pattern": "^[\\x21-\\x7e]+$"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
+          },
+          "fromName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "previewText": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+          },
+          "editor": {
+            "$ref": "#/components/schemas/CampaignEditor"
+          },
+          "replyTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "maxItems": 10,
+            "default": []
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "description": "Defaults to the installation’s persisted default region when omitted."
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
+          },
+          "html": {
+            "type": "string",
+            "maxLength": 524288
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 524288
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "maxItems": 20,
+            "default": []
+          },
+          "tracking": {
+            "type": "boolean",
+            "default": true
+          },
+          "audience": {
+            "type": "object",
+            "properties": {
+              "listId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "segmentId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "excludeListIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "maxItems": 20
+              },
+              "excludeSegmentIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "maxItems": 20
+              }
+            },
+            "default": {},
+            "additionalProperties": false
+          },
+          "defaults": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 65536
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "default": {}
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
       "CampaignSummary": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review."
           },
           "environment": {
             "type": "string",
@@ -1926,6 +2104,7 @@
         },
         "required": [
           "id",
+          "url",
           "environment",
           "revision",
           "status",
@@ -1953,18 +2132,40 @@
             "maxLength": 40
           },
           "from": {
-            "type": "string",
-            "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 254,
+                "pattern": "^[\\x21-\\x7e]+$"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
           },
           "fromName": {
             "type": "string",
             "maxLength": 200
           },
           "subject": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 998
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 998
+              },
+              {
+                "type": "string",
+                "enum": [
+                  ""
+                ]
+              }
+            ],
+            "default": ""
           },
           "previewText": {
             "type": "string",
@@ -1985,18 +2186,13 @@
                 "maxLength": 120
               }
             },
-            "required": [
-              "listId"
-            ],
+            "default": {},
             "additionalProperties": false
           }
         },
         "required": [
           "name",
-          "region",
-          "from",
-          "subject",
-          "audience"
+          "region"
         ],
         "additionalProperties": false
       },
@@ -2069,7 +2265,156 @@
             "exclusiveMinimum": 0
           },
           "draft": {
-            "$ref": "#/components/schemas/CampaignDraftInput"
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "from": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 254,
+                    "pattern": "^[\\x21-\\x7e]+$"
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      ""
+                    ]
+                  }
+                ],
+                "default": ""
+              },
+              "fromName": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "previewText": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+              },
+              "editor": {
+                "$ref": "#/components/schemas/CampaignEditor"
+              },
+              "replyTo": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 254,
+                  "pattern": "^[\\x21-\\x7e]+$"
+                },
+                "maxItems": 10,
+                "default": []
+              },
+              "region": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "description": "Keeps the campaign’s current region when omitted."
+              },
+              "subject": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 998
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      ""
+                    ]
+                  }
+                ],
+                "default": ""
+              },
+              "html": {
+                "type": "string",
+                "maxLength": 524288
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 524288
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "maxItems": 20,
+                "default": []
+              },
+              "tracking": {
+                "type": "boolean",
+                "default": true
+              },
+              "audience": {
+                "type": "object",
+                "properties": {
+                  "listId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "segmentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120
+                  },
+                  "excludeListIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "maxItems": 20
+                  },
+                  "excludeSegmentIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "maxItems": 20
+                  }
+                },
+                "default": {},
+                "additionalProperties": false
+              },
+              "defaults": {
+                "type": "object",
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 65536
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "default": {}
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -10196,6 +10541,7 @@
     "/v1/campaigns": {
       "post": {
         "operationId": "createCampaign",
+        "description": "Create an unfinished campaign with only a name. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing; sender, subject, content and audience are required at review, not creation.",
         "tags": [
           "Campaigns"
         ],
@@ -10215,7 +10561,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CampaignDraftInput"
+                "$ref": "#/components/schemas/CreateCampaignInput"
               }
             }
           }

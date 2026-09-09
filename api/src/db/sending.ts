@@ -12,7 +12,7 @@ export type EmailSnapshot = {
 export type CampaignDraft = {
   name: string; from: string; fromName?: string; previewText?: string; editor?: CampaignEditor | null; replyTo?: string[]; region: string; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean;
-  audience: { listId: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
+  audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
 };
 export type ReviewedRecipient = { id: string; email: string; name?: string; properties: Record<string, unknown> };

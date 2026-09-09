@@ -110,7 +110,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const instance = editor.current
     if (!instance?.editor) throw new Error('The composer is still loading. Try again in a moment.')
     const preserveOriginal = !changed.current && preservedHtml.current.trim() && (api.mode === 'demo' || (!/<script\b/i.test(preservedHtml.current) && !/<img\b[^>]*\bsrc\s*=\s*["']data:/i.test(preservedHtml.current) && !inlineImageSources(preservedEditor.current?.document ?? {}).length))
-    if (isDocumentVisuallyEmpty(instance.editor.state.doc) && (initial.canCompose || !preserveOriginal)) throw new Error('Add some email content before continuing.')
+    if (isDocumentVisuallyEmpty(instance.editor.state.doc) && (initial.canCompose || !preserveOriginal)) return { html: '', editor: { format: 'react-email', version: 1, document: sanitizeEditorDocument(instance.getJSON()) }, inlineAttachmentIds: [] }
     if (preserveOriginal) return { html: preservedHtml.current, editor: preservedEditor.current }
     // The serializer snapshots JSON before its first await. Lock the editor during export.
     let document = sanitizeEditorDocument(replaceEditorImageSources(instance.getJSON(), resolvedImageSources.current))

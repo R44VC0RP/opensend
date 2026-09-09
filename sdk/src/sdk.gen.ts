@@ -818,6 +818,9 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
     ...options
 });
 
+/**
+ * Create an unfinished campaign with only a name. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing; sender, subject, content and audience are required at review, not creation.
+ */
 export const createCampaign = <ThrowOnError extends boolean = false>(options: Options<CreateCampaignData, ThrowOnError>): RequestResult<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError> => (options.client ?? client).post<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },

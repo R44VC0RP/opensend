@@ -191,7 +191,7 @@ function segmentTotals(state: DemoState, segment: Segment): Segment {
   return { ...segment, matched: result.matched, eligible: result.eligible }
 }
 function campaignTotals(state: DemoState, campaign: Campaign): Campaign {
-  return { ...campaign, revision: campaign.revision ?? 1, archivedAt: campaign.archivedAt ?? null, ...(campaign.status === 'sent' ? {} : { recipients: campaignAudience(state, campaign.listId, campaign.segmentId).eligible }) }
+  return { ...campaign, revision: campaign.revision ?? 1, archivedAt: campaign.archivedAt ?? null, ...(campaign.status === 'sent' ? {} : { recipients: campaign.listId ? campaignAudience(state, campaign.listId, campaign.segmentId).eligible : 0 }) }
 }
 function requireUnarchived(campaign: Campaign) {
   if (campaign.archivedAt != null) throw new ApiError('Restore this campaign before editing, reviewing, testing, or sending it.', 'CAMPAIGN_ARCHIVED', {}, undefined, 409)
@@ -268,19 +268,21 @@ function validateDraft(value: unknown): Record<string, any> {
   if (draft.editor !== undefined) validateEditor(draft.editor)
   return draft
 }
-function validateCampaign(state: DemoState, input: CampaignInput, existing?: Campaign): CampaignInput {
+function validateCampaign(state: DemoState, input: CampaignInput, existing?: Campaign, requireComplete = false): CampaignInput {
   enabledRegion(state, input.regionId)
   checkRegion(state, input.regionId)
-  find(state.lists, input.listId, 'List')
-  if (input.segmentId !== null) find(state.segments, input.segmentId, 'Segment')
+  if (requireComplete && !input.listId) invalid('listId', 'Choose a recipient list before continuing.')
+  if (input.listId) find(state.lists, input.listId, 'List')
+  if (input.segmentId) find(state.segments, input.segmentId, 'Segment')
   const metadata = validateDraft(input.draft ?? existing?.draft ?? {})
   const attachments = validateAttachments(state, input.attachments ?? metadata.attachments ?? existing?.attachments ?? [])
   let editor = input.editor !== undefined ? validateEditor(input.editor) : existing?.editor !== undefined ? existing.editor : metadata.editor
   // HTML-only external edits cannot keep blocks that would silently replace that HTML.
   if (existing && input.html !== existing.html && (input.editor === undefined || JSON.stringify(editor ?? null) === JSON.stringify(existing.editor ?? null))) editor = null
-  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), attachments, ...(editor !== undefined ? { editor: validateEditor(editor) } : {}) }
-  const { segmentId: _oldSegment, ...audience } = metadata.audience ?? {}
-  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, editor: clean.editor ?? null, attachments, audience: { ...audience, listId: clean.listId, ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
+  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998, !requireComplete), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName', 200, true), fromEmail: requireComplete || input.fromEmail.trim() ? email(input.fromEmail, 'fromEmail') : '', listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000, true), attachments, ...(editor !== undefined ? { editor: validateEditor(editor) } : {}) }
+  if (requireComplete && !clean.html && !String(metadata.text ?? '').trim()) invalid('html', 'Add some email content before continuing.')
+  const { listId: _oldList, segmentId: _oldSegment, ...audience } = metadata.audience ?? {}
+  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, editor: clean.editor ?? null, attachments, audience: { ...audience, ...(clean.listId ? { listId: clean.listId } : {}), ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
   return clean
 }
 function validDateTime(value: string): boolean {
@@ -358,7 +360,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('contacts').every(row => strings(row, ['email', 'name', 'country', 'status']) && CONTACT_STATUSES.includes(String(row.status)) && stringArray(row.listIds) && row.listIds.every(ref => references('lists', ref)) && date(row.createdAt) && (row.lastOpenedAt === null || date(row.lastOpenedAt)) && isRecord(row.consent) && strings(row.consent, ['source']) && (row.consent.at === null || date(row.consent.at)))) return false
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && attachmentIds(row.attachments) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
-  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft) && validEditor(row.editor))) return false
+  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && (row.listId === '' || references('lists', row.listId)) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft) && validEditor(row.editor))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
@@ -547,7 +549,7 @@ export function createMockApi(): OpenSendApi {
         if (existing && input.revision !== undefined && input.revision !== (existing.revision ?? 1)) throw new ApiError('This campaign changed. Reload it before saving.', 'STALE_CAMPAIGN_REVISION', {}, undefined, 409)
         const clean = validateCampaign(s, input, existing)
         const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...clean }
-        campaign.recipients = campaignAudience(s, campaign.listId, campaign.segmentId).eligible
+        campaign.recipients = campaign.listId ? campaignAudience(s, campaign.listId, campaign.segmentId).eligible : 0
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)
         return campaign
@@ -567,7 +569,7 @@ export function createMockApi(): OpenSendApi {
           if (!validDateTime(value) || timestamp <= Date.now()) invalid('scheduledAt', 'Schedule a valid future date and time, including its timezone.')
           scheduledAt = new Date(timestamp).toISOString()
         }
-        validateCampaign(s, campaign)
+        validateCampaign(s, campaign, undefined, true)
         const region = checkRegion(s, campaign.regionId)
         if (region.access === 'sandbox') throw new ApiError('Campaign sending is unavailable in sandbox regions. Choose a production region.', 'validation', { regionId: 'Sandbox regions cannot send campaigns.' })
         if (!region.sendingEnabled || region.health === 'shutdown') throw new ApiError('Sending is disabled in this region.', 'conflict')
@@ -594,6 +596,7 @@ export function createMockApi(): OpenSendApi {
         const campaign = find(s.campaigns, input.id, 'Campaign')
         requireUnarchived(campaign)
         const to = email(input.to, 'to')
+        validateCampaign(s, campaign, undefined, true)
         enabledRegion(s, campaign.regionId)
         const region = checkRegion(s, campaign.regionId)
         if (!region.sendingEnabled || region.health === 'shutdown') throw new ApiError('Sending is disabled in this region.', 'conflict')
