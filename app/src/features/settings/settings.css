@@ -73,6 +73,22 @@
 }
 .settings-ses > .section > .ui-table-scroll .ui-table th:first-child,
 .settings-ses > .section > .ui-table-scroll .ui-table td:first-child { padding-left: var(--space-12); }
+.settings-setup-checklist { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-16); }
+.settings-setup-heading, .settings-setup-step-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); }
+.settings-setup-heading h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
+.settings-setup-heading > span, .settings-setup-status { font-size: var(--text-xs); line-height: var(--leading-xs); color: var(--color-muted); }
+.settings-setup-steps { list-style: none; margin: var(--space-8) 0 0; padding: 0; }
+.settings-setup-steps > li { display: flex; align-items: flex-start; gap: var(--space-12); padding-block: var(--space-12); border-bottom: 1px solid var(--color-border); }
+.settings-setup-steps > li:last-child { border-bottom: 0; }
+.settings-setup-steps > li > svg { flex-shrink: 0; margin-top: 2px; color: var(--color-muted); }
+.settings-setup-steps > li[data-state='complete'] > svg { color: var(--color-success); }
+.settings-setup-steps > li[data-state='waiting'] > svg, .settings-setup-steps > li[data-state='blocked'] > svg { color: var(--color-warning); }
+.settings-setup-step { flex: 1; min-width: 0; }
+.settings-setup-step p, .settings-setup-checklist > p { font-size: var(--text-xs); line-height: var(--leading-sm); margin: var(--space-8) 0 0; }
+.settings-setup-status { flex-shrink: 0; }
+.settings-setup-confirmation { max-width: 640px; }
+.settings-setup-confirmation > a { margin-top: var(--space-12); }
+.settings-setup-callback { display: flex; flex-wrap: wrap; gap: var(--space-8); border-top: 1px solid var(--color-border); margin-top: var(--space-8); padding-top: var(--space-12); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:hover { text-decoration-color: currentColor; }

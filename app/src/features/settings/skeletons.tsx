@@ -61,8 +61,6 @@ export function RegionDiscoverySkeleton() {
   return <LoadingRegion label="Checking AWS" className="settings-loading-body">
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">{['AWS account', 'SES access', 'Sent / daily quota', 'Send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
     <div className="stack settings-discovery-section"><h3>Domains</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Domain'}, {key: 'status', label: 'Status'}]} /></div>
-    <div className="stack settings-discovery-section"><h3>Configuration sets</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Stream'}, {key: 'status', label: 'Status'}]} /></div>
-    <div className="stack settings-discovery-section"><h3>Feedback</h3><dl className="settings-facts"><div><dt>Event delivery</dt><dd><SkeletonText width={120} /></dd></div><div className="settings-fact-wide"><dt>Callback URL</dt><dd><SkeletonText width={440} /></dd></div></dl></div>
     <div className="settings-aws-details"><SkeletonText width={90} /></div>
   </LoadingRegion>
 }
@@ -70,7 +68,7 @@ export function RegionDiscoverySkeleton() {
 export function SettingsBodySkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading workspace and sending regions" className="settings-loading-body">
     <section className="section stack"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used when no region is specified. Applies to Live and Test.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} rowSize="large" /></section>
-    <section className="section stack settings-region-detail"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={112} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><RegionDiscoverySkeleton /></section>
+    <section className="section stack settings-region-detail"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={112} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><div className="settings-setup-checklist"><h3>Provisioning</h3><ul className="settings-setup-steps">{['AWS account access', 'SES configuration sets', 'SNS topic and permissions', 'SES event destinations', 'HTTPS subscription'].map(name => <li key={name}><Skeleton width={16} /><div className="settings-setup-step-heading settings-setup-step"><span>{name}</span><SkeletonText width={100} /></div></li>)}</ul></div><RegionDiscoverySkeleton /></section>
     <section className="section stack"><SectionHeader title="Workspace" actions={<ControlSkeleton width={70} />} /><FieldSkeleton label="Name" /></section>
   </LoadingRegion>
 }

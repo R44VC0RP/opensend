@@ -9,6 +9,7 @@ import type { RegionCatalog, RegionCatalogEntry, SesDiscovery } from '../../data
 import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
+import { awaitingConfirmationOnly, SetupChecklist } from './setup-checklist'
 
 const activeJob = (entry: RegionCatalogEntry) => entry.provisionStatus === 'pending' || entry.provisionStatus === 'running'
 const flag = (value: boolean | null | undefined, yes = 'Yes', no = 'No') => value == null ? 'Unknown' : value ? yes : no
@@ -109,28 +110,22 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   const running = activeJob(entry)
   const discovering = entry.discoveryStatus === 'discovering'
   const ready = !running && report?.status === 'ready' && report.provisioned && report.resources.topic.subscription === 'confirmed'
+  const confirmationOnly = awaitingConfirmationOnly(report)
   const hardBlocker = report?.blockers.find(issue => !['SES_SANDBOX', 'SES_SENDING_DISABLED', 'SES_ACCOUNT_ENFORCEMENT', 'SES_DOMAIN_REQUIRED', 'SES_CONFIGURATION_SET_DISABLED', 'SNS_CONFIRMATION_PENDING'].includes(issue.code))
   const status = discovering ? 'Checking' : running ? entry.provisionStatus === 'pending' ? 'Queued' : 'Provisioning' : ready ? 'Ready' : entry.provisionStatus === 'failed' ? 'Setup failed' : report?.resources.topic.subscription === 'pending' ? 'Awaiting confirmation' : report ? report.status === 'blocked' ? 'Needs attention' : 'Needs setup' : 'Not checked'
   return <section id="ses-region-detail" className="section stack settings-region-detail" aria-label={`${entry.region} setup`}>
-    <SectionHeader title={<span className="cluster">{entry.region}<StatusBadge status={status} tone={ready ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : report?.status === 'blocked' && !running ? 'warning' : 'neutral'} /></span>} actions={<div className="cluster"><Button disabled={!canDiscover || !entry.enabled || discovering || running || refresh.isPending} loading={discovery.isFetching || refresh.isPending} onClick={() => {if (!report) void discovery.refetch().then(result => {if (result.data) setExplicitInspection(true)}); else refresh.mutate()}}>Check AWS</Button><Button variant="primary" disabled={!canManage || !entry.enabled || running || discovering || !report || Boolean(hardBlocker) || provision.isPending} title={hardBlocker?.message} onClick={() => {provision.reset(); setConfirmOpen(true)}}>{entry.provisionStatus === 'failed' ? 'Retry provisioning' : 'Provision resources'}</Button></div>} />
+    <SectionHeader title={<span className="cluster">{entry.region}<StatusBadge status={status} tone={ready ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : report?.status === 'blocked' && !running ? 'warning' : 'neutral'} /></span>} actions={<div className="cluster"><Button disabled={!canDiscover || !entry.enabled || discovering || running || refresh.isPending} loading={discovery.isFetching || refresh.isPending} onClick={() => {if (!report) void discovery.refetch().then(result => {if (result.data) setExplicitInspection(true)}); else refresh.mutate()}}>Check AWS</Button><Button variant="primary" disabled={!canManage || !entry.enabled || running || discovering || !report || confirmationOnly || Boolean(hardBlocker) || provision.isPending} title={confirmationOnly ? 'Resources are created. Request the pending confirmation in SNS, then check AWS.' : hardBlocker?.message} onClick={() => {provision.reset(); setConfirmOpen(true)}}>{confirmationOnly ? 'Resources created' : entry.provisionStatus === 'failed' ? 'Retry provisioning' : 'Provision resources'}</Button></div>} />
     {!entry.enabled && <p className="muted">Enable this region to check or provision AWS resources.</p>}
     {!canDiscover && <p className="muted">Read permission required to check AWS.</p>}
     {entry.provisionError && !ready && <Alert tone="danger">{setupError(entry.provisionError)}</Alert>}
     <MutationError error={discovery.error || refresh.error} />
     {!confirmOpen && <MutationError error={provision.error} />}
+    <SetupChecklist report={report} running={running} queued={entry.provisionStatus === 'pending'} />
     {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : entry.enabled && <p className="muted">Check AWS to load setup status. No resources are created.</p>}
     <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={`Creates or repairs SES configuration sets and SNS feedback in live AWS account ${report?.account?.id ?? '(not identified)'}, in ${entry.region}. Does not send email, change DNS, or grant production access.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
   </section>
 }
 
-function configurationStatus(set: SesDiscovery['resources']['transactional']) {
-  if (set.exists === false) return 'Not created'
-  if (set.owned === false) return 'Name conflict'
-  if (set.sendingEnabled === false) return 'Sending disabled'
-  if (set.eventWired === true && set.sendingEnabled === true) return 'Ready'
-  if (set.exists == null || set.owned == null || set.sendingEnabled == null) return 'Not checked'
-  return 'Needs setup'
-}
 function domainStatus(domain: SesDiscovery['domains'][number]) {
   if (domain.sendingEnabled === false) return 'Sending disabled'
   if (domain.verificationStatus === 'SUCCESS') return domain.sendingEnabled === true ? 'Verified' : 'Sending unknown'
@@ -139,9 +134,9 @@ function domainStatus(domain: SesDiscovery['domains'][number]) {
 function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCatalogEntry}) {
   const {account, resources} = report
   const topic = resources.topic
-  const feedbackStatus = topic.exists === false ? 'Not created' : topic.owned === false ? 'Name conflict' : topic.subscription === 'pending' ? 'Awaiting confirmation' : topic.subscription === 'confirmed' && topic.policyReady && topic.rawMessageDelivery === false ? 'Ready' : topic.exists == null ? 'Not checked' : 'Needs setup'
+  const blockers = report.blockers.filter(issue => issue.code !== 'SNS_CONFIRMATION_PENDING' || topic.subscription !== 'pending')
   return <>
-    {report.blockers.length > 0 && <Alert tone="warning" title="Needs attention"><ul className="settings-issues">{report.blockers.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></Alert>}
+    {blockers.length > 0 && <Alert tone="warning" title="Needs attention"><ul className="settings-issues">{blockers.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></Alert>}
     {report.warnings.length > 0 && <Alert tone="warning"><ul className="settings-issues">{report.warnings.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></Alert>}
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
@@ -149,10 +144,6 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
     <div className="stack settings-discovery-section"><h3>Domains</h3><DataTable rows={report.domains} rowKey={row => row.name} rowSize="large" empty={<EmptyState title={report.account ? 'No domains found' : 'Domains unavailable'} />} columns={[
       {key: 'name', label: 'Domain', render: row => row.name}, {key: 'status', label: 'Status', render: row => domainStatus(row)},
     ]} />{report.identitiesTruncated && !report.blockers.some(issue => issue.code === 'SES_IDENTITIES_TRUNCATED') && <p className="muted">Domain list is incomplete.</p>}</div>
-    <div className="stack settings-discovery-section"><h3>Configuration sets</h3><DataTable rowSize="large" rows={(['transactional', 'marketing'] as const).map(kind => ({kind, ...resources[kind]}))} rowKey={row => row.kind} columns={[
-      {key: 'name', label: 'Stream', render: row => label(row.kind)}, {key: 'status', label: 'Status', render: row => configurationStatus(row)},
-    ]} /></div>
-    <div className="stack settings-discovery-section"><h3>Feedback</h3><dl className="settings-facts"><div><dt>Event delivery</dt><dd>{feedbackStatus}</dd></div><div className="settings-fact-wide"><dt>Callback URL</dt><dd>{report.feedbackUrl ?? 'Not configured'}</dd></div></dl></div>
     <details className="settings-aws-details">
       <summary>AWS details</summary>
       <div className="stack">
