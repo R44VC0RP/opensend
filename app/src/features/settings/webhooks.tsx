@@ -41,7 +41,7 @@ export function WebhooksPage() {
     <PageHeader title="Settings" actions={<Button variant="primary" onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
     <SettingsTabs value="webhooks" />
     <SectionHeader title={webhooks.isPending ? <SkeletonText width={110} /> : 'Webhooks'} />
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={3} minRows={3} rowSize="large" rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhook endpoints" action={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />} columns={[
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={3} minRows={3} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhook endpoints" action={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />} columns={[
       { ...settingsColumns.webhooks[0], render: webhook => <div><Link to={`/settings/webhooks/${webhook.id}`}>{webhook.name}</Link><div className="muted settings-break">{webhook.url}</div></div> },
       { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
       { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(label).join(', ')}>{number(webhook.events.length)} events</span> },
@@ -120,11 +120,11 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} /></form>
     <section className="section stack"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
     <section className="section stack"><SectionHeader title="Delivery history" actions={<span className="muted">UTC</span>} /><MutationError error={retry.error} />
-      <DataTable minRows={3} rowSize="large" rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
+      <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...settingsColumns.deliveries[0], render: delivery => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
         { ...settingsColumns.deliveries[1], render: delivery => delivery.regionId },
         { ...settingsColumns.deliveries[2], render: delivery => label(delivery.event) },
-        { ...settingsColumns.deliveries[3], render: delivery => <div><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
+        { ...settingsColumns.deliveries[3], render: delivery => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
         { ...settingsColumns.deliveries[4], render: delivery => number(delivery.attempts) },
         { ...settingsColumns.deliveries[5], render: delivery => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null) } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
       ]} />

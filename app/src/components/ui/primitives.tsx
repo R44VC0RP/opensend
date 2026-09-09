@@ -89,8 +89,8 @@ export function DropdownMenu({ items, label = 'More actions', trigger }: { items
 }
 export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode };
 export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton'>;
-export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, rowSize = 'default' }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; rowSize?: 'default' | 'large' }) {
-  return <div className={cx('ui-table-scroll', rowSize === 'large' && 'ui-table-scroll--large')} aria-busy={loading || undefined}>
+export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0 }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number }) {
+  return <div className="ui-table-scroll" aria-busy={loading || undefined}>
     {loading && <span className="sr-only" role="status">Loading table</span>}
     <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
       <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}
@@ -99,8 +99,8 @@ export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, em
     {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
   </div>;
 }
-export function TableSkeleton({ columns, rows = 5, rowSize = 'default', pagination = false }: { columns: SkeletonColumn[]; rows?: number; rowSize?: 'default' | 'large'; pagination?: boolean }) {
-  return <><DataTable columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} rowSize={rowSize} />{pagination && <PaginationSkeleton />}</>;
+export function TableSkeleton({ columns, rows = 5, pagination = false }: { columns: SkeletonColumn[]; rows?: number; pagination?: boolean }) {
+  return <><DataTable columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} />{pagination && <PaginationSkeleton />}</>;
 }
 export function Pagination({ page, pageSize, total, nextCursor, onPageChange }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void }) {
   if (total === undefined) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">Cursor page {page}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;

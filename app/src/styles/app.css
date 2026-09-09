@@ -33,6 +33,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .between { justify-content: space-between; }
 .nowrap { white-space: nowrap; }
 .cell-caption { font-size: var(--text-xs); line-height: var(--leading-xs); margin-top: var(--space-4); }
+.ui-table .cell-caption { margin-top: 2px; }
 .text-accent { color: var(--color-accent); }
 .text-success { color: var(--color-success); }
 .text-warning { color: var(--color-warning); }

@@ -72,11 +72,9 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-dialog__body:empty { display: none; }
 .ui-dialog__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-8); margin-top: var(--space-24); flex-shrink: 0; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
-.ui-table-scroll--large { --table-row-height: var(--row-height-lg); }
 .ui-table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .ui-table th { height: 36px; padding: var(--space-8) var(--space-12); border-bottom: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-xs); font-weight: var(--font-weight-regular); white-space: nowrap; }
 .ui-table td { height: var(--table-row-height); padding: var(--space-6) var(--space-12); border-bottom: 1px solid var(--color-border); vertical-align: middle; overflow-wrap: anywhere; }
-.ui-table-scroll--large td { padding-block: 10px; }
 .ui-table td[data-skeleton-align='right'] > * { margin-left: auto; }
 .ui-table td[data-skeleton-align='right'] .ui-skeleton-line { justify-content: flex-end; }
 .ui-table-spacer td { padding: 0; border: 0; }

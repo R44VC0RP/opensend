@@ -32,9 +32,9 @@ function LiveDomainsPage() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rowSize="large" rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+      <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...settingsColumns.domains[1], render: row => <div><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.mailFromStatus === 'pending' && <div className="muted">Mail from pending</div>}</div> },
+        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.mailFromStatus === 'pending' && <div className="muted">Mail from pending</div>}</div> },
         { ...settingsColumns.domains[2], render: row => row.regionId },
         { ...settingsColumns.domains[3], render: row => <Link to={`/domains/${row.id}`}>{row.status === 'verified' && row.mailFromStatus === 'verified' ? 'Manage' : 'Review records'}</Link> },
       ]} />
@@ -67,7 +67,7 @@ function LiveDomainDetailPage() {
     <section className="section stack">
       <SectionHeader title="DNS records" />
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
-      <DataTable minRows={3} rowSize="large" rows={current.records} rowKey={record => record.id} columns={[
+      <DataTable minRows={3} rows={current.records} rowKey={record => record.id} columns={[
         { ...settingsColumns.dns[0], render: record => record.type },
         { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
         { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },

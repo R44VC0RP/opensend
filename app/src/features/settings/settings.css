@@ -22,6 +22,7 @@
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.ui-table .settings-copy-cell code { min-width: 0; overflow-x: auto; white-space: nowrap; }
 .settings-copy-cell > .cluster,
 .settings-secret > .cluster {
   flex-shrink: 0;
@@ -64,6 +65,7 @@
   flex-wrap: nowrap;
 }
 .settings-region-actions { gap: var(--space-8); }
+.settings-cell-stack { display: flex; flex-direction: column; align-items: flex-start; }
 .settings-payload {
   max-height: 55vh;
   overflow: auto;

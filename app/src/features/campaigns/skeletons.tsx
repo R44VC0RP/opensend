@@ -56,7 +56,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <PageHeader title="Campaigns" actions={<Button variant="primary" disabled>Create campaign</Button>} />
     <Tabs value="all" onValueChange={() => {}} items={[{ value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'sent', label: 'Sent' }]} />
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" disabled /></div>
-    <TableSkeleton columns={campaignColumns} rows={4} rowSize="large" pagination />
+    <TableSkeleton columns={campaignColumns} rows={4} pagination />
   </>
   if (kind === 'editor') return <>
     <PageHeader title={isNew ? 'Create campaign' : <SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div>} />
