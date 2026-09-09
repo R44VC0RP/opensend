@@ -265,7 +265,6 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
       </div>
       <div className="campaign-compose-actions">
         <Button variant="ghost" disabled={!accepted || saveDisabled || pending || autosavePaused} title={!accepted ? 'Save your draft first' : undefined} onClick={() => save('test')}>Send test</Button>
-        <Button variant="secondary" disabled={saveDisabled || pending} loading={preparing} onClick={() => save('edit')}>{autosavePaused ? 'Retry save' : 'Save draft'}</Button>
         <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={() => save('review')}>Continue to review</Button>
       </div>
     </>} />
