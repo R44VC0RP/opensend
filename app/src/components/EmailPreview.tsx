@@ -18,6 +18,19 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: OpenSendApi; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
+  const [fonts, setFonts] = useState<string[]>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all(['/fonts/inter-variable.woff2', '/fonts/inter-variable-italic.woff2'].map(async path => {
+      const response = await fetch(path, { signal: controller.signal });
+      if (!response.ok) throw new Error('Font unavailable');
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return `data:font/woff2;base64,${btoa(binary)}`;
+    })).then(sources => { if (!controller.signal.aborted) setFonts(sources); }).catch(() => { /* Use the font stack's fallback if local fonts are unavailable. */ });
+    return () => controller.abort();
+  }, []);
   const needed = useMemo(() => cidImageSources(html), [html]);
   useEffect(() => {
     const controller = new AbortController();
@@ -44,6 +57,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       FORBID_ATTR: ['href', 'srcset', 'ping', 'action', 'formaction', 'target', 'download', 'autofocus', 'xlink:href', 'background'],
     });
     const email = new DOMParser().parseFromString(clean, 'text/html');
+    email.querySelectorAll('style[data-opensend-fonts]').forEach(style => style.remove());
     email.querySelectorAll('[src]').forEach(element => {
       const source = element.getAttribute('src') ?? '';
       const owned = element.tagName === 'IMG' ? sources?.get(source) : undefined;
@@ -52,14 +66,16 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     });
     const csp = email.createElement('meta');
     csp.httpEquiv = 'Content-Security-Policy';
-    csp.content = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'";
+    csp.content = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'";
     email.head.prepend(csp);
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
-    style.textContent = `:root { --font-email: ${tokens.getPropertyValue('--font-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } html { color-scheme: light; background: var(--color-surface); color: var(--color-text); } body { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; } body, body * { font-family: var(--font-email) !important; } img { max-width: 100%; height: auto; }`;
+    // Reuse the browser's cached font files without opening network access inside the sandbox.
+    const fontFaces = fonts.map((source, index) => `@font-face { font-family: 'Inter'; src: url('${source}') format('woff2'); font-style: ${index === 0 ? 'normal' : 'italic'}; font-weight: 100 900; font-display: swap; }`).join(' ');
+    style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } html { color-scheme: light; background: var(--color-surface); color: var(--color-text); } body { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; } body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; } img { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
-  }, [html, sources]);
+  }, [html, sources, fonts]);
   return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;

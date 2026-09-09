@@ -4,7 +4,10 @@
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
 .page-surface:has(.campaign-compose-page) { padding: var(--space-16); }
 .campaign-compose-page { --font-body: var(--font-email); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
+.campaign-compose-page, .campaign-compose-page * { letter-spacing: var(--tracking-email); }
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) { --font-body: var(--font-email); --color-focus: var(--color-muted); --color-active-bg: color-mix(in srgb, var(--color-text) 8%, var(--color-surface)); font-family: var(--font-body); font-size: var(--text-md); }
+body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]),
+body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) * { letter-spacing: var(--tracking-email); }
 .campaign-compose-page :focus-visible,
 body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) :focus-visible { outline: none; }
 .campaign-compose-page .ui-button:focus-visible { text-decoration: underline; text-underline-offset: 3px; }

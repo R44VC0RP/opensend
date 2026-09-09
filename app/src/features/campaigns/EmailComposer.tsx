@@ -42,16 +42,17 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [theme] = useState(() => {
     const tokens = getComputedStyle(document.documentElement)
     const fontFamily = tokens.getPropertyValue('--font-email').trim()
+    const letterSpacing = tokens.getPropertyValue('--tracking-email').trim()
     const color = tokens.getPropertyValue('--color-email-text').trim()
     const backgroundColor = tokens.getPropertyValue('--color-email-surface').trim()
     return { extends: 'minimal' as const, styles: {
-      body: { fontFamily, color, backgroundColor, margin: '0', padding: '0' },
+      body: { fontFamily, letterSpacing, color, backgroundColor, margin: '0', padding: '0' },
       container: { width: '100%', maxWidth: '600px', margin: '0 auto', padding: '24px' },
-      paragraph: { fontFamily, fontSize: '16px', lineHeight: '1.6', margin: '0 0 16px', color },
-      h1: { fontFamily, fontSize: '26px', lineHeight: '1.25', fontWeight: '600', margin: '0 0 20px', color },
-      h2: { fontFamily, fontSize: '22px', lineHeight: '1.3', fontWeight: '600', margin: '24px 0 12px', color },
-      h3: { fontFamily, fontSize: '18px', lineHeight: '1.4', fontWeight: '600', margin: '20px 0 12px', color },
-      button: { fontFamily, fontSize: '15px', backgroundColor: '#181818', color: '#ffffff', padding: '12px 20px', borderRadius: '4px' },
+      paragraph: { fontFamily, letterSpacing, fontSize: '16px', lineHeight: '1.6', margin: '0 0 16px', color },
+      h1: { fontFamily, letterSpacing, fontSize: '26px', lineHeight: '1.25', fontWeight: '600', margin: '0 0 20px', color },
+      h2: { fontFamily, letterSpacing, fontSize: '22px', lineHeight: '1.3', fontWeight: '600', margin: '24px 0 12px', color },
+      h3: { fontFamily, letterSpacing, fontSize: '18px', lineHeight: '1.4', fontWeight: '600', margin: '20px 0 12px', color },
+      button: { fontFamily, letterSpacing, fontSize: '15px', backgroundColor: '#181818', color: '#ffffff', padding: '12px 20px', borderRadius: '4px' },
       link: { color: '#3156c7', textDecoration: 'underline' },
       image: { maxWidth: '100%', height: 'auto' },
     } }
@@ -114,6 +115,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const result = await composeReactEmail({ editor: instance.editor })
     // React Email emits JSON-LD metadata, but the public send contract forbids all script tags.
     let html = result.html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    const fontBase = new URL('/fonts/', window.location.origin).href
+    html = html.replace('</head>', `<style data-opensend-fonts="true">@font-face{font-family:Inter;src:url('${fontBase}inter-variable.woff2') format('woff2');font-style:normal;font-weight:100 900}@font-face{font-family:Inter;src:url('${fontBase}inter-variable-italic.woff2') format('woff2');font-style:italic;font-weight:100 900}</style></head>`)
     for (const [localSource, cid] of resolvedImageSources.current) html = replaceImageSource(html, localSource, cid)
     const currentReferences: InlineImageReference[] = []
     const storedSources = new Map<string, string>()

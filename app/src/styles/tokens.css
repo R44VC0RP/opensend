@@ -12,6 +12,20 @@
   font-weight: 700;
   font-display: swap;
 }
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-variable-italic.woff2') format('woff2');
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+}
 :root {
   color-scheme: light;
   --color-email-surface: #FFFFFF;
@@ -39,7 +53,8 @@
   --color-on-accent: var(--color-surface);
   --color-focus: var(--color-accent);
   --font-body: 'OpenTUI Mono', monospace;
-  --font-email: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-email: 'Inter', Arial, sans-serif;
+  --tracking-email: -0.01em;
   --text-xs: 12px;
   --text-sm: 13px;
   --text-md: 14px;
