@@ -35,16 +35,25 @@
 .settings-account > :first-child {
   flex: 1;
 }
-.settings-reputation {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1.35fr .75fr 1.5fr;
-  gap: 24px;
-}
-.settings-reputation > div {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.settings-ses { font-family: var(--font-body); }
+.settings-ses > .section { gap: var(--space-20); }
+.settings-region-detail { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
+.settings-discovery-state { min-height: 20px; }
+.settings-discovery-section { gap: var(--space-16); min-width: 0; }
+.settings-discovery-section + .settings-discovery-section { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
+.settings-discovery-section h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
+.settings-discovery-section .ui-table { min-width: 760px; }
+.settings-discovery-section .ui-table th:first-child { width: 32%; }
+.settings-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-20) var(--space-24); margin: 0; }
+.settings-facts > div { min-width: 0; }
+.settings-facts dt { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); margin-bottom: var(--space-6); }
+.settings-facts dd { margin: 0; overflow-wrap: anywhere; }
+.settings-fact-wide { grid-column: 1 / -1; }
+.settings-issues { margin: 0; padding-left: var(--space-20); }
+.settings-issues li + li { margin-top: var(--space-6); }
+.settings-job-state { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); font-size: var(--text-xs); }
+.settings-job-error { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-danger); font-size: var(--text-xs); }
+.settings-region-detail > .ui-alert { padding: 0; background: transparent; }
 .settings-choices {
   display: flex;
   flex-wrap: wrap;
@@ -54,6 +63,7 @@
   justify-content: flex-end;
   flex-wrap: nowrap;
 }
+.settings-region-actions { gap: var(--space-8); }
 .settings-payload {
   max-height: 55vh;
   overflow: auto;
@@ -62,10 +72,10 @@
   margin: 0;
 }
 @media (max-width: 900px) {
-  .settings-reputation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
   .settings-account { flex-wrap: wrap; }
   .settings-account > :first-child { flex-basis: 100%; }
-  .settings-reputation { grid-template-columns: 1fr; }
+  .settings-facts { grid-template-columns: 1fr; }
 }

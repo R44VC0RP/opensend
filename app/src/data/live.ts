@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Email, type Region, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -34,7 +34,18 @@ const mapEmail = (r: Json): Email => ({ ...r, id: r.id, from: r.from, subject: r
 const mapDomain = (r: Json): Domain => ({ ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', mailFromStatus: r.mailFromStatus == null ? 'not_configured' : r.mailFromStatus.toLowerCase() === 'success' ? 'verified' : r.mailFromStatus.toLowerCase() === 'failed' ? 'failed' : 'pending', records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: 'not_checked' })) } as Domain)
 const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload })
 const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Signing secret is hidden', deliveries: [] })
-const mapRegion = (r: Json): Region => ({ id: r.region, name: r.region, access: r.productionAccess ? 'production' : 'sandbox', health: r.enforcementStatus, sendingEnabled: r.sendingEnabled, sent24h: r.quota.sentLast24Hours, dailyQuota: r.quota.max24HourSend, maxSendRate: r.quota.maxSendRate } as Region)
+function regionCatalog(value: unknown): RegionCatalog {
+  const record = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
+  const nullableString = (v: unknown) => v === null || typeof v === 'string'
+  if (!record(value) || typeof value.defaultRegion !== 'string' || !Array.isArray(value.data) || !value.data.every((row: unknown) => record(row)
+    && typeof row.region === 'string' && typeof row.enabled === 'boolean' && typeof row.isDefault === 'boolean'
+    && ['not_discovered', 'discovering', 'stale', 'ready', 'needs_provisioning', 'blocked'].includes(row.discoveryStatus)
+    && nullableString(row.lastDiscoveredAt) && nullableString(row.provisionJobId) && nullableString(row.provisionError)
+    && (row.provisionStatus === null || ['pending', 'running', 'completed', 'failed'].includes(row.provisionStatus)))) {
+    throw new ApiError('The API did not return a region catalog. Update the running API service and run its database migrations; older region account responses are not supported.', 'INVALID_RESPONSE')
+  }
+  return value as RegionCatalog
+}
 
 export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
   const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal, environment })
@@ -68,7 +79,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
     mode: 'live', environment,
     consentHistory: async (id, cursor) => {const result = await call(`/contacts/${idPath(id)}/consent?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); return {items: result.data, nextCursor: result.nextCursor}},
     emailEvents: async (id, cursor) => {const result = await call(`/emails/${idPath(id)}/events?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); return {items: result.data.map(mapEmailEvent), nextCursor: result.nextCursor}},
-    regions: { list: async signal => (await call('/regions', 'GET', undefined, signal)).data.map(mapRegion), connect: async () => unsupported('Regions are configured by the deployment operator, not from this dashboard.') },
+    regions: {
+      list: async signal => regionCatalog(await call('/regions', 'GET', undefined, signal)),
+      configure: async (region, input, signal) => regionCatalog(await keyCall(`/regions/${idPath(region)}`, 'PUT', input, signal)),
+      discover: (region, options, signal) => keyCall<SesDiscovery>(`/regions/${idPath(region)}/discovery${options?.refresh === true ? '?refresh=true' : ''}`, 'GET', undefined, signal),
+      provision: (region, signal) => keyCall<RegionProvisionReceipt>(`/regions/${idPath(region)}/provision`, 'POST', { confirm: true }, signal),
+    },
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
     overview: { get: async (input, signal) => {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)

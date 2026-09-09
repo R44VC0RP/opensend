@@ -8,7 +8,28 @@ export type WebhookEvent = 'send' | 'delivered' | 'bounced' | 'complaint' | 'rej
 export type TimeRange = '24h' | '7d' | '30d'
 export interface PageRequest { page?: number; pageSize?: number; search?: string; regionId?: RegionId; status?: string; stream?: string; listId?: string; segmentId?: string; cursor?: string; to?: string; from?: string }
 export interface PageResult<T> { items: T[]; total?: number; nextCursor?: string | null; page: number; pageSize: number; facets?: Record<string, number> }
-export interface Region { id: RegionId; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
+export interface RegionCatalogEntry {
+  region: string; enabled: boolean; isDefault: boolean
+  discoveryStatus: 'not_discovered' | 'discovering' | 'stale' | 'ready' | 'needs_provisioning' | 'blocked'
+  lastDiscoveredAt: string | null; provisionJobId: string | null
+  provisionStatus: 'pending' | 'running' | 'completed' | 'failed' | null; provisionError: string | null
+}
+export interface RegionCatalog { defaultRegion: string; data: RegionCatalogEntry[] }
+export interface RegionConfigureInput { enabled?: boolean; makeDefault?: boolean }
+export interface RegionProvisionReceipt { jobId: string; status: 'pending' | 'running' }
+export interface SesDiscovery {
+  region: string; checkedAt: string
+  account: { id: string; productionAccess: boolean | null; sendingEnabled: boolean | null; enforcementStatus: string | null; quota: { max24HourSend: number | null; maxSendRate: number | null; sentLast24Hours: number | null } } | null
+  domains: { name: string; verificationStatus: string | null; sendingEnabled: boolean | null }[]
+  identitiesTruncated: boolean
+  resources: {
+    transactional: SesConfigurationSet; marketing: SesConfigurationSet; eventDestinationName: string
+    topic: { name: string; arn: string | null; exists: boolean | null; owned: boolean | null; policyReady: boolean | null; subscription: 'unknown' | 'missing' | 'pending' | 'confirmed'; rawMessageDelivery: boolean | null; subscriptionsTruncated: boolean; staleSubscriptions: number }
+  }
+  feedbackUrl: string | null; status: 'ready' | 'needs_provisioning' | 'blocked'; provisioned: boolean
+  blockers: { code: string; message: string }[]; warnings: { code: string; message: string }[]
+}
+interface SesConfigurationSet { name: string; exists: boolean | null; owned: boolean | null; sendingEnabled: boolean | null; eventDestinationExists: boolean | null; eventWired: boolean | null }
 export interface Workspace { id: string; name: string; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string }
 export interface Email { text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
@@ -52,7 +73,7 @@ export interface OpenSendApi {
   consent?: (id: string, input: ConsentInput) => Promise<Contact>
   webhookDeliveries?: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
   readonly mode: 'demo' | 'live'
-  regions: { list(signal?: AbortSignal): Promise<Region[]>; connect(id: string, signal?: AbortSignal): Promise<Region> }
+  regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt> }
   workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name: string }, signal?: AbortSignal): Promise<Workspace> }
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email> }

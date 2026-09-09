@@ -9,8 +9,8 @@ import pg from 'pg';
 // explicit API_FIXTURE_DATABASE_URL. Allow AUTH_TEST_EMAIL (operator@example.com)
 // and AUTH_TEST_GOOGLE_DOMAIN (example.com) in that server's Google access policy.
 // Synthetic DB identities exercise session authorization, NOT real Google OAuth.
-// HTTP scenarios use the actual server. One explicitly labeled callback integration
-// uses the normal app with mocked Google transport; no helper files or auth bypasses.
+// HTTP scenarios use the actual server. Explicitly labeled Google callback and SES
+// setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BETTER_AUTH_SECRET to sign synthetic local session fixtures; no scenarios were run.');
@@ -242,6 +242,8 @@ describe('Public contract and authentication', () => {
     assert.ok(document.paths && Object.keys(document.paths).length > 0);
     const contract: Record<string, string[]> = {
       '/v1/api-keys': ['get', 'post'], '/v1/api-keys/{id}/revoke': ['post'],
+      '/v1/regions': ['get'], '/v1/regions/{region}': ['put'],
+      '/v1/regions/{region}/discovery': ['get'], '/v1/regions/{region}/provision': ['post'],
       '/v1/contacts': ['get', 'post'], '/v1/contacts/{id}': ['get', 'patch', 'delete'],
       '/v1/contacts/{id}/consent': ['get', 'post'],
       '/v1/contact-imports': ['get', 'post'], '/v1/contact-imports/{id}/commit': ['post'],
@@ -568,6 +570,262 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('LIVE GOOGLE OAUTH: approved login and denied Google identity require browser verification', {
     skip: 'NOT RUN by synthetic fixtures. Manually complete real Google login and denied-identity flows with configured OAuth credentials; seeding does not verify OAuth, consent, provider claims, redirect registration, or browser cookies.',
   }, () => {});
+});
+
+describe('DB region catalog and explicit SES setup', () => {
+  test('MOCK AWS TRANSPORT: catalog changes are immediate, discovery is read-only, and provisioning is explicit and idempotent', async t => {
+    const [{ createApp }, { nodeRuntime }, { drizzle }, { drain }, ses, sns, sts] = await Promise.all([
+      import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/dispatch.js'),
+      import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'),
+    ]);
+    const db = await fixtureDatabase(t);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+      GOOGLE_CLIENT_ID: 'synthetic-ses-client', GOOGLE_CLIENT_SECRET: 'synthetic-ses-client-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'true',
+      S3_BUCKET: 'synthetic-ses-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const runtime = instance.runtime;
+    runtime.config.workspaceId = unique('mock-ses-workspace');
+    const app = createApp();
+    const rollback = new Error('Rollback isolated SES acceptance fixtures');
+    const observed: Array<{ name: string; input: Json }> = [];
+    const unexpected: string[] = [];
+    // SDK prototype interception includes clients constructed later or cached by the
+    // adapter. No credential chain, request handler, or actual AWS endpoint is used.
+    const accountId = '111122223333';
+    const sets = new Map<string, Json>();
+    let topic: Json | undefined;
+    let subscriptions: Json[] = [];
+    let deny = false;
+    let wrongOwner = false;
+    let expectedSets: string[] = [];
+    let expectedTopic = '';
+    const writes = () => observed.filter(call => !/^(Get|List)/.test(call.name));
+    const provider = async (command: { constructor: { name: string }; input: Json }): Promise<Json> => {
+      const name = command.constructor.name, input = command.input;
+      observed.push({ name, input: structuredClone(input) });
+      const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
+      if (deny) throw Object.assign(new Error('SECRET_PROVIDER_DIAGNOSTIC synthetic-access-key'), { name: 'AccessDeniedException' });
+      switch (name) {
+        case 'GetCallerIdentityCommand': return { Account: accountId, Arn: `arn:aws:iam::${accountId}:user/synthetic-setup` };
+        case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY', SendQuota: { Max24HourSend: 1000, MaxSendRate: 10, SentLast24Hours: 3 } };
+        case 'ListEmailIdentitiesCommand': return { EmailIdentities: [{ IdentityType: 'DOMAIN', IdentityName: 'example.com', VerificationStatus: 'SUCCESS', SendingEnabled: true }] };
+        case 'GetEmailIdentityCommand':
+          assert.notEqual(input.EmailIdentity, 'disabled.example.com', 'Default domain listing must not refresh disabled regions.');
+          return { VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningHostedZone: 'dkim.amazonses.com', Tokens: ['synthetic'] } };
+        case 'GetConfigurationSetCommand': return sets.get(input.ConfigurationSetName) ?? missing();
+        case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: sets.get(input.ConfigurationSetName)?.destinations ?? [] };
+        case 'GetTopicAttributesCommand': return topic ? { Attributes: { ...topic.attributes, ...(wrongOwner ? { Owner: '999999999999' } : {}) } } : missing();
+        case 'ListTagsForResourceCommand': return { Tags: topic?.tags ?? [] };
+        case 'ListSubscriptionsByTopicCommand': return { Subscriptions: subscriptions };
+        case 'GetSubscriptionAttributesCommand': return { Attributes: { ...subscriptions.find(sub => sub.SubscriptionArn === input.SubscriptionArn), Owner: accountId, PendingConfirmation: 'false', RawMessageDelivery: 'false' } };
+        case 'CreateConfigurationSetCommand':
+          assert.ok(expectedSets.includes(input.ConfigurationSetName));
+          assert.ok(!sets.has(input.ConfigurationSetName), 'Repeated runs must not recreate an existing set.');
+          sets.set(input.ConfigurationSetName, { Tags: input.Tags, SendingOptions: input.SendingOptions, destinations: [] }); return {};
+        case 'CreateTopicCommand':
+          assert.equal(`arn:aws:sns:${REGION}:${accountId}:${input.Name}`, expectedTopic);
+          assert.equal(topic, undefined, 'Repeated runs must not recreate an existing topic.');
+          topic = { attributes: { TopicArn: expectedTopic, Owner: accountId }, tags: input.Tags }; return { TopicArn: expectedTopic };
+        case 'SetTopicAttributesCommand':
+          assert.equal(input.TopicArn, expectedTopic); assert.equal(input.AttributeName, 'Policy');
+          topic!.attributes.Policy = input.AttributeValue; return {};
+        case 'CreateConfigurationSetEventDestinationCommand':
+        case 'UpdateConfigurationSetEventDestinationCommand': {
+          assert.ok(expectedSets.includes(input.ConfigurationSetName));
+          assert.equal(input.EventDestination.SnsDestination.TopicArn, expectedTopic);
+          const set = sets.get(input.ConfigurationSetName)!;
+          set.destinations = [...set.destinations.filter((d: Json) => d.Name !== input.EventDestinationName), { Name: input.EventDestinationName, ...input.EventDestination }]; return {};
+        }
+        case 'SubscribeCommand':
+          assert.equal(input.TopicArn, expectedTopic); assert.equal(input.Protocol, 'https');
+          assert.equal(input.Endpoint, runtime.config.sesFeedbackUrl ?? `${runtime.config.publicUrl}/v1/events/ses`);
+          const registered = await (await import('./src/ses-region-state.js')).resolveRegionRuntime(runtime);
+          assert.ok(registered.config.snsTopicArns.includes(input.TopicArn), 'Signed confirmation must be trusted before SNS Subscribe can deliver it.');
+          assert.equal(registered.config.awsAccountId, accountId);
+          assert.deepEqual(input.Attributes, { RawMessageDelivery: 'false' });
+          assert.equal(subscriptions.length, 0, 'Pending confirmation must never create duplicate subscriptions.');
+          subscriptions = [{ TopicArn: input.TopicArn, Protocol: input.Protocol, Endpoint: input.Endpoint, SubscriptionArn: 'PendingConfirmation' }];
+          return { SubscriptionArn: 'PendingConfirmation' };
+        default:
+          unexpected.push(name);
+          throw new Error(`Unexpected mocked AWS command: ${name}`);
+      }
+    };
+    t.mock.method(ses.SESv2Client.prototype, 'send', provider as any);
+    t.mock.method(sns.SNSClient.prototype, 'send', provider as any);
+    t.mock.method(sts.STSClient.prototype, 'send', provider as any);
+    try {
+      await drizzle(db).transaction(async tx => {
+        runtime.db = tx;
+        await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, runtime.config);
+        async function local(method: string, path: string, body?: Json, key?: string, environment: 'test' | 'live' = 'live'): Promise<Reply> {
+          const response = await app.fetch(new Request(`${runtime.config.publicUrl}${path}`, {
+            method, headers: { origin: runtime.config.publicUrl, 'x-opensend-environment': environment,
+              ...(key ? { authorization: `Bearer ${key}` } : { cookie: manager!.cookie }), ...(body ? { 'content-type': 'application/json' } : {}) },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          }), runtime);
+          return { status: response.status, body: await response.json(), headers: response.headers };
+        }
+        async function machine(environment: 'test' | 'live', permissions: string[], domains: string[] = []) {
+          return ok(await local('POST', '/v1/api-keys', { name: unique('mock-ses-key'), environment, permissions, domains }), 201).secret as string;
+        }
+        const testKey = await machine('test', ['read', 'send', 'manage']);
+        const reader = await machine('live', ['read']);
+        const admin = await machine('live', ['read', 'send', 'manage']);
+        const scoped = await machine('live', ['read', 'manage'], ['example.com']);
+        const initial = ok(await local('GET', '/v1/regions', undefined, testKey));
+        assert.equal(initial.defaultRegion, REGION);
+        assert.ok(initial.data.some((row: Json) => row.region === REGION && row.enabled && row.isDefault));
+        assert.deepEqual(ok(await local('GET', '/v1/regions', undefined, reader)), initial);
+        error(await local('GET', '/v1/regions', undefined, scoped), 403);
+        const second = REGION === 'eu-west-1' ? 'us-west-2' : 'eu-west-1';
+        error(await local('PUT', `/v1/regions/${second}`, { enabled: true }, testKey), 403);
+        error(await local('PUT', `/v1/regions/${second}`, { enabled: true }, reader), 403);
+        error(await local('PUT', '/v1/regions/not-a-region', { enabled: true }, admin), 422);
+        ok(await local('PUT', `/v1/regions/${second}`, { enabled: true, makeDefault: true }, admin));
+        assert.equal(ok(await local('GET', '/v1/regions', undefined, testKey)).defaultRegion, second);
+        error(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin), 409);
+        const sent = ok(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), subject: 'DB-selected region', text: 'Synthetic only' }, testKey), 202);
+        assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).region, second, 'Changing the DB default must affect send without rebuilding the environment.');
+        ok(await local('PUT', `/v1/regions/${REGION}`, { makeDefault: true }, admin));
+        error(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin), 409, undefined);
+        for (let count = 0; count < 5 && await drain(runtime, 10); count++) { /* Drain only this transaction's unique workspace. */ }
+        assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'simulated');
+        ok(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin));
+        error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: second, subject: 'Disabled region', text: 'Synthetic only' }, testKey), 422);
+        assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).region, second, 'Disabling a region must not hide its historical email.');
+        assert.equal(observed.length, 0, 'Catalog reads/writes and simulated sends must never access AWS.');
+        error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, testKey), 403);
+        error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, scoped), 403);
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, testKey), 403);
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, reader), 403);
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, scoped), 403);
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: false }, admin), 422);
+        const originalUrl = runtime.config.publicUrl;
+        runtime.config.publicUrl = 'https://ses-acceptance.opensend.dev';
+        const blocked = ok(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader));
+        assert.equal(blocked.status, 'blocked');
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, admin), 503);
+        assert.equal(observed.length, 0, 'Missing explicit AWS credentials must fail without SDK calls.');
+        runtime.config.aws = { accessKeyId: 'synthetic-access-key', secretAccessKey: 'synthetic-secret-key' };
+        runtime.config.publicUrl = 'http://127.0.0.1:8798';
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, admin), 422);
+        assert.equal(observed.length, 0, 'Invalid callback URL must reject provisioning before AWS calls.');
+        runtime.config.sesFeedbackUrl = 'https://ses-acceptance.opensend.dev/v1/events/ses';
+        const startup = await import('./src/ses-regions.js');
+        assert.equal(await startup.queueStartupDiscovery(runtime), 1);
+        assert.equal(await startup.queueStartupDiscovery(runtime), 0, 'Concurrent/repeated startup discovery must reuse its pending job.');
+        assert.equal(ok(await local('GET', '/v1/regions', undefined, reader)).data.find((row: Json) => row.region === REGION).discoveryStatus, 'discovering');
+        await drain(runtime, 10);
+        const startupReport = ok(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader));
+        assert.equal(startupReport.feedbackUrl, runtime.config.sesFeedbackUrl);
+        assert.equal(startupReport.status, 'needs_provisioning');
+        assert.equal(writes().length, 0, 'Automatic startup discovery must not provision resources.');
+        assert.equal(await startup.queueStartupDiscovery(runtime), 0, 'A fresh discovery does not need another startup job.');
+        runtime.config.sesFeedbackUrl = undefined;
+        runtime.config.publicUrl = 'https://ses-acceptance.opensend.dev';
+        const discoveryPath = `/v1/regions/${REGION}/discovery`;
+        const missing = ok(await local('GET', discoveryPath, undefined, reader));
+        assert.equal(missing.status, 'needs_provisioning', 'Changed credentials must invalidate the previous blocked discovery cache.');
+        assert.equal(missing.account.id, accountId);
+        assert.equal(missing.account.quota.maxSendRate, 10);
+        assert.ok(missing.domains.some((domain: Json) => domain.name === 'example.com' && domain.sendingEnabled));
+        await db.query("INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','disabled.example.com',$3)", [unique('disabled-domain'), runtime.config.workspaceId, second]);
+        const enabledDomains = ok(await local('GET', '/v1/domains', undefined, reader));
+        assert.ok(enabledDomains.data.some((domain: Json) => domain.name === 'example.com'));
+        assert.ok(enabledDomains.data.every((domain: Json) => domain.region !== second));
+        expectedSets = [missing.resources.transactional.name, missing.resources.marketing.name];
+        expectedTopic = missing.resources.topic.arn;
+        assert.equal(missing.resources.topic.exists, false);
+        assert.equal(missing.resources.transactional.exists, false);
+        assert.equal(writes().length, 0, 'Discovering missing resources must not create, update, or subscribe anything.');
+        const cachedCalls = observed.length;
+        Object.assign(runtime.config.aws, { $source: { CREDENTIALS_CODE: 'e' } });
+        assert.deepEqual(ok(await local('GET', discoveryPath, undefined, reader)), missing);
+        assert.equal(observed.length, cachedCalls, 'A fresh report must use the DB cache.');
+        ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.ok(observed.length > cachedCalls, 'Explicit refresh must repeat AWS reads.');
+        assert.equal(writes().length, 0);
+        const rotatedCalls = observed.length;
+        runtime.config.aws.accessKeyId = 'synthetic-rotated-access-key';
+        ok(await local('GET', discoveryPath, undefined, reader));
+        assert.ok(observed.length > rotatedCalls, 'Credential changes must invalidate cached account discovery.');
+        error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: REGION, subject: 'Must not queue before setup', text: 'Synthetic only' }, admin), 409, 'SES_SETUP_REQUIRED');
+        const provisionPath = `/v1/regions/${REGION}/provision`;
+        const queued = ok(await local('POST', provisionPath, { confirm: true }, admin), 202);
+        assert.equal(queued.status, 'pending');
+        assert.equal(typeof queued.jobId, 'string');
+        assert.equal(ok(await local('POST', provisionPath, { confirm: true }, admin), 202).jobId, queued.jobId);
+        assert.equal(writes().length, 0, 'Only the durable worker may perform provisioning writes.');
+        const job = (await db.query('SELECT type, status FROM jobs WHERE id = $1', [queued.jobId])).rows[0];
+        assert.deepEqual(job, { type: 'ses.provision', status: 'pending' });
+        await drain(runtime, 10);
+        assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [queued.jobId])).rows[0].status, 'completed');
+        const pending = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.equal(pending.resources.topic.subscription, 'pending');
+        assert.equal(pending.provisioned, false);
+        assert.notEqual(pending.status, 'ready', 'Creating resources cannot claim readiness before SNS confirmation.');
+        assert.ok(pending.blockers.some((blocker: Json) => blocker.code === 'SNS_CONFIRMATION_PENDING'));
+        assert.equal(sets.size, 2);
+        assert.equal(subscriptions.length, 1);
+        const policy = JSON.parse(topic!.attributes.Policy);
+        const publish = policy.Statement.find((statement: Json) => statement.Principal?.Service === 'ses.amazonaws.com');
+        assert.equal(publish.Action, 'sns:Publish');
+        assert.equal(publish.Resource, expectedTopic);
+        assert.equal(publish.Condition.StringEquals['AWS:SourceAccount'], accountId);
+        assert.deepEqual(publish.Condition.StringEquals['AWS:SourceArn'].sort(), expectedSets.map(name => `arn:aws:ses:${REGION}:${accountId}:configuration-set/${name}`).sort());
+        assert.ok(policy.Statement.every((statement: Json) => statement.Principal !== '*' && statement.Resource === expectedTopic));
+        for (const set of sets.values()) {
+          assert.ok(set.Tags.some((tag: Json) => tag.Key === 'opensend:installation-id' && tag.Value));
+          assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['SEND', 'DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
+        }
+        // A foreign destination must survive retries, while managed resources and
+        // pending subscriptions remain singleton resources rather than duplicates.
+        const unrelated = { Name: 'customer-tracking', Enabled: true, MatchingEventTypes: ['OPEN'], SnsDestination: { TopicArn: 'arn:aws:sns:us-east-1:444455556666:unrelated' } };
+        sets.get(expectedSets[0]!)!.destinations.push(unrelated);
+        const repeated = ok(await local('POST', provisionPath, { confirm: true }, admin), 202);
+        assert.notEqual(repeated.jobId, queued.jobId);
+        await drain(runtime, 10);
+        assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [repeated.jobId])).rows[0].status, 'completed');
+        assert.equal(writes().filter(call => call.name === 'CreateConfigurationSetCommand').length, 2);
+        assert.equal(writes().filter(call => call.name === 'CreateTopicCommand').length, 1);
+        assert.equal(writes().filter(call => call.name === 'SubscribeCommand').length, 1);
+        assert.deepEqual(sets.get(expectedSets[0]!)!.destinations.find((destination: Json) => destination.Name === unrelated.Name), unrelated);
+        subscriptions[0]!.SubscriptionArn = `${expectedTopic}:00000000-0000-4000-8000-000000000000`;
+        const ready = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.equal(ready.status, 'ready');
+        assert.equal(ready.provisioned, true);
+        const regional = await import('./src/ses-region-state.js');
+        const connectedKey = runtime.config.aws.accessKeyId;
+        runtime.config.aws.accessKeyId = 'another-synthetic-account-credential';
+        assert.ok((await regional.resolveRegionRuntime(runtime)).config.snsTopicArns.includes(expectedTopic), 'Rotating AWS credentials must not drop signed feedback from an already provisioned topic.');
+        ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.ok((await regional.resolveRegionRuntime(runtime)).config.snsTopicArns.includes(expectedTopic), 'Feedback trust follows the registered account and topic independently of API credential rotation.');
+        runtime.config.aws.accessKeyId = connectedKey;
+        assert.ok((await regional.resolveRegionRuntime(runtime)).config.snsTopicArns.includes(expectedTopic));
+        const beforeWrongOwner = writes().length;
+        wrongOwner = true;
+        const conflict = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.equal(conflict.status, 'blocked');
+        assert.ok(conflict.blockers.some((blocker: Json) => blocker.code === 'RESOURCE_OWNERSHIP_CONFLICT'));
+        const conflictJob = ok(await local('POST', provisionPath, { confirm: true }, admin), 202);
+        await drain(runtime, 10);
+        assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [conflictJob.jobId])).rows[0].status, 'failed');
+        assert.equal(writes().length, beforeWrongOwner, 'A conflicting owner must block all provisioning writes.');
+        wrongOwner = false;
+        deny = true;
+        const denied = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
+        assert.equal(denied.status, 'blocked');
+        assert.ok(denied.blockers.some((blocker: Json) => blocker.code === 'AWS_ACCESS_DENIED'));
+        assert.doesNotMatch(JSON.stringify(denied), /SECRET_PROVIDER_DIAGNOSTIC|synthetic-access-key|synthetic-secret-key/);
+        assert.equal(writes().length, beforeWrongOwner, 'Permission-denied discovery must never attempt repair.');
+        runtime.config.publicUrl = originalUrl;
+        assert.deepEqual(unexpected, []);
+        throw rollback;
+      });
+    } catch (cause) { if (cause !== rollback) throw cause; }
+  });
 });
 
 describe('Contacts, explicit consent, and environment isolation', () => {
@@ -1463,7 +1721,9 @@ describe('Operational configuration and public event boundaries', () => {
     assert.equal(ok(await http('GET', '/v1/settings/workspace', live.secret)).name, liveBefore.name);
     error(await http('PATCH', '/v1/settings/workspace', reader.secret, { name: 'Forbidden' }), 403, 'PERMISSION_DENIED');
     error(await http('GET', '/v1/settings/ses', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
-    error(await http('GET', '/v1/regions', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
+    const catalog = ok(await http('GET', '/v1/regions', key.secret));
+    assert.equal(typeof catalog.defaultRegion, 'string');
+    assert.ok(catalog.data.some((entry: Json) => entry.region === catalog.defaultRegion && entry.enabled && entry.isDefault));
     error(await http('GET', '/v1/domains', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
     error(await http('POST', '/v1/domains', key.secret, { name: `${unique('acceptance')}.example.com`, region: REGION }), 403, 'TEST_EXTERNAL_OPERATION');
   });

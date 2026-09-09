@@ -18,6 +18,8 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1128.0",
     "@aws-sdk/client-sesv2": "^3.1128.0",
+    "@aws-sdk/client-sns": "^3.1128.0",
+    "@aws-sdk/client-sts": "^3.1128.0",
     "@better-auth/drizzle-adapter": "^1.7.3",
     "@hono/node-server": "^2.1.1",
     "@hono/zod-openapi": "^1.6.3",

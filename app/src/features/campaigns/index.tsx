@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
+import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, Attachment, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
@@ -81,6 +82,7 @@ function RegionMismatch({ campaign }: { campaign: Campaign }) {
 
 function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regionId: string }) {
   const testEnvironment = useApi().environment === 'test'
+  const regionCatalog = useRegionCatalog()
   const {setRegionId} = useRegion()
   const navigate = useNavigate()
   const [form, setForm] = useState<CampaignInput>(() => initial ? {
@@ -147,7 +149,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
         <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={pending} /></Field>
         <Field label="Preview text" htmlFor="campaign-preview"><Input id="campaign-preview" maxLength={200} value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={pending} /></Field>
         <Field label="From name" htmlFor="campaign-from-name"><Input id="campaign-from-name" maxLength={200} value={form.fromName} onChange={event => change('fromName', event.target.value)} disabled={pending} /></Field>
-        {testEnvironment && <Field label="Simulation region" htmlFor="campaign-test-region" hint="Must be configured in SES_REGIONS. This editable default is not an availability check; no AWS lookup is performed."><Input id="campaign-test-region" maxLength={40} required value={form.regionId} onChange={event => change('regionId', event.target.value)} disabled={pending} /></Field>}
+        {testEnvironment && <Field label="Simulation region" htmlFor="campaign-test-region" hint="Enabled regions from the catalog. No AWS lookup is performed."><Select id="campaign-test-region" required value={form.regionId} onValueChange={value => change('regionId', value)} disabled={pending || regionCatalog.isPending} options={(regionCatalog.data?.data ?? []).filter(region => region.enabled || region.region === form.regionId).map(region => ({value: region.region, label: `${region.region}${region.enabled ? '' : ' · Disabled'}`, disabled: !region.enabled}))} /></Field>}
         {testEnvironment ? <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" type="email" required value={form.fromEmail} onChange={event => change('fromEmail', event.target.value)} disabled={pending} /></Field> : <div className="campaign-sender">
           <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={pending} /></Field>
           <span aria-hidden="true">@</span>

@@ -12,7 +12,7 @@ export function postgresConnection(connectionString: string | undefined) {
   if (!local && url.searchParams.get('sslmode') !== 'verify-full') throw new ApiError(503, 'DATABASE_TLS_REQUIRED', 'Remote PostgreSQL requires sslmode=verify-full. Only local development database hosts may omit TLS.');
   return { connectionString, connectionTimeoutMillis: 10000 };
 }
-export function nodeRuntime(env: NodeJS.ProcessEnv): { runtime: Runtime; close: () => Promise<void> } {
+export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {
   const pool = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 10, idleTimeoutMillis: 30000 });
   return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env) }, close: () => pool.end() };
 }

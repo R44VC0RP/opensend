@@ -1,9 +1,13 @@
-import type { ApiKey, AudienceList, Campaign, Contact, Domain, Email, Region, Segment, Webhook, Workspace } from './types'
+import type { ApiKey, AudienceList, Campaign, Contact, Domain, Email, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+
+// Legacy profiles stay internal to demo persistence and campaign quota simulation.
+export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
 
 export interface DemoState {
   version: 1
   workspace: Workspace
-  regions: Region[]
+  regions: DemoRegionProfile[]
+  regionSetup?: { catalog: RegionCatalog; reports: Record<string, SesDiscovery> }
   contacts: Contact[]
   lists: AudienceList[]
   segments: Segment[]
@@ -16,7 +20,7 @@ export interface DemoState {
 
 export function createSeed(now = Date.now()): DemoState {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
-  const regions: Region[] = [
+  const regions: DemoRegionProfile[] = [
     { id: 'us-east-1', name: 'US East (N. Virginia)', access: 'production', health: 'healthy', sendingEnabled: true, sent24h: 18204, dailyQuota: 50000, maxSendRate: 14, bounceRate: 0.0024, complaintRate: 0.0001, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: true },
     { id: 'eu-west-1', name: 'Europe (Ireland)', access: 'production', health: 'healthy', sendingEnabled: true, sent24h: 8240, dailyQuota: 100000, maxSendRate: 28, bounceRate: 0.0018, complaintRate: 0.0001, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: true },
     { id: 'us-west-2', name: 'US West (Oregon)', access: 'sandbox', health: 'healthy', sendingEnabled: true, sent24h: 12, dailyQuota: 200, maxSendRate: 1, bounceRate: 0, complaintRate: 0, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: false },

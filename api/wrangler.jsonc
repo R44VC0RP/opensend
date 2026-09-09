@@ -11,9 +11,8 @@
   },
   "vars": {
     "PUBLIC_URL": "https://opensend.example.com",
-    "SES_REGIONS": "us-east-1",
+    "DEFAULT_SES_REGION": "us-east-1",
     "ENABLE_LIVE_SES": "false",
-    "SNS_TOPIC_ARNS": "",
     "WEBHOOK_ALLOWED_HOSTS": "",
     "GOOGLE_CLIENT_ID": "",
     "AUTH_ALLOWED_EMAILS": "",

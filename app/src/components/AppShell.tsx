@@ -1,8 +1,9 @@
 import { Suspense, useEffect, useRef } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
-import { useApi, useApiQuery, useRegion, useSession } from '../data/context'
-import { number, percent } from '../lib/format'
-import { Button, Input, Select, Skeleton, SkeletonText } from './ui'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
+import { useApi, useRegion, useSession } from '../data/context'
+import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
+import { label, number, percent } from '../lib/format'
+import { Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 
@@ -11,16 +12,23 @@ export function AppShell() {
   const api = useApi()
   const session = useSession()
   const { regionId, setRegionId } = useRegion()
-  const regions = useApiQuery(['regions'], (client, signal) => client.environment === 'test' ? Promise.resolve([]) : client.regions.list(signal))
-  const current = regions.data?.find(region => region.id === regionId)
+  const regions = useRegionCatalog()
+  const enabled = regions.data?.data.filter(region => region.enabled) ?? []
+  const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
+  const discovery = useRegionDiscovery(current)
+  const quota = discovery.data?.account?.quota
   const location = useLocation()
   const navigate = useNavigate()
+  const needsRegion = location.pathname === '/' || ['/logs', '/campaigns', '/domains'].some(path => location.pathname.startsWith(path))
   const content = useRef<HTMLElement>(null)
   useEffect(() => {
     window.scrollTo(0, 0)
     content.current?.scrollTo(0, 0)
   }, [location.pathname])
-  useEffect(() => { if (regions.data?.length && !current) setRegionId(regions.data[0].id) }, [regions.data, current, setRegionId])
+  useEffect(() => {
+    const preferred = regions.data?.defaultRegion
+    if (regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
+  }, [regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
   function changeRegion(id: string) {
     setRegionId(id)
@@ -40,17 +48,18 @@ export function AppShell() {
       <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
-        {api.environment === 'test' ? <label className="stack"><span className="muted">Simulation region</span><Input key={regionId} aria-label="Simulation region" title="Must be configured in SES_REGIONS; this editable scope is not an availability check." defaultValue={regionId} maxLength={40} onBlur={event => {const value = event.currentTarget.value.trim(); if (value && value !== regionId) changeRegion(value)}} onKeyDown={event => {if (event.key === 'Enter') event.currentTarget.blur()}} /></label> : <Select aria-label="AWS region" value={regionId} onValueChange={changeRegion} options={(regions.data ?? [{ id: regionId }]).map(region => ({ value: region.id, label: region.id }))} disabled={!regions.data?.length} />}
+        <Select aria-label={api.environment === 'test' ? 'Simulation region' : 'AWS region'} value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />
+        {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
       </div>
       {api.mode !== 'demo' && session && <div className="sidebar-context"><Select aria-label="Environment" value={session.environment} onValueChange={value => { session.setEnvironment(value as 'live' | 'test'); navigate('/') }} options={[{value: 'live', label: 'Live'}, {value: 'test', label: 'Test'}]} /><span className="muted">{session.environment === 'test' ? 'Simulation only' : 'Real delivery'}</span><Button variant="ghost" onClick={() => session.logout()}>Sign out</Button></div>}
       <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
-      <div className="sidebar-quota">{api.environment === 'test' ? <span>Test scope · No AWS quota lookup</span> : current ? <>
-        <div className="quota-label"><span>SES · 24h</span><span>{percent(current.sent24h / Math.max(1, current.dailyQuota), 0)}</span></div>
-        <meter className="quota-meter" min={0} max={current.dailyQuota} value={current.sent24h} aria-label="Daily sending quota used" />
-        <span>{number(current.sent24h)} / {number(current.dailyQuota)} sent</span>
-      </> : regions.isError ? <><span>Quota unavailable</span><Button variant="ghost" onClick={() => regions.refetch()}>Retry</Button></> : <><div className="quota-label"><span>SES · 24h</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></>}</div>
+      <div className="sidebar-quota">{api.environment === 'test' ? <span>Test scope · No AWS quota lookup</span> : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
+        <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
+        {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
+        <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
+      </> : discovery.isFetching ? <><div className="quota-label"><span>Inspecting SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : <><span>SES · {discovery.isError ? 'Inspection unavailable' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">View SES setup</Link></>}</div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}><Outlet /></Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} /> : regions.isPending || (!current && enabled.length > 0) ? <RouteSkeleton /> : needsRegion && !enabled.length ? <EmptyState title="No enabled regions" action={<Link to="/settings">Configure SES regions</Link>} /> : <Outlet />}</Suspense></main>
   </div>
 }

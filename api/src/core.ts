@@ -24,6 +24,7 @@ export interface Config {
   allowedEmails: string[];
   allowedDomains: string[];
   publicUrl: string;
+  sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;
   encryptionKey: string;

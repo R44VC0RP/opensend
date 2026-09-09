@@ -2,7 +2,8 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
-import type { Region, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
+import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
+import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog, SettingsTabs } from './shared'
 import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './skeletons'
@@ -19,15 +20,14 @@ function validate(input: WebhookInput) {
   return errors
 }
 
-function EndpointFields({ input, onChange, regions, errors, apiError, disabled }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: Region[]; errors: Record<string, string>; apiError: unknown; disabled: boolean }) {
-  const testEnvironment = useApi().environment === 'test'
+function EndpointFields({ input, onChange, regions, errors, apiError, disabled }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean }) {
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
       <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><Input id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required disabled={disabled} placeholder="https://support.acme.com/hooks/email" /></Field>
     </div>
-    <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'This workspace · Includes all regions' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.map(region => region.id) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
-    {input.regionIds !== 'all' && (testEnvironment ? <Field label="Region identifiers" htmlFor="endpoint-test-regions" hint="Comma-separated test scopes. No AWS lookup is performed."><Input id="endpoint-test-regions" value={input.regionIds.join(', ')} disabled={disabled} onChange={event => onChange({...input, regionIds: event.target.value.split(',').map(value => value.trim())})} /></Field> : <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => <Checkbox key={region.id} label={region.id} checked={input.regionIds !== 'all' && input.regionIds.includes(region.id)} disabled={disabled} onCheckedChange={checked => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: checked ? [...selected, region.id] : selected.filter(id => id !== region.id) }) }} />)}</div>)}</div>
+    <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'This workspace · Includes all regions' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
+    {input.regionIds !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = input.regionIds !== 'all' && input.regionIds.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: next ? [...selected, region.region] : selected.filter(id => id !== region.region) }) }} /> })}</div>}</div>
     <div className="stack"><div id="endpoint-events-label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={label(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
   </div>
 }
@@ -54,7 +54,7 @@ export function WebhooksPage() {
 
 function NewWebhook() {
   const navigate = useNavigate()
-  const regions = useApiQuery(['regions'], (api, signal) => api.environment === 'test' ? Promise.resolve([]) : api.regions.list(signal))
+  const regions = useRegionCatalog()
   const save = useApiMutation((api, input: WebhookInput) => api.webhooks.save(input), 'Webhook endpoint created')
   const [input, setInput] = useState<WebhookInput>(blankEndpoint)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -69,7 +69,7 @@ function NewWebhook() {
     <PageHeader title="Add webhook" backTo="/settings/webhooks" />
     {regions.isPending ? <WebhookBodySkeleton isNew /> : regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
-      <EndpointFields input={input} onChange={setInput} regions={regions.data} errors={errors} apiError={save.error} disabled={save.isPending} />
+      <EndpointFields input={input} onChange={setInput} regions={regions.data.data} errors={errors} apiError={save.error} disabled={save.isPending} />
       <div className="muted">A separate signing secret is created for each endpoint.</div>
       <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings/webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add endpoint</Button></div>
     </form>}
@@ -78,13 +78,13 @@ function NewWebhook() {
 
 function ExistingWebhook({ id }: { id: string }) {
   const webhook = useApiQuery(['webhook', id], (api, signal) => api.webhooks.get(id, signal))
-  const regions = useApiQuery(['regions'], (api, signal) => api.environment === 'test' ? Promise.resolve([]) : api.regions.list(signal))
+  const regions = useRegionCatalog()
   if (webhook.isPending || regions.isPending) return <SettingsRouteSkeleton kind="webhook" />
   if (webhook.error || regions.error) return <ErrorState error={webhook.error || regions.error} onRetry={() => { void webhook.refetch(); void regions.refetch() }} />
-  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data} />
+  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data.data} />
 }
 
-function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region[] }) {
+function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: RegionCatalogEntry[] }) {
   const navigate = useNavigate()
   const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: webhook.url, regionIds: webhook.regionIds, events: webhook.events })
   const [errors, setErrors] = useState<Record<string, string>>({})

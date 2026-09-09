@@ -8,6 +8,7 @@ import { registerGoogleAuth } from './google-auth.js';
 import { registerAudience } from './audience.js';
 import { registerSending } from './sending.js';
 import { registerOperations } from './operations.js';
+import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -30,8 +31,13 @@ export function createApp() {
   });
   app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
   app.use('/v1/*', async (c, next) => {
-    if (c.req.path === '/v1/events/ses') return next();
-    return authenticate(c, next);
+    const configured = async () => {
+      if (/^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path) || c.req.path === '/v1/settings/ses') c.env = await resolveRegionRuntime(c.env);
+      await next();
+    };
+    if (c.req.path === '/v1/events/ses') return configured();
+    // Reject invalid credentials before accessing regional settings. Never mutate a shared Node runtime.
+    return authenticate(c, configured);
   });
   app.onError((error, c) => {
     const requestId = c.get('requestId');
@@ -43,7 +49,7 @@ export function createApp() {
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
-  registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app);
+  registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app); registerSesRegions(app);
   app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending.' } });
   return app;
 }

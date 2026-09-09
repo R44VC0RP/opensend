@@ -173,7 +173,10 @@ export type SendEmailInput = {
     cc?: Array<string>;
     bcc?: Array<string>;
     replyTo?: Array<string>;
-    region: string;
+    /**
+     * Defaults to the installation’s persisted default region when omitted.
+     */
+    region?: string;
     kind?: 'transactional' | 'marketing';
     subject?: string;
     html?: string;
@@ -483,10 +486,6 @@ export type SesAccount = {
     };
 };
 
-export type Regions = {
-    data: Array<SesAccount>;
-};
-
 export type DomainPage = {
     data: Array<DomainReadiness>;
     nextCursor: string | null;
@@ -653,6 +652,97 @@ export type Metrics = {
         bounced: number;
         complained: number;
     }>;
+};
+
+export type RegionCatalog = {
+    defaultRegion: string;
+    data: Array<{
+        region: string;
+        enabled: boolean;
+        isDefault: boolean;
+        discoveryStatus: 'not_discovered' | 'discovering' | 'stale' | 'ready' | 'needs_provisioning' | 'blocked';
+        lastDiscoveredAt: string | null;
+        provisionJobId: string | null;
+        provisionStatus: 'pending' | 'running' | 'completed' | 'failed' | null;
+        provisionError: string | null;
+    }>;
+};
+
+export type ConfigureRegion = {
+    enabled?: boolean;
+    makeDefault?: boolean;
+};
+
+export type SesDiscovery = {
+    region: string;
+    checkedAt: string;
+    account: {
+        id: string;
+        productionAccess: boolean | null;
+        sendingEnabled: boolean | null;
+        enforcementStatus: string | null;
+        quota: {
+            max24HourSend: number | null;
+            maxSendRate: number | null;
+            sentLast24Hours: number | null;
+        };
+    } | null;
+    domains: Array<{
+        name: string;
+        verificationStatus: string | null;
+        sendingEnabled: boolean | null;
+    }>;
+    identitiesTruncated: boolean;
+    resources: {
+        transactional: {
+            name: string;
+            exists: boolean | null;
+            owned: boolean | null;
+            sendingEnabled: boolean | null;
+            eventDestinationExists: boolean | null;
+            eventWired: boolean | null;
+        };
+        marketing: {
+            name: string;
+            exists: boolean | null;
+            owned: boolean | null;
+            sendingEnabled: boolean | null;
+            eventDestinationExists: boolean | null;
+            eventWired: boolean | null;
+        };
+        eventDestinationName: string;
+        topic: {
+            name: string;
+            arn: string | null;
+            exists: boolean | null;
+            owned: boolean | null;
+            policyReady: boolean | null;
+            subscription: 'unknown' | 'missing' | 'pending' | 'confirmed';
+            rawMessageDelivery: boolean | null;
+            subscriptionsTruncated: boolean;
+            staleSubscriptions: number;
+        };
+    };
+    feedbackUrl: string | null;
+    status: 'ready' | 'needs_provisioning' | 'blocked';
+    provisioned: boolean;
+    blockers: Array<{
+        code: string;
+        message: string;
+    }>;
+    warnings: Array<{
+        code: string;
+        message: string;
+    }>;
+};
+
+export type RegionProvisionReceipt = {
+    jobId: string;
+    status: 'pending' | 'running';
+};
+
+export type ProvisionRegion = {
+    confirm: true;
 };
 
 export type GetCurrentIdentityData = {
@@ -4132,67 +4222,6 @@ export type GetSesSettingsResponses = {
 
 export type GetSesSettingsResponse = GetSesSettingsResponses[keyof GetSesSettingsResponses];
 
-export type ListRegionsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/v1/regions';
-};
-
-export type ListRegionsErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type ListRegionsError = ListRegionsErrors[keyof ListRegionsErrors];
-
-export type ListRegionsResponses = {
-    /**
-     * Success
-     */
-    200: Regions;
-};
-
-export type ListRegionsResponse = ListRegionsResponses[keyof ListRegionsResponses];
-
 export type ListDomainsData = {
     body?: never;
     path?: never;
@@ -5394,3 +5423,255 @@ export type GetMetricsResponses = {
 };
 
 export type GetMetricsResponse = GetMetricsResponses[keyof GetMetricsResponses];
+
+export type ListRegionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/regions';
+};
+
+export type ListRegionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListRegionsError = ListRegionsErrors[keyof ListRegionsErrors];
+
+export type ListRegionsResponses = {
+    /**
+     * Success
+     */
+    200: RegionCatalog;
+};
+
+export type ListRegionsResponse = ListRegionsResponses[keyof ListRegionsResponses];
+
+export type ConfigureRegionData = {
+    body: ConfigureRegion;
+    path: {
+        region: string;
+    };
+    query?: never;
+    url: '/v1/regions/{region}';
+};
+
+export type ConfigureRegionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ConfigureRegionError = ConfigureRegionErrors[keyof ConfigureRegionErrors];
+
+export type ConfigureRegionResponses = {
+    /**
+     * Success
+     */
+    200: RegionCatalog;
+};
+
+export type ConfigureRegionResponse = ConfigureRegionResponses[keyof ConfigureRegionResponses];
+
+export type DiscoverRegionData = {
+    body?: never;
+    path: {
+        region: string;
+    };
+    query?: {
+        refresh?: 'true' | 'false';
+    };
+    url: '/v1/regions/{region}/discovery';
+};
+
+export type DiscoverRegionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DiscoverRegionError = DiscoverRegionErrors[keyof DiscoverRegionErrors];
+
+export type DiscoverRegionResponses = {
+    /**
+     * Success
+     */
+    200: SesDiscovery;
+};
+
+export type DiscoverRegionResponse = DiscoverRegionResponses[keyof DiscoverRegionResponses];
+
+export type ProvisionRegionData = {
+    body: ProvisionRegion;
+    path: {
+        region: string;
+    };
+    query?: never;
+    url: '/v1/regions/{region}/provision';
+};
+
+export type ProvisionRegionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ProvisionRegionError = ProvisionRegionErrors[keyof ProvisionRegionErrors];
+
+export type ProvisionRegionResponses = {
+    /**
+     * Success
+     */
+    202: RegionProvisionReceipt;
+};
+
+export type ProvisionRegionResponse = ProvisionRegionResponses[keyof ProvisionRegionResponses];

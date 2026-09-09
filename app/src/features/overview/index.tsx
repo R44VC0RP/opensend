@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
+import { useRegionCatalog } from '../../data/regions'
 import type { ChartPoint, Stream, TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Skeleton, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { date, number, percent, label } from '../../lib/format'
@@ -15,11 +16,11 @@ export function OverviewPage() {
   const [stream, setStream] = useState('all')
   const navigate = useNavigate()
   const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal))
-  const regions = useApiQuery(['regions'], (api, signal) => api.environment === 'test' ? Promise.resolve([]) : api.regions.list(signal))
-  const current = regions.data?.find(region => region.id === regionId)
+  const regions = useRegionCatalog()
+  const current = regions.data?.data.find(region => region.region === regionId)
   const data = query.data
   const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
-  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span>{api.environment === 'test' ? <StatusBadge status="Test simulation" /> : current ? <StatusBadge status={current.access} tone={current.access === 'production' ? 'success' : 'warning'} /> : <Skeleton width={84} height={20} />}</div>} />{filterBar}
+  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span>{api.environment === 'test' ? <StatusBadge status="Test simulation" /> : current ? <StatusBadge status={label(current.discoveryStatus)} tone={current.discoveryStatus === 'ready' ? 'success' : current.discoveryStatus === 'blocked' ? 'danger' : 'warning'} /> : <Skeleton width={84} height={20} />}</div>} />{filterBar}
     {query.isPending ? <OverviewBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <>
       <div className="metrics-grid">
         <Metric title={live ? "Created" : "Sent"} value={number(data.sent)} note={data.previousSent ? `${percent((data.sent - data.previousSent) / data.previousSent, 1)} vs. previous period` : 'No emails in the previous period'} tone="accent" />

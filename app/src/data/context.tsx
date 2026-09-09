@@ -67,7 +67,7 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
 const RegionContext = createContext<{ regionId: string; setRegionId: (id: string) => void } | null>(null)
 export function RegionProvider({ children }: { children: ReactNode }) {
   const [regionId, setRegion] = useState(() => {
-    try { return localStorage.getItem('opensend.region') || 'us-east-1' } catch { return 'us-east-1' }
+    try { return localStorage.getItem('opensend.region') || '' } catch { return '' }
   })
   function setRegionId(id: string) {
     setRegion(id)

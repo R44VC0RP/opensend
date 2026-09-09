@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignEditorMetadata, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignEditorMetadata, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { createSeed } from './seed'
 import type { DemoState } from './seed'
 
@@ -19,6 +19,58 @@ const CONNECTABLE_REGIONS: Record<string, string> = {
 const clone = <T,>(value: T): T => structuredClone(value)
 const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`
 const now = () => new Date().toISOString()
+const DISCOVERY_TTL = 15 * 60 * 1000
+function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean, subscription: SesDiscovery['resources']['topic']['subscription'] = resourcesReady ? 'confirmed' : 'missing'): SesDiscovery {
+  const profile = find(state.regions, region, 'Region')
+  const set = (kind: string) => ({ name: `opensend-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady })
+  const blockers: SesDiscovery['blockers'] = []
+  if (profile.access === 'sandbox') blockers.push({ code: 'SES_SANDBOX', message: 'Demo SES production access is not enabled in this region. Provisioning cannot grant production approval.' })
+  if (!profile.sendingEnabled) blockers.push({ code: 'SES_SENDING_DISABLED', message: 'Demo SES account sending is disabled.' })
+  if (profile.health !== 'healthy') blockers.push({ code: 'SES_ACCOUNT_ENFORCEMENT', message: 'Demo SES account enforcement status is not healthy.' })
+  if (subscription === 'pending') blockers.push({ code: 'SNS_CONFIRMATION_PENDING', message: 'Demo SNS subscription confirmation is pending. Poll the catalog again to advance the simulation.' })
+  const provisioned = resourcesReady && subscription === 'confirmed'
+  return {
+    region, checkedAt: now(), account: { id: '123456789012', productionAccess: profile.access === 'production', sendingEnabled: profile.sendingEnabled, enforcementStatus: profile.health.toUpperCase(), quota: { max24HourSend: profile.dailyQuota, maxSendRate: profile.maxSendRate, sentLast24Hours: profile.sent24h } },
+    domains: state.domains.filter(domain => domain.regionId === region).map(domain => ({ name: domain.name, verificationStatus: domain.status === 'verified' ? 'SUCCESS' : domain.status === 'issue' ? 'FAILED' : 'PENDING', sendingEnabled: domain.status === 'verified' })), identitiesTruncated: false,
+    resources: { transactional: set('transactional'), marketing: set('marketing'), eventDestinationName: 'opensend-demo-events', topic: { name: 'opensend-demo-feedback', arn: resourcesReady ? `arn:aws:sns:${region}:123456789012:opensend-demo-feedback` : null, exists: resourcesReady, owned: resourcesReady, policyReady: resourcesReady, subscription, rawMessageDelivery: subscription === 'confirmed' ? false : null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
+    feedbackUrl: 'https://demo.example.invalid/v1/events/ses', status: blockers.length ? 'blocked' : provisioned ? 'ready' : 'needs_provisioning', provisioned, blockers,
+    warnings: [{ code: 'DEMO_SIMULATION', message: 'Simulated discovery only. No AWS resources, DNS records, subscriptions, or email are changed.' }],
+  }
+}
+function regionSetup(state: DemoState): NonNullable<DemoState['regionSetup']> {
+  if (!state.regionSetup) {
+    const reports = Object.fromEntries(state.regions.map(region => [region.id, demoDiscovery(state, region.id, true)]))
+    state.regionSetup = { catalog: { defaultRegion: state.regions[0]!.id, data: state.regions.map((region, index) => ({ region: region.id, enabled: true, isDefault: index === 0, discoveryStatus: reports[region.id]!.status, lastDiscoveredAt: reports[region.id]!.checkedAt, provisionJobId: null, provisionStatus: null, provisionError: null })) }, reports }
+  }
+  return state.regionSetup
+}
+function enabledRegion(state: DemoState, region: string): RegionCatalogEntry {
+  const row = regionSetup(state).catalog.data.find(row => row.region === region)
+  if (!row?.enabled) throw new ApiError('Enable this SES region before continuing.', 'REGION_NOT_CONFIGURED', { region: 'This region is disabled or not configured.' })
+  return row
+}
+function saveDiscovery(state: DemoState, report: SesDiscovery) {
+  const setup = regionSetup(state)
+  setup.reports[report.region] = report
+  const row = setup.catalog.data.find(row => row.region === report.region)!
+  row.discoveryStatus = report.status; row.lastDiscoveredAt = report.checkedAt
+  return report
+}
+function catalog(state: DemoState, advance = false): RegionCatalog {
+  const setup = regionSetup(state)
+  for (const row of setup.catalog.data) {
+    // Only catalog polling advances explicitly queued demo jobs; discovery never provisions.
+    if (advance && row.provisionStatus === 'pending') {
+      row.provisionStatus = 'running'
+      saveDiscovery(state, demoDiscovery(state, row.region, true, 'pending'))
+    } else if (advance && row.provisionStatus === 'running') {
+      row.provisionStatus = 'completed'
+      saveDiscovery(state, demoDiscovery(state, row.region, true, 'confirmed'))
+    }
+    if (row.lastDiscoveredAt && Date.now() - Date.parse(row.lastDiscoveredAt) >= DISCOVERY_TTL) row.discoveryStatus = 'stale'
+  }
+  return setup.catalog
+}
 const invalid = (field: string, message: string): never => { throw new ApiError(message, 'validation', { [field]: message }) }
 function text(value: unknown, field: string, max = 200, optional = false): string {
   if (typeof value !== 'string') return invalid(field, `${field} must be text.`)
@@ -176,6 +228,7 @@ function validEditor(value: unknown): boolean {
   try { validateEditor(value); return true } catch { return false }
 }
 function validateCampaign(state: DemoState, input: CampaignInput): CampaignInput {
+  enabledRegion(state, input.regionId)
   checkRegion(state, input.regionId)
   find(state.lists, input.listId, 'List')
   if (input.segmentId !== null) find(state.segments, input.segmentId, 'Segment')
@@ -212,6 +265,26 @@ function validSnapshot(value: unknown): value is DemoState {
   const records = (v: unknown): v is Record<string, unknown>[] => Array.isArray(v) && v.every(isRecord)
   if (!arrays.every(key => rows(key).every(row => typeof row.id === 'string') && new Set(rows(key).map(row => row.id)).size === rows(key).length)) return false
   const references = (key: string, ref: unknown) => rows(key).some(row => row.id === ref)
+  if (value.regionSetup !== undefined) {
+    const setup = value.regionSetup
+    const nullableString = (v: unknown) => v === null || typeof v === 'string'
+    const flag = (v: unknown) => v === null || typeof v === 'boolean'
+    const nullableNumber = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v))
+    const issues = (v: unknown) => records(v) && v.every(issue => strings(issue, ['code', 'message']))
+    const set = (v: unknown) => isRecord(v) && strings(v, ['name']) && ['exists', 'owned', 'sendingEnabled', 'eventDestinationExists', 'eventWired'].every(key => flag(v[key]))
+    if (!isRecord(setup) || !isRecord(setup.catalog) || !isRecord(setup.reports)) return false
+    const catalog = setup.catalog
+    if (!records(catalog.data)) return false
+    if (!references('regions', catalog.defaultRegion) || catalog.data.length !== rows('regions').length || new Set(catalog.data.map(row => row.region)).size !== catalog.data.length || !catalog.data.every(row => references('regions', row.region) && typeof row.enabled === 'boolean' && row.isDefault === (row.region === catalog.defaultRegion) && (row.region !== catalog.defaultRegion || row.enabled) && ['not_discovered', 'stale', 'ready', 'needs_provisioning', 'blocked'].includes(String(row.discoveryStatus)) && (row.lastDiscoveredAt === null || date(row.lastDiscoveredAt)) && nullableString(row.provisionJobId) && nullableString(row.provisionError) && (row.provisionStatus === null || ['pending', 'running', 'completed', 'failed'].includes(String(row.provisionStatus))))) return false
+    for (const [region, report] of Object.entries(setup.reports)) {
+      if (!references('regions', region) || !isRecord(report) || report.region !== region || !date(report.checkedAt) || !['ready', 'needs_provisioning', 'blocked'].includes(String(report.status)) || typeof report.provisioned !== 'boolean' || typeof report.identitiesTruncated !== 'boolean' || !nullableString(report.feedbackUrl) || !issues(report.blockers) || !issues(report.warnings)) return false
+      if (report.account !== null && (!isRecord(report.account) || !strings(report.account, ['id']) || !flag(report.account.productionAccess) || !flag(report.account.sendingEnabled) || !nullableString(report.account.enforcementStatus) || !isRecord(report.account.quota) || !['max24HourSend', 'maxSendRate', 'sentLast24Hours'].every(key => nullableNumber((report.account as Record<string, any>).quota[key])))) return false
+      if (!records(report.domains) || !report.domains.every(domain => strings(domain, ['name']) && nullableString(domain.verificationStatus) && flag(domain.sendingEnabled))) return false
+      if (!isRecord(report.resources) || !set(report.resources.transactional) || !set(report.resources.marketing) || !strings(report.resources, ['eventDestinationName']) || !isRecord(report.resources.topic)) return false
+      const topic = report.resources.topic
+      if (!strings(topic, ['name']) || !nullableString(topic.arn) || !['exists', 'owned', 'policyReady', 'rawMessageDelivery'].every(key => flag(topic[key])) || !['unknown', 'missing', 'pending', 'confirmed'].includes(String(topic.subscription)) || typeof topic.subscriptionsTruncated !== 'boolean' || typeof topic.staleSubscriptions !== 'number' || !Number.isInteger(topic.staleSubscriptions)) return false
+    }
+  }
   const workspace = value.workspace
   if (!isRecord(workspace) || !strings(workspace, ['id', 'name', 'accountId', 'role']) || !records(workspace.members) || !workspace.members.every(member => strings(member, ['id', 'name', 'email', 'role']))) return false
   if (!rows('regions').length || !rows('regions').every(row => strings(row, ['name', 'access', 'health', 'ipPool']) && ['production', 'sandbox'].includes(String(row.access)) && ['healthy', 'probation', 'shutdown'].includes(String(row.health)) && numbers(row, ['sent24h', 'dailyQuota', 'maxSendRate', 'bounceRate', 'complaintRate']) && typeof row.sendingEnabled === 'boolean' && typeof row.vdmEnabled === 'boolean' && stringArray(row.suppression))) return false
@@ -259,15 +332,42 @@ export function createMockApi(): OpenSendApi {
   return {
     mode: 'demo',
     regions: {
-      list: signal => run(signal, false, s => s.regions),
-      connect: (regionId, signal) => run(signal, true, s => {
-        const cleanId = text(regionId, 'regionId', 30).toLowerCase()
-        if (!Object.hasOwn(CONNECTABLE_REGIONS, cleanId)) invalid('regionId', 'Choose a supported AWS region ID, such as ap-southeast-1.')
-        if (s.regions.some(region => region.id === cleanId)) throw new ApiError('This region is already connected.', 'conflict', { regionId: 'Choose a region that is not already connected.' })
-        // Connecting is simulated and cannot grant production access or change AWS.
-        const region = { id: cleanId, name: CONNECTABLE_REGIONS[cleanId]!, access: 'sandbox' as const, health: 'healthy' as const, sendingEnabled: true, sent24h: 0, dailyQuota: 200, maxSendRate: 1, bounceRate: 0, complaintRate: 0, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: false }
-        s.regions.push(region)
-        return region
+      list: signal => run(signal, true, s => catalog(s, true)),
+      configure: (region, input, signal) => run(signal, true, s => {
+        if (region.length > 32 || !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region) || /^(cn-|us-gov-|us-iso)/.test(region)) invalid('region', 'Enter a commercial AWS region ID, such as ap-southeast-1.')
+        if (!isRecord(input) || Object.keys(input).some(key => !['enabled', 'makeDefault'].includes(key)) || (input.enabled !== undefined && typeof input.enabled !== 'boolean') || (input.makeDefault !== undefined && typeof input.makeDefault !== 'boolean') || (input.enabled === undefined && input.makeDefault !== true)) invalid('region', 'Choose enabled or makeDefault.')
+        const setup = regionSetup(s)
+        let row = setup.catalog.data.find(row => row.region === region)
+        if (input.enabled === false) {
+          if (setup.catalog.defaultRegion === region || input.makeDefault) throw new ApiError('Choose another default region before disabling this one.', 'REGION_DEFAULT_REQUIRED')
+          if (s.emails.some(email => email.regionId === region && ['queued', 'attempting', 'acceptance_unknown'].includes(email.status)) || s.campaigns.some(campaign => campaign.regionId === region && ['scheduled', 'sending'].includes(campaign.status)) || (row?.provisionStatus && ['pending', 'running'].includes(row.provisionStatus))) throw new ApiError('This region has queued, in-flight, or uncertain work. Resolve it before disabling the region.', 'REGION_IN_USE')
+        }
+        if (!row) {
+          if (setup.catalog.data.length >= 40) throw new ApiError('At most 40 SES regions may be configured.', 'REGION_LIMIT_EXCEEDED')
+          // Keep internal quota/history profiles; configuration never grants production access.
+          s.regions.push({ id: region, name: CONNECTABLE_REGIONS[region] ?? region, access: 'sandbox', health: 'healthy', sendingEnabled: true, sent24h: 0, dailyQuota: 200, maxSendRate: 1, bounceRate: 0, complaintRate: 0, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: false })
+          row = { region, enabled: false, isDefault: false, discoveryStatus: 'not_discovered', lastDiscoveredAt: null, provisionJobId: null, provisionStatus: null, provisionError: null }
+          setup.catalog.data.push(row)
+        }
+        if (input.enabled !== undefined) row.enabled = input.enabled
+        if (input.makeDefault) {
+          row.enabled = true; setup.catalog.defaultRegion = region
+          setup.catalog.data.forEach(entry => { entry.isDefault = entry.region === region })
+        }
+        return catalog(s)
+      }),
+      discover: (region, options, signal) => run(signal, true, s => {
+        enabledRegion(s, region)
+        const cached = regionSetup(s).reports[region]
+        if (cached && !options?.refresh && Date.now() - Date.parse(cached.checkedAt) < DISCOVERY_TTL) return cached
+        // Read-only simulation: refresh account observations while retaining resource state.
+        return saveDiscovery(s, demoDiscovery(s, region, cached?.resources.transactional.exists === true && cached.resources.marketing.exists === true && cached.resources.topic.exists === true, cached?.resources.topic.subscription ?? 'missing'))
+      }),
+      provision: (region, signal) => run(signal, true, s => {
+        const row = enabledRegion(s, region)
+        if (row.provisionJobId && (row.provisionStatus === 'pending' || row.provisionStatus === 'running')) return { jobId: row.provisionJobId, status: row.provisionStatus }
+        row.provisionJobId = id('demo_job'); row.provisionStatus = 'pending'; row.provisionError = null
+        return { jobId: row.provisionJobId, status: 'pending' as const }
       }),
     },
     workspace: {
@@ -353,6 +453,7 @@ export function createMockApi(): OpenSendApi {
       test: (input, signal) => run(signal, false, s => {
         const campaign = find(s.campaigns, input.id, 'Campaign')
         const to = email(input.to, 'to')
+        enabledRegion(s, campaign.regionId)
         const region = checkRegion(s, campaign.regionId)
         if (!region.sendingEnabled || region.health === 'shutdown') throw new ApiError('Sending is disabled in this region.', 'conflict')
         if (region.access === 'sandbox' && !s.domains.some(d => d.regionId === region.id && d.status === 'verified' && d.name === to.split('@')[1])) invalid('to', 'Sandbox test recipients must use a domain verified in this region.')

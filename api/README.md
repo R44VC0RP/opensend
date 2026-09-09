@@ -23,7 +23,9 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Your installation's real Google OAuth **Web application** client credentials. See below. |
 | `AUTH_ALLOWED_EMAILS` | Comma-separated exact Google email addresses. Use this for personal Gmail accounts. |
 | `AUTH_ALLOWED_DOMAINS` | Optional comma-separated exact Google Workspace hosted domains, checked against Google's verified `hd` claim—not an email suffix. Either allowlist can approve a user; missing/empty lists deny everyone. All approved users are admins. |
-| `PUBLIC_URL` | Canonical external **origin**, without path, query, fragment, or credentials. HTTPS is required except for `localhost` and `127.0.0.1`. Docker default: `http://127.0.0.1:8793`. |
+| `PUBLIC_URL` | Canonical external **origin**, without path, query, fragment, or credentials. HTTPS is required except for local sign-in/development at `localhost` and `127.0.0.1`. Docker default: `http://127.0.0.1:8793`; AWS provisioning requires a public HTTPS origin. |
+| `DEFAULT_SES_REGION` | Initial region, default `us-east-1`. Migration seeds the database once and also imports already-used regions to avoid stranding existing work. Subsequent region/default changes use the API, not this environment value. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Explicit server-only IAM credentials for SES discovery, provisioning, and live sending; the session token is optional for temporary credentials. No automatic role lookup or token renewal. |
 | `POSTGRES_PASSWORD`, `DATABASE_URL` | Generate a password and substitute the same value into the local database URL. Compose supplies its internal database hostname automatically. |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Local MinIO credentials; use a nonempty access ID and a strong generated secret. The local bucket is created separately below. |
 
@@ -114,7 +116,7 @@ Attachments belong in a **private** S3/R2 bucket. Set the bucket, region, endpoi
 
 **Disable Hyperdrive query caching** with `--caching-disabled`; a shorter TTL is not equivalent. Authentication, consent, idempotency, and job state need fresh reads. Hyperdrive still provides pooling. See [query caching](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/).
 
-Supply `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_SECRET` using Worker secrets; configure your real `GOOGLE_CLIENT_ID`, allowlists, and HTTPS `PUBLIC_URL` for this deployment. When deliberately enabling live SES, also supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` securely. Use interactive `wrangler secret put`, not secrets in config or command arguments. Pasted temporary credentials are not automatically renewed.
+Supply `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_SECRET` using Worker secrets; configure your real `GOOGLE_CLIENT_ID`, allowlists, and HTTPS `PUBLIC_URL` for this deployment. For AWS discovery, explicit provisioning, or live SES sending, also supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` securely. Use interactive `wrangler secret put`, not secrets in config or command arguments. Pasted temporary credentials are not automatically renewed.
 
 Build `app/` with `npm ci` and `npm run build` before `npm run cf:check` in `api/`. `cf:check` is a deployment **dry run**, not a deployment or remote-resource check. For local Workers, keep an ignored `api/.dev.vars` containing only the required Worker settings and secrets, including both Google credentials, allowlists, `BETTER_AUTH_SECRET`, and the local `PUBLIC_URL`. This avoids loading unrelated Docker/storage credentials from `.env`. Securely set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`, then use `npm run cf:dev -- --port 8794` and a matching `PUBLIC_URL`/Google callback. Local Hyperdrive cannot certify production pooling/caching; see [local development](https://developers.cloudflare.com/hyperdrive/configuration/local-development/).
 
@@ -130,15 +132,44 @@ HTTP, Queue, and scheduled handlers share the outbox. Queue messages are wakeups
 
 ## SES and production release gates
 
-Leave `ENABLE_LIVE_SES=false` until real sending is deliberately configured. Test keys simulate sends without SES calls, production suppression effects, or production engagement; they do not certify real MIME rendering/delivery.
+Leave `ENABLE_LIVE_SES=false` until real sending is deliberately configured. It prevents live mail, **not read-only AWS discovery or explicitly confirmed provisioning**. Test keys simulate sends without AWS calls, production suppression effects, or production engagement; they do not certify real MIME rendering/delivery.
 
-1. Configure your AWS connection with least privilege. This implementation reads SES credentials explicitly from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`; it does not automatically resolve or renew instance/task-role credentials. Supply them securely and arrange renewal if using temporary credentials. Set `SES_REGIONS` to the regions you actually use. This is not a customer-connection enrollment service.
-2. Verify regional SES identities and publish the DKIM records **returned by SES**, never guessed records. Configure the transactional/marketing configuration sets named in `.env`, and review SES sandbox/production access and quotas. See [SES verified identities](https://docs.aws.amazon.com/ses/latest/dg/verify-addresses-and-domains.html) and [configuration sets](https://docs.aws.amazon.com/ses/latest/dg/using-configuration-sets.html).
-3. Configure SNS event destinations, restrictive publisher policies, and exact trusted `SNS_TOPIC_ARNS`. Set `AWS_ACCOUNT_ID` to the actual SES sending account whenever topics are configured. Keep the signed SNS envelope (disable Raw Message Delivery); OpenSend verifies signatures, pinned AWS certificate URLs, topic membership, and sending-account identity at ingestion/processing. Prefer SignatureVersion 2. See [SNS delivery verification](https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html).
+1. Supply the explicit server-side AWS credentials above for a least-privilege IAM principal, never root or administrator keys. Set `DEFAULT_SES_REGION` before the first migration; region selection is persisted in PostgreSQL afterward. STS verifies the AWS account; provisioning records trusted account/topic identifiers in the database. `SES_REGIONS`, `AWS_ACCOUNT_ID`, `SNS_TOPIC_ARNS`, and `SES_*_CONFIGURATION_SET` are not normal installation inputs.
+2. Read regional discovery, then explicitly request provisioning through the public API below. Provisioning creates two installation-scoped configuration sets (transactional/marketing), one SNS topic, their event destinations, and a signed HTTPS feedback subscription. Names are generated automatically. The feedback callback must be public HTTPS before provisioning. For local Docker, keep `PUBLIC_URL=http://127.0.0.1:8793` for Google login and set `SES_FEEDBACK_URL=https://YOUR-TUNNEL/v1/events/ses`. Route that path to the local API; Google’s localhost callback does not change. Recipient unsubscribe links still use `PUBLIC_URL`, so a local-only dashboard URL is not suitable for real marketing campaigns. For a fully public installation, omit the override and use a public HTTPS `PUBLIC_URL` with its matching Google callback.
+3. Verify regional SES identities and publish the DKIM records **returned by SES**, never guessed records. Review SES sandbox/production access and quotas separately; successful setup is not approval to send. See [SES verified identities](https://docs.aws.amazon.com/ses/latest/dg/verify-addresses-and-domains.html) and [configuration sets](https://docs.aws.amazon.com/ses/latest/dg/using-configuration-sets.html).
 4. Verify public HTTPS, private buckets, verified database TLS, disabled Hyperdrive caching where used, proxy/log-export redaction, and least-privilege database/IAM/SNS policies. Set `WEBHOOK_ALLOWED_HOSTS` only to exact trusted public hosts before enabling outbound webhooks. An empty list denies outbound webhook destinations.
 5. With explicitly authorized credentials and recipients, test a **real Google consent/callback**, a live SES send and received message, authentic SNS feedback, and public signed webhook delivery. Only then enable intended live workloads. Local mocks and dry runs cannot certify these integrations; no Cloudflare deployment or real Google/SES verification is implied here.
 
-OpenSend does not silently provision paid AWS features, change your DNS, or request mailbox access.
+### Region discovery and explicit setup API
+
+These are authenticated public API operations, not separate dashboard-only endpoints. Region access requires an unrestricted principal (no sending-domain restriction); AWS reads require live `read` access, and configuration/provisioning require live `manage` access.
+
+| Operation | Behavior |
+| --- | --- |
+| `GET /v1/regions` | Both live and test `read` access: database catalog of default/enabled regions, cached discovery status, and provision job status/errors. Never calls AWS. |
+| `PUT /v1/regions/{region}` | Body `{ "enabled": true }` and/or `{ "makeDefault": true }`. Shared database settings for live/test. Disabling the default, a region with queued/in-flight/uncertain mail or scheduled/sending campaigns, or active provisioning is blocked. Disabling deletes no AWS resources and preserves trusted feedback for historical mail. |
+| `GET /v1/regions/{region}/discovery` | Enable the region first. Automatically discovers on the first uncached read, including for the default region; caches for 15 minutes. `?refresh=true` forces AWS reads. Credential, `PUBLIC_URL`, or `SES_FEEDBACK_URL` changes invalidate the cache. AWS operations are read-only; reports and discovered **DOMAIN** identity names are saved in the local catalog. |
+| `POST /v1/regions/{region}/provision` | Body `{ "confirm": true }`. Returns `202 { jobId, status }`, reusing an active job. The durable worker performs setup with a 90-second attempt budget and normal bounded retries. Read the catalog for job completion and refresh discovery afterward; a pending SNS confirmation is **not ready**, even if the job completed. |
+
+Setup manages only resources tagged with this installation's `opensend:installation-id` and `opensend:purpose=ses-feedback`; it never automatically adopts manually created resources. Name/ownership collisions and missing permissions produce coded blockers, not permission escalation. SNS publishing is scoped to the verified account and the two configuration-set ARNs. The subscription uses signed SNS JSON with `RawMessageDelivery=false`; only the existing signature-verified callback confirms subscriptions for trusted topics. There is no public `SubscribeURL` trust override. See [SNS delivery verification](https://docs.aws.amazon.com/sns/latest/dg/sns-verify-signature-of-message.html).
+
+The managed destinations enable `SEND`, `DELIVERY`, `BOUNCE`, `COMPLAINT`, `REJECT`, `RENDERING_FAILURE`, `DELIVERY_DELAY`, `OPEN`, and `CLICK`. Open/click tracking still follows each message’s explicit tracking override; `tracking: false` disables it. `SUBSCRIPTION` is not enabled because OpenSend owns consent. Setup does not change DNS, obtain SES production/sandbox approval, mutate IAM, delete unrelated resources, add SQS/Lambda, or request mailbox access. Unrelated event destinations/subscriptions remain unchanged.
+
+### Setup IAM action groups
+
+Review resource scopes and tag conditions for your account and generated regional names. The current commands in [`src/ses-setup.ts`](src/ses-setup.ts) require these groups; this is an action inventory, **not a complete verified deployment policy** or the separate permissions needed for sending/identity management:
+
+- Identity: STS `GetCallerIdentity` verifies the caller/account.
+- SES reads (`ses:`): `GetAccount`, `ListEmailIdentities`, `GetConfigurationSet`, `GetConfigurationSetEventDestinations`.
+- SNS reads (`sns:`): `GetTopicAttributes`, `ListTagsForResource`, `ListSubscriptionsByTopic`, `GetSubscriptionAttributes`.
+- SES provisioning (`ses:`): `CreateConfigurationSet`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, plus `TagResource` permission for creation tags.
+- SNS provisioning (`sns:`): `CreateTopic`, `SetTopicAttributes`, `Subscribe`, `SetSubscriptionAttributes`, plus `TagResource` permission for creation tags.
+
+When the Docker job worker starts with AWS credentials, it queues read-only discovery for enabled regions with missing or stale reports. Repeated starts reuse pending discovery jobs. This never queues provisioning. The dashboard shows discovery progress and polls for its results.
+
+Registered SNS feedback trust is bound to the provisioned AWS account and topic, not to short-lived API credentials: rotating access keys or session tokens does not drop feedback. Discovery observations are refreshed for changed credentials. Do not switch AWS accounts on an existing provisioned installation; use a separate installation instead.
+
+Use the route schemas in [`src/ses-regions.ts`](src/ses-regions.ts) for the exact API contract. The [historical AWS reference](../docs/aws-ses/credentials-and-iam.md) provides background; its broader manual-configuration guidance is not an exact policy for this setup flow.
 
 ## Sending and operational boundaries
 
@@ -183,7 +214,7 @@ For an **older `ENCRYPTION_KEY` installation**, retain that old key only as upgr
 
 The only acceptance-test file is `api/api.acceptance.test.ts`. `npm test` uses the local API/job worker and a paired local database; its Google identities are synthetic and its OAuth transport is mocked. It does **not** prove normal Google login with a real client. Do not run it against production or unrelated data: synthetic contacts/campaigns and audit records are created.
 
-For a dedicated local test installation, the suite needs the server's matching `BETTER_AUTH_SECRET`, `API_BASE_URL`, and paired `DATABASE_URL`. Allow its default fixture email `operator@example.com` in `AUTH_ALLOWED_EMAILS` and fixture domain `example.com` in `AUTH_ALLOWED_DOMAINS` (or use matching `AUTH_TEST_EMAIL` / `AUTH_TEST_GOOGLE_DOMAIN` values). Reserve `operator@example.com` for the fixture; it must not collide with an existing user. Set `WEBHOOK_ALLOWED_HOSTS=example.com` for paused webhook fixtures. Restart the API/worker after changing configuration. These are **test-only** identities/permissions, not production onboarding, and fake OAuth credentials alone are not an alternate login path.
+Use an isolated database with synthetic identities, never real user data, for local acceptance. For that dedicated local test installation, the suite needs the server's matching `BETTER_AUTH_SECRET`, `API_BASE_URL`, and paired `DATABASE_URL`. Allow its default fixture email `operator@example.com` in `AUTH_ALLOWED_EMAILS` and fixture domain `example.com` in `AUTH_ALLOWED_DOMAINS` (or use matching `AUTH_TEST_EMAIL` / `AUTH_TEST_GOOGLE_DOMAIN` values). Reserve `operator@example.com` for the fixture; it must not collide with an existing user. Set `WEBHOOK_ALLOWED_HOSTS=example.com` for paused webhook fixtures. Restart the API/worker after changing configuration. These are **test-only** identities/permissions, not production onboarding, and fake OAuth credentials alone are not an alternate login path.
 
 The dashboard is desktop-first. At a 390-pixel viewport its controls remain reachable, but the persistent sidebar leaves a cramped main pane; small-screen layout polish remains a follow-up, not a verified mobile-ready claim.
 

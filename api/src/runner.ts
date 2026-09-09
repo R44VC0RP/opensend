@@ -2,6 +2,7 @@ import { setTimeout } from 'node:timers/promises';
 import { nodeRuntime } from './adapters/node.js';
 import { drain } from './dispatch.js';
 import { cleanup } from './maintenance.js';
+import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log } from './core.js';
 try {
   const { runtime, close } = nodeRuntime(process.env);
@@ -9,6 +10,7 @@ try {
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
   try {
+    await queueStartupDiscovery(runtime);
     while (!stopped) {
       try {
         if (Date.now() - lastCleanup > 3600000) { await cleanup(runtime); lastCleanup = Date.now(); }

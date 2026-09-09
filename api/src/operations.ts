@@ -167,10 +167,9 @@ export function registerOperations(app: App) {
     return c.json({ name, environment: a.environment }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/regions', operationId: 'listRegions', tags: ['Settings'], security, responses: { 200: response(z.object({ data: z.array(accountSchema) }).openapi('Regions')), ...errors } }), async c => { const a = workspaceActor(c); external(a); if (!c.env.config.regions.length) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'No SES regions are configured.'); return c.json({ data: await Promise.all(c.env.config.regions.map(r => account(c.env, r))) }, 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Default page size is 5; use individual domain detail for a single refresh. Concurrent clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional() }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
-    const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), a.domains.length ? inArray(domains.name, a.domains) : undefined, q.region ? eq(domains.region, region(c.env, q.region)) : undefined, q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
+    const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), a.domains.length ? inArray(domains.name, a.domains) : undefined, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
     const data: z.infer<typeof domainSchema>[] = [];
     for (const row of rows.slice(0, q.limit)) { if (data.length) await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
@@ -258,7 +257,7 @@ type SnsEnvelope = z.infer<typeof snsSchema>;
 function snsHost(runtime: Runtime, envelope: SnsEnvelope) {
   if (!runtime.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
   const match = /^arn:aws:sns:([a-z0-9-]+):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
-  if (!match || !runtime.config.regions.includes(match[1]!)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only configured standard AWS regional SNS topics are supported.');
+  if (!match) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only registered standard AWS regional SNS topics are supported.');
   return { host: `sns.${match[1]}.amazonaws.com`, region: match[1]! };
 }
 function trustedSnsUrl(value: string, host: string, certificate: boolean) {

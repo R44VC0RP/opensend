@@ -6,6 +6,7 @@ import { postgresConnection } from './adapters/node.js';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { loadConfig } from './config.js';
 import { reencryptWebhookSecrets } from './operations.js';
+import { ensureRegionSettings } from './ses-region-state.js';
 
 const config = loadConfig(process.env);
 
@@ -38,6 +39,7 @@ try {
       log('info', { code: 'MIGRATION_APPLIED', migration: name });
     } catch (error) { await client.query('ROLLBACK'); throw error; }
   }
+  await ensureRegionSettings(drizzle(client), config);
   const rekeyed = await reencryptWebhookSecrets(drizzle(client), config);
   if (rekeyed.conflicted) throw new Error('SECRET_REKEY_CONFLICT: concurrent changes occurred; rerun migrate before removing the previous secret.');
   log('info', { code: 'WEBHOOK_SECRETS_REKEYED', ...rekeyed });

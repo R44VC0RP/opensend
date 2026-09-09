@@ -9,6 +9,7 @@ import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, 
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
+import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, regionalLimits, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
@@ -78,7 +79,7 @@ const AttachmentIds = z.array(z.string().min(1).max(120)).max(20).default([]);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
-  region: Region, kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
+  region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(),
 }).strict().superRefine((v, ctx) => {
@@ -334,7 +335,9 @@ function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, input: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
+  const input = { ...request, region: await assertRegionEnabled(db, a.workspaceId, request.region) };
+  if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
   sender(runtime, a, input.from, input.region);
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [] };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
@@ -499,7 +502,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', tags: ['Campaigns'], security, request: { body: json(CampaignInput) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const draft = c.req.valid('json'); sender(c.env, a, draft.from, draft.region);
-    const result = await idempotent(c, a, draft, async db => { const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId); const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning(); return Campaign.parse({ ...row, counts: emptyCounts() }); });
+    const result = await idempotent(c, a, draft, async db => { await assertRegionEnabled(db, a.workspaceId, draft.region); const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId); const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning(); return Campaign.parse({ ...row, counts: emptyCounts() }); });
     return c.json(Campaign.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
@@ -519,7 +522,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id; sender(c.env, a, input.draft.from, input.draft.region);
-    const row = await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
+    const row = await c.env.db.transaction(async db => { await assertRegionEnabled(db, a.workspaceId, input.draft.region); const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
     return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row!]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/campaigns/{id}', operationId: 'deleteCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
@@ -663,6 +666,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   if (!authorized) { await finishCampaign(runtime, a, mail.campaignId); return; }
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
   const s = mail.snapshot;
+  if (a.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, s.region, s.kind, true);
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];
   const rows = await attachmentRows(runtime.db, a, s.attachments);
