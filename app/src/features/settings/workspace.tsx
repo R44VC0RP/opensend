@@ -22,7 +22,7 @@ export function SettingsPage() {
     {workspace.isPending ? <SettingsBodySkeleton regionId={regionId} /> : <>
       <RegionSetup />
       {workspace.error ? <ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /> : <WorkspaceForm key={workspace.data.id} workspace={workspace.data} />}
-      {session?.identity && <section className="section stack"><SectionHeader title="Signed in" /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>Access</dt><dd>{session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>}
+      {session?.identity && <section className="section stack"><SectionHeader title="Signed in" /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>Access</dt><dd>{session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl><div><Button onClick={() => session.logout()}>Sign out</Button></div></section>}
     </>}
   </div>
 }

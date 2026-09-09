@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
-import { useApi, useRegion, useSession } from '../data/context'
+import { useApi, useRegion } from '../data/context'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { Button, EmptyState, ErrorState, Field, Select, Skeleton, SkeletonText } from './ui'
@@ -10,7 +10,6 @@ import { ThemeToggle } from './ThemeToggle'
 const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/campaigns', 'Campaigns'], ['/contacts', 'Contacts'], ['/lists', 'Lists'], ['/segments', 'Segments'], ['/api-keys', 'API keys'], ['/domains', 'Domains'], ['/settings', 'Settings']] as const
 export function AppShell() {
   const api = useApi()
-  const session = useSession()
   const { regionId, setRegionId } = useRegion()
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
@@ -54,7 +53,6 @@ export function AppShell() {
         {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
       </div>
-      {api.mode !== 'demo' && session && <Button variant="ghost" onClick={() => session.logout()}>Sign out</Button>}
       <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
         {needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
