@@ -128,11 +128,6 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   </section>
 }
 
-function domainStatus(domain: SesDiscovery['domains'][number]) {
-  if (domain.sendingEnabled === false) return 'Sending disabled'
-  if (domain.verificationStatus === 'SUCCESS') return domain.sendingEnabled === true ? 'Verified' : 'Sending unknown'
-  return domain.verificationStatus ? label(domain.verificationStatus) : 'Not checked'
-}
 function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCatalogEntry}) {
   const {account, resources} = report
   const topic = resources.topic
@@ -143,9 +138,6 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>
-    <div className="stack settings-discovery-section"><h3>Domains</h3><DataTable rows={report.domains} rowKey={row => row.name} rowSize="large" empty={<EmptyState title={report.account ? 'No domains found' : 'Domains unavailable'} />} columns={[
-      {key: 'name', label: 'Domain', render: row => row.name}, {key: 'status', label: 'Status', render: row => domainStatus(row)},
-    ]} />{report.identitiesTruncated && !report.blockers.some(issue => issue.code === 'SES_IDENTITIES_TRUNCATED') && <p className="muted">Domain list is incomplete.</p>}</div>
     <details className="settings-aws-details">
       <summary>AWS details</summary>
       <div className="stack">

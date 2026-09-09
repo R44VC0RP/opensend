@@ -60,7 +60,6 @@ function RouteTabs({ value }: { value: 'ses' | 'webhooks' }) {
 export function RegionDiscoverySkeleton() {
   return <LoadingRegion label="Checking AWS" className="settings-loading-body">
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">{['AWS account', 'SES access', 'Sent / daily quota', 'Send rate'].map(name => <div key={name}><dt>{name}</dt><dd><SkeletonText width={120} /></dd></div>)}</dl></div>
-    <div className="stack settings-discovery-section"><h3>Domains</h3><TableSkeleton rowSize="large" rows={2} columns={[{key: 'name', label: 'Domain'}, {key: 'status', label: 'Status'}]} /></div>
     <div className="settings-aws-details"><SkeletonText width={90} /></div>
   </LoadingRegion>
 }
