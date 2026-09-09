@@ -40,9 +40,9 @@ export const attachmentLinks = pgTable('sending_attachment_links', {
 }, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.attachmentId, t.ownerType, t.ownerId] }), index('sending_attachment_owner').on(t.workspaceId, t.environment, t.ownerType, t.ownerId)]);
 export const campaigns = pgTable('sending_campaigns', {
   id: text('id').primaryKey(), ...scope(), revision: integer('revision').notNull().default(1), draft: jsonb('draft').$type<CampaignDraft>().notNull(),
-  status: text('status').$type<'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled'>().notNull().default('draft'), reviewId: text('review_id'), scheduledAt: time('scheduled_at'),
+  status: text('status').$type<'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled'>().notNull().default('draft'), reviewId: text('review_id'), scheduledAt: time('scheduled_at'), archivedAt: time('archived_at'),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
-}, t => [index('sending_campaigns_page').on(t.workspaceId, t.environment, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc())]);
+}, t => [index('sending_campaigns_page').on(t.workspaceId, t.environment, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.environment, t.archivedAt, t.createdAt.desc(), t.id.desc())]);
 export const campaignReviews = pgTable('sending_campaign_reviews', {
   id: text('id').primaryKey(), ...scope(), campaignId: text('campaign_id').notNull(), revision: integer('revision').notNull(), draft: jsonb('draft').$type<CampaignDraft>().notNull(),
   recipients: jsonb('recipients').$type<ReviewedRecipient[]>().notNull(), matched: integer('matched').notNull(), eligible: integer('eligible').notNull(), suppressed: integer('suppressed').notNull(), unsubscribed: integer('unsubscribed').notNull(),

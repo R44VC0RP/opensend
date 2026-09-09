@@ -297,6 +297,7 @@ export type Campaign = {
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     reviewId: string | null;
     scheduledAt: string | null;
+    archivedAt: string | null;
     createdAt: string;
     updatedAt: string;
     /**
@@ -374,6 +375,7 @@ export type CampaignSummary = {
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     reviewId: string | null;
     scheduledAt: string | null;
+    archivedAt: string | null;
     createdAt: string;
     updatedAt: string;
     /**
@@ -420,6 +422,10 @@ export type CampaignDraftSummary = {
 export type CampaignUpdateInput = {
     revision: number;
     draft: CampaignDraftInput;
+};
+
+export type CampaignArchiveInput = {
+    archived: boolean;
 };
 
 export type CampaignAudienceCounts = {
@@ -3357,6 +3363,10 @@ export type ListCampaignsData = {
         limit?: number;
         region?: string;
         status?: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+        /**
+         * False lists active campaigns; true lists archived campaigns only.
+         */
+        archived?: 'true' | 'false';
         search?: string;
     };
     url: '/v1/campaigns';
@@ -3668,6 +3678,69 @@ export type UpdateCampaignResponses = {
 };
 
 export type UpdateCampaignResponse = UpdateCampaignResponses[keyof UpdateCampaignResponses];
+
+export type SetCampaignArchivedData = {
+    body: CampaignArchiveInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/archive';
+};
+
+export type SetCampaignArchivedErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetCampaignArchivedError = SetCampaignArchivedErrors[keyof SetCampaignArchivedErrors];
+
+export type SetCampaignArchivedResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type SetCampaignArchivedResponse = SetCampaignArchivedResponses[keyof SetCampaignArchivedResponses];
 
 export type PreviewCampaignAudienceData = {
     body?: never;

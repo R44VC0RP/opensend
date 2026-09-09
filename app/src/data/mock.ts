@@ -170,7 +170,10 @@ function segmentTotals(state: DemoState, segment: Segment): Segment {
   return { ...segment, matched: result.matched, eligible: result.eligible }
 }
 function campaignTotals(state: DemoState, campaign: Campaign): Campaign {
-  return campaign.status === 'sent' ? campaign : { ...campaign, recipients: campaignAudience(state, campaign.listId, campaign.segmentId).eligible }
+  return { ...campaign, archivedAt: campaign.archivedAt ?? null, ...(campaign.status === 'sent' ? {} : { recipients: campaignAudience(state, campaign.listId, campaign.segmentId).eligible }) }
+}
+function requireUnarchived(campaign: Campaign) {
+  if (campaign.archivedAt != null) throw new ApiError('Restore this campaign before editing, reviewing, testing, or sending it.', 'CAMPAIGN_ARCHIVED', {}, undefined, 409)
 }
 function validateSender(state: DemoState, campaign: CampaignInput) {
   const senderDomain = campaign.fromEmail.split('@')[1]
@@ -292,7 +295,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('contacts').every(row => strings(row, ['email', 'name', 'country', 'status']) && CONTACT_STATUSES.includes(String(row.status)) && stringArray(row.listIds) && row.listIds.every(ref => references('lists', ref)) && date(row.createdAt) && (row.lastOpenedAt === null || date(row.lastOpenedAt)) && isRecord(row.consent) && strings(row.consent, ['source']) && (row.consent.at === null || date(row.consent.at)))) return false
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
-  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && validEditor(row.editor))) return false
+  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && validEditor(row.editor))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
@@ -405,7 +408,7 @@ export function createMockApi(): OpenSendApi {
           const rows = emails.filter(e => Date.parse(e.sentAt) >= from && (i === buckets - 1 ? Date.parse(e.sentAt) <= to : Date.parse(e.sentAt) < to))
           return { at: new Date(from).toISOString(), sent: rows.length, delivered: rows.filter(e => e.status === 'delivered').length, bounced: rows.filter(e => e.status === 'bounced').length, complaints: rows.filter(e => e.status === 'complaint').length }
         })
-        return { periodStart: new Date(start).toISOString(), periodEnd: new Date(end).toISOString(), sent: emails.length, delivered: count('delivered'), bounced: count('bounced'), complaints: count('complaint'), deferred: count('deferred'), previousSent: all.filter(e => Date.parse(e.sentAt) >= start - duration && Date.parse(e.sentAt) < start).length, points, streams: (['transactional', 'marketing'] as const).map(name => ({ name, sent: emails.filter(e => e.stream === name).length })), recentCampaigns: s.campaigns.filter(c => c.regionId === input.regionId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4).map(c => campaignTotals(s, c)) }
+        return { periodStart: new Date(start).toISOString(), periodEnd: new Date(end).toISOString(), sent: emails.length, delivered: count('delivered'), bounced: count('bounced'), complaints: count('complaint'), deferred: count('deferred'), previousSent: all.filter(e => Date.parse(e.sentAt) >= start - duration && Date.parse(e.sentAt) < start).length, points, streams: (['transactional', 'marketing'] as const).map(name => ({ name, sent: emails.filter(e => e.stream === name).length })), recentCampaigns: s.campaigns.filter(c => c.regionId === input.regionId && c.archivedAt == null).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4).map(c => campaignTotals(s, c)) }
       }),
     },
     emails: {
@@ -413,14 +416,25 @@ export function createMockApi(): OpenSendApi {
       get: (emailId, signal) => run(signal, false, s => find(s.emails, emailId, 'Email')),
     },
     campaigns: {
-      list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.campaigns.filter(c => (!input.regionId || c.regionId === input.regionId) && (!input.status || c.status === input.status) && (!input.listId || c.listId === input.listId) && (!input.segmentId || c.segmentId === input.segmentId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(c => campaignTotals(s, c)), input, c => `${c.name} ${c.subject}`) }),
+      list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.campaigns.filter(c => (c.archivedAt != null) === (input.archived === true) && (!input.regionId || c.regionId === input.regionId) && (!input.status || c.status === input.status) && (!input.listId || c.listId === input.listId) && (!input.segmentId || c.segmentId === input.segmentId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(c => campaignTotals(s, c)), input, c => `${c.name} ${c.subject}`) }),
       get: (campaignId, signal) => run(signal, false, s => campaignTotals(s, find(s.campaigns, campaignId, 'Campaign'))),
+      setArchived: (input, signal) => run(signal, true, s => {
+        const campaign = find(s.campaigns, input.id, 'Campaign')
+        if (typeof input.archived !== 'boolean') invalid('archived', 'Choose whether to archive or restore the campaign.')
+        if (input.archived && ['scheduled', 'sending'].includes(campaign.status)) throw new ApiError('Scheduled or sending campaigns cannot be archived.', 'CAMPAIGN_ACTIVE', {}, undefined, 409)
+        if ((campaign.archivedAt != null) !== input.archived) {
+          campaign.updatedAt = now()
+          campaign.archivedAt = input.archived ? campaign.updatedAt : null
+        }
+        return campaignTotals(s, campaign)
+      }),
       save: (input, signal) => run(signal, true, s => {
         const existing = input.id ? find(s.campaigns, input.id, 'Campaign') : undefined
+        if (existing) requireUnarchived(existing)
         if (existing && existing.status !== 'draft') throw new ApiError('Only draft campaigns can be edited.', 'conflict')
         if (existing && existing.regionId !== input.regionId) invalid('regionId', 'A campaign cannot be moved between regions.')
         const clean = validateCampaign(s, input)
-        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(existing?.editor !== undefined ? { editor: existing.editor } : {}), ...clean }
+        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(existing?.editor !== undefined ? { editor: existing.editor } : {}), ...clean }
         campaign.recipients = campaignAudience(s, campaign.listId, campaign.segmentId).eligible
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)
@@ -429,6 +443,7 @@ export function createMockApi(): OpenSendApi {
       audience: (input, signal) => run(signal, false, s => campaignAudience(s, input.listId, input.segmentId)),
       send: (input, signal) => run(signal, true, s => {
         const campaign = find(s.campaigns, input.id, 'Campaign')
+        requireUnarchived(campaign)
         if (campaign.status !== 'draft') throw new ApiError('This campaign has already been sent or scheduled.', 'conflict')
         if (input.mode !== 'now' && input.mode !== 'schedule') invalid('mode', 'Choose send now or schedule.')
         const timezone = text(input.timezone, 'timezone', 100)
@@ -465,6 +480,7 @@ export function createMockApi(): OpenSendApi {
       }),
       test: (input, signal) => run(signal, false, s => {
         const campaign = find(s.campaigns, input.id, 'Campaign')
+        requireUnarchived(campaign)
         const to = email(input.to, 'to')
         enabledRegion(s, campaign.regionId)
         const region = checkRegion(s, campaign.regionId)

@@ -253,7 +253,7 @@ describe('Public contract and authentication', () => {
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
-      '/v1/campaigns/{id}/review': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
+      '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/review': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
     };
     for (const [path, methods] of Object.entries(contract)) for (const method of methods) {
       const operation = document.paths[path]?.[method];
@@ -704,7 +704,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 64);
+    assert.equal(catalog.tools.length, 65);
     assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     for (const tool of tools.values()) {
@@ -733,6 +733,17 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(tools.get('getEmailContent')!.inputSchema.required, ['id']);
     assert.equal(tools.get('createContact')!.inputSchema.properties.confirm.const, true);
     assert.equal(tools.get('createContact')!.inputSchema.properties.idempotencyKey.type, 'string');
+    const archiveTool = tools.get('setCampaignArchived');
+    assert.ok(archiveTool);
+    assert.equal(archiveTool.annotations.readOnlyHint, false);
+    assert.equal(archiveTool.inputSchema.properties.id.type, 'string');
+    assert.equal(archiveTool.inputSchema.properties.confirm.const, true);
+    assert.deepEqual([...archiveTool.inputSchema.required].sort(), ['body', 'confirm', 'id']);
+    assert.equal(archiveTool.inputSchema.$defs.CampaignArchiveInput.properties.archived.type, 'boolean');
+    assert.deepEqual(archiveTool.inputSchema.$defs.CampaignArchiveInput.required, ['archived']);
+    assert.equal(archiveTool.outputSchema.anyOf[0].properties.response.$ref, '#/$defs/Campaign');
+    assert.ok(archiveTool.outputSchema.$defs.Campaign.required.includes('archivedAt'));
+    assert.deepEqual(tools.get('listCampaigns')!.inputSchema.properties.archived.enum, ['true', 'false']);
 
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
@@ -778,6 +789,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(summary.draft.html, undefined);
     const detail = await callTool(token, 'getCampaign', { id: campaign.id });
     assert.equal(detail.draft.html, campaign.draft.html);
+    assert.equal(detail.archivedAt, null);
+    cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
+    const archived = await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: true }, confirm: true });
+    assert.equal(typeof archived.archivedAt, 'string');
+    assert.deepEqual(archived.draft, detail.draft);
+    assert.deepEqual((await callTool(token, 'listCampaigns', { search: campaign.draft.name })).data, []);
+    assert.equal((await callTool(token, 'listCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
+    assert.equal((await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
   });
 
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
@@ -787,6 +806,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(catalog.tools.length, 25);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContacts'));
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'setCampaignArchived'));
+    const archiveDenied = await rpc(token, 'tools/call', { name: 'setCampaignArchived', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
+    assert.equal(archiveDenied.isError, true, redact(archiveDenied));
+    assert.equal(archiveDenied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(archiveDenied));
     const denied = await rpc(token, 'tools/call', { name: 'createContact', arguments: { confirm: true, body: { email: address() } } });
     assert.equal(denied.isError, true, redact(denied));
     assert.equal(denied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(denied));
@@ -1393,6 +1416,147 @@ describe('Private attachment assets and campaign revisions', () => {
 });
 
 describe('Dashboard API capabilities', () => {
+  test('campaign archive filters lists, binds pagination and restores unchanged reviewed drafts', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('archive-audience') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const marker = unique('archive');
+    const reviewed: Json[] = [];
+    for (let index = 0; index < 2; index++) {
+      const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { name: `${marker} %_\\literal ${index}` });
+      cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, key.secret, { archived: false })); });
+      assert.equal(campaign.archivedAt, null);
+      const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: 'Retain this revision' } }));
+      const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }));
+      const current = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+      assert.equal(current.reviewId, review.id);
+      reviewed.push(current);
+    }
+    const visible = await campaignFixture(t, key.secret, { listId: list.id }, { name: `${marker} ZZZliteral` });
+    const activePath = `/v1/campaigns?search=${encodeURIComponent(marker)}`;
+    assert.equal(page(await http('GET', activePath, key.secret)).length, 3);
+    for (const before of reviewed) {
+      const path = `/v1/campaigns/${before.id}`;
+      const archived = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true }));
+      assert.equal(typeof archived.archivedAt, 'string');
+      assert.ok(Number.isFinite(Date.parse(archived.archivedAt)));
+      assert.deepEqual({ ...archived, archivedAt: before.archivedAt, updatedAt: before.updatedAt }, before, 'Archive must preserve the complete draft, revision, review, status and counts.');
+      assert.deepEqual(ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true })), archived, 'Repeated archive must keep the original timestamp.');
+      assert.deepEqual(ok(await http('GET', path, key.secret)), archived);
+      assert.deepEqual(ok(await http('POST', `${path}/audience-preview`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+      error(await http('PATCH', path, key.secret, { revision: before.revision, draft: before.draft }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('DELETE', path, key.secret), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/review`, key.secret, { revision: before.revision }), 409, 'CAMPAIGN_ARCHIVED');
+      // These calls must reject before queueing, including tests that have no campaignId in their email record.
+      error(await http('POST', `${path}/send`, key.secret, { revision: before.revision, reviewId: before.reviewId }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/schedule`, key.secret, { revision: before.revision, reviewId: before.reviewId, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/test`, key.secret, { to: contact.email }), 409, 'CAMPAIGN_ARCHIVED');
+      assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${before.id}`, key.secret)), []);
+      assert.deepEqual(ok(await http('GET', path, key.secret)), archived, 'Rejected writes must leave the archived record intact.');
+    }
+    assert.deepEqual(page(await http('GET', `/v1/emails?search=${encodeURIComponent(contact.email)}`, key.secret)), [], 'Archived send, schedule and test must not queue any recipient email.');
+    for (const suffix of ['', '&archived=false', '&status=draft', `&region=${REGION}`]) {
+      assert.deepEqual(page(await http('GET', `${activePath}${suffix}`, key.secret)).map(row => row.id), [visible.id]);
+    }
+    const query = new URLSearchParams({ search: `${marker} %_\\literal`, status: 'reviewed', region: REGION, archived: 'true', limit: '1' });
+    const first = await http('GET', `/v1/campaigns?${query}`, key.secret);
+    assert.equal(page(first).length, 1);
+    assert.equal(typeof first.body.nextCursor, 'string');
+    query.set('cursor', first.body.nextCursor);
+    const second = await http('GET', `/v1/campaigns?${query}`, key.secret);
+    assert.equal(page(second).length, 1);
+    assert.equal(second.body.nextCursor, null);
+    const summaries = [...first.body.data, ...second.body.data];
+    assert.deepEqual(summaries.map((row: Json) => row.id).sort(), reviewed.map(row => row.id).sort());
+    assert.ok(summaries.every((row: Json) => typeof row.archivedAt === 'string' && row.status === 'reviewed' && row.draft.region === REGION && row.draft.html === undefined));
+    for (const [filter, value] of [['archived', 'false'], ['status', 'draft'], ['search', marker], ['region', REGION === 'us-east-1' ? 'us-west-2' : 'us-east-1']]) {
+      const changed = new URLSearchParams(query);
+      changed.set(filter, value);
+      error(await http('GET', `/v1/campaigns?${changed}`, key.secret), 422, 'INVALID_CURSOR');
+    }
+    assert.deepEqual(page(await http('GET', `${activePath}&archived=true&status=draft`, key.secret)), []);
+    for (const before of reviewed) {
+      const restored = ok(await http('PATCH', `/v1/campaigns/${before.id}/archive`, key.secret, { archived: false }));
+      assert.deepEqual({ ...restored, updatedAt: before.updatedAt }, before);
+      assert.deepEqual(ok(await http('PATCH', `/v1/campaigns/${before.id}/archive`, key.secret, { archived: false })), restored);
+    }
+    assert.deepEqual(page(await http('GET', activePath, key.secret)).map(row => row.id).sort(), [...reviewed.map(row => row.id), visible.id].sort());
+    assert.deepEqual(page(await http('GET', `${activePath}&archived=true`, key.secret)), []);
+  });
+
+  test('campaign archive enforces validation, authorization and active-status guards without sending', async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    const reader = await keyFixture(t, { permissions: ['read'] });
+    const sender = await keyFixture(t, { permissions: ['send'] });
+    const restricted = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
+    const live = await keyFixture(t, { environment: 'live', permissions: ['read', 'send'] });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('archive-guards') });
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    const path = `/v1/campaigns/${campaign.id}`;
+    cleanup(t, async () => {
+      ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
+      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [campaign.id, list.workspaceId]);
+    });
+    for (const body of [{}, { archived: 'true' }, { archived: null }, { archived: 1 }, { archived: true, revision: 1 }]) error(await http('PATCH', `${path}/archive`, key.secret, body), 422);
+    for (const value of ['1', 'TRUE', 'all', '']) error(await http('GET', `/v1/campaigns?archived=${value}`, key.secret), 422);
+    error(await http('PATCH', `${path}/archive`, undefined, { archived: true }), 401);
+    error(await http('PATCH', `/v1/campaigns/${unique('missing')}/archive`, key.secret, { archived: true }), 404, 'NOT_FOUND');
+    for (const archived of [true, false]) {
+      error(await http('PATCH', `${path}/archive`, reader.secret, { archived }), 403, 'PERMISSION_DENIED');
+      error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 403, 'SENDER_DOMAIN_FORBIDDEN');
+      error(await http('PATCH', `${path}/archive`, live.secret, { archived }), 404, 'NOT_FOUND');
+    }
+    assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Invalid or unauthorized requests must not change the campaign.');
+    const archived = ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: true }));
+    assert.equal(typeof archived.archivedAt, 'string', 'Send permission alone is sufficient to archive.');
+    assert.deepEqual(ok(await http('GET', path, reader.secret)), archived);
+    assert.deepEqual(ok(await http('POST', `${path}/audience-preview`, reader.secret)), { matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0 });
+    error(await http('GET', path, live.secret), 404, 'NOT_FOUND');
+    assert.deepEqual(page(await http('GET', `/v1/campaigns?archived=true&search=${campaign.id}`, live.secret)), []);
+    assert.equal(ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: false })).archivedAt, null);
+    // Seed a terminal synthetic log and event, never a dispatch job, to verify nonzero counts and retained history.
+    const emailId = unique('archive-email'), eventId = unique('archive-event');
+    const snapshot = { from: campaign.draft.from, to: [address()], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic archive history', text: 'Retained without sending.', attachments: [], tracking: false, headers: [] };
+    cleanup(t, async () => {
+      await db.query("DELETE FROM sending_email_events WHERE id = $1 AND email_id = $2 AND workspace_id = $3 AND environment = 'test'", [eventId, emailId, list.workspaceId]);
+      await db.query("DELETE FROM sending_emails WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3 AND environment = 'test'", [emailId, campaign.id, list.workspaceId]);
+    });
+    await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
+      VALUES ($1,$2,'test',$3,$4,$5,$6,$7::jsonb,'[]','[]',$8,'simulated',$9::jsonb,true)`, [emailId, list.workspaceId, REGION, key.id, campaign.id, snapshot.from, JSON.stringify(snapshot.to), snapshot.subject, JSON.stringify(snapshot)]);
+    await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
+      VALUES ($1,$2,'test',$3,'simulated','{"synthetic":true}',true)`, [eventId, list.workspaceId, emailId]);
+    const email = ok(await http('GET', `/v1/emails/${emailId}`, key.secret));
+    const content = ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret));
+    const history = page(await http('GET', `/v1/emails/${emailId}/events`, key.secret));
+    assert.equal(history.length, 1);
+    // Scoped terminal/active states exercise guards without scheduling or sending email.
+    for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 AND environment = 'test' RETURNING id", [status, campaign.id, list.workspaceId]);
+      assert.equal(seeded.rowCount, 1);
+      const before = ok(await http('GET', path, key.secret));
+      assert.equal(before.status, status);
+      assert.equal(before.counts.total, 1);
+      assert.equal(before.counts.byStatus.simulated, 1);
+      if (['scheduled', 'sending'].includes(status)) {
+        error(await http('PATCH', `${path}/archive`, key.secret, { archived: true }), 409, 'CAMPAIGN_ACTIVE');
+        assert.deepEqual(ok(await http('GET', path, key.secret)), before);
+      } else {
+        const result = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true }));
+        assert.equal(typeof result.archivedAt, 'string');
+        assert.deepEqual({ ...result, archivedAt: before.archivedAt, updatedAt: before.updatedAt }, before);
+        assert.deepEqual(ok(await http('GET', `/v1/emails/${emailId}`, key.secret)), email);
+        assert.deepEqual(ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret)), content);
+        assert.deepEqual(page(await http('GET', `/v1/emails/${emailId}/events`, key.secret)), history);
+      }
+      const restored = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
+      assert.deepEqual({ ...restored, updatedAt: before.updatedAt }, before, 'Restore must remain available without changing delivery status.');
+    }
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), [email]);
+  });
+
   test('dashboard campaign metadata survives review revisions and produces escaped immutable snapshots with real status counts', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('editor-list') });
