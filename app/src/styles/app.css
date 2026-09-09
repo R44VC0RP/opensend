@@ -1,7 +1,7 @@
 body { font-variant-numeric: tabular-nums; }
 code, pre { font-family: var(--font-body); font-size: inherit; }
 button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); stroke-width: 1.5; }
-.app-shell { min-height: 100dvh; }
+.app-shell { display: flow-root; height: 100dvh; overflow: hidden; }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: var(--sidebar-width); background: var(--color-canvas); z-index: 20; }
 .wordmark { position: absolute; top: var(--space-32); left: var(--space-24); height: var(--space-24); display: flex; align-items: center; gap: var(--space-6); color: var(--color-text); font-size: 17px; line-height: 24px; text-decoration: none; white-space: nowrap; }
 .wordmark-square { position: relative; top: 2px; width: 14px; height: 14px; border-radius: 4px; background: var(--color-accent); flex-shrink: 0; }
@@ -19,7 +19,9 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .quota-meter::-webkit-meter-bar { background: var(--color-border); border: 0; border-radius: 0; height: 3px; }
 .quota-meter::-webkit-meter-optimum-value { background: var(--color-accent); }
 .quota-meter::-moz-meter-bar { background: var(--color-accent); }
-.page-surface { margin: var(--space-24) var(--space-24) var(--space-24) var(--sidebar-width); padding: var(--space-28) var(--space-40); min-height: min(720px, calc(100dvh - 48px)); background: var(--color-surface); border-radius: var(--radius-lg); min-width: 0; }
+.page-surface { margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-28) var(--space-40); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.page-surface > .stack { gap: var(--page-gap); }
+.page-surface > .stack > .section { margin-block: 0; }
 .page-surface:focus { outline: none; }
 .skip-link { position: fixed; top: -80px; left: var(--space-24); z-index: 150; padding: var(--space-8) var(--space-12); background: var(--color-accent); color: var(--color-on-accent); border-radius: var(--radius-sm); }
 .skip-link:focus { top: var(--space-8); }

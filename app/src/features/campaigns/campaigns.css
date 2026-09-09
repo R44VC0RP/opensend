@@ -1,7 +1,8 @@
 .campaign-search { max-width: 310px; }
 .campaign-row-name { display: flex; flex-direction: column; gap: var(--space-4); padding-block: var(--space-8); }
-.campaign-editor-layout { display: grid; grid-template-columns: minmax(0, 470fr) minmax(0, 618fr); gap: var(--space-40); padding-top: var(--space-28); }
-.campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--space-28); }
+.campaign-editor-layout { display: grid; grid-template-columns: minmax(0, 470fr) minmax(0, 618fr); gap: var(--space-40); }
+.ui-alert + .campaign-editor-layout { margin-top: var(--page-gap); }
+.campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--page-gap); }
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-16); }
 .campaign-message { min-width: 0; }
 .campaign-message-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); margin-bottom: var(--space-16); }

@@ -33,7 +33,7 @@ export function ApiKeysPage() {
   }
   return <div className="stack">
     <PageHeader title="API keys" actions={<Button variant="primary" onClick={openCreate}>Create key</Button>} />
-    <div className="muted">Workspace-wide keys · Domain restrictions available in {regionId}</div>
+    <div className="page-toolbar muted">Workspace-wide keys · Domain restrictions available in {regionId}</div>
     {keys.isPending ? <LoadingState /> : keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable rows={keys.data} rowKey={row => row.id} empty={<EmptyState title="No API keys" action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
       { key: 'name', label: 'Name', width: '23%', render: row => row.name },
       { key: 'prefix', label: 'Key prefix', width: '20%', render: row => <code>{row.prefix}</code> },

@@ -30,7 +30,7 @@ export function DomainsPage() {
   }
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
-    <div className="muted">Sending region · {regionId}</div>
+    <div className="page-toolbar muted">Sending region · {regionId}</div>
     {domains.isPending ? <LoadingState /> : domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable rows={domains.data.items} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { key: 'name', label: 'Domain', width: '32%', render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },

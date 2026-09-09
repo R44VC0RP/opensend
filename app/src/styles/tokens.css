@@ -67,6 +67,8 @@
   --row-height: 48px;
   --row-height-lg: 64px;
   --sidebar-width: 208px;
+  --page-inset: var(--space-24);
+  --page-gap: var(--space-20);
   --motion-duration: 120ms;
   --shadow-popover: 0 4px 16px var(--color-shadow);
   --shadow-dialog: 0 12px 40px var(--color-shadow);

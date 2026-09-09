@@ -1,4 +1,4 @@
-import { Suspense, useEffect } from 'react'
+import { Suspense, useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useApiQuery, useRegion } from '../data/context'
 import { number, percent } from '../lib/format'
@@ -13,7 +13,11 @@ export function AppShell() {
   const current = regions.data?.find(region => region.id === regionId)
   const location = useLocation()
   const navigate = useNavigate()
-  useEffect(() => { window.scrollTo(0, 0) }, [location.pathname])
+  const content = useRef<HTMLElement>(null)
+  useEffect(() => {
+    window.scrollTo(0, 0)
+    content.current?.scrollTo(0, 0)
+  }, [location.pathname])
   useEffect(() => { if (regions.data?.length && !current) setRegionId(regions.data[0].id) }, [regions.data, current, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
   function changeRegion(id: string) {
@@ -44,6 +48,6 @@ export function AppShell() {
         <span>{number(current.sent24h)} / {number(current.dailyQuota)} sent</span>
       </> : regions.isError ? <><span>Quota unavailable</span><Button variant="ghost" onClick={() => regions.refetch()}>Retry</Button></> : <span>Loading region…</span>}</div>
     </aside>
-    <main id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<LoadingState />}><Outlet /></Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<LoadingState />}><Outlet /></Suspense></main>
   </div>
 }
