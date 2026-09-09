@@ -15,8 +15,8 @@ export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = 'secondary', size = 'md', loading, disabled, className, children, type = 'button', ...props }, ref) {
   return <button {...props} ref={ref} type={type} disabled={disabled || loading} aria-busy={loading || undefined} className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, className)}>{loading && <LoaderCircle className="ui-spinner" size={14} aria-hidden="true" />}{children}</button>;
 });
-export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: string }>(function IconButton({ label, className, variant = 'ghost', ...props }, ref) {
-  return <Button {...props} ref={ref} variant={variant} aria-label={label} title={label} className={cx('ui-icon-button', className)} />;
+export const IconButton = forwardRef<HTMLButtonElement, ButtonProps & { label: string }>(function IconButton({ label, className, variant = 'ghost', loading, children, ...props }, ref) {
+  return <Button {...props} ref={ref} variant={variant} loading={loading} aria-label={label} title={label} className={cx('ui-icon-button', className)}>{loading ? null : children}</Button>;
 });
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input({ className, ...props }, ref) {
   return <input {...props} ref={ref} className={cx('ui-input', className)} />;
