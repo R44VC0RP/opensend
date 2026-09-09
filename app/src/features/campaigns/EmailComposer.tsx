@@ -5,6 +5,7 @@ import { defaultSlashCommands } from '@react-email/editor/ui'
 import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, Type, Undo2 } from 'lucide-react'
 import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
+import type { Attachment } from '../../data/types'
 import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources } from './composer-content'
 import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type EditorNode } from './block-content'
 import '@react-email/editor/themes/default.css'
@@ -37,6 +38,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [initialSnapshot] = useState(() => ({ html: initialHtml, attachmentIds: [...attachmentIds] }))
   // Inline attachments open as data URLs and save back as their cid references.
   const cidBySource = useRef(new Map<string, string>())
+  // Uploads must survive a failed prepare/save before their IDs reach attachmentIds.
+  const uploadedInline = useRef(new Map<string, Attachment>())
   const [hydrating, setHydrating] = useState(cidImageSources(initialHtml).size > 0)
   const [content, setContent] = useState<EditorNode>(() => blockHtmlToDocument(initialHtml))
   const [generation, setGeneration] = useState(0)
@@ -122,11 +125,17 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     if (isBlockDocumentEmpty(document)) return { html: '', inlineAttachmentIds: [] }
     const currentInline: string[] = []
     if (api.attachments) {
-      const metadata = await Promise.all(attachmentIds.map(id => api.attachments!.get(id)))
-      let totalSize = metadata.reduce((total, item) => total + item.size, 0)
       const allIds = new Set(attachmentIds)
+      const metadata = await Promise.all([...allIds].map(id => api.attachments!.get(id)))
+      const inlineSources = inlineImageSources(document as Record<string, unknown>)
+      for (const source of inlineSources) {
+        const cached = uploadedInline.current.get(source)
+        if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
+      }
+      let totalSize = metadata.reduce((total, item) => total + item.size, 0)
+      if (allIds.size > 20 || totalSize > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
       const sources = new Map<string, string>()
-      for (const source of inlineImageSources(document as Record<string, unknown>)) {
+      for (const source of inlineSources) {
         let cid = cidBySource.current.get(source)
         if (!cid) {
           const match = /^data:(image\/(?:png|jpeg|gif|webp|avif));base64,(.+)$/i.exec(source)
@@ -138,7 +147,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
           const item = await api.attachments.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
           cid = `cid:${contentId}`
-          cidBySource.current.set(source, cid); allIds.add(item.id); totalSize += item.size
+          cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
           currentInline.push(item.id)
         } else {
           const owner = metadata.find(item => item.contentId && `cid:${item.contentId}` === cid)

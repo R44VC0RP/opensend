@@ -20,7 +20,7 @@ export function AppShell() {
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const location = useLocation()
   const navigate = useNavigate()
-  const needsRegion = location.pathname === '/' || ['/logs', '/campaigns', '/domains'].some(path => location.pathname.startsWith(path))
+  const needsRegion = location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path))
   const content = useRef<HTMLElement>(null)
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -34,7 +34,7 @@ export function AppShell() {
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
-    if (['logs', 'campaigns', 'domains'].includes(parts[0])) {
+    if (['logs', 'domains'].includes(parts[0])) {
       if (parts.length > 1) navigate(`/${parts[0]}`)
       else {
         const search = new URLSearchParams(location.search)

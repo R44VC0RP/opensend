@@ -2,11 +2,11 @@ import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Cam
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; environment?: 'live' | 'test' } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; environment?: 'live' | 'test'; idempotencyKey?: string } = {}): Promise<T> {
   let response: Response
   try {
     response = await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.environment ? { 'X-OpenSend-Environment': options.environment } : {}) },
+      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.environment ? { 'X-OpenSend-Environment': options.environment } : {}), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
@@ -118,7 +118,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
         const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
-        return mapCampaign(await call(input.id ? `/campaigns/${idPath(input.id)}` : '/campaigns', input.id ? 'PATCH' : 'POST', input.id ? {revision: input.revision, draft} : draft, signal))
+        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : draft, signal, environment, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
       audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
       send: async (input, signal) => {

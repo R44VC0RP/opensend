@@ -1490,7 +1490,7 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review."
+            "description": "Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review."
           },
           "environment": {
             "type": "string",
@@ -1931,7 +1931,7 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review."
+            "description": "Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review."
           },
           "environment": {
             "type": "string",

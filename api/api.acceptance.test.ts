@@ -809,7 +809,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(editorUrl.origin, PUBLIC_ORIGIN);
     assert.equal(editorUrl.pathname, `/campaigns/${unfinished.id}/edit`);
     assert.equal(editorUrl.searchParams.get('environment'), 'test');
-    assert.equal(editorUrl.searchParams.get('region'), unfinished.draft.region);
+    assert.equal(editorUrl.searchParams.get('region'), null);
     assert.equal((await callTool(token, 'createCampaign', draftArgs, 201)).id, unfinished.id);
     assert.equal((await callTool(token, 'getCampaign', { id: unfinished.id })).url, unfinished.url);
     assert.equal((await callTool(token, 'listCampaigns', { search: draftName })).data[0].id, unfinished.id);

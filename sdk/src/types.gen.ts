@@ -292,7 +292,7 @@ export type DeletedSendingResource = {
 export type Campaign = {
     id: string;
     /**
-     * Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
      */
     url: string;
     environment: 'live' | 'test';
@@ -393,7 +393,7 @@ export type CreateCampaignInput = {
 export type CampaignSummary = {
     id: string;
     /**
-     * Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
      */
     url: string;
     environment: 'live' | 'test';
