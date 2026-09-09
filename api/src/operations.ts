@@ -300,6 +300,16 @@ function verifySesAccount(runtime: Runtime, message: unknown) {
   if (runtime.config.awsAccountId && accountId !== runtime.config.awsAccountId) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this deployment.');
 }
 function registerPublicEvents(app: App) {
+  app.use('/v1/events/ses', async (c, next) => {
+    // SNS sends JSON envelopes as text/plain. Normalize only the media type before
+    // OpenAPI's required JSON validator; preserve the signed envelope bytes.
+    if (c.req.method === 'POST' && c.req.header('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'text/plain') {
+      const headers = new Headers(c.req.raw.headers);
+      headers.set('content-type', 'application/json');
+      c.req.raw = new Request(c.req.raw, { headers });
+    }
+    await next();
+  });
   app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(z.object({ accepted: z.boolean() }).openapi('SnsAccepted')), ...errors } }), async c => {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');

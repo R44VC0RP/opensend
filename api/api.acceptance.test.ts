@@ -1776,6 +1776,13 @@ describe('Operational configuration and public event boundaries', () => {
       SigningCertURL: 'https://127.0.0.1/never-fetch-this.pem',
     };
     error(await http('POST', '/v1/events/ses', undefined, envelope), 403, 'SNS_TOPIC_NOT_ALLOWED');
+    // SNS defaults to text/plain, including signed subscription confirmations.
+    // These must reach the same security checks, not fail as an absent JSON body.
+    for (const contentType of ['text/plain', 'text/plain; charset=UTF-8']) {
+      error(await http('POST', '/v1/events/ses', undefined, envelope, { 'content-type': contentType }), 403, 'SNS_TOPIC_NOT_ALLOWED');
+      error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Type: 'SubscriptionConfirmation', SubscribeURL: `https://sns.${REGION}.amazonaws.com/?Action=ConfirmSubscription`, Token: 'untrusted' }, { 'content-type': contentType }), 403, 'SNS_TOPIC_NOT_ALLOWED');
+      error(await http('POST', '/v1/events/ses', undefined, {}, { 'content-type': contentType }), 422, 'VALIDATION_FAILED');
+    }
     // Topic authorization is checked before certificate/signature work, even for malformed signatures.
     error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Signature: '!!!' }), 403, 'SNS_TOPIC_NOT_ALLOWED');
   });
