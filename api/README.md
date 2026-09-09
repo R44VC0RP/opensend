@@ -155,6 +155,12 @@ Setup manages only resources tagged with this installation's `opensend:installat
 
 The managed destinations enable `SEND`, `DELIVERY`, `BOUNCE`, `COMPLAINT`, `REJECT`, `RENDERING_FAILURE`, `DELIVERY_DELAY`, `OPEN`, and `CLICK`. Open/click tracking still follows each message’s explicit tracking override; `tracking: false` disables it. `SUBSCRIPTION` is not enabled because OpenSend owns consent. Setup does not change DNS, obtain SES production/sandbox approval, mutate IAM, delete unrelated resources, add SQS/Lambda, or request mailbox access. Unrelated event destinations/subscriptions remain unchanged.
 
+### Copyable IAM policy
+
+Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, stored-template reads/rendering, and sending; it grants no IAM administration, resource deletion, or attachment-storage access.
+
+The separate `ses:ApplyTrackingConfigurationOverrides` permission is needed for per-message open/click tracking settings, including `tracking: false`. SES can report a healthy account and completed setup while rejecting sends without this permission. This statement grants only that action on `*`; `ses:SendEmail` remains limited by the account-scoped identity/configuration-set/template statement. The subscription statement permits HTTPS callbacks at `/v1/events/ses`; you can replace its host wildcard with your exact public callback URL. Validate sending with an authorized recipient after applying the policy—read-only discovery cannot prove send authorization.
+
 ### Setup IAM action groups
 
 Review resource scopes and tag conditions for your account and generated regional names. The current commands in [`src/ses-setup.ts`](src/ses-setup.ts) require these groups; this is an action inventory, **not a complete verified deployment policy** or the separate permissions needed for sending/identity management:

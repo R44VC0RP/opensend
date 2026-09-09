@@ -1,0 +1,77 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverAccountAndSesIdentities",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity", "ses:GetAccount", "ses:ListEmailIdentities"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadAndVerifySenderIdentities",
+      "Effect": "Allow",
+      "Action": ["ses:GetEmailIdentity", "ses:CreateEmailIdentity"],
+      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*"
+    },
+    {
+      "Sid": "ProvisionOpenSendConfigurationSets",
+      "Effect": "Allow",
+      "Action": [
+        "ses:CreateConfigurationSet",
+        "ses:GetConfigurationSet",
+        "ses:GetConfigurationSetEventDestinations",
+        "ses:CreateConfigurationSetEventDestination",
+        "ses:UpdateConfigurationSetEventDestination",
+        "ses:TagResource"
+      ],
+      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*"
+    },
+    {
+      "Sid": "SendFromAccountIdentities",
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": [
+        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*",
+        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*",
+        "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/*"
+      ]
+    },
+    {
+      "Sid": "ApplyPerMessageTracking",
+      "Effect": "Allow",
+      "Action": "ses:ApplyTrackingConfigurationOverrides",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadAndRenderStoredTemplates",
+      "Effect": "Allow",
+      "Action": ["ses:GetEmailTemplate", "ses:TestRenderEmailTemplate"],
+      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/*"
+    },
+    {
+      "Sid": "ProvisionOpenSendFeedbackTopics",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:ListTagsForResource",
+        "sns:TagResource",
+        "sns:ListSubscriptionsByTopic",
+        "sns:GetSubscriptionAttributes",
+        "sns:SetSubscriptionAttributes"
+      ],
+      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:opensend-*"
+    },
+    {
+      "Sid": "SubscribeOpenSendHttpsFeedback",
+      "Effect": "Allow",
+      "Action": "sns:Subscribe",
+      "Resource": "arn:aws:sns:*:YOUR_AWS_ACCOUNT_ID:opensend-*",
+      "Condition": {
+        "StringEquals": {"sns:Protocol": "https"},
+        "StringLike": {"sns:Endpoint": "https://*/v1/events/ses"}
+      }
+    }
+  ]
+}
