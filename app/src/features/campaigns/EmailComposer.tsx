@@ -5,18 +5,28 @@ import { composeReactEmail, isDocumentVisuallyEmpty } from '@react-email/editor/
 import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Plus, Redo2, Type, Undo2 } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, DropdownMenu, Field, IconButton, SkeletonText, Tabs, Textarea } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
+import { useApi } from '../../data/context'
 import type { CampaignEditorMetadata } from '../../data/types'
-import { prepareEditorContent, prepareLocalImage, sanitizeEditorDocument } from './composer-content'
+import { prepareEditorContent, prepareLocalImage, sanitizeEditorDocument, inlineImageSources, inlineImageReferences, inlineImageHash, replaceImageSource, replaceEditorImageSources, loadInlineAttachments, cidImageSources, type InlineImageReference } from './composer-content'
 import '@react-email/editor/themes/default.css'
 import './composer.css'
 
-type Draft = { html: string; editor: CampaignEditorMetadata | null }
+type Draft = { html: string; editor: CampaignEditorMetadata | null; inlineAttachmentIds?: string[] }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
-type Props = { initialHtml: string; initialEditor?: CampaignEditorMetadata | null; previewText: string; disabled?: boolean; onReady: () => void; onDirty: () => void }
+type Props = { attachmentIds?: string[]; initialHtml: string; initialEditor?: CampaignEditorMetadata | null; previewText: string; disabled?: boolean; onReady: () => void; onDirty: () => void }
 type Mode = 'compose' | 'html' | 'preview'
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
-export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ initialHtml, initialEditor, previewText, disabled = false, onReady, onDirty }, ref) {
+export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], initialHtml, initialEditor, previewText, disabled = false, onReady, onDirty }, ref) {
+  const api = useApi()
+  const inlineReferences = useRef<InlineImageReference[]>(inlineImageReferences(initialEditor?.document))
+  const ownedInline = useRef(new Set<string>())
+  const preparing = useRef<Promise<Draft> | null>(null)
+  const [initialSnapshot] = useState(() => ({html: initialHtml, editor: initialEditor, attachmentIds: [...attachmentIds]}))
+  const resolvedImageSources = useRef(new Map<string, string>())
+  const [hydrating, setHydrating] = useState(Boolean(initialEditor && cidImageSources(initialHtml).size))
+  const [previewAttachmentIds, setPreviewAttachmentIds] = useState(attachmentIds)
+  const [previewEditor, setPreviewEditor] = useState(initialEditor ?? null)
   const [initial] = useState(() => prepareEditorContent(initialHtml, initialEditor))
   const [mode, setMode] = useState<Mode>(initial.canCompose ? 'compose' : 'html')
   const [source, setSource] = useState<'compose' | 'html'>(initial.canCompose ? 'compose' : 'html')
@@ -30,13 +40,14 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [convert, setConvert] = useState(false)
   const editor = useRef<EmailEditorRef>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  const changed = useRef(Boolean(initialEditor))
+  const changed = useRef(false)
+  const preservedEditor = useRef(initialEditor ?? null)
   const operation = useRef(false)
   const latestRaw = useRef(initialHtml)
   const preservedHtml = useRef(initialHtml)
   const uploads = useRef(0)
   const sourceRef = useRef(source)
-  const locked = disabled || busy
+  const locked = disabled || busy || hydrating
   const [theme] = useState(() => {
     const tokens = getComputedStyle(document.documentElement)
     const fontFamily = tokens.getPropertyValue('--font-email').trim()
@@ -78,21 +89,80 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   // Run after child option reconciliation so the name and paste boundary remain installed.
   useEffect(() => { if (editor.current) synchronizeEditor(editor.current) })
 
-  async function prepare(allowEmpty = false): Promise<Draft> {
+  useEffect(() => {
+    if (!initialSnapshot.editor || !cidImageSources(initialSnapshot.html).size) return
+    const controller = new AbortController()
+    let release: (() => void) | undefined
+    setHydrating(true)
+    loadInlineAttachments(api, initialSnapshot.attachmentIds, cidImageSources(initialSnapshot.html), controller.signal).then(result => {
+      if (controller.signal.aborted) {result.release(); return}
+      release = result.release
+      resolvedImageSources.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
+      const original = sanitizeEditorDocument(initialSnapshot.editor!.document)
+      setContent(replaceEditorImageSources(original, result.sources))
+      setHydrating(false); setReady(false); setGeneration(value => value + 1)
+    }).catch(cause => {if (!controller.signal.aborted) {setError(cause instanceof Error ? cause.message : 'Inline images could not be loaded.'); setHydrating(false); setGeneration(value => value + 1)}})
+    return () => {controller.abort(); release?.()}
+  }, [api, initialSnapshot])
+
+  async function prepareContent(allowEmpty = false): Promise<Draft> {
+    if (hydrating) throw new Error('Wait for inline images to finish loading before saving.')
     if (uploads.current) throw new Error('Wait for your image to finish loading before continuing.')
-    if (sourceRef.current === 'html') return { html: latestRaw.current, editor: null }
+    if (sourceRef.current === 'html') {
+      if (api.mode !== 'demo' && /<img\b[^>]*\bsrc\s*=\s*["']data:/i.test(latestRaw.current)) throw new Error('Inline data images cannot be sent. Convert this HTML to Compose so images can be uploaded as inline attachments, or use an HTTPS image URL.')
+      return { html: latestRaw.current, editor: latestRaw.current === preservedHtml.current ? preservedEditor.current : null, inlineAttachmentIds: inlineReferences.current.filter(item => latestRaw.current.includes(`cid:${item.contentId}`)).map(item => item.attachmentId) }
+    }
     const instance = editor.current
     if (!instance?.editor) throw new Error('The composer is still loading. Try again in a moment.')
     if (isDocumentVisuallyEmpty(instance.editor.state.doc)) {
       if (allowEmpty) return { html: '', editor: null }
       throw new Error('Add some email content before continuing.')
     }
-    if (!changed.current && preservedHtml.current.trim()) return { html: preservedHtml.current, editor: null }
+    if (!changed.current && preservedHtml.current.trim() && (api.mode === 'demo' || (!/<script\b/i.test(preservedHtml.current) && !/<img\b[^>]*\bsrc\s*=\s*["']data:/i.test(preservedHtml.current) && !inlineImageSources(preservedEditor.current?.document ?? {}).length))) return { html: preservedHtml.current, editor: preservedEditor.current }
     // The serializer snapshots JSON before its first await. Lock the editor during export.
-    const document = sanitizeEditorDocument(instance.getJSON())
-    const result = await composeReactEmail({ editor: instance.editor, preview: previewText || undefined })
-    if (result.html.length > 500_000) throw new Error('This email is too large. Remove an image or shorten the content before saving.')
-    return { html: result.html, editor: { format: 'react-email', version: 1, document } }
+    let document = sanitizeEditorDocument(replaceEditorImageSources(instance.getJSON(), resolvedImageSources.current))
+    if (new TextEncoder().encode(JSON.stringify({format: 'react-email', version: 1, document})).byteLength > 256 * 1024) throw new Error('The visual document exceeds 256 KiB. Remove an image or shorten the content before saving.')
+    const result = await composeReactEmail({ editor: instance.editor })
+    // React Email emits JSON-LD metadata, but the public send contract forbids all script tags.
+    let html = result.html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    for (const [localSource, cid] of resolvedImageSources.current) html = replaceImageSource(html, localSource, cid)
+    const currentReferences: InlineImageReference[] = []
+    const storedSources = new Map<string, string>()
+    if (api.attachments) {
+      const metadata = await Promise.all(attachmentIds.map(id => api.attachments!.get(id)))
+      let totalSize = metadata.reduce((total, item) => total + item.size, 0)
+      const allIds = new Set(attachmentIds)
+      for (const source of inlineImageSources(document)) {
+        const hash = await inlineImageHash(source)
+        let reference = inlineReferences.current.find(item => item.hash === hash && (allIds.has(item.attachmentId) || ownedInline.current.has(item.attachmentId)))
+        if (!reference) {
+          const match = /^data:(image\/(?:png|jpeg|gif|webp|avif));base64,(.+)$/i.exec(source)
+          if (!match) throw new Error('Unsupported inline image format.')
+          const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
+          if (allIds.size >= 20 || totalSize + bytes.length > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+          const contentId = `opensend-${crypto.randomUUID()}`
+          const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
+          const item = await api.attachments.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, {type: match[1]}), {contentId})
+          reference = {hash, contentId, attachmentId: item.id}
+          ownedInline.current.add(item.id); inlineReferences.current.push(reference); totalSize += item.size
+        } else if (!allIds.has(reference.attachmentId)) {
+          totalSize += (await api.attachments.get(reference.attachmentId)).size
+          if (allIds.size >= 20 || totalSize > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+        }
+        allIds.add(reference.attachmentId); currentReferences.push(reference)
+        html = replaceImageSource(html, source, `cid:${reference.contentId}`)
+        storedSources.set(source, `cid:${reference.contentId}`)
+      }
+      document = replaceEditorImageSources(document, storedSources)
+      delete document.opensendInlineImages
+    }
+    if (new TextEncoder().encode(JSON.stringify({format: 'react-email', version: 1, document})).byteLength > 256 * 1024) throw new Error('The visual document exceeds 256 KiB. Remove an image or shorten the content before saving.')
+    if (html.length > 500_000) throw new Error('This email is too large. Remove an image or shorten the content before saving.')
+    return { html, editor: { format: 'react-email', version: 1, document }, inlineAttachmentIds: currentReferences.map(item => item.attachmentId) }
+  }
+  function prepare(allowEmpty = false): Promise<Draft> {
+    if (!preparing.current) preparing.current = prepareContent(allowEmpty).finally(() => {preparing.current = null})
+    return preparing.current
   }
   useImperativeHandle(ref, () => ({ prepare }))
 
@@ -102,6 +172,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setGeneration(value => value + 1)
     changed.current = false
     preservedHtml.current = latestRaw.current
+    preservedEditor.current = null
     sourceRef.current = 'compose'
     setSource('compose')
     setReady(false)
@@ -124,7 +195,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     try {
       const draft = await prepare(next === 'html')
       if (next === 'html') { latestRaw.current = draft.html; setRaw(draft.html) }
-      else setPreview(draft.html)
+      else {setPreview(draft.html); setPreviewEditor(draft.editor); setPreviewAttachmentIds([...new Set([...attachmentIds, ...(draft.inlineAttachmentIds ?? [])])])}
       setMode(next as Mode)
       return true
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not prepare this email.'); return false }
@@ -170,6 +241,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     } else if (locked) { event.preventDefault(); event.stopPropagation() }
   }}>
     <div className="composer-mode-bar"><Tabs value={mode} onValueChange={selectMode} disabled={locked} label="Email content mode" items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} />{busy && <span className="muted" role="status">Preparing…</span>}</div>
+    {initial.reason && source === 'html' && <Alert tone="info">{initial.reason}</Alert>}
     {error && <Alert tone="danger">{error}</Alert>}
     <div hidden={mode !== 'compose'} className="composer-visual">
       <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
@@ -188,11 +260,11 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       </div>
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your newsletter, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); setReady(true); onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
+        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your newsletter, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); setReady(!hydrating); if (!hydrating) onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
       </div>
     </div>
     {mode === 'html' && <Field label="Email HTML" htmlFor="campaign-html"><Textarea id="campaign-html" className="campaign-html" value={raw} disabled={locked} spellCheck={false} onChange={event => { latestRaw.current = event.target.value; setRaw(event.target.value); sourceRef.current = 'html'; setSource('html'); onDirty() }} /></Field>}
-    {mode === 'preview' && <EmailPreview html={preview} title="Campaign email preview" />}
+    {mode === 'preview' && <EmailPreview html={preview} title="Campaign email preview" editor={previewEditor} attachmentIds={previewAttachmentIds} />}
     <ConfirmDialog open={convert} onOpenChange={setConvert} title="Convert HTML to visual blocks?" description="Custom HTML and styles may not convert exactly. Your original HTML is kept until you edit the visual content. Review the preview before saving." confirmLabel="Convert to blocks" onConfirm={openVisual} />
   </div>
 })

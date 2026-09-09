@@ -4,15 +4,21 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../app/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json"]
+  },
   "vars": {
-    "WORKSPACE_ID": "default",
     "PUBLIC_URL": "https://opensend.example.com",
     "SES_REGIONS": "us-east-1",
     "ENABLE_LIVE_SES": "false",
     "SNS_TOPIC_ARNS": "",
-    "WEBHOOK_ALLOWED_HOSTS": ""
+    "WEBHOOK_ALLOWED_HOSTS": "",
+    "GOOGLE_CLIENT_ID": "",
+    "AUTH_ALLOWED_EMAILS": "",
+    "AUTH_ALLOWED_DOMAINS": ""
   },
-  "secrets": { "required": ["ADMIN_API_KEY", "ENCRYPTION_KEY"] },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {

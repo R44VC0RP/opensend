@@ -1,27 +1,30 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
-import { timingSafeEqual } from 'node:crypto';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security } from './core.js';
 import type { App, AppEnv } from './core.js';
 import { apiKeys } from './db/core.js';
+import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
 
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const token = c.req.header('authorization')?.match(/^Bearer ([^\s]+)$/i)?.[1];
-  if (!token) throw new ApiError(401, 'AUTH_REQUIRED', 'A bearer API key is required.');
-  const hash = await digest(token);
-  const adminHash = await digest(c.env.config.adminToken);
-  if (timingSafeEqual(new TextEncoder().encode(hash), new TextEncoder().encode(adminHash))) {
-    c.set('actor', { keyId: `bootstrap_${adminHash.slice(0, 24)}`, workspaceId: c.env.config.workspaceId, environment: 'live', permissions: ['manage'], domains: [] });
-  } else {
-    if (!/^os_(?:test|live)_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+  const authorization = c.req.header('authorization');
+  if (authorization !== undefined) {
+    const token = authorization.match(/^Bearer (os_(?:test|live)_[0-9a-f]{64})$/i)?.[1];
+    if (!token) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+    const hash = await digest(token);
     const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), eq(apiKeys.workspaceId, c.env.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);
     if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+    // API-key credentials always define the environment, regardless of cookies or headers.
     c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains });
     await c.env.db.update(apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, key.id), or(isNull(apiKeys.lastUsedAt), sql`${apiKeys.lastUsedAt} < now() - interval '1 minute'`)));
+  } else {
+    const dashboard = await getDashboardActor(c.env, c.req.raw.headers);
+    if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
+    c.set('actor', dashboard);
   }
   const identity = c.get('actor');
-  const maxRequests = identity.keyId.startsWith('bootstrap_') ? 2400 : identity.environment === 'test' ? 600 : 1200;
+  const maxRequests = identity.keyId.startsWith('user_') ? 2400 : identity.environment === 'test' ? 600 : 1200;
   const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
     VALUES (${identity.workspaceId}, ${identity.keyId}, date_trunc('minute', now()), 1)
     ON CONFLICT (workspace_id, key_id) DO UPDATE SET

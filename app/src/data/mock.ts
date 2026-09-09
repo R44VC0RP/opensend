@@ -4,8 +4,8 @@ import { createSeed } from './seed'
 import type { DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
-const EVENTS: WebhookEvent[] = ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed']
-const CONTACT_STATUSES = ['subscribed', 'unsubscribed', 'suppressed']
+const EVENTS: WebhookEvent[] = ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed', 'email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
+const CONTACT_STATUSES = ['unknown', 'subscribed', 'unsubscribed', 'suppressed']
 const CONNECTABLE_REGIONS: Record<string, string> = {
   'us-east-1': 'US East (N. Virginia)', 'us-east-2': 'US East (Ohio)',
   'us-west-1': 'US West (N. California)', 'us-west-2': 'US West (Oregon)',
@@ -134,7 +134,7 @@ function validateEditor(value: unknown): CampaignEditorMetadata | null {
     if (++nodes > 5000) invalid('editor', 'Editor data must contain no more than 5,000 values.')
     if (typeof value === 'string') {
       characters += value.length
-      if (characters > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+      if (characters > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
       return value
     }
     if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value
@@ -155,7 +155,7 @@ function validateEditor(value: unknown): CampaignEditorMetadata | null {
       if (!descriptor.enumerable || !('value' in descriptor)) invalid('editor', 'Editor data cannot contain accessors or hidden properties.')
       if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) invalid('editor', 'Editor arrays cannot contain named properties.')
       if (!array) characters += key.length
-      if (characters > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+      if (characters > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
       Object.defineProperty(result, key, { value: copy(descriptor.value, depth + 1), enumerable: true, writable: true, configurable: true })
       entries++
     }
@@ -168,7 +168,7 @@ function validateEditor(value: unknown): CampaignEditorMetadata | null {
   if (!isRecord(clean) || clean.format !== 'react-email' || clean.version !== 1) return invalid('editor', 'Editor data must use react-email format version 1.')
   if (!isRecord(clean.document) || clean.document.type !== 'doc' || (Object.hasOwn(clean.document, 'content') && !Array.isArray(clean.document.content))) invalid('editor', 'Editor document must have type “doc” and an optional content array.')
   const serialized = JSON.stringify(clean)
-  if (serialized.length > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+  if (serialized.length > 262_144) invalid('editor', 'Editor data must serialize to 262,144 characters or fewer.')
   return JSON.parse(serialized) as CampaignEditorMetadata
 }
 function validEditor(value: unknown): boolean {
@@ -179,7 +179,7 @@ function validateCampaign(state: DemoState, input: CampaignInput): CampaignInput
   checkRegion(state, input.regionId)
   find(state.lists, input.listId, 'List')
   if (input.segmentId !== null) find(state.segments, input.segmentId, 'Segment')
-  return { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 500, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), ...(input.editor !== undefined ? { editor: validateEditor(input.editor) } : {}) }
+  return { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), ...(input.editor !== undefined ? { editor: validateEditor(input.editor) } : {}) }
 }
 function validDateTime(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value)

@@ -1,4 +1,4 @@
-export const number = (value: number) => new Intl.NumberFormat('en-US').format(value)
+export const number = (value: number | undefined | null) => value == null || !Number.isFinite(value) ? '—' : new Intl.NumberFormat('en-US').format(value)
 export const percent = (value: number, digits = 2) => new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value)
 export function date(value: string | null | undefined, options?: Intl.DateTimeFormatOptions) {
   if (!value) return '—'

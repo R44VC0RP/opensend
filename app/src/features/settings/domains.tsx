@@ -1,20 +1,20 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
-import { useApiMutation, useApiQuery, useRegion } from '../../data/context'
+import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { label } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
-export function DomainsPage() {
+function LiveDomainsPage() {
   const { regionId } = useRegion()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
   const page = pageState.regionId === regionId ? pageState.page : 1
-  const domains = useApiQuery(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 20 }, signal))
-  const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added')
+  const domains = useApiQuery(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal))
+  const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [invalid, setInvalid] = useState('')
@@ -39,7 +39,7 @@ export function DomainsPage() {
         { ...settingsColumns.domains[2], render: row => row.regionId },
         { ...settingsColumns.domains[3], render: row => <Link to={`/domains/${row.id}`}>{row.status === 'verified' && row.mailFromStatus === 'verified' ? 'Manage' : 'Review records'}</Link> },
       ]} />
-      {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={20} total={domains.data.total} onPageChange={next => setPageState({ regionId, page: next })} />}
+      {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add domain" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="add-domain">Continue to DNS records</Button></>}>
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
@@ -51,11 +51,11 @@ export function DomainsPage() {
   </div>
 }
 
-export function DomainDetailPage() {
+function LiveDomainDetailPage() {
   const { id = '' } = useParams()
   const { regionId, setRegionId } = useRegion()
   const domain = useApiQuery(['domain', id], (api, signal) => api.domains.get(id, signal))
-  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Domain records verified')
+  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Domain readiness refreshed', true)
   if (domain.isPending) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
@@ -67,6 +67,7 @@ export function DomainDetailPage() {
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <section className="section stack">
       <SectionHeader title="DNS records" />
+      {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
       <div className="muted">Copy these records to your DNS provider, then verify.</div>
       <DataTable minRows={3} rowSize="large" rows={current.records} rowKey={record => record.id} columns={[
         { ...settingsColumns.dns[0], render: record => record.type },
@@ -74,7 +75,11 @@ export function DomainDetailPage() {
         { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
         { ...settingsColumns.dns[3], render: record => <StatusBadge status={label(record.status)} /> },
       ]} />
-      {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`}>Review the pending records, then verify again.</Alert> : <Alert tone="success">All DNS records are verified.</Alert>}
+      {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`}>Review the pending records, then verify again.</Alert> : <Alert tone="info">DNS record values are provided by SES. Use the domain readiness status above; individual DNS records are not independently verified.</Alert>}
     </section>
   </div>
 }
+
+function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domain verification is a live SES operation. Switch to live mode to manage sending domains. Test campaigns accept an explicit sender address without an AWS lookup.</Alert></> }
+export function DomainsPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainsPage /> }
+export function DomainDetailPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainDetailPage /> }

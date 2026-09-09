@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, log, type App, type Actor, type Ctx, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -63,12 +63,12 @@ async function encryptionKey(value: string) {
 }
 const hex = (value: Uint8Array) => Array.from(value, b => b.toString(16).padStart(2, '0')).join('');
 const unhex = (value: string) => Uint8Array.from(value.match(/../g) ?? [], h => parseInt(h, 16));
-async function encrypt(runtime: Runtime, secret: string, binding: string) {
+async function encrypt(runtime: Pick<Runtime, 'config'>, secret: string, binding: string) {
   const current = await encryptionKey(runtime.config.encryptionKey), iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, current.key, new TextEncoder().encode(secret));
   return `v1.${current.id}.${hex(iv)}.${hex(new Uint8Array(encrypted))}`;
 }
-async function decrypt(runtime: Runtime, ciphertext: string, binding: string) {
+async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: string, binding: string) {
   const parts = ciphertext.split('.'), versioned = parts.length === 4 && parts[0] === 'v1';
   const [iv, value] = versioned ? parts.slice(2) : parts;
   const rotationRequired = () => new ApiError(503, 'KEY_ROTATION_REQUIRED', 'The webhook secret cannot be decrypted with configured keys. Restore its encryption key or rotate the webhook secret.');
@@ -84,6 +84,31 @@ async function decrypt(runtime: Runtime, ciphertext: string, binding: string) {
 function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
 async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
 const secretBinding = (a: Pick<Actor, 'workspaceId' | 'environment'>, webhookId: string) => `${a.workspaceId}:${a.environment}:${webhookId}`;
+
+// Installer-only, resumable rewrapping; no webhook signing secret is rotated or returned.
+// Decryption failure aborts, leaving earlier successful updates safe to skip on rerun.
+export async function reencryptWebhookSecrets(db: Database, config: Config): Promise<{ scanned: number; reencrypted: number; skipped: number; conflicted: number }> {
+  const runtime = { config }, current = await encryptionKey(config.encryptionKey);
+  const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
+  let cursor: string | undefined;
+  for (;;) {
+    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, environment: webhooks.environment, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(eq(webhooks.workspaceId, config.workspaceId), inArray(webhooks.environment, ['live', 'test']), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
+    if (!rows.length) return counts;
+    for (const row of rows) {
+      counts.scanned++;
+      const parts = row.encryptedSecret.split('.');
+      if (parts.length === 4 && parts[0] === 'v1' && parts[1] === current.id && /^[a-f0-9]{24}$/i.test(parts[2]!) && /^(?:[a-f0-9]{2}){16,}$/i.test(parts[3]!)) { counts.skipped++; continue; }
+      const binding = secretBinding(row, row.id);
+      const encryptedSecret = await encrypt(runtime, await decrypt(runtime, row.encryptedSecret, binding), binding);
+      // Concurrent deletion or secret rotation must never be overwritten by this scan.
+      const updated = await db.update(webhooks).set({ encryptedSecret, updatedAt: now() }).where(and(eq(webhooks.id, row.id), scoped(webhooks, row), eq(webhooks.encryptedSecret, row.encryptedSecret))).returning({ id: webhooks.id });
+      if (updated.length) counts.reencrypted++; else counts.conflicted++;
+    }
+    cursor = rows[rows.length - 1]!.id;
+    if (rows.length < 100) return counts;
+  }
+}
+
 function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
   return a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } };
 }
@@ -314,15 +339,19 @@ function registerPublicEvents(app: App) {
 
 function registerMetrics(app: App) {
   const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional() }).openapi('MetricsQuery');
-  const schema = z.object({ from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(z.object({ date: z.string(), count: z.number() })) }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() })) }).openapi('Metrics');
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (daily sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails; absent days have no created emails. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
     const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
-    const emailCounts = await c.env.db.select({ status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(filter).groupBy(emails.status);
-    const eventCounts = await c.env.db.select({ type: events.type, count: sql<number>`count(distinct ${events.data}->>'emailId')::int` }).from(events).innerJoin(emails, and(eq(emails.id, sql`${events.data}->>'emailId'`), eq(emails.workspaceId, events.workspaceId), eq(emails.environment, events.environment))).where(and(scoped(events, a), gte(events.createdAt, start), lt(events.createdAt, end), q.region ? eq(events.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined)).groupBy(events.type);
-    const daily = await c.env.db.select({ date: sql<string>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`, count: sql<number>`count(*)::int` }).from(emails).where(filter).groupBy(sql`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`).orderBy(sql`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`);
-    const status = (s: string) => Number(emailCounts.find(row => row.status === s)?.count ?? 0), event = (s: EventType) => Number(eventCounts.find(row => row.type === s)?.count ?? 0);
-    return c.json({ from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals: { emails: emailCounts.reduce((total, row) => total + Number(row.count), 0), accepted: ['accepted','sent','delivered','bounced','complained','delayed'].reduce((total,s) => total + status(s),0), delivered: event('email.delivered'), bounced: event('email.bounced'), complained: event('email.complained'), opened: event('email.opened'), clicked: event('email.clicked'), failed: event('email.rejected') + event('email.rendering_failed'), deliveryDelayed: event('email.delivery_delayed'), simulated: status('simulated') }, daily }, 200);
+    const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
+    const outcome = (status: string, type: EventType) => distinct(sql`${emails.status} = ${status} OR ${events.type} = ${type}`);
+    const date = sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+    // ROLLUP computes the total and at most 367 daily aggregates in one snapshot.
+    // The scoped left join retains queued emails and limits all events to this cohort.
+    const rows = await c.env.db.select({ date, emails: sql<number>`count(DISTINCT ${emails.id})::int`, accepted: distinct(sql`NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${events.type} IN ('email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.delivery_delayed'))`), delivered: outcome('delivered', 'email.delivered'), bounced: outcome('bounced', 'email.bounced'), complained: outcome('complained', 'email.complained'), opened: distinct(sql`${events.type} = 'email.opened'`), clicked: distinct(sql`${events.type} = 'email.clicked'`), failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${events.type} IN ('email.rejected', 'email.rendering_failed')`), deliveryDelayed: outcome('delayed', 'email.delivery_delayed'), simulated: distinct(sql`${emails.simulated}`) }).from(emails).leftJoin(events, and(eq(emails.id, sql`${events.data}->>'emailId'`), eq(emails.workspaceId, events.workspaceId), eq(emails.environment, events.environment), scoped(events, a))).where(filter).groupBy(sql`ROLLUP (${date})`).orderBy(date);
+    const { date: _date, ...totals } = rows.find(row => row.date === null)!;
+    const daily = rows.filter(row => row.date !== null).map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
+    return c.json({ basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily }, 200);
   });
 }
 

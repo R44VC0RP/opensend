@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -18,14 +18,56 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
     meta?: keyof ClientMeta extends never ? Record<string, unknown> : ClientMeta;
 };
 
+export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options?: Options<GetCurrentIdentityData, ThrowOnError>): RequestResult<GetCurrentIdentityResponses, GetCurrentIdentityErrors, ThrowOnError> => (options?.client ?? client).get<GetCurrentIdentityResponses, GetCurrentIdentityErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/me',
+    ...options
+});
+
 export const listApiKeys = <ThrowOnError extends boolean = false>(options?: Options<ListApiKeysData, ThrowOnError>): RequestResult<ListApiKeysResponses, ListApiKeysErrors, ThrowOnError> => (options?.client ?? client).get<ListApiKeysResponses, ListApiKeysErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/api-keys',
     ...options
 });
 
 export const createApiKey = <ThrowOnError extends boolean = false>(options: Options<CreateApiKeyData, ThrowOnError>): RequestResult<CreateApiKeyResponses, CreateApiKeyErrors, ThrowOnError> => (options.client ?? client).post<CreateApiKeyResponses, CreateApiKeyErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/api-keys',
     ...options,
     headers: {
@@ -35,19 +77,58 @@ export const createApiKey = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 export const revokeApiKey = <ThrowOnError extends boolean = false>(options: Options<RevokeApiKeyData, ThrowOnError>): RequestResult<RevokeApiKeyResponses, RevokeApiKeyErrors, ThrowOnError> => (options.client ?? client).post<RevokeApiKeyResponses, RevokeApiKeyErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/api-keys/{id}/revoke',
     ...options
 });
 
+/**
+ * Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.
+ */
 export const listContacts = <ThrowOnError extends boolean = false>(options?: Options<ListContactsData, ThrowOnError>): RequestResult<ListContactsResponses, ListContactsErrors, ThrowOnError> => (options?.client ?? client).get<ListContactsResponses, ListContactsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts',
     ...options
 });
 
 export const createContact = <ThrowOnError extends boolean = false>(options: Options<CreateContactData, ThrowOnError>): RequestResult<CreateContactResponses, CreateContactErrors, ThrowOnError> => (options.client ?? client).post<CreateContactResponses, CreateContactErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts',
     ...options,
     headers: {
@@ -60,19 +141,55 @@ export const createContact = <ThrowOnError extends boolean = false>(options: Opt
  * Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.
  */
 export const deleteContact = <ThrowOnError extends boolean = false>(options: Options<DeleteContactData, ThrowOnError>): RequestResult<DeleteContactResponses, DeleteContactErrors, ThrowOnError> => (options.client ?? client).delete<DeleteContactResponses, DeleteContactErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts/{id}',
     ...options
 });
 
 export const getContact = <ThrowOnError extends boolean = false>(options: Options<GetContactData, ThrowOnError>): RequestResult<GetContactResponses, GetContactErrors, ThrowOnError> => (options.client ?? client).get<GetContactResponses, GetContactErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts/{id}',
     ...options
 });
 
 export const updateContact = <ThrowOnError extends boolean = false>(options: Options<UpdateContactData, ThrowOnError>): RequestResult<UpdateContactResponses, UpdateContactErrors, ThrowOnError> => (options.client ?? client).patch<UpdateContactResponses, UpdateContactErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts/{id}',
     ...options,
     headers: {
@@ -82,7 +199,19 @@ export const updateContact = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 export const listContactConsentEvents = <ThrowOnError extends boolean = false>(options: Options<ListContactConsentEventsData, ThrowOnError>): RequestResult<ListContactConsentEventsResponses, ListContactConsentEventsErrors, ThrowOnError> => (options.client ?? client).get<ListContactConsentEventsResponses, ListContactConsentEventsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts/{id}/consent',
     ...options
 });
@@ -91,7 +220,19 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
  * Explicit consent evidence only. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
  */
 export const updateContactConsent = <ThrowOnError extends boolean = false>(options: Options<UpdateContactConsentData, ThrowOnError>): RequestResult<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError> => (options.client ?? client).post<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contacts/{id}/consent',
     ...options,
     headers: {
@@ -101,13 +242,37 @@ export const updateContactConsent = <ThrowOnError extends boolean = false>(optio
 });
 
 export const listContactLists = <ThrowOnError extends boolean = false>(options?: Options<ListContactListsData, ThrowOnError>): RequestResult<ListContactListsResponses, ListContactListsErrors, ThrowOnError> => (options?.client ?? client).get<ListContactListsResponses, ListContactListsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists',
     ...options
 });
 
 export const createContactList = <ThrowOnError extends boolean = false>(options: Options<CreateContactListData, ThrowOnError>): RequestResult<CreateContactListResponses, CreateContactListErrors, ThrowOnError> => (options.client ?? client).post<CreateContactListResponses, CreateContactListErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists',
     ...options,
     headers: {
@@ -117,19 +282,55 @@ export const createContactList = <ThrowOnError extends boolean = false>(options:
 });
 
 export const deleteContactList = <ThrowOnError extends boolean = false>(options: Options<DeleteContactListData, ThrowOnError>): RequestResult<DeleteContactListResponses, DeleteContactListErrors, ThrowOnError> => (options.client ?? client).delete<DeleteContactListResponses, DeleteContactListErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}',
     ...options
 });
 
 export const getContactList = <ThrowOnError extends boolean = false>(options: Options<GetContactListData, ThrowOnError>): RequestResult<GetContactListResponses, GetContactListErrors, ThrowOnError> => (options.client ?? client).get<GetContactListResponses, GetContactListErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}',
     ...options
 });
 
 export const updateContactList = <ThrowOnError extends boolean = false>(options: Options<UpdateContactListData, ThrowOnError>): RequestResult<UpdateContactListResponses, UpdateContactListErrors, ThrowOnError> => (options.client ?? client).patch<UpdateContactListResponses, UpdateContactListErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}',
     ...options,
     headers: {
@@ -139,13 +340,37 @@ export const updateContactList = <ThrowOnError extends boolean = false>(options:
 });
 
 export const listListMembers = <ThrowOnError extends boolean = false>(options: Options<ListListMembersData, ThrowOnError>): RequestResult<ListListMembersResponses, ListListMembersErrors, ThrowOnError> => (options.client ?? client).get<ListListMembersResponses, ListListMembersErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}/members',
     ...options
 });
 
 export const addListMembers = <ThrowOnError extends boolean = false>(options: Options<AddListMembersData, ThrowOnError>): RequestResult<AddListMembersResponses, AddListMembersErrors, ThrowOnError> => (options.client ?? client).post<AddListMembersResponses, AddListMembersErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}/members',
     ...options,
     headers: {
@@ -155,19 +380,55 @@ export const addListMembers = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const removeListMember = <ThrowOnError extends boolean = false>(options: Options<RemoveListMemberData, ThrowOnError>): RequestResult<RemoveListMemberResponses, RemoveListMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveListMemberResponses, RemoveListMemberErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/lists/{id}/members/{contactId}',
     ...options
 });
 
 export const listSegments = <ThrowOnError extends boolean = false>(options?: Options<ListSegmentsData, ThrowOnError>): RequestResult<ListSegmentsResponses, ListSegmentsErrors, ThrowOnError> => (options?.client ?? client).get<ListSegmentsResponses, ListSegmentsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments',
     ...options
 });
 
 export const createSegment = <ThrowOnError extends boolean = false>(options: Options<CreateSegmentData, ThrowOnError>): RequestResult<CreateSegmentResponses, CreateSegmentErrors, ThrowOnError> => (options.client ?? client).post<CreateSegmentResponses, CreateSegmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments',
     ...options,
     headers: {
@@ -177,19 +438,55 @@ export const createSegment = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 export const deleteSegment = <ThrowOnError extends boolean = false>(options: Options<DeleteSegmentData, ThrowOnError>): RequestResult<DeleteSegmentResponses, DeleteSegmentErrors, ThrowOnError> => (options.client ?? client).delete<DeleteSegmentResponses, DeleteSegmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments/{id}',
     ...options
 });
 
 export const getSegment = <ThrowOnError extends boolean = false>(options: Options<GetSegmentData, ThrowOnError>): RequestResult<GetSegmentResponses, GetSegmentErrors, ThrowOnError> => (options.client ?? client).get<GetSegmentResponses, GetSegmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments/{id}',
     ...options
 });
 
 export const updateSegment = <ThrowOnError extends boolean = false>(options: Options<UpdateSegmentData, ThrowOnError>): RequestResult<UpdateSegmentResponses, UpdateSegmentErrors, ThrowOnError> => (options.client ?? client).patch<UpdateSegmentResponses, UpdateSegmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments/{id}',
     ...options,
     headers: {
@@ -202,7 +499,19 @@ export const updateSegment = <ThrowOnError extends boolean = false>(options: Opt
  * Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.
  */
 export const previewSegment = <ThrowOnError extends boolean = false>(options: Options<PreviewSegmentData, ThrowOnError>): RequestResult<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError> => (options.client ?? client).post<PreviewSegmentResponses, PreviewSegmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/segments/{id}/preview',
     ...options,
     headers: {
@@ -212,7 +521,19 @@ export const previewSegment = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const listContactImports = <ThrowOnError extends boolean = false>(options?: Options<ListContactImportsData, ThrowOnError>): RequestResult<ListContactImportsResponses, ListContactImportsErrors, ThrowOnError> => (options?.client ?? client).get<ListContactImportsResponses, ListContactImportsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contact-imports',
     ...options
 });
@@ -221,7 +542,19 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
  * Persist a preview before commit. Feature limit: 1 MiB UTF-8 CSV, 1000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.
  */
 export const previewContactImport = <ThrowOnError extends boolean = false>(options: Options<PreviewContactImportData, ThrowOnError>): RequestResult<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError> => (options.client ?? client).post<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contact-imports',
     ...options,
     headers: {
@@ -231,19 +564,55 @@ export const previewContactImport = <ThrowOnError extends boolean = false>(optio
 });
 
 export const getContactImport = <ThrowOnError extends boolean = false>(options: Options<GetContactImportData, ThrowOnError>): RequestResult<GetContactImportResponses, GetContactImportErrors, ThrowOnError> => (options.client ?? client).get<GetContactImportResponses, GetContactImportErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contact-imports/{id}',
     ...options
 });
 
 export const commitContactImport = <ThrowOnError extends boolean = false>(options: Options<CommitContactImportData, ThrowOnError>): RequestResult<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError> => (options.client ?? client).post<CommitContactImportResponses, CommitContactImportErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/contact-imports/{id}/commit',
     ...options
 });
 
 export const sendEmail = <ThrowOnError extends boolean = false>(options: Options<SendEmailData, ThrowOnError>): RequestResult<SendEmailResponses, SendEmailErrors, ThrowOnError> => (options.client ?? client).post<SendEmailResponses, SendEmailErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails/send',
     ...options,
     headers: {
@@ -253,7 +622,19 @@ export const sendEmail = <ThrowOnError extends boolean = false>(options: Options
 });
 
 export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Options<SendEmailBatchData, ThrowOnError>): RequestResult<SendEmailBatchResponses, SendEmailBatchErrors, ThrowOnError> => (options.client ?? client).post<SendEmailBatchResponses, SendEmailBatchErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails/batch',
     ...options,
     headers: {
@@ -263,13 +644,37 @@ export const sendEmailBatch = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const listEmails = <ThrowOnError extends boolean = false>(options?: Options<ListEmailsData, ThrowOnError>): RequestResult<ListEmailsResponses, ListEmailsErrors, ThrowOnError> => (options?.client ?? client).get<ListEmailsResponses, ListEmailsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails',
     ...options
 });
 
 export const getEmail = <ThrowOnError extends boolean = false>(options: Options<GetEmailData, ThrowOnError>): RequestResult<GetEmailResponses, GetEmailErrors, ThrowOnError> => (options.client ?? client).get<GetEmailResponses, GetEmailErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails/{id}',
     ...options
 });
@@ -278,19 +683,55 @@ export const getEmail = <ThrowOnError extends boolean = false>(options: Options<
  * Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.
  */
 export const getEmailContent = <ThrowOnError extends boolean = false>(options: Options<GetEmailContentData, ThrowOnError>): RequestResult<GetEmailContentResponses, GetEmailContentErrors, ThrowOnError> => (options.client ?? client).get<GetEmailContentResponses, GetEmailContentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails/{id}/content',
     ...options
 });
 
 export const listEmailEvents = <ThrowOnError extends boolean = false>(options: Options<ListEmailEventsData, ThrowOnError>): RequestResult<ListEmailEventsResponses, ListEmailEventsErrors, ThrowOnError> => (options.client ?? client).get<ListEmailEventsResponses, ListEmailEventsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/emails/{id}/events',
     ...options
 });
 
 export const uploadAttachment = <ThrowOnError extends boolean = false>(options: Options<UploadAttachmentData, ThrowOnError>): RequestResult<UploadAttachmentResponses, UploadAttachmentErrors, ThrowOnError> => (options.client ?? client).post<UploadAttachmentResponses, UploadAttachmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/attachments',
     ...options,
     headers: {
@@ -300,25 +741,97 @@ export const uploadAttachment = <ThrowOnError extends boolean = false>(options: 
 });
 
 export const deleteAttachment = <ThrowOnError extends boolean = false>(options: Options<DeleteAttachmentData, ThrowOnError>): RequestResult<DeleteAttachmentResponses, DeleteAttachmentErrors, ThrowOnError> => (options.client ?? client).delete<DeleteAttachmentResponses, DeleteAttachmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/attachments/{id}',
     ...options
 });
 
 export const getAttachment = <ThrowOnError extends boolean = false>(options: Options<GetAttachmentData, ThrowOnError>): RequestResult<GetAttachmentResponses, GetAttachmentErrors, ThrowOnError> => (options.client ?? client).get<GetAttachmentResponses, GetAttachmentErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/attachments/{id}',
     ...options
 });
 
+/**
+ * Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.
+ */
+export const getAttachmentContent = <ThrowOnError extends boolean = false>(options: Options<GetAttachmentContentData, ThrowOnError>): RequestResult<GetAttachmentContentResponses, GetAttachmentContentErrors, ThrowOnError> => (options.client ?? client).get<GetAttachmentContentResponses, GetAttachmentContentErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/attachments/{id}/content',
+    ...options
+});
+
+/**
+ * Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.
+ */
 export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Options<ListCampaignsData, ThrowOnError>): RequestResult<ListCampaignsResponses, ListCampaignsErrors, ThrowOnError> => (options?.client ?? client).get<ListCampaignsResponses, ListCampaignsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns',
     ...options
 });
 
 export const createCampaign = <ThrowOnError extends boolean = false>(options: Options<CreateCampaignData, ThrowOnError>): RequestResult<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError> => (options.client ?? client).post<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns',
     ...options,
     headers: {
@@ -328,19 +841,55 @@ export const createCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const deleteCampaign = <ThrowOnError extends boolean = false>(options: Options<DeleteCampaignData, ThrowOnError>): RequestResult<DeleteCampaignResponses, DeleteCampaignErrors, ThrowOnError> => (options.client ?? client).delete<DeleteCampaignResponses, DeleteCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}',
     ...options
 });
 
 export const getCampaign = <ThrowOnError extends boolean = false>(options: Options<GetCampaignData, ThrowOnError>): RequestResult<GetCampaignResponses, GetCampaignErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignResponses, GetCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}',
     ...options
 });
 
 export const updateCampaign = <ThrowOnError extends boolean = false>(options: Options<UpdateCampaignData, ThrowOnError>): RequestResult<UpdateCampaignResponses, UpdateCampaignErrors, ThrowOnError> => (options.client ?? client).patch<UpdateCampaignResponses, UpdateCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}',
     ...options,
     headers: {
@@ -350,13 +899,37 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const previewCampaignAudience = <ThrowOnError extends boolean = false>(options: Options<PreviewCampaignAudienceData, ThrowOnError>): RequestResult<PreviewCampaignAudienceResponses, PreviewCampaignAudienceErrors, ThrowOnError> => (options.client ?? client).post<PreviewCampaignAudienceResponses, PreviewCampaignAudienceErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/audience-preview',
     ...options
 });
 
 export const testCampaign = <ThrowOnError extends boolean = false>(options: Options<TestCampaignData, ThrowOnError>): RequestResult<TestCampaignResponses, TestCampaignErrors, ThrowOnError> => (options.client ?? client).post<TestCampaignResponses, TestCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/test',
     ...options,
     headers: {
@@ -366,7 +939,19 @@ export const testCampaign = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 export const reviewCampaign = <ThrowOnError extends boolean = false>(options: Options<ReviewCampaignData, ThrowOnError>): RequestResult<ReviewCampaignResponses, ReviewCampaignErrors, ThrowOnError> => (options.client ?? client).post<ReviewCampaignResponses, ReviewCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/review',
     ...options,
     headers: {
@@ -376,7 +961,19 @@ export const reviewCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const sendCampaign = <ThrowOnError extends boolean = false>(options: Options<SendCampaignData, ThrowOnError>): RequestResult<SendCampaignResponses, SendCampaignErrors, ThrowOnError> => (options.client ?? client).post<SendCampaignResponses, SendCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/send',
     ...options,
     headers: {
@@ -386,7 +983,19 @@ export const sendCampaign = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: Options<ScheduleCampaignData, ThrowOnError>): RequestResult<ScheduleCampaignResponses, ScheduleCampaignErrors, ThrowOnError> => (options.client ?? client).post<ScheduleCampaignResponses, ScheduleCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/schedule',
     ...options,
     headers: {
@@ -396,19 +1005,55 @@ export const scheduleCampaign = <ThrowOnError extends boolean = false>(options: 
 });
 
 export const cancelCampaign = <ThrowOnError extends boolean = false>(options: Options<CancelCampaignData, ThrowOnError>): RequestResult<CancelCampaignResponses, CancelCampaignErrors, ThrowOnError> => (options.client ?? client).post<CancelCampaignResponses, CancelCampaignErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/campaigns/{id}/cancel',
     ...options
 });
 
 export const getWorkspaceSettings = <ThrowOnError extends boolean = false>(options?: Options<GetWorkspaceSettingsData, ThrowOnError>): RequestResult<GetWorkspaceSettingsResponses, GetWorkspaceSettingsErrors, ThrowOnError> => (options?.client ?? client).get<GetWorkspaceSettingsResponses, GetWorkspaceSettingsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/settings/workspace',
     ...options
 });
 
 export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(options: Options<UpdateWorkspaceSettingsData, ThrowOnError>): RequestResult<UpdateWorkspaceSettingsResponses, UpdateWorkspaceSettingsErrors, ThrowOnError> => (options.client ?? client).patch<UpdateWorkspaceSettingsResponses, UpdateWorkspaceSettingsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/settings/workspace',
     ...options,
     headers: {
@@ -418,13 +1063,37 @@ export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(op
 });
 
 export const getSesSettings = <ThrowOnError extends boolean = false>(options?: Options<GetSesSettingsData, ThrowOnError>): RequestResult<GetSesSettingsResponses, GetSesSettingsErrors, ThrowOnError> => (options?.client ?? client).get<GetSesSettingsResponses, GetSesSettingsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/settings/ses',
     ...options
 });
 
 export const listRegions = <ThrowOnError extends boolean = false>(options?: Options<ListRegionsData, ThrowOnError>): RequestResult<ListRegionsResponses, ListRegionsErrors, ThrowOnError> => (options?.client ?? client).get<ListRegionsResponses, ListRegionsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/regions',
     ...options
 });
@@ -433,13 +1102,37 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
  * Refreshes at most 10 identities, sequentially with one second between SES reads. Default page size is 5; use individual domain detail for a single refresh. Concurrent clients may still encounter account-level throttling.
  */
 export const listDomains = <ThrowOnError extends boolean = false>(options?: Options<ListDomainsData, ThrowOnError>): RequestResult<ListDomainsResponses, ListDomainsErrors, ThrowOnError> => (options?.client ?? client).get<ListDomainsResponses, ListDomainsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/domains',
     ...options
 });
 
 export const createDomain = <ThrowOnError extends boolean = false>(options: Options<CreateDomainData, ThrowOnError>): RequestResult<CreateDomainResponses, CreateDomainErrors, ThrowOnError> => (options.client ?? client).post<CreateDomainResponses, CreateDomainErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/domains',
     ...options,
     headers: {
@@ -449,25 +1142,73 @@ export const createDomain = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 export const getDomain = <ThrowOnError extends boolean = false>(options: Options<GetDomainData, ThrowOnError>): RequestResult<GetDomainResponses, GetDomainErrors, ThrowOnError> => (options.client ?? client).get<GetDomainResponses, GetDomainErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/domains/{id}',
     ...options
 });
 
 export const verifyDomain = <ThrowOnError extends boolean = false>(options: Options<VerifyDomainData, ThrowOnError>): RequestResult<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError> => (options.client ?? client).post<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/domains/{id}/verify',
     ...options
 });
 
 export const listWebhooks = <ThrowOnError extends boolean = false>(options?: Options<ListWebhooksData, ThrowOnError>): RequestResult<ListWebhooksResponses, ListWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<ListWebhooksResponses, ListWebhooksErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks',
     ...options
 });
 
 export const createWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateWebhookData, ThrowOnError>): RequestResult<CreateWebhookResponses, CreateWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateWebhookResponses, CreateWebhookErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks',
     ...options,
     headers: {
@@ -477,19 +1218,55 @@ export const createWebhook = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 export const deleteWebhook = <ThrowOnError extends boolean = false>(options: Options<DeleteWebhookData, ThrowOnError>): RequestResult<DeleteWebhookResponses, DeleteWebhookErrors, ThrowOnError> => (options.client ?? client).delete<DeleteWebhookResponses, DeleteWebhookErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}',
     ...options
 });
 
 export const getWebhook = <ThrowOnError extends boolean = false>(options: Options<GetWebhookData, ThrowOnError>): RequestResult<GetWebhookResponses, GetWebhookErrors, ThrowOnError> => (options.client ?? client).get<GetWebhookResponses, GetWebhookErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}',
     ...options
 });
 
 export const updateWebhook = <ThrowOnError extends boolean = false>(options: Options<UpdateWebhookData, ThrowOnError>): RequestResult<UpdateWebhookResponses, UpdateWebhookErrors, ThrowOnError> => (options.client ?? client).patch<UpdateWebhookResponses, UpdateWebhookErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}',
     ...options,
     headers: {
@@ -499,37 +1276,109 @@ export const updateWebhook = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 export const revealWebhookSecret = <ThrowOnError extends boolean = false>(options: Options<RevealWebhookSecretData, ThrowOnError>): RequestResult<RevealWebhookSecretResponses, RevealWebhookSecretErrors, ThrowOnError> => (options.client ?? client).get<RevealWebhookSecretResponses, RevealWebhookSecretErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/secret',
     ...options
 });
 
 export const rotateWebhookSecret = <ThrowOnError extends boolean = false>(options: Options<RotateWebhookSecretData, ThrowOnError>): RequestResult<RotateWebhookSecretResponses, RotateWebhookSecretErrors, ThrowOnError> => (options.client ?? client).post<RotateWebhookSecretResponses, RotateWebhookSecretErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/rotate-secret',
     ...options
 });
 
 export const testWebhook = <ThrowOnError extends boolean = false>(options: Options<TestWebhookData, ThrowOnError>): RequestResult<TestWebhookResponses, TestWebhookErrors, ThrowOnError> => (options.client ?? client).post<TestWebhookResponses, TestWebhookErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/test',
     ...options
 });
 
 export const listWebhookDeliveries = <ThrowOnError extends boolean = false>(options: Options<ListWebhookDeliveriesData, ThrowOnError>): RequestResult<ListWebhookDeliveriesResponses, ListWebhookDeliveriesErrors, ThrowOnError> => (options.client ?? client).get<ListWebhookDeliveriesResponses, ListWebhookDeliveriesErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/deliveries',
     ...options
 });
 
 export const getWebhookDelivery = <ThrowOnError extends boolean = false>(options: Options<GetWebhookDeliveryData, ThrowOnError>): RequestResult<GetWebhookDeliveryResponses, GetWebhookDeliveryErrors, ThrowOnError> => (options.client ?? client).get<GetWebhookDeliveryResponses, GetWebhookDeliveryErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/deliveries/{deliveryId}',
     ...options
 });
 
 export const retryWebhookDelivery = <ThrowOnError extends boolean = false>(options: Options<RetryWebhookDeliveryData, ThrowOnError>): RequestResult<RetryWebhookDeliveryResponses, RetryWebhookDeliveryErrors, ThrowOnError> => (options.client ?? client).post<RetryWebhookDeliveryResponses, RetryWebhookDeliveryErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/webhooks/{id}/deliveries/{deliveryId}/retry',
     ...options
 });
@@ -547,8 +1396,23 @@ export const unsubscribeByLink = <ThrowOnError extends boolean = false>(options:
 
 export const unsubscribeOneClick = <ThrowOnError extends boolean = false>(options: Options<UnsubscribeOneClickData, ThrowOnError>): RequestResult<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError> => (options.client ?? client).post<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError>({ url: '/unsubscribe/{token}', ...options });
 
+/**
+ * Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (daily sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails; absent days have no created emails. Engagement is observed, not verified human activity.
+ */
 export const getMetrics = <ThrowOnError extends boolean = false>(options?: Options<GetMetricsData, ThrowOnError>): RequestResult<GetMetricsResponses, GetMetricsErrors, ThrowOnError> => (options?.client ?? client).get<GetMetricsResponses, GetMetricsErrors, ThrowOnError>({
-    security: [{ scheme: 'bearer', type: 'http' }],
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
     url: '/v1/metrics',
     ...options
 });

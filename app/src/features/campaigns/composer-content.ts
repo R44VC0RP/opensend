@@ -1,14 +1,17 @@
 import DOMPurify from 'dompurify'
-import type { CampaignEditorMetadata } from '../../data/types'
+import type { CampaignEditorMetadata, OpenSendApi } from '../../data/types'
 
 const semanticTags = new Set(['H1', 'H2', 'H3', 'P', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'UL', 'OL', 'LI', 'A', 'BR', 'HR'])
 const semanticAttributes = new Set(['href', 'target', 'rel'])
 const blockedAttributes = new Set(['__proto__', 'prototype', 'constructor', 'srcset', 'imagesrcset', 'srcdoc', 'poster', 'background', 'action', 'formaction', 'ping', 'xlink:href', 'xmlns', 'innerhtml', 'outerhtml', 'dangerouslysetinnerhtml'])
-const rasterDataUrl = /^data:image\/(?:png|jpeg|gif|webp|avif);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/i
+export function isRasterDataUrl(value: string): boolean {
+  const content = value.slice(value.indexOf(',') + 1)
+  return content.length % 4 === 0 && /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value)
+}
 const unsafeCss = /url\s*\(|expression\s*\(|@import|binding|behavior|(?:image-set|image|paint|var|src)\s*\(|\\|\/\*/i
 
 function safeImageSource(value: unknown): value is string {
-  return typeof value === 'string' && value.length > value.indexOf(',') + 1 && rasterDataUrl.test(value)
+  return typeof value === 'string' && ((value.length > value.indexOf(',') + 1 && isRasterDataUrl(value)) || /^cid:[a-zA-Z0-9_.@-]{1,120}$/.test(value))
 }
 
 function safeHref(value: unknown): value is string {
@@ -101,10 +104,18 @@ function sanitizedImportHtml(html: string): string {
   return body.innerHTML.trim() || '<p></p>'
 }
 
-export function prepareEditorContent(html: string, metadata?: CampaignEditorMetadata | null): { content: Record<string, unknown> | string; canCompose: boolean } {
+export function prepareEditorContent(html: string, metadata?: CampaignEditorMetadata | null): { content: Record<string, unknown> | string; canCompose: boolean; reason?: string } {
   if (metadata?.format === 'react-email' && metadata.version === 1) {
-    try { return { content: sanitizeEditorDocument(metadata.document), canCompose: true } }
-    catch { return { content: sanitizedImportHtml(html), canCompose: false } }
+    try {
+      const content = sanitizeEditorDocument(metadata.document)
+      if (JSON.stringify(content) !== JSON.stringify(metadata.document)) return {
+        content: '<p></p>', canCompose: false,
+        reason: 'This saved document contains image sources or attributes that Compose cannot safely preserve. HTML mode retains the original content without loading remote images.',
+      }
+      return { content, canCompose: true }
+    } catch {
+      return { content: '<p></p>', canCompose: false, reason: 'This visual document cannot be opened safely. HTML mode retains the original content.' }
+    }
   }
   return { content: sanitizedImportHtml(html), canCompose: metadata == null && isSemanticHtml(html) }
 }
@@ -158,4 +169,103 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
     canvas.height = 0
   }
   throw new Error('This image is still too large for email. Choose a smaller image.')
+}
+
+export type InlineImageReference = { attachmentId: string; contentId: string; hash: string }
+export function inlineImageReferences(document?: Record<string, unknown>): InlineImageReference[] {
+  const value = document?.opensendInlineImages
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is InlineImageReference => isRecord(item) && typeof item.attachmentId === 'string' && typeof item.contentId === 'string' && /^[a-zA-Z0-9_.@-]{1,120}$/.test(item.contentId) && typeof item.hash === 'string' && /^[a-f0-9]{64}$/.test(item.hash))
+}
+export function inlineImageSources(document: Record<string, unknown>): string[] {
+  const sources = new Set<string>()
+  const pending: unknown[] = [document]
+  let count = 0
+  while (pending.length && count++ < 20000) {
+    const value = pending.pop()
+    if (!isRecord(value)) continue
+    if (value.type === 'image' && isRecord(value.attrs) && typeof value.attrs.src === 'string' && isRasterDataUrl(value.attrs.src)) sources.add(value.attrs.src)
+    if (Array.isArray(value.content)) pending.push(...value.content)
+  }
+  return [...sources]
+}
+export async function inlineImageHash(source: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source))
+  return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
+}
+export function replaceImageSource(html: string, source: string, replacement: string): string {
+  // Only quoted img src attributes are rewritten; never arbitrary text or CSS.
+  return html.replace(/<img\b[^>]*>/gi, tag => tag.replace(/(\bsrc\s*=\s*)(["'])(.*?)\2/gi, (attribute, prefix: string, quote: string, value: string) => value === source ? `${prefix}${quote}${replacement}${quote}` : attribute))
+}
+export async function inlinePreviewHtml(html: string, editor?: CampaignEditorMetadata | null): Promise<string> {
+  if (!editor) return html
+  const references = inlineImageReferences(editor.document)
+  if (!references.length) return html
+  const document = sanitizeEditorDocument(editor.document)
+  let result = html
+  for (const source of inlineImageSources(document)) {
+    const hash = await inlineImageHash(source)
+    const reference = references.find(item => item.hash === hash)
+    if (reference) result = replaceImageSource(result, `cid:${reference.contentId}`, source)
+  }
+  return result
+}
+
+export function replaceEditorImageSources(document: Record<string, unknown>, sources: ReadonlyMap<string, string>): Record<string, unknown> {
+  const copy = structuredClone(document)
+  const pending: unknown[] = [copy]
+  let count = 0
+  while (pending.length && count++ < 20000) {
+    const value = pending.pop()
+    if (!isRecord(value)) continue
+    if (value.type === 'image' && isRecord(value.attrs) && typeof value.attrs.src === 'string') {
+      const replacement = sources.get(value.attrs.src)
+      if (replacement) value.attrs.src = replacement
+    }
+    if (Array.isArray(value.content)) pending.push(...value.content)
+  }
+  return copy
+}
+export function cidImageSources(html: string): Set<string> {
+  const ids = new Set<string>()
+  for (const tag of html.match(/<img\b[^>]*>/gi) ?? []) {
+    const match = /\ssrc\s*=\s*(["'])cid:([a-zA-Z0-9_.@-]{1,120})\1/i.exec(tag)
+    if (match) ids.add(match[2])
+  }
+  return ids
+}
+const rasterTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+function rasterBytesMatch(bytes: Uint8Array, type: string): boolean {
+  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.slice(start, end))
+  if (type === 'image/png') return bytes[0] === 0x89 && ascii(1, 4) === 'PNG' && bytes[4] === 13 && bytes[5] === 10 && bytes[6] === 26 && bytes[7] === 10
+  if (type === 'image/jpeg') return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  if (type === 'image/gif') return ['GIF87a', 'GIF89a'].includes(ascii(0, 6))
+  if (type === 'image/webp') return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'
+  return type === 'image/avif' && ascii(4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(8, 12))
+}
+export async function loadInlineAttachments(api: OpenSendApi, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>; release: () => void}> {
+  const sources = new Map<string, string>()
+  const release = () => {} // Data URLs are scoped to the caller's transient preview state; no global URL registration.
+  if (!needed.size || !api.attachments) return {sources, release}
+  const ids = [...new Set(attachmentIds)]
+  if (ids.length > 20) throw new Error('Too many attachments to preview.')
+  const metadata = await Promise.all(ids.map(id => api.attachments!.get(id, signal)))
+  const inline = metadata.filter(item => item.disposition === 'inline' && item.contentId && needed.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
+  if (inline.reduce((total, item) => total + item.size, 0) > 8 * 1024 * 1024) throw new Error('Inline images exceed the 8 MiB preview limit.')
+  try {
+    const results = await Promise.allSettled(inline.map(async item => {
+      const result = await api.attachments!.content(item.id, signal)
+      const type = result.contentType.toLowerCase()
+      if (result.id !== item.id || type !== item.contentType.toLowerCase() || !rasterTypes.has(type) || result.content.length > 11184812) throw new Error('Attachment preview metadata does not match.')
+      // A repeated four-character regex group over 8 MiB can exhaust the JavaScript engine's stack.
+      if (result.content.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(result.content)) throw new Error('Attachment preview encoding is invalid.')
+      const bytes = Uint8Array.from(atob(result.content), character => character.charCodeAt(0))
+      if (bytes.length !== item.size || !rasterBytesMatch(bytes, type)) throw new Error('The attachment is not a supported raster image.')
+      if (signal.aborted) throw new DOMException('Preview canceled.', 'AbortError')
+      sources.set(`cid:${item.contentId}`, `data:${type};base64,${result.content}`)
+    }))
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure?.status === 'rejected') throw failure.reason
+    return {sources, release}
+  } catch (error) {release(); throw error}
 }

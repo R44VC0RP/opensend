@@ -1,63 +1,45 @@
-import { useMemo, useState } from 'react'
-import { useApiMutation } from '../../data/context'
-import type { ImportResult, ImportRow } from '../../data/types'
-import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, ErrorState, Field, Input, LoadingRegion, Select } from '../../components/ui'
+import { useState } from 'react'
+import { useApi, useApiMutation } from '../../data/context'
+import type { ImportPreview } from '../../data/types'
+import { Alert, Button, DataTable, Dialog, Field, Input, Select } from '../../components/ui'
 import { MutationError, useAudienceLists } from './shared'
 import { parseCsv } from './csv'
 
-const targets = [{ value: 'email', label: 'Email (required)' }, { value: 'name', label: 'Full name' }, { value: 'country', label: 'Country' }, { value: 'consent', label: 'Marketing consent' }] as const
-export function ImportContactsDialog({ listId: initialListId = '', onClose }: { listId?: string; onClose: () => void }) {
+const targets = [{value: 'email', label: 'Email (required)'}, {value: 'name', label: 'Full name'}, {value: 'country', label: 'Country'}, {value: 'firstName', label: 'First name'}, {value: 'plan', label: 'Plan'}]
+export function ImportContactsDialog({listId: initialListId = '', onClose}: {listId?: string; onClose: () => void}) {
+  const api = useApi()
+  const [listSearch, setListSearch] = useState('')
+  const [listCursor, setListCursor] = useState<string | undefined>()
+  const lists = useAudienceLists(listSearch, listCursor)
   const [listId, setListId] = useState(initialListId)
-  const [csv, setCsv] = useState<string[][]>([])
-  const [filename, setFilename] = useState('')
-  const [mapping, setMapping] = useState<Record<string, string>>({ email: '', name: '', country: '', consent: '' })
-  const [consent, setConsent] = useState(false)
-  const [error, setError] = useState<unknown>(null)
-  const [reading, setReading] = useState(false)
-  const [result, setResult] = useState<ImportResult | null>(null)
-  const lists = useAudienceLists()
-  const mutation = useApiMutation((api, input: { listId: string; rows: ImportRow[] }) => api.contacts.import(input), 'Contacts imported')
-  const rows = useMemo(() => csv.slice(1).map(row => {
-    const value = (field: string) => mapping[field] === '' ? '' : (row[Number(mapping[field])] || '').trim()
-    return { email: value('email'), name: value('name'), country: value('country'), subscribed: consent && (mapping.consent === '' || ['true', 'yes', '1', 'subscribed', 'opted_in'].includes(value('consent').toLowerCase())) }
-  }), [csv, mapping, consent])
-  const invalid = useMemo(() => {
-    const seen = new Set<string>()
-    return rows.map((row, index) => {
-      const address = row.email.toLowerCase()
-      const message = !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(address) || address.length > 254 ? 'Invalid or missing email' : (row.name?.length || 0) > 200 ? 'Name exceeds 200 characters' : row.country && !/^[a-z]{2}$/i.test(row.country) ? 'Country must be a two-letter code' : seen.has(address) ? 'Duplicate email in this import' : ''
-      if (!message) seen.add(address)
-      return { row: index + 2, message }
-    }).filter(issue => issue.message)
-  }, [rows])
-  async function readFile(file: File | undefined) {
+  const [csv, setCsv] = useState(''), [headers, setHeaders] = useState<string[]>([]), [filename, setFilename] = useState('')
+  const [mapping, setMapping] = useState<Record<string, string>>({}), [error, setError] = useState<unknown>(null), [reading, setReading] = useState(false)
+  const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const mutation = useApiMutation(async (_api, action: 'preview' | 'commit') => {
+    const selected = Object.fromEntries(Object.entries(mapping).filter(([, value]) => value !== ''))
+    if (api.imports) return action === 'preview' ? api.imports.preview({csv, mapping: selected, ...(listId ? {listId} : {})}) : api.imports.commit(preview!.id)
+    const rows = parseCsv(csv).slice(1).map((row, index) => ({row: index + 2, email: row[headers.indexOf(mapping.email)] ?? '', name: row[headers.indexOf(mapping.name)] ?? '', country: row[headers.indexOf(mapping.country)] ?? ''}))
+    if (action === 'preview') return {id: 'demo-import', status: 'preview', imported: 0, rows, errors: []} satisfies ImportPreview
+    const result = await api.contacts.import({listId, rows: rows.map(row => ({...row, subscribed: false}))})
+    return {...preview!, status: 'committed', imported: result.created + result.matched, errors: result.issues.map(issue => ({...issue, field: 'email'}))} satisfies ImportPreview
+  })
+  function resetPreview() {setPreview(null); setError(null); mutation.reset()}
+  async function readFile(file?: File) {
     if (!file) return
-    setError(null); setCsv([]); setResult(null); setConsent(false); mutation.reset(); setReading(true)
+    resetPreview(); setCsv(''); setHeaders([]); setReading(true)
     try {
-      if (file.size > 10 * 1024 * 1024) throw new Error('Choose a CSV smaller than 10 MB.')
-      const parsed = parseCsv(await file.text())
-      if (parsed.length > 10001) throw new Error('Import at most 10,000 contact rows at a time.')
-      setCsv(parsed); setFilename(file.name)
-      const headers = parsed[0].map(header => header.trim().toLowerCase().replace(/[\s_-]/g, ''))
-      const find = (names: string[]) => { const index = headers.findIndex(header => names.includes(header)); return index < 0 ? '' : String(index) }
-      setMapping({ email: find(['email', 'emailaddress']), name: find(['name', 'fullname']), country: find(['country']), consent: find(['consent', 'subscribed', 'marketingconsent', 'optin']) })
-    } catch (caught) { setError(caught) } finally { setReading(false) }
+      if (file.size > 1024 * 1024) throw new Error('Choose a CSV no larger than 1 MiB.')
+      const raw = await file.text(), rows = parseCsv(raw)
+      if (rows.length < 2 || rows.length > 1001) throw new Error('Import 1–1,000 contact rows at a time.')
+      if (new Set(rows[0]).size !== rows[0].length) throw new Error('Use unique column headings.')
+      setCsv(raw); setHeaders(rows[0]); setFilename(file.name)
+      const defaults: Record<string, string> = {}
+      for (const target of targets) defaults[target.value] = rows[0].find(h => h.toLowerCase().replace(/[ _-]/g, '') === target.value.toLowerCase()) ?? ''
+      setMapping(defaults)
+    } catch (cause) {setError(cause)} finally {setReading(false)}
   }
-  async function submit() {
-    try { setResult(await mutation.mutateAsync({ listId, rows })) } catch { /* Shown inline. */ }
-  }
-  return <Dialog open onOpenChange={open => { if (!open && !mutation.isPending && !reading) onClose() }} title={result ? 'Import complete' : 'Import contacts'} footer={result ? <Button variant="primary" onClick={onClose}>Done</Button> : <><Button disabled={mutation.isPending || reading} onClick={onClose}>Cancel</Button><Button variant="primary" loading={mutation.isPending} disabled={!listId || !csv.length || mapping.email === '' || invalid.length === rows.length || reading} onClick={() => void submit()}>Import {rows.length ? `${rows.length} contacts` : 'contacts'}</Button></>}>
-    <div className="stack"><MutationError error={error || mutation.error} />
-      {result ? <><Alert tone="success">{result.created} created · {result.matched} existing contacts matched · {result.skipped} skipped</Alert>{result.issues.length > 0 && <DataTable rows={result.issues} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Data row', render: row => row.row }, { key: 'issue', label: 'Issue', render: row => row.message }]} />}</> : <>
-        {!initialListId && <Field label="Destination list" htmlFor="import-list">{lists.isPending ? <LoadingRegion label="Loading destination lists"><ControlSkeleton /></LoadingRegion> : lists.isError ? <ErrorState error={lists.error} onRetry={() => lists.refetch()} /> : <Select id="import-list" value={listId} onValueChange={setListId} options={[{ value: '', label: 'Choose a list' }, ...lists.data.map(list => ({ value: list.id, label: list.name }))]} />}{lists.data?.length === 0 && <span className="muted">Create a list before importing contacts.</span>}</Field>}
-        <Field label="CSV file" htmlFor="import-file"><Input id="import-file" type="file" accept=".csv,text/csv" disabled={mutation.isPending || reading} onChange={event => void readFile(event.target.files?.[0])} /></Field>
-        {reading && <p className="muted" role="status">Reading CSV file…</p>}
-        {csv.length > 0 && <><p className="muted">{filename} · {rows.length} contact rows</p><div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`}><Select id={`map-${target.value}`} value={mapping[target.value]} onValueChange={value => { setMapping({ ...mapping, [target.value]: value }); setConsent(false) }} options={[{ value: '', label: target.value === 'email' ? 'Choose email column' : 'Do not import' }, ...csv[0].map((header, index) => ({ value: String(index), label: header || `Column ${index + 1}` }))]} /></Field>)}</div>
-          {mapping.email !== '' && <><DataTable rows={rows.slice(0, 5).map((row, index) => ({ ...row, index }))} rowKey={row => String(row.index)} columns={[{ key: 'email', label: 'Email preview', render: row => row.email || 'Missing' }, { key: 'name', label: 'Name', render: row => row.name || '—' }, { key: 'status', label: 'New contact status', render: row => row.subscribed ? 'Subscribed' : 'Not subscribed' }]} />{invalid.length > 0 && <Alert tone="warning">{invalid.length} invalid rows will be skipped.{invalid.slice(0, 5).map(issue => <div key={issue.row}>CSV row {issue.row}: {issue.message}</div>)}</Alert>}</>}
-          <Checkbox checked={consent} onCheckedChange={setConsent} label={mapping.consent !== '' ? 'Apply affirmative consent values from this column; I confirm they represent valid marketing opt-in.' : 'I confirm all new contacts in this file have given valid marketing opt-in.'} />
-          <Alert tone="info">New contacts are not subscribed unless opt-in is explicitly confirmed. Existing subscription states and suppressions are always retained.</Alert>
-        </>}
-      </>}
-    </div>
-  </Dialog>
+  async function submit(action: 'preview' | 'commit') {setError(null); try {setPreview(await mutation.mutateAsync(action))} catch { /* inline */ }}
+  const busy = reading || mutation.isPending
+  const committed = preview?.status === 'committed'
+  return <Dialog open onOpenChange={open => {if (!open && !busy) onClose()}} title={committed ? 'Import complete' : 'Import contacts'} footer={committed ? <Button variant="primary" onClick={onClose}>Done</Button> : <><Button disabled={busy} onClick={onClose}>Cancel</Button><Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => submit(preview ? 'commit' : 'preview')}>{preview ? 'Commit reviewed import' : 'Preview import'}</Button></>}><div className="stack"><MutationError error={error || mutation.error} />{committed ? <Alert tone="success">{preview.imported} contacts imported.</Alert> : <><Field label="Find destination list" htmlFor="import-list-search"><Input id="import-list-search" type="search" disabled={busy || !!preview} value={listSearch} onChange={event => {setListSearch(event.target.value); setListCursor(undefined)}} /></Field><Field label="Destination list" htmlFor="import-list"><Select id="import-list" disabled={busy || !!preview} value={listId} onValueChange={value => {setListId(value); resetPreview()}} options={[{value: '', label: 'No list'}, ...(listId && !(lists.data ?? []).some(list => list.id === listId) ? [{value: listId, label: listId}] : []), ...(lists.data ?? []).map(list => ({value: list.id, label: `${list.name} · ${list.id}`}))]} /></Field>{(listCursor || lists.data?.nextCursor) && <div className="cluster"><Button disabled={busy || !!preview || lists.isFetching || !listCursor} onClick={() => setListCursor(undefined)}>First matching lists</Button><Button disabled={busy || !!preview || lists.isFetching || !lists.data?.nextCursor} onClick={() => setListCursor(lists.data?.nextCursor ?? undefined)}>Next matching lists</Button></div>}<Field label="CSV file (1 MiB, 1,000 rows maximum)" htmlFor="import-file"><Input type="file" id="import-file" accept=".csv,text/csv" disabled={busy || !!preview} onChange={event => readFile(event.target.files?.[0])} /></Field>{csv && <><p className="muted">{filename}</p><div className="form-grid">{targets.map(target => <Field key={target.value} label={target.label} htmlFor={`map-${target.value}`}><Select id={`map-${target.value}`} disabled={busy || !!preview} value={mapping[target.value] ?? ''} onValueChange={value => {setMapping({...mapping, [target.value]: value}); resetPreview()}} options={[{value: '', label: 'Do not import'}, ...headers.map(header => ({value: header, label: header}))]} /></Field>)}</div></>}<Alert tone="info">Imports do not grant marketing consent. Existing consent and suppressions are preserved.</Alert></>}{preview && <><DataTable rows={preview.rows.slice(0, 10)} rowKey={row => String(row.row)} columns={[{key: 'row', label: 'CSV row', render: row => row.row}, {key: 'email', label: 'Email', render: row => row.email}, {key: 'name', label: 'Name', render: row => row.name || '—'}]} /><span className="muted">{preview.rows.length} valid rows · First 10 shown</span>{preview.errors.length > 0 && <Alert tone="warning">{preview.errors.length} rows rejected{preview.errors.slice(0, 10).map((issue, i) => <div key={i}>Row {issue.row}: {issue.message}</div>)}</Alert>}{!committed && <Button disabled={busy} onClick={resetPreview}>Change mapping</Button>}</>}</div></Dialog>
 }

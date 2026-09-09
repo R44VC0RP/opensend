@@ -25,7 +25,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   componentDidCatch(_error: Error, _info: ErrorInfo) { /* A production reporter can be injected here; never log message bodies. */ }
-  render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Your saved changes are still on this device.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
+  render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Reload to fetch the latest saved data from the API. Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
 }
 export function App() {
   return <AppErrorBoundary><Routes><Route element={<AppShell />}>

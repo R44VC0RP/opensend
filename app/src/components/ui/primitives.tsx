@@ -102,7 +102,11 @@ export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, em
 export function TableSkeleton({ columns, rows = 5, rowSize = 'default', pagination = false }: { columns: SkeletonColumn[]; rows?: number; rowSize?: 'default' | 'large'; pagination?: boolean }) {
   return <><DataTable columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} rowSize={rowSize} />{pagination && <PaginationSkeleton />}</>;
 }
-export function Pagination({ page, pageSize, total, onPageChange }: { page: number; pageSize: number; total: number; onPageChange: (page: number) => void }) {
+export function Pagination({ page, pageSize, total, nextCursor, onPageChange }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void }) {
+  if (total === undefined) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">Cursor page {page}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
+  return <NumberedPagination page={page} pageSize={pageSize} total={total} onPageChange={onPageChange} />
+}
+function NumberedPagination({ page, pageSize, total, onPageChange }: { page: number; pageSize: number; total: number; onPageChange: (page: number) => void }) {
   const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));
   const validPage = Math.min(pages, Math.max(1, page));
   useEffect(() => { if (page !== validPage) onPageChange(validPage); }, [page, validPage, onPageChange]);

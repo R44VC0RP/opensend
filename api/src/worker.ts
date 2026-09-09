@@ -19,10 +19,13 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
 export default {
   async fetch(request, env) {
     try {
-      const peer = await digest(request.headers.get('CF-Connecting-IP') ?? 'local');
-      const gate = await env.ADMISSION.limit({ key: `opensend:${env.WORKSPACE_ID}:${peer}` });
+      const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';
+      const peer = await digest(address);
+      const gate = await env.ADMISSION.limit({ key: `opensend:default:${peer}` });
       if (!gate.success) return admissionDenied();
-      return await withRuntime(env, async runtime => app.fetch(request, runtime));
+      const headers = new Headers(request.headers);
+      headers.set('x-opensend-client-ip', address);
+      return await withRuntime(env, async runtime => app.fetch(new Request(request, { headers }), runtime));
     }
     catch (error) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;

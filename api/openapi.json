@@ -10,9 +10,55 @@
         "type": "http",
         "scheme": "bearer",
         "description": "An OpenSend API key. Credentials never belong in URLs."
+      },
+      "dashboardSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "opensend.session_token",
+        "description": "Google-approved HttpOnly session for local development. Unsafe requests require the canonical dashboard Origin."
+      },
+      "secureDashboardSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Secure-opensend.session_token",
+        "description": "Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin."
       }
     },
     "schemas": {
+      "ApiError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "requestId": {
+                "type": "string"
+              },
+              "field": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId",
+              "retryable"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
       "ApiKey": {
         "type": "object",
         "properties": {
@@ -77,40 +123,6 @@
           "revokedAt"
         ]
       },
-      "ApiError": {
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "object",
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              },
-              "requestId": {
-                "type": "string"
-              },
-              "field": {
-                "type": "string"
-              },
-              "retryable": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "code",
-              "message",
-              "requestId",
-              "retryable"
-            ]
-          }
-        },
-        "required": [
-          "error"
-        ]
-      },
       "CreateApiKey": {
         "type": "object",
         "properties": {
@@ -157,6 +169,27 @@
           "name"
         ],
         "additionalProperties": false
+      },
+      "ContactRead": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Contact"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "listIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "listIds"
+            ]
+          }
+        ]
       },
       "Contact": {
         "type": "object",
@@ -281,6 +314,50 @@
           "deletedAt",
           "createdAt",
           "updatedAt"
+        ]
+      },
+      "ContactListRead": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ContactList"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer"
+                  },
+                  "subscribed": {
+                    "type": "integer"
+                  },
+                  "unsubscribed": {
+                    "type": "integer"
+                  },
+                  "unknown": {
+                    "type": "integer"
+                  },
+                  "suppressed": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "total",
+                  "subscribed",
+                  "unsubscribed",
+                  "unknown",
+                  "suppressed"
+                ],
+                "description": "Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total."
+              }
+            },
+            "required": [
+              "counts"
+            ],
+            "additionalProperties": false
+          }
         ]
       },
       "ContactList": {
@@ -852,6 +929,10 @@
             "maxLength": 254,
             "pattern": "^[\\x21-\\x7e]+$"
           },
+          "fromName": {
+            "type": "string",
+            "maxLength": 200
+          },
           "to": {
             "anyOf": [
               {
@@ -1028,6 +1109,19 @@
           "from": {
             "type": "string"
           },
+          "fromName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "transactional",
+              "marketing"
+            ]
+          },
           "to": {
             "type": "array",
             "items": {
@@ -1108,6 +1202,8 @@
           "region",
           "campaignId",
           "from",
+          "fromName",
+          "kind",
           "to",
           "cc",
           "bcc",
@@ -1320,6 +1416,25 @@
         ],
         "additionalProperties": false
       },
+      "AttachmentContent": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Attachment"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "maxLength": 11184812
+              }
+            },
+            "required": [
+              "content"
+            ]
+          }
+        ]
+      },
       "DeletedSendingResource": {
         "type": "object",
         "properties": {
@@ -1385,6 +1500,81 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byStatus": {
+                "type": "object",
+                "properties": {
+                  "queued": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "attempting": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sent": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delivered": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bounced": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "complained": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rejected": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rendering_failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delayed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suppressed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "canceled": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "acceptance_unknown": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "simulated": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "required": [
+              "total",
+              "byStatus"
+            ],
+            "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
           }
         },
         "required": [
@@ -1396,7 +1586,8 @@
           "reviewId",
           "scheduledAt",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "counts"
         ]
       },
       "CampaignDraftInput": {
@@ -1411,6 +1602,18 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[\\x21-\\x7e]+$"
+          },
+          "fromName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "previewText": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+          },
+          "editor": {
+            "$ref": "#/components/schemas/CampaignEditor"
           },
           "replyTo": {
             "type": "array",
@@ -1524,6 +1727,236 @@
         ],
         "additionalProperties": false,
         "description": "Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
+      },
+      "CampaignEditor": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "react-email"
+            ]
+          },
+          "version": {
+            "type": "number",
+            "enum": [
+              1
+            ]
+          },
+          "document": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        },
+        "required": [
+          "format",
+          "version",
+          "document"
+        ],
+        "additionalProperties": false,
+        "description": "Inert editor metadata; never executed or rendered by the server. HTML/text remain the sendable content."
+      },
+      "CampaignSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "live",
+              "test"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "reviewed",
+              "scheduled",
+              "sending",
+              "completed",
+              "canceled"
+            ]
+          },
+          "reviewId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scheduledAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byStatus": {
+                "type": "object",
+                "properties": {
+                  "queued": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "attempting": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sent": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delivered": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bounced": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "complained": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rejected": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rendering_failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delayed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suppressed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "canceled": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "acceptance_unknown": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "simulated": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "required": [
+              "total",
+              "byStatus"
+            ],
+            "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
+          },
+          "draft": {
+            "$ref": "#/components/schemas/CampaignDraftSummary"
+          }
+        },
+        "required": [
+          "id",
+          "environment",
+          "revision",
+          "status",
+          "reviewId",
+          "scheduledAt",
+          "createdAt",
+          "updatedAt",
+          "counts",
+          "draft"
+        ],
+        "description": "Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted."
+      },
+      "CampaignDraftSummary": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "from": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[\\x21-\\x7e]+$"
+          },
+          "fromName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998
+          },
+          "previewText": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML."
+          },
+          "audience": {
+            "type": "object",
+            "properties": {
+              "listId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              },
+              "segmentId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "listId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "name",
+          "region",
+          "from",
+          "subject",
+          "audience"
+        ],
+        "additionalProperties": false
       },
       "CampaignUpdateInput": {
         "type": "object",
@@ -2479,6 +2912,12 @@
       "Metrics": {
         "type": "object",
         "properties": {
+          "basis": {
+            "type": "string",
+            "enum": [
+              "created-cohort"
+            ]
+          },
           "from": {
             "type": "string"
           },
@@ -2554,16 +2993,33 @@
                 },
                 "count": {
                   "type": "number"
+                },
+                "sent": {
+                  "type": "number"
+                },
+                "delivered": {
+                  "type": "number"
+                },
+                "bounced": {
+                  "type": "number"
+                },
+                "complained": {
+                  "type": "number"
                 }
               },
               "required": [
                 "date",
-                "count"
+                "count",
+                "sent",
+                "delivered",
+                "bounced",
+                "complained"
               ]
             }
           }
         },
         "required": [
+          "basis",
           "from",
           "to",
           "region",
@@ -2576,6 +3032,179 @@
     "parameters": {}
   },
   "paths": {
+    "/v1/me": {
+      "get": {
+        "operationId": "getCurrentIdentity",
+        "tags": [
+          "Auth"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "email": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "environment": {
+                      "type": "string",
+                      "enum": [
+                        "live",
+                        "test"
+                      ]
+                    },
+                    "permissions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "send",
+                          "manage"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "email",
+                    "name",
+                    "environment",
+                    "permissions"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/api-keys": {
       "post": {
         "operationId": "createApiKey",
@@ -2585,6 +3214,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -2733,6 +3368,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -2898,6 +3539,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -3050,8 +3697,15 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
+        "description": "Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.",
         "parameters": [
           {
             "schema": {
@@ -3072,6 +3726,51 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "unknown",
+                "subscribed",
+                "unsubscribed"
+              ]
+            },
+            "required": false,
+            "name": "consent",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "suppressed",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "listId",
+            "in": "query"
           }
         ],
         "responses": {
@@ -3085,7 +3784,7 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Contact"
+                        "$ref": "#/components/schemas/ContactRead"
                       }
                     },
                     "nextCursor": {
@@ -3213,6 +3912,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -3384,6 +4089,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -3404,7 +4115,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Contact"
+                  "$ref": "#/components/schemas/ContactRead"
                 }
               }
             }
@@ -3519,6 +4230,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -3694,6 +4411,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "description": "Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.",
@@ -3847,6 +4570,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "description": "Explicit consent evidence only. Does not lift delivery suppression. Imports/profile edits cannot establish consent.",
@@ -4033,6 +4762,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -4277,6 +5012,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -4299,6 +5040,16 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
           }
         ],
         "responses": {
@@ -4312,7 +5063,7 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/ContactList"
+                        "$ref": "#/components/schemas/ContactListRead"
                       }
                     },
                     "nextCursor": {
@@ -4440,6 +5191,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -4591,6 +5348,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -4611,7 +5374,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContactList"
+                  "$ref": "#/components/schemas/ContactListRead"
                 }
               }
             }
@@ -4726,6 +5489,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -4884,6 +5653,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5036,6 +5811,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5068,6 +5849,41 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "unknown",
+                "subscribed",
+                "unsubscribed"
+              ]
+            },
+            "required": false,
+            "name": "consent",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "suppressed",
+            "in": "query"
           }
         ],
         "responses": {
@@ -5081,7 +5897,7 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Contact"
+                        "$ref": "#/components/schemas/ContactRead"
                       }
                     },
                     "nextCursor": {
@@ -5209,6 +6025,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5380,6 +6202,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5542,6 +6370,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5563,6 +6397,16 @@
             },
             "required": false,
             "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
             "in": "query"
           }
         ],
@@ -5705,6 +6549,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -5855,6 +6705,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -5990,6 +6846,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -6146,6 +7008,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -6298,6 +7166,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "description": "Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.",
@@ -6474,6 +7348,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "description": "Persist a preview before commit. Feature limit: 1 MiB UTF-8 CSV, 1000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.",
@@ -6659,6 +7539,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -6871,6 +7757,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -7008,6 +7900,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -7145,6 +8043,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -7280,6 +8184,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -7415,6 +8325,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -7440,7 +8356,8 @@
           },
           {
             "schema": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 120
             },
             "required": false,
             "name": "campaignId",
@@ -7468,6 +8385,56 @@
             },
             "required": false,
             "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            },
+            "required": false,
+            "name": "region",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "transactional",
+                "marketing"
+              ]
+            },
+            "required": false,
+            "name": "kind",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "required": false,
+            "name": "to",
             "in": "query"
           }
         ],
@@ -7612,6 +8579,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -7750,6 +8723,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -7887,6 +8866,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -8062,6 +9047,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -8197,6 +9188,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -8332,6 +9329,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -8460,6 +9463,150 @@
         }
       }
     },
+    "/v1/attachments/{id}/content": {
+      "get": {
+        "operationId": "getAttachmentContent",
+        "description": "Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.",
+        "tags": [
+          "Attachments"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/campaigns": {
       "post": {
         "operationId": "createCampaign",
@@ -8469,6 +9616,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -8596,12 +9749,19 @@
       },
       "get": {
         "operationId": "listCampaigns",
+        "description": "Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.",
         "tags": [
           "Campaigns"
         ],
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -8624,6 +9784,42 @@
             "required": false,
             "name": "limit",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            },
+            "required": false,
+            "name": "region",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "reviewed",
+                "scheduled",
+                "sending",
+                "completed",
+                "canceled"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
           }
         ],
         "responses": {
@@ -8637,7 +9833,7 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/Campaign"
+                        "$ref": "#/components/schemas/CampaignSummary"
                       }
                     },
                     "nextCursor": {
@@ -8767,6 +9963,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -8902,6 +10104,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9047,6 +10255,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9184,6 +10398,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9321,6 +10541,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9468,6 +10694,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9615,6 +10847,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9762,6 +11000,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -9909,6 +11153,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -10046,6 +11296,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "responses": {
@@ -10169,6 +11425,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -10304,6 +11566,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -10439,6 +11707,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "responses": {
@@ -10565,6 +11839,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -10718,6 +11998,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -10853,6 +12139,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -10990,6 +12282,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11127,6 +12425,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11272,6 +12576,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "requestBody": {
@@ -11407,6 +12717,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11542,6 +12858,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11687,6 +13009,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11824,6 +13152,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -11961,6 +13295,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -12098,6 +13438,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -12235,6 +13581,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -12392,6 +13744,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -12535,6 +13893,12 @@
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [
@@ -13070,12 +14434,19 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (daily sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails; absent days have no created emails. Engagement is observed, not verified human activity.",
         "tags": [
           "Metrics"
         ],
         "security": [
           {
             "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
           }
         ],
         "parameters": [

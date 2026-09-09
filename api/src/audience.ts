@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, errors, id, IdParams, json, notFound, page, PageQuery, response, security, type Actor, type App, type DbExecutor, type Mode, type Runtime } from './core.js';
 import { contacts, consentAudit, imports, listMembers, lists, segments, type ImportError, type ImportRow, type SegmentRule } from './db/audience.js';
@@ -14,6 +14,11 @@ const Dates = { createdAt: z.string(), updatedAt: z.string() };
 const Contact = z.object({ id: z.string(), ...Scope, email: z.string(), name: z.string().nullable(), properties: Properties, marketingConsent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean(), suppressionReason: z.string().nullable(), lastOpenAt: z.string().nullable(), lastClickAt: z.string().nullable(), observedSince: z.string().nullable(), openObservedSince: z.string().nullable(), clickObservedSince: z.string().nullable(), deletedAt: z.string().nullable(), ...Dates }).openapi('Contact');
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
+const ContactRead = Contact.extend({ listIds: z.array(z.string()) }).openapi('ContactRead');
+const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
+const ListRead = List.extend({ counts: ListCounts }).openapi('ContactListRead');
+const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
+const ContactQuery = SearchQuery.extend({ consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
 let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
@@ -37,6 +42,25 @@ function paginate<T extends { id: string }>(rows: T[], limit: number) { return {
 async function findContact(db: DbExecutor, identity: Actor, contactId: string) { const [row] = await db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1); return row ?? notFound('Contact'); }
 async function findList(db: DbExecutor, identity: Actor, listId: string) { const [row] = await db.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1); return row ?? notFound('List'); }
 async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) { const [row] = await db.select().from(segments).where(and(scope(segments, identity), eq(segments.id, segmentId))).limit(1); return row ?? notFound('Segment'); }
+
+// Literal substring search: %, _ and backslash have no wildcard meaning.
+function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
+function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
+  return [query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+}
+async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>) {
+  if (!rows.length) return [];
+  const memberships = await db.select({ contactId: listMembers.contactId, listId: listMembers.listId }).from(listMembers).innerJoin(lists, and(eq(lists.id, listMembers.listId), eq(lists.workspaceId, listMembers.workspaceId), eq(lists.environment, listMembers.environment))).where(and(scope(listMembers, identity), scope(lists, identity), inArray(listMembers.contactId, rows.map(row => row.id)))).orderBy(asc(listMembers.listId));
+  const byContact = new Map<string, string[]>();
+  for (const member of memberships) { const ids = byContact.get(member.contactId) ?? []; ids.push(member.listId); byContact.set(member.contactId, ids); }
+  return rows.map(row => ({ ...row, listIds: byContact.get(row.id) ?? [] }));
+}
+async function readLists(db: DbExecutor, identity: Actor, rows: Array<typeof lists.$inferSelect>) {
+  if (!rows.length) return [];
+  const totals = await db.select({ listId: listMembers.listId, total: sql<number>`count(*)::int`, subscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int`, unsubscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unsubscribed')::int`, unknown: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unknown')::int`, suppressed: sql<number>`count(*) FILTER (WHERE ${contacts.suppressed})::int` }).from(listMembers).innerJoin(contacts, and(eq(contacts.id, listMembers.contactId), eq(contacts.workspaceId, listMembers.workspaceId), eq(contacts.environment, listMembers.environment))).where(and(scope(listMembers, identity), scope(contacts, identity), isNull(contacts.deletedAt), inArray(listMembers.listId, rows.map(row => row.id)))).groupBy(listMembers.listId);
+  const byList = new Map(totals.map(({ listId, ...counts }) => [listId, counts]));
+  return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
+}
 
 function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
 function compileRuleCondition(rule: SegmentRule): SQL {
@@ -144,10 +168,12 @@ function previewImport(input: z.infer<typeof ImportInput>) {
 }
 
 export function registerAudience(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Contact)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/contacts', operationId: 'listContacts', tags: ['Audience'], security, description: 'Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.', request: { query: ContactQuery }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query');
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
-    return c.json(paginate(rows, query.limit), 200);
+    if (query.listId) await findList(c.env.db, identity, query.listId);
+    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, query), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
+    const result = paginate(rows, query.limit);
+    return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contacts', operationId: 'createContact', tags: ['Audience'], security, request: { body: json(ContactInput) }, responses: { 201: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'manage'), input = c.req.valid('json');
@@ -155,7 +181,10 @@ export function registerAudience(app: App) {
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
     return c.json(contact, 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Contact), ...errors } }), async c => c.json(await findContact(c.env.db, actor(c), c.req.valid('param').id), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactRead), ...errors } }), async c => {
+    const identity = actor(c), row = await findContact(c.env.db, identity, c.req.valid('param').id);
+    return c.json((await readContacts(c.env.db, identity, [row]))[0]!, 200);
+  });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'manage'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
     const [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
@@ -192,13 +221,17 @@ export function registerAudience(app: App) {
     const rows = await c.env.db.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId), query.cursor ? gt(consentAudit.id, query.cursor) : undefined)).orderBy(asc(consentAudit.id)).limit(query.limit + 1);
     return c.json(paginate(rows, query.limit), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/lists', operationId: 'listContactLists', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(List)), ...errors } }), async c => {
-    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(lists).where(and(scope(lists, identity), query.cursor ? gt(lists.id, query.cursor) : undefined)).orderBy(asc(lists.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/lists', operationId: 'listContactLists', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(ListRead)), ...errors } }), async c => {
+    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(lists).where(and(scope(lists, identity), query.search ? searchText(lists.name, query.search) : undefined, query.cursor ? gt(lists.id, query.cursor) : undefined)).orderBy(asc(lists.id)).limit(query.limit + 1);
+    const result = paginate(rows, query.limit); return c.json({ ...result, data: await readLists(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists', operationId: 'createContactList', tags: ['Audience'], security, request: { body: json(ListInput) }, responses: { 201: response(List), ...errors } }), async c => {
     const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(lists).values({ id: id('lst'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(row!, 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}', operationId: 'getContactList', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(List), ...errors } }), async c => c.json(await findList(c.env.db, actor(c), c.req.valid('param').id), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}', operationId: 'getContactList', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ListRead), ...errors } }), async c => {
+    const identity = actor(c), row = await findList(c.env.db, identity, c.req.valid('param').id);
+    return c.json((await readLists(c.env.db, identity, [row]))[0]!, 200);
+  });
   app.openapi(createRoute({ method: 'patch', path: '/v1/lists/{id}', operationId: 'updateContactList', tags: ['Audience'], security, request: { params: IdParams, body: json(ListInput.partial()) }, responses: { 200: response(List), ...errors } }), async c => {
     const identity = actor(c, 'manage'); const [row] = await c.env.db.update(lists).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(lists, identity), eq(lists.id, c.req.valid('param').id))).returning(); return c.json(row ?? notFound('List'), 200);
   });
@@ -206,9 +239,10 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id;
     await c.env.db.transaction(async tx => { const [row] = await tx.delete(lists).where(and(scope(lists, identity), eq(lists.id, listId))).returning(); if (!row) notFound('List'); await tx.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, listId))); }); return c.json({ id: listId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}/members', operationId: 'listListMembers', tags: ['Audience'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Contact)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}/members', operationId: 'listListMembers', tags: ['Audience'], security, request: { params: IdParams, query: ContactQuery.omit({ listId: true }) }, responses: { 200: response(page(ContactRead)), ...errors } }), async c => {
     const identity = actor(c), listId = c.req.valid('param').id, query = c.req.valid('query'); await findList(c.env.db, identity, listId);
-    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), inList(identity, listId), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+    const rows = await c.env.db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId }), query.cursor ? gt(contacts.id, query.cursor) : undefined)).orderBy(asc(contacts.id)).limit(query.limit + 1);
+    const result = paginate(rows, query.limit); return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists/{id}/members', operationId: 'addListMembers', tags: ['Audience'], security, request: { params: IdParams, body: json(z.object({ contactIds: z.array(z.string().min(1).max(120)).min(1).max(100) }).strict()) }, responses: { 200: response(z.object({ added: z.number().int() })), ...errors } }), async c => {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id, contactIds = [...new Set(c.req.valid('json').contactIds)];
@@ -217,8 +251,8 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/lists/{id}/members/{contactId}', operationId: 'removeListMember', tags: ['Audience'], security, request: { params: IdParams.extend({ contactId: z.string().min(1).max(120) }) }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id); await c.env.db.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); return c.json({ id: params.contactId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/segments', operationId: 'listSegments', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Segment)), ...errors } }), async c => {
-    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/segments', operationId: 'listSegments', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(Segment)), ...errors } }), async c => {
+    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.search ? searchText(segments.name, query.search) : undefined, query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/segments', operationId: 'createSegment', tags: ['Audience'], security, request: { body: json(SegmentInput) }, responses: { 201: response(Segment), ...errors } }), async c => {
     const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(segments).values({ id: id('seg'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(row!, 201);

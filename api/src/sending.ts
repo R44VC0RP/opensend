@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
@@ -8,6 +8,7 @@ import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRende
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
+import { isApprovedUser } from './google-auth.js';
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, regionalLimits, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
@@ -37,6 +38,36 @@ function campaignBytes(a: Actor, total: number, snapshot: EmailSnapshot) {
 }
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
+const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f]/.test(v), 'Sender name cannot contain control characters.');
+const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.');
+function inertDocument(document: Record<string, unknown>): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{ value: document, depth: 0 }];
+  const seen = new Set<object>(); let values = 0;
+  while (stack.length) {
+    const { value, depth } = stack.pop()!;
+    if (++values > 20000 || depth > 32) return false;
+    if (value === null || typeof value === 'string' || typeof value === 'boolean') continue;
+    if (typeof value === 'number') { if (!Number.isFinite(value)) return false; continue; }
+    if (typeof value !== 'object' || seen.has(value)) return false;
+    seen.add(value);
+    const array = Array.isArray(value), prototype = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > 20001 || (array && value.length > 20000)) return false;
+    let entries = 0;
+    for (const key of keys) {
+      if (array && key === 'length') continue;
+      if (typeof key !== 'string') return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      if (!descriptor.enumerable || !('value' in descriptor)) return false;
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) return false;
+      stack.push({ value: descriptor.value, depth: depth + 1 }); entries++;
+    }
+    if (array && entries !== value.length) return false;
+  }
+  return true;
+}
+const Editor = z.object({ format: z.literal('react-email'), version: z.literal(1), document: z.record(z.string(), z.unknown()) }).strict().refine(value => inertDocument(value.document) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= 256 * 1024, 'Editor metadata must be inert JSON, at most 256 KiB UTF-8, 32 document levels and 20,000 values.').describe('Inert editor metadata; never executed or rendered by the server. HTML/text remain the sendable content.').openapi('CampaignEditor');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
 const Data = z.record(z.string().max(120), Scalar).default({});
 const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(value => {
@@ -46,7 +77,7 @@ const Region = z.string().min(1).max(40);
 const AttachmentIds = z.array(z.string().min(1).max(120)).max(20).default([]);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
-  from: Address, to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
+  from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
   region: Region, kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(),
@@ -58,7 +89,7 @@ const SendInput = z.object({
 }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
-const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
+const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), environment: z.enum(['live', 'test']), simulated: z.boolean() }).openapi('EmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), environment: z.enum(['live', 'test']), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
@@ -66,8 +97,15 @@ const EmailContent = z.object({ subject: z.string(), html: z.string().nullable()
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string(), environment: z.enum(['live', 'test']) }).openapi('Attachment');
 const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
-const CampaignInput = z.object({ name: z.string().min(1).max(200), from: Address, replyTo: z.array(Address).max(10).default([]), region: Region, subject: Subject, html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: AudienceSpec, defaults: Data }).strict().refine(v => !!v.html || !!v.text, 'Provide html or text.').describe('Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
-const Campaign = z.object({ id: z.string(), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']), reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Campaign');
+const CampaignInput = z.object({ name: z.string().min(1).max(200), from: Address, fromName: FromName.optional(), previewText: PreviewText.optional(), editor: Editor.nullable().optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: Subject, html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: AudienceSpec, defaults: Data }).strict().refine(v => !!v.html || !!v.text, 'Provide html or text.').describe('Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
+const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
+const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
+const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
+const Campaign = z.object({ id: z.string(), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
+const CampaignDraftSummary = z.object({ name: CampaignInput.shape.name, region: Region, from: Address, fromName: FromName.optional(), subject: Subject, previewText: PreviewText.optional(), audience: AudienceSpec.pick({ listId: true, segmentId: true }) }).strict().openapi('CampaignDraftSummary');
+const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal, case-insensitive recipient (To/Cc/Bcc), subject or ID text.').openapi('ListEmailsQuery');
+const CampaignQuery = PageQuery.extend({ region: Region.optional(), status: CampaignStatus.optional(), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, with an opaque cursor bound to the filters and environment. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).openapi('CampaignAudienceCounts');
 const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), revision: z.number().int(), contentHash: z.string(), createdAt: z.string() }).openapi('CampaignReview');
 const Revision = z.object({ revision: z.number().int().positive() }).strict().openapi('CampaignRevisionInput');
@@ -79,6 +117,51 @@ const CampaignCanceled = z.object({ id: z.string(), status: z.literal('canceled'
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
 type SendRequest = z.infer<typeof SendInput>;
 const now = () => new Date().toISOString();
+// Metadata routes must not materialize HTML, raw MIME or template data from the immutable snapshot.
+const emailColumns = {
+  id: emails.id, environment: emails.environment, region: emails.region, campaignId: emails.campaignId,
+  from: emails.from, fromName: sql<string | null>`${emails.snapshot}->>'fromName'`, kind: sql<'transactional' | 'marketing'>`${emails.snapshot}->>'kind'`,
+  to: emails.to, cc: emails.cc, bcc: emails.bcc, subject: emails.subject, status: emails.status,
+  providerId: emails.providerId, simulated: emails.simulated, attemptStartedAt: emails.attemptStartedAt,
+  errorCode: emails.errorCode, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
+};
+function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+// Project the bounded list draft in PostgreSQL, before driver JSON parsing or application allocation.
+const campaignSummaryColumns = {
+  id: campaigns.id, environment: campaigns.environment, revision: campaigns.revision, status: campaigns.status,
+  reviewId: campaigns.reviewId, scheduledAt: campaigns.scheduledAt, createdAt: campaigns.createdAt, updatedAt: campaigns.updatedAt,
+  draft: sql<z.infer<typeof CampaignDraftSummary>>`jsonb_strip_nulls(jsonb_build_object(
+    'name', ${campaigns.draft}->'name', 'region', ${campaigns.draft}->'region', 'from', ${campaigns.draft}->'from',
+    'fromName', ${campaigns.draft}->'fromName', 'subject', ${campaigns.draft}->'subject', 'previewText', ${campaigns.draft}->'previewText',
+    'audience', jsonb_build_object('listId', ${campaigns.draft}->'audience'->'listId', 'segmentId', ${campaigns.draft}->'audience'->'segmentId')
+  ))`,
+};
+async function campaignViews<T extends { id: string }>(db: DbExecutor, a: Actor, rows: T[]) {
+  if (!rows.length) return [];
+  const grouped = await db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  return rows.map(row => {
+    const counts = emptyCounts();
+    for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
+    return { ...row, counts };
+  });
+}
+async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
+  const { cursor: _cursor, limit: _limit, ...filters } = query;
+  return (await digest(canonical({ workspaceId: a.workspaceId, environment: a.environment, resource, filters }))).slice(0, 24);
+}
+function readCursor(value: string | undefined, binding: string): { at: string; id: string } | null {
+  if (!value) return null;
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+    const tuple = z.tuple([z.string().datetime({ offset: true }), z.string().min(1).max(120), z.literal(binding)]).parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+    return { at: tuple[0], id: tuple[1] };
+  } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters and environment.', 'cursor'); }
+}
+function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
+  const last = rows[limit - 1];
+  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+}
+function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
 const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
 const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
 const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
@@ -142,6 +225,36 @@ async function linkAttachments(db: DbExecutor, a: Actor, ids: string[], ownerTyp
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, environment: a.environment, attachmentId, ownerType, ownerId }))).onConflictDoNothing();
 }
 function escaped(value: string) { return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!); }
+function formattedSender(from: string, fromName?: string, foldMime = false): string {
+  // Domain authorization always uses the bare address; formatting happens only at the MIME/SES boundary.
+  Address.parse(from);
+  if (!fromName) return from;
+  FromName.parse(fromName);
+  if (/^[\x20-\x7e]+$/.test(fromName)) return `"${fromName.replace(/["\\]/g, '\\$&')}" <${from}>`;
+  // RFC 2047 encoded words, each below 75 characters and never splitting a UTF-8 code point.
+  const words: string[] = []; let chunk = '';
+  for (const character of fromName) {
+    if (Buffer.byteLength(chunk + character, 'utf8') > 42) { words.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`); chunk = ''; }
+    chunk += character;
+  }
+  if (chunk) words.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`);
+  const separator = foldMime ? '\r\n ' : ' ';
+  return `${words.join(separator)}${separator}<${from}>`;
+}
+function withPreheader(html: string | undefined, previewText?: string): string | undefined {
+  if (!html || !previewText) return html;
+  const stack: DefaultTreeAdapterMap['node'][] = [parse(html, { sourceCodeLocationInfo: true })];
+  let bodyOffset = 0;
+  while (stack.length) {
+    const node = stack.pop()!;
+    if ('tagName' in node && node.namespaceURI === 'http://www.w3.org/1999/xhtml') {
+      if (node.tagName === 'body') bodyOffset = node.sourceCodeLocation?.startTag?.endOffset ?? 0;
+    }
+    if ('childNodes' in node) stack.push(...node.childNodes);
+  }
+  const preheader = `<div data-opensend-preview="true" data-skip-in-text="true" style="display:none;max-height:0;overflow:hidden;opacity:0;mso-hide:all">${escaped(previewText)}</div>`;
+  return html.slice(0, bodyOffset) + preheader + html.slice(bodyOffset);
+}
 const URL_ATTRIBUTES = new Set(['href', 'src', 'action', 'formaction', 'poster', 'background', 'cite', 'longdesc', 'data', 'codebase', 'profile', 'manifest', 'xlink:href']);
 const TEXT_ATTRIBUTES = new Set(['title', 'alt', 'aria-label', 'aria-description']);
 const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'iframe', 'xmp', 'noembed', 'noframes', 'noscript', 'plaintext']);
@@ -197,7 +310,8 @@ function inspectHtml(source: string, template = false) {
 function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean): string | undefined {
   if (!source) return source;
   const unsupported = source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, '');
-  if (unsupported.includes('{{') || unsupported.includes('}}')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
+  // Nested CSS blocks legitimately end in }}. Only an unmatched opening delimiter begins unsupported template syntax.
+  if (unsupported.includes('{{')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
   if (html) inspectHtml(source, true);
   let result = ''; let offset = 0;
   for (const match of source.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)) {
@@ -222,7 +336,7 @@ function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, input: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
   sender(runtime, a, input.from, input.region);
-  const snapshot: EmailSnapshot = { from: input.from, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [] };
+  const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [] };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
   validateHtmlUrls(snapshot.html);
   if (input.template) {
@@ -246,7 +360,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, input: SendRe
       const split = normalized.indexOf('\r\n\r\n');
       if (split < 0) throw new ApiError(422, 'INVALID_RENDERED_MIME', 'SES rendered content has no MIME header/body separator.');
       const headers = normalized.slice(0, split).split(/\r\n(?![ \t])/).filter(h => !/^(?:from|to|cc|bcc|reply-to|return-path|date|message-id):/i.test(h));
-      snapshot.raw = [`From: ${snapshot.from}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers].join('\r\n') + normalized.slice(split);
+      snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers].join('\r\n') + normalized.slice(split);
     }
   }
   if (input.kind === 'marketing' && !preview) {
@@ -273,12 +387,14 @@ function editable(row: typeof campaigns.$inferSelect, revision?: number) {
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
-    const parsed = SendInput.safeParse({ from: draft.from, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: interpolate(draft.html, values, true), text: interpolate(draft.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(draft.html, values, true), draft.previewText), text: interpolate(draft.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
     }
-    return await prepare(runtime, db, a, parsed.data, preview, lockedAttachments);
+    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments);
+    if (draft.previewText !== undefined) snapshot.previewText = draft.previewText;
+    return snapshot;
   } catch (error) {
     // Add only a contact identifier to known local validation failures; never rewrite database/provider errors.
     if (error instanceof ApiError && ['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE'].includes(error.code)) throw new ApiError(error.status, error.code, `Contact ${contact.id}: ${error.message}`, 'contactId', error.retryable);
@@ -308,11 +424,23 @@ export function registerSending(app: App) {
     });
     wake(c.env); return c.json(BatchReceipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: PageQuery.extend({ campaignId: z.string().optional(), status: Status.optional() }) }, responses: { 200: response(page(Email)), ...errors } }), async c => {
-    const a = actor(c); const q = c.req.valid('query'); const rows = await c.env.db.select().from(emails).where(and(scope(emails, a), q.cursor ? gt(emails.id, q.cursor) : undefined, q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined)).orderBy(asc(emails.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => Email.parse(r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
+    const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
+    if (q.region) region(c.env, q.region);
+    const search = q.search ? literalSearch(q.search) : null;
+    const rows = await c.env.db.select(emailColumns).from(emails).where(and(scope(emails, a),
+      cursor ? sql`(${emails.createdAt}, ${emails.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
+      q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined,
+      q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
+      q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
+      search ? sql`(${emails.id} ILIKE ${search} OR ${emails.subject} ILIKE ${search} OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(${emails.to} || ${emails.cc} || ${emails.bcc}) AS recipient(address) WHERE recipient.address ILIKE ${search}))` : undefined,
+    )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(emailView), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => c.json(Email.parse(await findEmail(c.env.db, actor(c), c.req.valid('param').id)), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}', operationId: 'getEmail', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(Email), ...errors } }), async c => {
+    const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(actor(c), c.req.valid('param').id)).limit(1);
+    return c.json(emailView(row ?? notFound('Email')), 200);
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id); const s = row.snapshot;
     const manage = a.permissions.includes('manage');
@@ -352,6 +480,13 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]); return c.json(AttachmentInfo.parse(row), 200);
   });
+  app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENTS / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
+    const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
+    const asset = await c.env.storage.get(row!.storageKey);
+    if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENTS || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
+    c.header('X-Content-Type-Options', 'nosniff');
+    return c.json({ ...AttachmentInfo.parse(row), content: Buffer.from(asset.body).toString('base64') }, 200);
+  });
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;
     await c.env.db.transaction(async db => {
@@ -364,18 +499,28 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', tags: ['Campaigns'], security, request: { body: json(CampaignInput) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const draft = c.req.valid('json'); sender(c.env, a, draft.from, draft.region);
-    const result = await idempotent(c, a, draft, async db => { const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId); const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning(); return Campaign.parse(row); });
+    const result = await idempotent(c, a, draft, async db => { const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId); const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning(); return Campaign.parse({ ...row, counts: emptyCounts() }); });
     return c.json(Campaign.parse(result), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', tags: ['Campaigns'], security, request: { query: PageQuery }, responses: { 200: response(page(Campaign)), ...errors } }), async c => {
-    const a = actor(c); const q = c.req.valid('query'); const rows = await c.env.db.select().from(campaigns).where(and(scope(campaigns, a), q.cursor ? gt(campaigns.id, q.cursor) : undefined)).orderBy(asc(campaigns.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => Campaign.parse(r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
+    const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
+    if (q.region) region(c.env, q.region);
+    const search = q.search ? literalSearch(q.search) : null;
+    const rows = await c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(scope(campaigns, a),
+      cursor ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
+      q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.status ? eq(campaigns.status, q.status) : undefined,
+      search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
+    )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1);
+    return c.json({ data: (await campaignViews(c.env.db, a, rows.slice(0, q.limit))).map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => c.json(Campaign.parse(await findCampaign(c.env.db, actor(c), c.req.valid('param').id)), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
+    const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row]))[0]!), 200);
+  });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id; sender(c.env, a, input.draft.from, input.draft.region);
     const row = await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); sender(c.env, a, current.draft.from, current.draft.region); editable(current, input.revision); await attachmentRows(db, a, input.draft.attachments, true); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId); const [updated] = await db.update(campaigns).set({ draft: input.draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning(); return updated; });
-    return c.json(Campaign.parse(row), 200);
+    return c.json(Campaign.parse((await campaignViews(c.env.db, a, [row!]))[0]!), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/campaigns/{id}', operationId: 'deleteCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
@@ -489,9 +634,10 @@ async function deferDispatch(runtime: Runtime, a: Actor, mail: typeof emails.$in
   });
 }
 async function originAllowed(runtime: Runtime, db: DbExecutor, mail: typeof emails.$inferSelect) {
-  // Bind bootstrap jobs to the current credential generation, so env-key rotation contains queued work too.
-  if (mail.actorKeyId.startsWith('bootstrap_')) return mail.workspaceId === runtime.config.workspaceId && mail.environment === 'live' && mail.actorKeyId === `bootstrap_${(await digest(runtime.config.adminToken)).slice(0, 24)}`;
-  // Legacy unbound "bootstrap" jobs cannot prove their originating credential is still valid.
+  // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
+  // Re-check its current allowlist approval under the same transaction lock as the attempt claim.
+  if (mail.actorKeyId.startsWith('user_')) return mail.workspaceId === runtime.config.workspaceId && (mail.environment === 'live' || mail.environment === 'test') && await isApprovedUser(runtime, mail.actorKeyId.slice(5), db);
+  // Removed bootstrap origins fail closed; only durable API keys are accepted below.
   const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('update');
   // FOR UPDATE serializes with revocation/permission updates through the durable attempt claim,
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
@@ -551,7 +697,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'simulated', externalId: `simulated:${mail.id}`, data: { stage: 'validated', providerCalled: false, deliveryObserved: false } });
     await finishCampaign(runtime, a, mail.campaignId); return;
   }
-  const request: SendEmailCommandInput = { FromEmailAddress: s.from, Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
+  const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
     Content: s.raw ? { Raw: { Data: new TextEncoder().encode(s.raw) } } : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } },

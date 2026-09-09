@@ -1,10 +1,23 @@
 import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { fileURLToPath } from 'node:url';
 import { app } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
 import { admissionDenied, ApiError, log } from './core.js';
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
+  const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
+  const assets = serveStatic({ root: publicRoot });
+  const dashboard = serveStatic({ path: `${publicRoot}index.html` });
+  app.use('*', async (c, next) => {
+    // API failures must remain JSON, never an apparently successful SPA response.
+    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:v1|api|unsubscribe)(?:\/|$)/.test(c.req.path) || ['/health', '/openapi.json'].includes(c.req.path)) return next();
+    return assets(c, async () => {
+      const response = await dashboard(c, next);
+      if (response) c.res = response;
+    });
+  });
   // Coarse per-process admission guard; trusted proxy/WAF controls remain necessary for distributed abuse.
   const peers = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
   const server = serve({ fetch: (request, connection) => {
@@ -14,7 +27,9 @@ try {
     const key = peers.has(address) || peers.size < 1024 ? address : 'overflow';
     const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
     if (count > 6000) return admissionDenied();
-    return app.fetch(request, runtime);
+    const headers = new Headers(request.headers);
+    headers.set('x-opensend-client-ip', address);
+    return app.fetch(new Request(request, { headers }), runtime);
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
   });

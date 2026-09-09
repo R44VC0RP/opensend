@@ -17,7 +17,12 @@ export interface Storage {
 }
 export interface Config {
   workspaceId: string;
-  adminToken: string;
+  authSecret: string;
+  previousAuthSecret?: string;
+  googleClientId?: string;
+  googleClientSecret?: string;
+  allowedEmails: string[];
+  allowedDomains: string[];
   publicUrl: string;
   regions: string[];
   liveEnabled: boolean;
@@ -40,7 +45,7 @@ export class ApiError extends Error {
 }
 export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean() }) }).openapi('ApiError');
 export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
-export const security = [{ bearerAuth: [] }];
+export const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 export const IdParams = z.object({ id: z.string().min(1).max(120) });
 export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });
 export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'application/json': { schema } }, required: true });

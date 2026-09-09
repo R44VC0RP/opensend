@@ -1,19 +1,29 @@
-import { describe, test, type TestContext } from 'node:test';
+import { after, before, describe, test, type TestContext } from 'node:test';
+import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import pg from 'pg';
 
-// Run against the actual server and its normal background-job runner:
-// ADMIN_API_KEY=... API_BASE_URL=http://127.0.0.1:8787 npx tsx --test api.acceptance.test.ts
-// This file deliberately imports no implementation and creates no helper fixtures on disk.
+// Run against the actual server and normal background-job runner with npm test.
+// Requires its BETTER_AUTH_SECRET and paired DATABASE_URL (localhost only) or
+// explicit API_FIXTURE_DATABASE_URL. Allow AUTH_TEST_EMAIL (operator@example.com)
+// and AUTH_TEST_GOOGLE_DOMAIN (example.com) in that server's Google access policy.
+// Synthetic DB identities exercise session authorization, NOT real Google OAuth.
+// HTTP scenarios use the actual server. One explicitly labeled callback integration
+// uses the normal app with mocked Google transport; no helper files or auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
-const ADMIN = process.env.ADMIN_API_KEY;
-if (!ADMIN) throw new Error('Acceptance tests require ADMIN_API_KEY for the running API; no scenarios were run.');
+const AUTH_SECRET = process.env.BETTER_AUTH_SECRET;
+if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BETTER_AUTH_SECRET to sign synthetic local session fixtures; no scenarios were run.');
+const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
+const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
+const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Secure-opensend.session_token' : 'opensend.session_token';
+const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
+const AUTH_DOMAIN = process.env.AUTH_TEST_GOOGLE_DOMAIN ?? 'example.com';
 // Do not send credentials to an unrelated service occupying the configured port.
 const probe = await fetch(`${BASE}/health`, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
 const identity = await probe.json().catch(() => null) as { service?: string } | null;
 if (!probe.ok || identity?.service !== 'opensend' || !probe.headers.get('x-request-id')) throw new Error('API_TARGET_MISMATCH: API_BASE_URL is not an OpenSend API. No authenticated scenarios were run.');
-const secrets = new Set<string>([ADMIN]);
+const secrets = new Set<string>([AUTH_SECRET]);
 const unique = (prefix: string) => `${prefix}-${randomUUID().replaceAll('-', '')}`;
 const address = () => `${unique('acceptance')}@example.com`;
 const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
@@ -21,8 +31,8 @@ const REGION = process.env.API_TEST_REGION ?? 'us-east-1';
 // never silently arrange a remote API's fixtures in the developer's default DB.
 const LOCAL_API = ['localhost', '127.0.0.1'].includes(new URL(BASE).hostname);
 const FIXTURE_DATABASE_URL = process.env.API_FIXTURE_DATABASE_URL || (LOCAL_API ? process.env.DATABASE_URL : undefined);
-const DATABASE_FIXTURE_SKIP = !LOCAL_API && !process.env.API_FIXTURE_DATABASE_URL
-  ? 'Remote API: set API_FIXTURE_DATABASE_URL to its explicitly paired database to run scoped source-fixture regressions.' : false;
+if (!FIXTURE_DATABASE_URL) throw new Error('Session fixture bootstrap requires DATABASE_URL for localhost, or API_FIXTURE_DATABASE_URL explicitly paired with a remote API. No authenticated scenarios were run.');
+const DATABASE_FIXTURE_SKIP = false; // Bootstrap already requires an explicitly safe fixture database.
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
@@ -48,6 +58,54 @@ async function fixtureDatabase(t: TestContext): Promise<pg.Client> {
   cleanup(t, async () => { await db.end(); });
   return db;
 }
+type SessionFixture = { userId: string; sessionId: string; token: string; cookie: string; email: string };
+let authDb: pg.Client | undefined;
+let manager: SessionFixture | undefined;
+async function seedSession(db: pg.Client, options: { email?: string; hostedDomain?: string | null; verified?: boolean; googleAccount?: boolean } = {}): Promise<SessionFixture> {
+  const userId = unique('acceptance-user');
+  const sessionId = unique('acceptance-session');
+  const token = unique('acceptance-token');
+  const email = options.email ?? `${unique('acceptance-google')}@${AUTH_DOMAIN}`;
+  const cookie = `${COOKIE_NAME}=${encodeURIComponent(`${token}.${await makeSignature(token, AUTH_SECRET!)}`)}`;
+  secrets.add(token);
+  secrets.add(cookie);
+  await db.query('BEGIN');
+  try {
+    // Never overwrite/reuse an existing user's email or credentials. A collision
+    // fails the fixture; choose a dedicated AUTH_TEST_EMAIL rather than deleting it.
+    await db.query(`INSERT INTO auth_user (id, name, email, email_verified, google_hosted_domain)
+      VALUES ($1, $2, $3, $4, $5)`, [userId, 'Synthetic acceptance operator', email, options.verified ?? true, options.hostedDomain === undefined ? AUTH_DOMAIN : options.hostedDomain]);
+    if (options.googleAccount !== false) await db.query(`INSERT INTO auth_account (id, provider_id, account_id, user_id)
+      VALUES ($1, 'google', $2, $3)`, [unique('acceptance-account'), unique('acceptance-google-sub'), userId]);
+    await db.query(`INSERT INTO auth_session (id, token, expires_at, user_id)
+      VALUES ($1, $2, $3, $4)`, [sessionId, token, new Date(Date.now() + 3_600_000), userId]);
+    await db.query('COMMIT');
+  } catch (cause) {
+    await db.query('ROLLBACK');
+    throw cause;
+  }
+  return { userId, sessionId, token, cookie, email };
+}
+async function sessionFixture(t: TestContext, options: Parameters<typeof seedSession>[1] = {}): Promise<SessionFixture> {
+  assert.ok(authDb, 'Synthetic session database must be bootstrapped first.');
+  const fixture = await seedSession(authDb, options);
+  cleanup(t, async () => { await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]); });
+  return fixture;
+}
+before(async () => {
+  authDb = new pg.Client({ connectionString: FIXTURE_DATABASE_URL, connectionTimeoutMillis: 5_000, statement_timeout: 5_000 });
+  await authDb.connect();
+  manager = await seedSession(authDb, { email: AUTH_EMAIL, hostedDomain: null });
+  const identity = ok(await http('GET', '/v1/me', MANAGER));
+  assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
+  assert.equal(identity.email, AUTH_EMAIL);
+});
+after(async () => {
+  if (authDb) {
+    try { if (manager) await authDb.query('DELETE FROM auth_user WHERE id = $1', [manager.userId]); }
+    finally { await authDb.end(); }
+  }
+});
 async function resource(t: TestContext, key: string, path: string, body: Json): Promise<Json> {
   const created = ok(await http('POST', path, key, body), 201);
   assert.equal(typeof created.id, 'string');
@@ -104,11 +162,15 @@ function redact(value: unknown): string {
 function diagnostic(reply: Reply): string {
   return `HTTP ${reply.status}; x-request-id=${reply.headers.get('x-request-id') ?? '(missing)'}; body=${redact(reply.body)}`;
 }
-async function http(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}, timeout = 5_000): Promise<Reply> {
-  const response = await fetch(`${BASE}${path}`, {
+async function http(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}, timeout = 5_000, base = BASE): Promise<Reply> {
+  if (key === MANAGER) assert.ok(manager, 'Synthetic dashboard session has not been bootstrapped.');
+  const credentials: Record<string, string> = key === MANAGER
+    ? { cookie: manager!.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': path.startsWith('/v1/api-keys') ? 'live' : 'test' }
+    : key ? { authorization: `Bearer ${key}` } : {};
+  const response = await fetch(`${base}${path}`, {
     method,
     redirect: 'manual',
-    headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+    headers: { ...credentials, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     body: body === undefined ? undefined : headers['content-type'] === 'application/x-www-form-urlencoded' ? String(body) : JSON.stringify(body),
     signal: AbortSignal.timeout(timeout),
   });
@@ -144,7 +206,7 @@ function page(reply: Reply): Json[] {
   return body.data;
 }
 async function keyFixture(t: TestContext, options: { environment?: 'test' | 'live'; permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
-  const body = ok(await http('POST', '/v1/api-keys', ADMIN, {
+  const body = ok(await http('POST', '/v1/api-keys', MANAGER, {
     name: unique('acceptance'), environment: options.environment ?? 'test',
     permissions: options.permissions ?? ['read', 'send', 'manage'], domains: options.domains ?? [],
   }), 201);
@@ -152,7 +214,7 @@ async function keyFixture(t: TestContext, options: { environment?: 'test' | 'liv
   assert.equal(typeof body.secret, 'string', 'API-key creation must return the secret exactly once.');
   assert.ok(body.secret.startsWith(options.environment === 'live' ? 'os_live_' : 'os_test_'), 'Key prefix must identify its environment.');
   secrets.add(body.secret);
-  cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, ADMIN), [200, 204]); });
+  cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, MANAGER), [200, 204]); });
   return body;
 }
 async function poll(path: string, key: string, predicate: (body: Json) => boolean): Promise<Json> {
@@ -209,9 +271,9 @@ describe('Public contract and authentication', () => {
     error(await http('GET', '/v1/api-keys', 'not-a-valid-key'), 401);
   });
 
-  test('bootstrap creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
+  test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
-    const rows = await allPages('/v1/api-keys', ADMIN);
+    const rows = await allPages('/v1/api-keys', MANAGER);
     const saved = rows.find(row => row.id === key.id);
     assert.ok(saved, 'Newly created API key must be visible in the key list.');
     for (const row of rows) {
@@ -221,9 +283,291 @@ describe('Public contract and authentication', () => {
     }
     page(await http('GET', '/v1/contacts', key.secret));
     error(await http('POST', '/v1/api-keys', key.secret, { name: unique('forbidden'), environment: 'test', permissions: ['manage'], domains: [] }), 403);
-    ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, ADMIN), [200, 204]);
+    ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]);
     error(await http('GET', '/v1/contacts', key.secret), 401);
   });
+});
+
+describe('Google dashboard sessions and current-policy authorization', () => {
+  test('approved synthetic Google sessions identify the operator and select an environment without exposing credentials', async t => {
+    const me = ok(await http('GET', '/v1/me', MANAGER));
+    assert.equal(me.id, manager!.userId);
+    assert.equal(me.email, AUTH_EMAIL);
+    assert.equal(me.name, 'Synthetic acceptance operator');
+    assert.equal(me.environment, 'test');
+    assert.ok(me.permissions.includes('manage'));
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'live' })).environment, 'live');
+    error(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'invalid' }), 422, 'ENVIRONMENT_INVALID');
+    const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
+    assert.equal(inspected.user.id, manager!.userId);
+    assert.equal(inspected.user.emailVerified, true);
+    assert.equal(inspected.user.googleHostedDomain, undefined, 'Google hd is protected server-side identity data.');
+    assert.equal(ok(await http('GET', '/api/auth/get-session')), null);
+    const machine = await keyFixture(t, { permissions: ['read'] });
+    const machineMe = ok(await http('GET', '/v1/me', machine.secret, undefined, { 'x-opensend-environment': 'live' }));
+    assert.equal(machineMe.id, machine.id);
+    assert.equal(machineMe.email, null);
+    assert.equal(machineMe.name, null);
+    assert.equal(machineMe.environment, 'test', 'Dashboard headers cannot elevate an API key into live scope.');
+    assert.deepEqual(machineMe.permissions, ['read']);
+    for (const field of ['token', 'secret', 'cookie', 'accessToken', 'refreshToken']) assert.equal(me[field], undefined);
+  });
+
+  test('invalid Bearer credentials never fall back to a valid dashboard cookie; machine writes need no Origin', async t => {
+    const headers = { cookie: manager!.cookie, origin: PUBLIC_ORIGIN };
+    error(await http('GET', '/v1/me', 'not-a-valid-key', undefined, headers), 401, 'AUTH_INVALID');
+    error(await http('GET', '/v1/me', undefined, undefined, { ...headers, authorization: 'Basic invalid' }), 401, 'AUTH_INVALID');
+    const key = await keyFixture(t);
+    const contact = ok(await http('POST', '/v1/contacts', key.secret, { email: address() }), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${contact.id}`, MANAGER), [200, 404]); });
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).id, contact.id);
+    ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]);
+    error(await http('GET', '/v1/me', key.secret, undefined, headers), 401, 'AUTH_INVALID');
+  });
+
+  test('cookie-authenticated unsafe requests require the canonical Origin and leave no rejected writes', async () => {
+    for (const origin of [undefined, 'https://attacker.invalid', `${PUBLIC_ORIGIN}.attacker.invalid`]) {
+      const email = address();
+      const headers: Record<string, string> = { cookie: manager!.cookie, 'x-opensend-environment': 'test' };
+      if (origin) headers.origin = origin;
+      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 403, 'CSRF_ORIGIN_INVALID');
+      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, 'Rejected CSRF writes must never create a contact.');
+      error(await http('POST', '/api/auth/sign-out', undefined, {}, headers), 403, 'CSRF_ORIGIN_INVALID');
+      error(await http('POST', '/api/auth/sign-in/social', undefined, { provider: 'google' }, headers), 403, 'CSRF_ORIGIN_INVALID');
+      assert.equal(ok(await http('GET', '/v1/me', MANAGER)).id, manager!.userId, 'Rejected sign-out cannot revoke the valid session.');
+    }
+  });
+
+  test('each request rechecks verified Google identity and exact allowlists, not cached session inspection', async t => {
+    const fixture = await sessionFixture(t);
+    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': 'test' };
+    assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
+    const cases = [
+      { email: fixture.email, verified: false, hd: AUTH_DOMAIN, account: true, reason: 'Unverified email' },
+      { email: fixture.email, verified: true, hd: AUTH_DOMAIN, account: false, reason: 'Missing Google account' },
+      { email: `${unique('unapproved')}@unapproved.invalid`, verified: true, hd: null, account: true, reason: 'Unapproved identity' },
+      { email: fixture.email, verified: true, hd: null, account: true, reason: 'Email suffix alone is not Google hd' },
+      { email: `${unique('suffix')}@unapproved.invalid`, verified: true, hd: `${AUTH_DOMAIN}.evil.invalid`, account: true, reason: 'Allowed-domain suffix attack' },
+      { email: `${unique('prefix')}@unapproved.invalid`, verified: true, hd: `evil${AUTH_DOMAIN}`, account: true, reason: 'Allowed-domain prefix attack' },
+    ];
+    for (const state of cases) {
+      await authDb!.query('UPDATE auth_user SET email = $2, email_verified = $3, google_hosted_domain = $4 WHERE id = $1', [fixture.userId, state.email, state.verified, state.hd]);
+      await authDb!.query('UPDATE auth_account SET provider_id = $2 WHERE user_id = $1', [fixture.userId, state.account ? 'google' : 'not-google']);
+      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
+      assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null, state.reason);
+      const email = address();
+      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
+      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state.reason} must prevent all API writes.`);
+    }
+    await authDb!.query('UPDATE auth_user SET email = $2, email_verified = true, google_hosted_domain = $3 WHERE id = $1', [fixture.userId, fixture.email, AUTH_DOMAIN]);
+    assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'Restoring this fixture’s current Google policy evidence must restore access without replacing its cookie.');
+  });
+
+  test('profile forgery, password login, non-Google providers and account linking are not public authentication paths', async t => {
+    const fixture = await sessionFixture(t, { email: `${unique('unapproved')}@unapproved.invalid`, hostedDomain: null });
+    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
+    for (const path of ['/update-user', '/sign-in/email', '/sign-up/email', '/link-social', '/change-email', '/get-access-token', '/callback/github']) {
+      error(await http(path.startsWith('/callback/') ? 'GET' : 'POST', `/api/auth${path}`, undefined,
+        path.startsWith('/callback/') ? undefined : { email: AUTH_EMAIL, googleHostedDomain: AUTH_DOMAIN, provider: 'google', password: 'synthetic-never-valid' }, headers), 404, 'NOT_FOUND');
+    }
+    for (const body of [
+      { provider: 'github' }, { provider: 'google', googleHostedDomain: AUTH_DOMAIN },
+      { provider: 'google', idToken: { token: 'forged' } }, { provider: 'google', scopes: ['openid', 'email'] },
+      { provider: 'google', profile: { email: AUTH_EMAIL, email_verified: true, hd: AUTH_DOMAIN } },
+    ]) error(await http('POST', '/api/auth/sign-in/social', undefined, body, headers), 422, 'AUTH_INPUT_INVALID');
+    const stored = (await authDb!.query('SELECT email, google_hosted_domain FROM auth_user WHERE id = $1', [fixture.userId])).rows[0];
+    assert.equal(stored.email, fixture.email);
+    assert.equal(stored.google_hosted_domain, null, 'Client-provided hd must never become verified Google evidence.');
+    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
+  });
+
+  test('expired, revoked, deleted and tampered sessions deny API access; sign-out revokes its persisted session', async t => {
+    for (const state of ['expired', 'revoked', 'deleted', 'tampered', 'sign-out']) {
+      const fixture = await sessionFixture(t);
+      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
+      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId);
+      if (state === 'expired') await authDb!.query('UPDATE auth_session SET expires_at = $2 WHERE id = $1', [fixture.sessionId, new Date(Date.now() - 60_000)]);
+      if (state === 'revoked') await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
+      if (state === 'deleted') await authDb!.query('DELETE FROM auth_user WHERE id = $1', [fixture.userId]);
+      if (state === 'tampered') headers.cookie = `${COOKIE_NAME}=${encodeURIComponent(`${fixture.token}.forged-signature`)}`;
+      if (state === 'sign-out') {
+        const signedOut = await http('POST', '/api/auth/sign-out', undefined, {}, headers);
+        assert.equal(ok(signedOut).success, true);
+        assert.match(signedOut.headers.get('set-cookie') ?? '', /opensend\.session_token=/);
+        assert.equal((await authDb!.query('SELECT id FROM auth_session WHERE id = $1', [fixture.sessionId])).rowCount, 0);
+      }
+      error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
+      const email = address();
+      error(await http('POST', '/v1/contacts', undefined, { email }, { ...headers, 'x-opensend-environment': 'test' }), 401, 'AUTH_REQUIRED');
+      assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state} sessions must not write.`);
+    }
+  });
+
+  test('forged OAuth callback state and code cannot create an identity or session', async () => {
+    const before = (await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0];
+    // Never create a valid state or call Google's authorization/token endpoints.
+    // Invalid state must fail locally before exchanging the deliberately fake code.
+    const reply = await http('GET', `/api/auth/callback/google?state=${unique('never-issued')}&code=${unique('forged-code')}`);
+    assert.equal(reply.status, 302, diagnostic(reply));
+    assert.equal(reply.headers.get('location'), `${PUBLIC_ORIGIN}/?auth=error`);
+    assert.ok(!reply.headers.get('set-cookie')?.includes(`${COOKIE_NAME}=`), 'An invalid callback must not issue a session cookie.');
+    assert.deepEqual((await authDb!.query('SELECT (SELECT count(*) FROM auth_user) AS users, (SELECT count(*) FROM auth_session) AS sessions')).rows[0], before);
+  });
+
+  test('MOCK GOOGLE TRANSPORT: real OAuth state/callback lifecycle persists trusted claims, rejects denied profiles, and fails closed on configuration', async t => {
+    const [{ createApp }, { drizzle }] = await Promise.all([import('./src/app.js'), import('drizzle-orm/node-postgres')]);
+    const app = createApp();
+    const origin = 'https://mock-oauth.opensend.invalid';
+    const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
+    const runtime: import('./src/core.js').Runtime = {
+      db: drizzle(authDb!),
+      storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
+      config: { workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], publicUrl: origin, regions: [REGION], liveEnabled: false, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
+    };
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const kid = unique('mock-google-signing-key');
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
+    let profile: Json = {};
+    let jwtFault = '';
+    let expectedCode = '';
+    let expectedNonce: string | null = null;
+    let tokenCalls = 0;
+    let certCalls = 0;
+    const transport = t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.url === 'https://oauth2.googleapis.com/token') {
+        tokenCalls++;
+        const form = new URLSearchParams(await request.text());
+        assert.equal(form.get('code'), expectedCode, 'Only the current synthetic callback may exchange a code.');
+        assert.equal(form.get('redirect_uri'), `${origin}/api/auth/callback/google`);
+        assert.ok(form.get('code_verifier'), 'The actual OAuth callback must retain its generated PKCE verifier.');
+        const now = Math.floor(Date.now() / 1000);
+        const head = Buffer.from(JSON.stringify({ alg: jwtFault === 'unsigned' ? 'none' : 'RS256', kid, typ: 'JWT' })).toString('base64url');
+        const payload: Json = { iss: 'https://accounts.google.com', aud: runtime.config.googleClientId, iat: now, exp: now + 300, ...profile, ...(expectedNonce ? { nonce: expectedNonce } : {}) };
+        if (jwtFault === 'audience') payload.aud = 'wrong-client.apps.googleusercontent.com';
+        if (jwtFault === 'issuer') payload.iss = 'https://attacker.invalid';
+        if (jwtFault === 'expired') { payload.iat = now - 120; payload.exp = now - 60; }
+        if (jwtFault === 'missing-exp') delete payload.exp;
+        const claims = Buffer.from(JSON.stringify(payload)).toString('base64url');
+        const input = `${head}.${claims}`;
+        const signature = Buffer.from(sign('RSA-SHA256', Buffer.from(input), privateKey));
+        if (jwtFault === 'signature') signature[0] = signature[0]! ^ 1;
+        const idToken = `${input}.${jwtFault === 'unsigned' ? '' : signature.toString('base64url')}`;
+        return Response.json({ access_token: 'synthetic-access-token', refresh_token: 'synthetic-refresh-token', id_token: idToken, token_type: 'Bearer', expires_in: 300, scope: 'openid email profile' });
+      }
+      if (request.url === 'https://www.googleapis.com/oauth2/v3/certs') {
+        certCalls++;
+        return Response.json({ keys: [jwk] });
+      }
+      throw new Error(`Unexpected network request in mocked Google transport: ${new URL(request.url).origin}`);
+    });
+    async function local(method: string, path: string, body?: Json, cookie?: string): Promise<Reply> {
+      const response = await app.fetch(new Request(`${origin}${path}`, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime);
+      const text = await response.text();
+      let parsed: unknown = text;
+      try { parsed = JSON.parse(text); } catch { /* Redirects intentionally have no JSON body. */ }
+      return { status: response.status, body: parsed, headers: response.headers };
+    }
+    const fixtureEmails: string[] = [];
+    const states: string[] = [];
+    cleanup(t, async () => {
+      await authDb!.query('DELETE FROM api_request_budgets WHERE workspace_id = $1', [runtime.config.workspaceId]);
+      for (const email of fixtureEmails) await authDb!.query('DELETE FROM auth_user WHERE email = $1', [email]);
+      for (const state of states) await authDb!.query('DELETE FROM auth_verification WHERE identifier = $1', [state]);
+    });
+    let approvedCookie = '';
+    const returningSub = unique('mock-returning-sub');
+    const returningEmail = `${unique('mock-returning')}@example.com`;
+    const scenarios: Array<{ allowed: boolean; email: string; hd?: string; verified: boolean; sub?: string; jwtFault?: string }> = [
+      { allowed: true, email: emailAllowed, hd: undefined, verified: true },
+      { allowed: true, email: `${unique('mock-domain')}@example.com`, hd: 'example.com', verified: true },
+      { allowed: false, email: `${unique('mock-unverified')}@example.com`, hd: 'example.com', verified: false },
+      { allowed: false, email: `${unique('mock-denied')}@unapproved.invalid`, hd: undefined, verified: true },
+      { allowed: false, email: `${unique('mock-suffix')}@unapproved.invalid`, hd: 'example.com.evil.invalid', verified: true },
+      { allowed: false, email: `${unique('mock-email-suffix')}@example.com`, hd: undefined, verified: true },
+      ...['signature', 'audience', 'issuer', 'expired', 'missing-exp', 'unsigned'].map(jwtFault => ({ allowed: false, email: `${unique(`mock-jwt-${jwtFault}`)}@example.com`, hd: 'example.com', verified: true, jwtFault })),
+      { allowed: true, email: returningEmail, hd: 'example.com', verified: true, sub: returningSub },
+      { allowed: true, email: returningEmail, hd: 'second.example.com', verified: true, sub: returningSub },
+      { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
+      { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
+    ];
+    for (const scenario of scenarios) {
+      fixtureEmails.push(scenario.email);
+      jwtFault = scenario.jwtFault ?? '';
+      profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: 'Mock provider identity', email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
+      const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
+      const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
+      const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
+      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL: `${origin}/`, disableRedirect: true });
+      const authorization = new URL(ok(start).url);
+      assert.equal(authorization.origin, 'https://accounts.google.com');
+      assert.deepEqual(authorization.searchParams.get('scope')!.split(' ').sort(), ['email', 'openid', 'profile']);
+      assert.equal(authorization.searchParams.get('access_type'), 'online');
+      assert.equal(authorization.searchParams.get('include_granted_scopes'), null);
+      const state = authorization.searchParams.get('state');
+      assert.ok(state);
+      states.push(state);
+      expectedNonce = authorization.searchParams.get('nonce');
+      const stateCookie = start.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+      assert.ok(stateCookie, 'The real sign-in endpoint must issue a state-binding cookie.');
+      expectedCode = unique('mock-authorization-code');
+      const previousCalls = tokenCalls;
+      const callback = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
+      assert.equal(tokenCalls, previousCalls + 1, 'The real callback must exchange this code exactly once through the mocked transport.');
+      assert.equal(callback.status, 302, diagnostic(callback));
+      const users = await authDb!.query('SELECT id, email_verified, google_hosted_domain FROM auth_user WHERE email = $1', [scenario.email]);
+      if (scenario.allowed) {
+        assert.equal(callback.headers.get('location'), `${origin}/`);
+        assert.equal(users.rowCount, 1, 'An approved real callback must create its user through the normal Better Auth lifecycle.');
+        assert.equal(users.rows[0].email_verified, true);
+        assert.equal(users.rows[0].google_hosted_domain, scenario.hd ?? null);
+        if (subjectBefore.length) assert.equal(users.rows[0].id, subjectBefore[0].id, 'Returning Google sub must refresh the same user, never swap identities.');
+        const account = (await authDb!.query('SELECT * FROM auth_account WHERE user_id = $1', [users.rows[0].id])).rows[0];
+        assert.ok(account);
+        assert.equal(account.provider_id, 'google');
+        assert.equal(account.account_id, profile.sub);
+        for (const field of ['access_token', 'refresh_token', 'id_token', 'password', 'scope']) assert.equal(account[field], null, 'Google token material must not remain in the account row.');
+        const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('__Secure-opensend.session_token='));
+        assert.ok(sessionCookie, 'A successful callback must issue the secure prefixed session cookie.');
+        assert.match(sessionCookie, /;\s*HttpOnly/i);
+        assert.match(sessionCookie, /;\s*Secure/i);
+        assert.match(sessionCookie, /;\s*SameSite=Lax/i);
+        approvedCookie = sessionCookie.split(';')[0];
+        secrets.add(approvedCookie);
+        const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));
+        assert.equal(me.id, users.rows[0].id);
+        assert.equal(me.email, scenario.email);
+      } else {
+        assert.equal(callback.headers.get('location'), `${origin}/?auth=error`);
+        assert.equal(users.rowCount, userBefore.length, 'Denied profile/JWT must not provision another identity.');
+        assert.deepEqual((await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows, userBefore);
+        assert.deepEqual((await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows, subjectBefore, 'A denied returning profile must not replace the established identity or overwrite its last trusted hd.');
+        assert.deepEqual((await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows, sessionsBefore, 'Denied profile/JWT must not create any session.');
+        assert.ok(!callback.headers.getSetCookie().some(value => value.startsWith('__Secure-opensend.session_token=')));
+      }
+      const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
+      assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
+      assert.equal(tokenCalls, previousCalls + 1, 'Consumed OAuth state cannot exchange a code twice.');
+    }
+    assert.ok(certCalls > 0, 'The normal provider path must verify the mocked JWT against mocked Google JWKS, not merely decode claims.');
+    assert.ok(approvedCookie);
+    runtime.config.allowedEmails = [];
+    runtime.config.allowedDomains = [];
+    error(await local('GET', '/v1/me', undefined, approvedCookie), 401, 'AUTH_REQUIRED');
+    const blockedEmail = address();
+    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 401, 'AUTH_REQUIRED');
+    runtime.config.googleClientSecret = undefined;
+    error(await local('GET', '/v1/me', undefined, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
+    error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
+    error(await local('POST', '/api/auth/sign-in/social', { provider: 'google' }), 503, 'AUTH_NOT_CONFIGURED');
+    assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [blockedEmail])).rowCount, 0);
+    transport.mock.restore();
+  });
+
+  test('LIVE GOOGLE OAUTH: approved login and denied Google identity require browser verification', {
+    skip: 'NOT RUN by synthetic fixtures. Manually complete real Google login and denied-identity flows with configured OAuth credentials; seeding does not verify OAuth, consent, provider claims, redirect registration, or browser cookies.',
+  }, () => {});
 });
 
 describe('Contacts, explicit consent, and environment isolation', () => {
@@ -485,6 +829,14 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(stored.size, bytes.length);
     for (const field of ['content', 'url', 'publicUrl', 'storageKey']) assert.equal(stored[field], undefined, `Attachment metadata must not expose ${field}.`);
     error(await http('GET', `/v1/attachments/${attachment.id}`, live.secret), 404, 'ATTACHMENT_NOT_FOUND');
+    const reader = await keyFixture(t, { permissions: ['read'] });
+    const downloaded = await http('GET', `/v1/attachments/${attachment.id}/content`, reader.secret);
+    assert.equal(ok(downloaded).content, bytes.toString('base64'));
+    assert.equal(downloaded.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(downloaded.headers.get('cache-control'), 'no-store');
+    assert.equal(downloaded.body.storageKey, undefined);
+    error(await http('GET', `/v1/attachments/${attachment.id}/content`, live.secret), 404, 'ATTACHMENT_NOT_FOUND');
+    error(await http('GET', `/v1/attachments/${attachment.id}/content`), 401, 'AUTH_REQUIRED');
     const liveAsset = await resource(t, live.secret, '/v1/attachments', { filename: 'production-fixture.txt', content: bytes.toString('base64') });
     error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [liveAsset.id] })), 404, 'ATTACHMENT_NOT_FOUND');
     error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [unique('attachment-missing')] })), 404, 'ATTACHMENT_NOT_FOUND');
@@ -550,6 +902,158 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(canceled.inFlight, 0);
     assert.equal(ok(await http('GET', `/v1/emails/${queued[0].id}`, key.secret)).status, 'canceled');
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).status, 'canceled');
+  });
+});
+
+describe('Dashboard API capabilities', () => {
+  test('dashboard campaign metadata survives review revisions and produces escaped immutable snapshots with real status counts', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('editor-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const editor = { format: 'react-email', version: 1, document: { type: 'Email', children: [{ type: 'Text', props: { children: 'Inert editor metadata' } }] } };
+    const fromName = 'Élodie 日本語 ✉';
+    const previewText = '<img src=x onerror=alert(1)> & "Preview"';
+    const html = '<html><body><p>Visible body</p></body></html>';
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { editor, fromName, previewText, html });
+    const persisted = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+    assert.deepEqual(persisted.draft.editor, editor);
+    assert.equal(persisted.draft.fromName, fromName);
+    assert.equal(persisted.draft.previewText, previewText);
+    assert.equal(persisted.draft.html, html, 'Preheader injection belongs to the snapshot, not editable HTML.');
+    assert.equal(persisted.counts.total, 0);
+    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
+    let deep: Json = {};
+    for (let depth = 0; depth < 34; depth++) deep = { child: deep };
+    for (const document of [deep, { content: 'x'.repeat(256 * 1024) }]) {
+      error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, editor: { ...editor, document } } }), 422);
+    }
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, fromName: 'Name\r\nBcc: victim@example.com' } }), 422);
+    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).reviewId, review.id, 'Invalid metadata must not invalidate or mutate the existing revision.');
+    const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: `${previewText}!`, editor: { ...editor, document: { ...editor.document, label: 'revision two' } } } }));
+    assert.equal(revised.reviewId, null);
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
+    const finalReview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }));
+    assert.notEqual(finalReview.contentHash, review.contentHash);
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: finalReview.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].fromName, fromName);
+    assert.equal(messages[0].kind, 'marketing');
+    const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
+    assert.equal(content.simulated, true);
+    assert.ok(content.html.includes('data-opensend-preview="true"'));
+    assert.ok(content.html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Preview&quot;!'));
+    assert.ok(!content.html.includes('<img src=x'));
+    assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: revised.revision, draft: { ...revised.draft, previewText: 'Too late' } }), 409, 'CAMPAIGN_LOCKED');
+    assert.equal(ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret)).html, content.html);
+    for (const expected of ['queued', 'canceled']) {
+      if (expected === 'canceled') ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret));
+      const current = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+      const counts = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).counts;
+      assert.equal(counts.total, current.length);
+      assert.equal(Object.values(counts.byStatus).reduce<number>((sum, value) => sum + Number(value), 0), counts.total);
+      for (const [status, count] of Object.entries(counts.byStatus)) assert.equal(count, current.filter(row => row.status === status).length);
+      assert.equal(counts.byStatus[expected], 1);
+    }
+  });
+
+  test('dashboard email queries bind literal search, kind, region, time and cursors while cohort metrics deduplicate event replays', async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const marker = unique('query');
+    const from = new Date(Date.now() - 1000).toISOString();
+    const ids: string[] = [];
+    for (const suffix of ['%_\\literal', 'ZZZliteral', '%_\\literal newest']) {
+      const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ subject: `${marker} ${suffix}`, fromName: 'Élodie 日本語' })), 202);
+      ids.push(queued.id);
+      await poll(`/v1/emails/${queued.id}`, key.secret, row => row.status === 'simulated');
+    }
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'Name\nBcc: victim@example.com' })), 422);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing', subject: `${marker} marketing` })), 202);
+    await poll(`/v1/emails/${marketing.id}`, key.secret, row => row.status === 'simulated');
+    const to = new Date(Date.now() + 1000).toISOString();
+    const query = new URLSearchParams({ search: marker.toUpperCase(), kind: 'transactional', region: REGION, from, to, limit: '1' });
+    const first = await http('GET', `/v1/emails?${query}`, key.secret);
+    assert.equal(page(first)[0].id, ids[2]);
+    assert.equal(first.body.data[0].fromName, 'Élodie 日本語');
+    assert.equal(first.body.data[0].kind, 'transactional');
+    assert.ok(first.body.nextCursor);
+    const cursor = first.body.nextCursor;
+    query.set('cursor', cursor);
+    const second = await http('GET', `/v1/emails?${query}`, key.secret);
+    assert.equal(page(second)[0].id, ids[1]);
+    query.set('cursor', second.body.nextCursor);
+    const third = await http('GET', `/v1/emails?${query}`, key.secret);
+    assert.equal(page(third)[0].id, ids[0]);
+    assert.equal(third.body.nextCursor, null);
+    query.set('cursor', cursor);
+    error(await http('GET', `/v1/emails?${query}`, live.secret), 422, 'INVALID_CURSOR');
+    query.set('kind', 'marketing');
+    error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'INVALID_CURSOR');
+    query.delete('cursor');
+    assert.deepEqual(page(await http('GET', `/v1/emails?${query}`, key.secret)).map(row => row.id), [marketing.id]);
+    query.set('kind', 'transactional'); query.set('limit', '100'); query.set('search', `${marker} %_\\literal`);
+    assert.deepEqual(page(await http('GET', `/v1/emails?${query}`, key.secret)).map(row => row.id), [ids[2], ids[0]], 'Search must treat percent, underscore and backslash literally.');
+    query.set('to', from);
+    error(await http('GET', `/v1/emails?${query}`, key.secret), 422);
+    query.set('to', to); query.set('region', 'not-configured');
+    error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'REGION_NOT_CONFIGURED');
+    const metricQuery = new URLSearchParams({ from, to, region: REGION, stream: 'transactional' });
+    const before = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
+    assert.equal(before.basis, 'created-cohort');
+    assert.equal(before.region, REGION);
+    assert.equal(before.stream, 'transactional');
+    assert.ok(before.totals.emails >= 3);
+    assert.equal(before.totals.accepted, 0, 'Simulated mail is not provider acceptance.');
+    assert.equal(before.daily.reduce((sum: number, day: Json) => sum + day.count, 0), before.totals.emails);
+    const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND actor_key_id = $4', [ids[0], contact.workspaceId, 'test', key.id]);
+    assert.equal(matched.rowCount, 1, 'Only an exact HTTP-created scoped email can receive synthetic replay source events.');
+    const events = [unique('cohort-click'), unique('cohort-click-replay')];
+    cleanup(t, async () => { for (const id of events) await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [id, contact.workspaceId, 'test']); });
+    for (const id of events) await db.query('INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)', [id, contact.workspaceId, 'test', 'email.clicked', REGION, JSON.stringify({ emailId: ids[0], synthetic: true }), new Date(Date.parse(to) + 3_600_000)]);
+    const after = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
+    assert.equal(after.totals.clicked, before.totals.clicked + 1, 'Two source events for one email count once, even when observed after the cohort end.');
+    assert.equal(after.totals.emails, before.totals.emails);
+    assert.equal(after.totals.accepted, 0);
+    assert.equal(ok(await http('GET', `/v1/metrics?${metricQuery}`, live.secret)).totals.clicked, 0, 'Synthetic test events cannot leak into live metrics.');
+  });
+
+  test('dashboard audience memberships and list counts partition active consent and suppression without scope leaks', async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('partition-list') });
+    const other = await resource(t, key.secret, '/v1/lists', { name: unique('other-list') });
+    const members: Json[] = [];
+    for (let index = 0; index < 4; index++) members.push(await resource(t, key.secret, '/v1/contacts', { email: address(), name: `Partition ${index}` }));
+    ok(await consent(key.secret, members[1].id, 'subscribed'));
+    ok(await consent(key.secret, members[2].id, 'unsubscribed'));
+    ok(await consent(key.secret, members[3].id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: members.map(row => row.id) }));
+    ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [members[0].id] }));
+    const suppression = await db.query('UPDATE audience_contacts SET suppressed = true, suppression_reason = $1 WHERE id = $2 AND workspace_id = $3 AND environment = $4 AND email = $5 AND marketing_consent = $6 AND suppressed = false RETURNING id', ['synthetic-acceptance-source', members[3].id, list.workspaceId, 'test', members[3].email, 'subscribed']);
+    assert.equal(suppression.rowCount, 1, 'Synthetic suppression must match the exact HTTP-created subscribed contact.');
+    cleanup(t, async () => { await db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL WHERE id = $1 AND workspace_id = $2 AND environment = $3', [members[3].id, list.workspaceId, 'test']); });
+    const expected = { total: 4, subscribed: 1, unsubscribed: 1, unknown: 1, suppressed: 1 };
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, expected);
+    assert.deepEqual(page(await http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}`, key.secret))[0].counts, expected);
+    const contacts = page(await http('GET', `/v1/contacts?listId=${list.id}`, key.secret));
+    assert.equal(contacts.length, 4);
+    for (const row of contacts) assert.deepEqual(row.listIds, (row.id === members[0].id ? [list.id, other.id] : [list.id]).sort());
+    assert.deepEqual(ok(await http('GET', `/v1/contacts/${members[0].id}`, key.secret)).listIds, [list.id, other.id].sort());
+    assert.deepEqual(page(await http('GET', `/v1/contacts?listId=${list.id}&consent=subscribed&suppressed=false`, key.secret)).map(row => row.id), [members[1].id]);
+    assert.deepEqual(page(await http('GET', `/v1/contacts?listId=${list.id}&suppressed=true`, key.secret)).map(row => row.id), [members[3].id]);
+    error(await http('GET', `/v1/lists/${list.id}`, live.secret), 404, 'NOT_FOUND');
+    error(await http('GET', `/v1/contacts/${members[0].id}`, live.secret), 404, 'NOT_FOUND');
+    ok(await http('DELETE', `/v1/contacts/${members[0].id}`, key.secret));
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...expected, total: 3, unknown: 0 });
+    assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
   });
 });
 
@@ -643,7 +1147,7 @@ describe('Personalization context boundaries', () => {
       assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
     }
     const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
-      html: '<a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a>', text: 'Plain {{name}}: {{firstName}}',
+      html: '<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style><a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a>', text: 'Plain {{name}}: {{firstName}}',
     });
     const review = ok(await http('POST', `/v1/campaigns/${valid.id}/review`, key.secret, { revision: valid.revision }));
     ok(await http('POST', `/v1/campaigns/${valid.id}/schedule`, key.secret, {
@@ -652,6 +1156,7 @@ describe('Personalization context boundaries', () => {
     const messages = page(await http('GET', `/v1/emails?campaignId=${valid.id}`, key.secret));
     assert.equal(messages.length, 1);
     const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
+    assert.ok(content.html.includes('@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}'), 'Adjacent closing CSS braces from a real composer export are not template delimiters.');
     assert.ok(content.html.includes('href="https://example.com/path?q=one&amp;next=two"'), 'Quoted URL substitutions must remain supported and escape the URL’s ampersand.');
     assert.ok(content.html.includes('title="https://example.com onmouseover=alert(1)"'), 'The injected attribute-shaped value must remain inside the quoted title, not become an event handler.');
     assert.ok(content.html.includes('>Name {{literal}}</a>'));
@@ -714,7 +1219,7 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.equal(messages.length, 1);
     assert.equal(messages[0].status, 'queued');
     assert.equal(messages[0].environment, 'test');
-    ok(await http('POST', `/v1/api-keys/${origin.id}/revoke`, ADMIN), [200, 204]);
+    ok(await http('POST', `/v1/api-keys/${origin.id}/revoke`, MANAGER), [200, 204]);
     assert.ok(Date.now() < dueAt, 'Revocation must finish before the scheduled job becomes due; otherwise this scenario cannot prove a dispatch-time credential check.');
     const blocked = await poll(`/v1/emails/${messages[0].id}`, reader.secret, body => ['canceled', 'suppressed'].includes(body.status));
     assert.equal(blocked.errorCode, 'ORIGIN_KEY_REVOKED');

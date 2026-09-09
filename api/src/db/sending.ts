@@ -1,15 +1,16 @@
 import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
-  from: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
+  from: string; fromName?: string; previewText?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
   kind: 'transactional' | 'marketing'; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean; raw?: string;
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
 };
 export type CampaignDraft = {
-  name: string; from: string; replyTo?: string[]; region: string; subject: string; html?: string; text?: string;
+  name: string; from: string; fromName?: string; previewText?: string; editor?: CampaignEditor | null; replyTo?: string[]; region: string; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean;
   audience: { listId: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
@@ -24,7 +25,7 @@ export const emails = pgTable('sending_emails', {
   snapshot: jsonb('snapshot').$type<EmailSnapshot>().notNull(), simulated: boolean('simulated').notNull(),
   attemptStartedAt: time('attempt_started_at'), errorCode: text('error_code'), scheduledAt: time('scheduled_at'), dispatchVersion: integer('dispatch_version').notNull().default(0),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
-}, t => [index('sending_emails_page').on(t.workspaceId, t.environment, t.id), index('sending_emails_campaign').on(t.workspaceId, t.environment, t.campaignId), uniqueIndex('sending_emails_provider').on(t.workspaceId, t.environment, t.region, t.providerId)]);
+}, t => [index('sending_emails_page').on(t.workspaceId, t.environment, t.id), index('sending_emails_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_emails_campaign').on(t.workspaceId, t.environment, t.campaignId), uniqueIndex('sending_emails_provider').on(t.workspaceId, t.environment, t.region, t.providerId)]);
 export const emailEvents = pgTable('sending_email_events', {
   id: text('id').primaryKey(), ...scope(), emailId: text('email_id').notNull(), type: text('type').notNull(), providerId: text('provider_id'),
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
@@ -41,7 +42,7 @@ export const campaigns = pgTable('sending_campaigns', {
   id: text('id').primaryKey(), ...scope(), revision: integer('revision').notNull().default(1), draft: jsonb('draft').$type<CampaignDraft>().notNull(),
   status: text('status').$type<'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled'>().notNull().default('draft'), reviewId: text('review_id'), scheduledAt: time('scheduled_at'),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
-}, t => [index('sending_campaigns_page').on(t.workspaceId, t.environment, t.id)]);
+}, t => [index('sending_campaigns_page').on(t.workspaceId, t.environment, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc())]);
 export const campaignReviews = pgTable('sending_campaign_reviews', {
   id: text('id').primaryKey(), ...scope(), campaignId: text('campaign_id').notNull(), revision: integer('revision').notNull(), draft: jsonb('draft').$type<CampaignDraft>().notNull(),
   recipients: jsonb('recipients').$type<ReviewedRecipient[]>().notNull(), matched: integer('matched').notNull(), eligible: integer('eligible').notNull(), suppressed: integer('suppressed').notNull(), unsubscribed: integer('unsubscribed').notNull(),

@@ -4,6 +4,16 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type ApiError = {
+    error: {
+        code: string;
+        message: string;
+        requestId: string;
+        field?: string;
+        retryable: boolean;
+    };
+};
+
 export type ApiKey = {
     id: string;
     name: string;
@@ -16,21 +26,15 @@ export type ApiKey = {
     revokedAt: string | null;
 };
 
-export type ApiError = {
-    error: {
-        code: string;
-        message: string;
-        requestId: string;
-        field?: string;
-        retryable: boolean;
-    };
-};
-
 export type CreateApiKey = {
     name: string;
     environment?: 'live' | 'test';
     permissions?: Array<'read' | 'send' | 'manage'>;
     domains?: Array<string>;
+};
+
+export type ContactRead = Contact & {
+    listIds: Array<string>;
 };
 
 export type Contact = {
@@ -53,6 +57,19 @@ export type Contact = {
     deletedAt: string | null;
     createdAt: string;
     updatedAt: string;
+};
+
+export type ContactListRead = ContactList & {
+    /**
+     * Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.
+     */
+    counts: {
+        total: number;
+        subscribed: number;
+        unsubscribed: number;
+        unknown: number;
+        suppressed: number;
+    };
 };
 
 export type ContactList = {
@@ -151,6 +168,7 @@ export type EmailQueued = {
 
 export type SendEmailInput = {
     from: string;
+    fromName?: string;
     to: string | Array<string>;
     cc?: Array<string>;
     bcc?: Array<string>;
@@ -190,6 +208,8 @@ export type Email = {
     region: string;
     campaignId: string | null;
     from: string;
+    fromName: string | null;
+    kind: 'transactional' | 'marketing';
     to: Array<string>;
     cc: Array<string>;
     bcc: Array<string>;
@@ -250,6 +270,10 @@ export type AttachmentUpload = {
     contentId?: string;
 };
 
+export type AttachmentContent = Attachment & {
+    content: string;
+};
+
 export type DeletedSendingResource = {
     id: string;
     deleted: true;
@@ -265,6 +289,28 @@ export type Campaign = {
     scheduledAt: string | null;
     createdAt: string;
     updatedAt: string;
+    /**
+     * Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.
+     */
+    counts: {
+        total: number;
+        byStatus: {
+            queued?: number;
+            attempting?: number;
+            accepted?: number;
+            sent?: number;
+            delivered?: number;
+            bounced?: number;
+            complained?: number;
+            rejected?: number;
+            rendering_failed?: number;
+            delayed?: number;
+            suppressed?: number;
+            canceled?: number;
+            acceptance_unknown?: number;
+            simulated?: number;
+        };
+    };
 };
 
 /**
@@ -273,6 +319,12 @@ export type Campaign = {
 export type CampaignDraftInput = {
     name: string;
     from: string;
+    fromName?: string;
+    /**
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     */
+    previewText?: string;
+    editor?: CampaignEditor;
     replyTo?: Array<string>;
     region: string;
     subject: string;
@@ -288,6 +340,70 @@ export type CampaignDraftInput = {
     };
     defaults?: {
         [key: string]: string | number | boolean | null;
+    };
+};
+
+/**
+ * Inert editor metadata; never executed or rendered by the server. HTML/text remain the sendable content.
+ */
+export type CampaignEditor = {
+    format: 'react-email';
+    version: 1;
+    document: {
+        [key: string]: unknown;
+    };
+} | null;
+
+/**
+ * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.
+ */
+export type CampaignSummary = {
+    id: string;
+    environment: 'live' | 'test';
+    revision: number;
+    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+    reviewId: string | null;
+    scheduledAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    /**
+     * Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.
+     */
+    counts: {
+        total: number;
+        byStatus: {
+            queued?: number;
+            attempting?: number;
+            accepted?: number;
+            sent?: number;
+            delivered?: number;
+            bounced?: number;
+            complained?: number;
+            rejected?: number;
+            rendering_failed?: number;
+            delayed?: number;
+            suppressed?: number;
+            canceled?: number;
+            acceptance_unknown?: number;
+            simulated?: number;
+        };
+    };
+    draft: CampaignDraftSummary;
+};
+
+export type CampaignDraftSummary = {
+    name: string;
+    region: string;
+    from: string;
+    fromName?: string;
+    subject: string;
+    /**
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader. Plaintext-only campaigns retain this metadata without generating HTML.
+     */
+    previewText?: string;
+    audience: {
+        listId: string;
+        segmentId?: string;
     };
 };
 
@@ -512,6 +628,7 @@ export type SnsPlainTextEnvelope = string;
 export type UnsubscribeConfirmationHtml = string;
 
 export type Metrics = {
+    basis: 'created-cohort';
     from: string;
     to: string;
     region: string | null;
@@ -531,8 +648,79 @@ export type Metrics = {
     daily: Array<{
         date: string;
         count: number;
+        sent: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
     }>;
 };
+
+export type GetCurrentIdentityData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/me';
+};
+
+export type GetCurrentIdentityErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCurrentIdentityError = GetCurrentIdentityErrors[keyof GetCurrentIdentityErrors];
+
+export type GetCurrentIdentityResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        email: string | null;
+        name: string | null;
+        environment: 'live' | 'test';
+        permissions: Array<'read' | 'send' | 'manage'>;
+    };
+};
+
+export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCurrentIdentityResponses];
 
 export type ListApiKeysData = {
     body?: never;
@@ -736,6 +924,10 @@ export type ListContactsData = {
     query?: {
         cursor?: string;
         limit?: number;
+        search?: string;
+        consent?: 'unknown' | 'subscribed' | 'unsubscribed';
+        suppressed?: 'true' | 'false';
+        listId?: string;
     };
     url: '/v1/contacts';
 };
@@ -790,7 +982,7 @@ export type ListContactsResponses = {
      * Success
      */
     200: {
-        data: Array<Contact>;
+        data: Array<ContactRead>;
         nextCursor: string | null;
     };
 };
@@ -988,7 +1180,7 @@ export type GetContactResponses = {
     /**
      * Success
      */
-    200: Contact;
+    200: ContactRead;
 };
 
 export type GetContactResponse = GetContactResponses[keyof GetContactResponses];
@@ -1219,6 +1411,7 @@ export type ListContactListsData = {
     query?: {
         cursor?: string;
         limit?: number;
+        search?: string;
     };
     url: '/v1/lists';
 };
@@ -1273,7 +1466,7 @@ export type ListContactListsResponses = {
      * Success
      */
     200: {
-        data: Array<ContactList>;
+        data: Array<ContactListRead>;
         nextCursor: string | null;
     };
 };
@@ -1468,7 +1661,7 @@ export type GetContactListResponses = {
     /**
      * Success
      */
-    200: ContactList;
+    200: ContactListRead;
 };
 
 export type GetContactListResponse = GetContactListResponses[keyof GetContactListResponses];
@@ -1547,6 +1740,9 @@ export type ListListMembersData = {
     query?: {
         cursor?: string;
         limit?: number;
+        search?: string;
+        consent?: 'unknown' | 'subscribed' | 'unsubscribed';
+        suppressed?: 'true' | 'false';
     };
     url: '/v1/lists/{id}/members';
 };
@@ -1601,7 +1797,7 @@ export type ListListMembersResponses = {
      * Success
      */
     200: {
-        data: Array<Contact>;
+        data: Array<ContactRead>;
         nextCursor: string | null;
     };
 };
@@ -1748,6 +1944,7 @@ export type ListSegmentsData = {
     query?: {
         cursor?: string;
         limit?: number;
+        search?: string;
     };
     url: '/v1/segments';
 };
@@ -2541,6 +2738,11 @@ export type ListEmailsData = {
         limit?: number;
         campaignId?: string;
         status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
+        region?: string;
+        kind?: 'transactional' | 'marketing';
+        search?: string;
+        from?: string;
+        to?: string;
     };
     url: '/v1/emails';
 };
@@ -2984,12 +3186,78 @@ export type GetAttachmentResponses = {
 
 export type GetAttachmentResponse = GetAttachmentResponses[keyof GetAttachmentResponses];
 
+export type GetAttachmentContentData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/attachments/{id}/content';
+};
+
+export type GetAttachmentContentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetAttachmentContentError = GetAttachmentContentErrors[keyof GetAttachmentContentErrors];
+
+export type GetAttachmentContentResponses = {
+    /**
+     * Success
+     */
+    200: AttachmentContent;
+};
+
+export type GetAttachmentContentResponse = GetAttachmentContentResponses[keyof GetAttachmentContentResponses];
+
 export type ListCampaignsData = {
     body?: never;
     path?: never;
     query?: {
         cursor?: string;
         limit?: number;
+        region?: string;
+        status?: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+        search?: string;
     };
     url: '/v1/campaigns';
 };
@@ -3044,7 +3312,7 @@ export type ListCampaignsResponses = {
      * Success
      */
     200: {
-        data: Array<Campaign>;
+        data: Array<CampaignSummary>;
         nextCursor: string | null;
     };
 };
