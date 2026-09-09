@@ -5,7 +5,7 @@ import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, ConfirmDialog, Dialog, EmptyState, ErrorState,
-  Field, Input, PageHeader, SectionHeader, Select,
+  Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
@@ -32,7 +32,7 @@ const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.re
 const campaignInput = (campaign: Campaign): CampaignInput => ({
   id: campaign.id, revision: campaign.revision, draft: campaign.draft, attachments: campaign.attachments, regionId: campaign.regionId,
   name: campaign.name, subject: campaign.subject, previewText: campaign.previewText, fromName: campaign.fromName, fromEmail: campaign.fromEmail,
-  listId: campaign.listId, segmentId: campaign.segmentId, html: campaign.html, editor: campaign.editor,
+  listId: campaign.listId, segmentId: campaign.segmentId, html: campaign.html,
 })
 
 export function CampaignEditorPage() {
@@ -230,7 +230,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
             </div>
             <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="campaign-subject">Subject</label><Input id="campaign-subject" placeholder="Add a subject" value={form.subject} onChange={event => change('subject', event.target.value)} disabled={controlsDisabled} /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled={controlsDisabled} aria-expanded={previewOpen} aria-controls="campaign-preview-row" onClick={() => {setPreviewOpen(!previewOpen); if (!previewOpen) requestAnimationFrame(() => previewInput.current?.focus({preventScroll: true}))}}>Preview text</Button></div>
           </div>
-          <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>
+          <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
         </div>
       </div>
@@ -280,6 +280,13 @@ export function CampaignReviewPage() {
   return <CampaignReview key={`${id}:${regionId}`} campaign={query.data} />
 }
 
+// The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
+function CampaignRenderedPreview({ campaign }: { campaign: Campaign }) {
+  const preview = useApiQuery(['campaign-preview', campaign.id, campaign.revision, campaign.updatedAt], (api, signal) => api.campaigns.preview(campaign.id, signal))
+  if (preview.isPending) return <div className="ui-email-preview campaign-preview-loading" role="status"><SkeletonText width="55%" lineHeight={28} /><SkeletonText /><SkeletonText width="80%" /></div>
+  if (preview.isError) return <ErrorState error={preview.error} onRetry={() => void preview.refetch()} />
+  return <EmailPreview html={preview.data.html} title="Campaign email preview" attachmentIds={campaign.attachments} respectStyles remoteImages />
+}
 function CampaignReview({ campaign }: { campaign: Campaign }) {
   const navigate = useNavigate()
   const { regionId } = useRegion()
@@ -346,7 +353,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       <section className="campaign-fields">
         <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
         <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd><dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
-        <EmailPreview html={campaign.html} title="Campaign email preview" editor={campaign.editor} attachmentIds={campaign.attachments} />
+        <CampaignRenderedPreview campaign={campaign} />
       </section>
     </div>
     {draft && <section className="section campaign-delivery">

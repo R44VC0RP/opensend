@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignEditorMetadata, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { createSeed } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
@@ -248,23 +248,11 @@ function copyJson(value: unknown, field = 'editor', maxCharacters = 262_144): un
   if (serialized.length > maxCharacters) invalid(field, sizeError)
   return JSON.parse(serialized)
 }
-function validateEditor(value: unknown): CampaignEditorMetadata | null {
-  if (value === null) return null
-  const clean = copyJson(value)
-  if (!isRecord(clean) || clean.format !== 'react-email' || clean.version !== 1) return invalid('editor', 'Editor data must use react-email format version 1.')
-  if (!isRecord(clean.document) || clean.document.type !== 'doc' || (Object.hasOwn(clean.document, 'content') && !Array.isArray(clean.document.content))) invalid('editor', 'Editor document must have type “doc” and an optional content array.')
-  return clean as CampaignEditorMetadata
-}
-function validEditor(value: unknown): boolean {
-  if (value === undefined) return true
-  try { validateEditor(value); return true } catch { return false }
-}
 function validateDraft(value: unknown): Record<string, any> {
-  // Full drafts include bodies as well as editor metadata; keep both bounded and inert.
+  // Full drafts include bodies; keep them bounded and inert.
   const draft = copyJson(value, 'draft', 1_500_000)
   if (!isRecord(draft) || (draft.audience !== undefined && !isRecord(draft.audience))) return invalid('draft', 'Draft metadata and its audience must be JSON objects.')
   if (draft.html !== undefined) text(draft.html, 'html', 500_000, true)
-  if (draft.editor !== undefined) validateEditor(draft.editor)
   return draft
 }
 function validateCampaign(state: DemoState, input: CampaignInput, existing?: Campaign, requireComplete = false): CampaignInput {
@@ -275,13 +263,10 @@ function validateCampaign(state: DemoState, input: CampaignInput, existing?: Cam
   if (input.segmentId) find(state.segments, input.segmentId, 'Segment')
   const metadata = validateDraft(input.draft ?? existing?.draft ?? {})
   const attachments = validateAttachments(state, input.attachments ?? metadata.attachments ?? existing?.attachments ?? [])
-  let editor = input.editor !== undefined ? validateEditor(input.editor) : existing?.editor !== undefined ? existing.editor : metadata.editor
-  // HTML-only external edits cannot keep blocks that would silently replace that HTML.
-  if (existing && input.html !== existing.html && (input.editor === undefined || JSON.stringify(editor ?? null) === JSON.stringify(existing.editor ?? null))) editor = null
-  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998, !requireComplete), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName', 200, true), fromEmail: requireComplete || input.fromEmail.trim() ? email(input.fromEmail, 'fromEmail') : '', listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000, true), attachments, ...(editor !== undefined ? { editor: validateEditor(editor) } : {}) }
-  if (requireComplete && !clean.html && !String(metadata.text ?? '').trim()) invalid('html', 'Add some email content before continuing.')
+  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998, !requireComplete), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName', 200, true), fromEmail: requireComplete || input.fromEmail.trim() ? email(input.fromEmail, 'fromEmail') : '', listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000, true), attachments }
+  if (requireComplete && !clean.html.trim()) invalid('html', 'Add some email content before continuing.')
   const { listId: _oldList, segmentId: _oldSegment, ...audience } = metadata.audience ?? {}
-  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, editor: clean.editor ?? null, attachments, audience: { ...audience, ...(clean.listId ? { listId: clean.listId } : {}), ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
+  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, attachments, audience: { ...audience, ...(clean.listId ? { listId: clean.listId } : {}), ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
   return clean
 }
 function validDateTime(value: string): boolean {
@@ -359,7 +344,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('contacts').every(row => strings(row, ['email', 'name', 'country', 'status']) && CONTACT_STATUSES.includes(String(row.status)) && stringArray(row.listIds) && row.listIds.every(ref => references('lists', ref)) && date(row.createdAt) && (row.lastOpenedAt === null || date(row.lastOpenedAt)) && isRecord(row.consent) && strings(row.consent, ['source']) && (row.consent.at === null || date(row.consent.at)))) return false
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && attachmentIds(row.attachments) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
-  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && (row.listId === '' || references('lists', row.listId)) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft) && validEditor(row.editor))) return false
+  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && (row.listId === '' || references('lists', row.listId)) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
@@ -525,6 +510,8 @@ export function createMockApi(): OpenSendApi {
     campaigns: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.campaigns.filter(c => (c.archivedAt != null) === (input.archived === true) && (!input.regionId || c.regionId === input.regionId) && (!input.status || c.status === input.status) && (!input.listId || c.listId === input.listId) && (!input.segmentId || c.segmentId === input.segmentId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(c => campaignTotals(s, c)), input, c => `${c.name} ${c.subject}`) }),
       get: (campaignId, signal) => run(signal, false, s => campaignTotals(s, find(s.campaigns, campaignId, 'Campaign'))),
+      // The demo has no renderer; block HTML is shown as-is with the preview frame's base styles.
+      preview: (campaignId, signal) => run(signal, false, s => { const campaign = find(s.campaigns, campaignId, 'Campaign'); return { html: campaign.html, text: campaign.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() } }),
       state: (campaignId, signal) => run(signal, false, s => {
         const campaign = find(s.campaigns, campaignId, 'Campaign')
         return { id: campaign.id, revision: campaign.revision ?? 1, updatedAt: campaign.updatedAt, status: campaign.status, reviewId: campaign.reviewId ?? null, scheduledAt: campaign.scheduledAt, archivedAt: campaign.archivedAt ?? null }

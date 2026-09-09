@@ -1,123 +1,11 @@
-import DOMPurify from 'dompurify'
-import type { CampaignEditorMetadata, OpenSendApi } from '../../data/types'
+import type { OpenSendApi } from '../../data/types'
 
-const semanticTags = new Set(['H1', 'H2', 'H3', 'P', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'UL', 'OL', 'LI', 'A', 'BR', 'HR'])
-const semanticAttributes = new Set(['href', 'target', 'rel'])
-const blockedAttributes = new Set(['__proto__', 'prototype', 'constructor', 'srcset', 'imagesrcset', 'srcdoc', 'poster', 'background', 'action', 'formaction', 'ping', 'xlink:href', 'xmlns', 'innerhtml', 'outerhtml', 'dangerouslysetinnerhtml'])
 export function isRasterDataUrl(value: string): boolean {
   const content = value.slice(value.indexOf(',') + 1)
   return content.length % 4 === 0 && /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i.test(value)
 }
-const unsafeCss = /url\s*\(|expression\s*\(|@import|binding|behavior|(?:image-set|image|paint|var|src)\s*\(|\\|\/\*/i
-
-function safeImageSource(value: unknown): value is string {
-  return typeof value === 'string' && ((value.length > value.indexOf(',') + 1 && isRasterDataUrl(value)) || /^cid:[a-zA-Z0-9_.@-]{1,120}$/.test(value))
-}
-
-function safeHref(value: unknown): value is string {
-  return typeof value === 'string' && !/[\u0000-\u0020\u007f\\]/.test(value) && /^(?:https?:\/\/|mailto:|#)/i.test(value)
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function cleanJson(value: unknown, depth: number, attributes = false): unknown {
-  if (depth > 50) throw new Error('This visual document is too deeply nested to edit in the composer.')
-  if (value === null || typeof value === 'boolean') return value
-  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
-  if (typeof value === 'string') return attributes && unsafeCss.test(value) ? undefined : value
-  if (Array.isArray(value)) return value.map(item => cleanJson(item, depth + 1, attributes)).filter(item => item !== undefined)
-  if (!isRecord(value)) return undefined
-  if (value.type === 'image' && (!isRecord(value.attrs) || !safeImageSource(value.attrs.src))) return undefined
-  const result: Record<string, unknown> = {}
-  for (const [key, item] of Object.entries(value)) {
-    const name = key.toLowerCase()
-    if (name.startsWith('on') || blockedAttributes.has(name)) continue
-    if (name === 'src') {
-      if (safeImageSource(item)) result[key] = item
-      continue
-    }
-    if (name === 'href') {
-      if (safeHref(item)) result[key] = item
-      continue
-    }
-    if (name === 'target') {
-      if (item === '_blank' || item === '_self') result[key] = item
-      continue
-    }
-    const cleaned = cleanJson(item, depth + 1, attributes || name === 'attrs' || name === 'style')
-    if (cleaned !== undefined) result[key] = cleaned
-  }
-  if (result.target === '_blank') result.rel = 'noopener noreferrer'
-  return result
-}
-
-export function sanitizeEditorDocument(document: Record<string, unknown>): Record<string, unknown> {
-  if (!isRecord(document) || document.type !== 'doc' || (document.content !== undefined && !Array.isArray(document.content))) {
-    throw new Error('This visual document is invalid and cannot be edited in the composer.')
-  }
-  return cleanJson(document, 0) as Record<string, unknown>
-}
-
-function isSemanticHtml(html: string): boolean {
-  // A template is inert: classification must never request images from custom HTML.
-  const template = document.createElement('template')
-  template.innerHTML = html
-  if (/<\s*(?:!|\/?(?:html|head|body)\b)/i.test(html)) return false
-  const pending = Array.from(template.content.childNodes)
-  while (pending.length) {
-    const node = pending.pop()!
-    if (node.nodeType === Node.TEXT_NODE) continue
-    if (node.nodeType !== Node.ELEMENT_NODE) return false
-    const element = node as Element
-    if (!semanticTags.has(element.tagName) || Array.from(element.attributes).some(attribute => !semanticAttributes.has(attribute.name))) return false
-    pending.push(...Array.from(element.childNodes))
-  }
-  return true
-}
-
-function sanitizedImportHtml(html: string): string {
-  const body = DOMPurify.sanitize(html, {
-    RETURN_DOM: true,
-    USE_PROFILES: { html: true },
-    FORBID_TAGS: ['script', 'iframe', 'frame', 'frameset', 'form', 'style', 'link', 'input', 'button', 'select', 'option', 'textarea', 'object', 'embed', 'applet', 'base', 'meta', 'video', 'audio', 'source', 'track', 'template', 'noscript'],
-    FORBID_ATTR: ['srcset', 'imagesrcset', 'srcdoc', 'poster', 'background', 'action', 'formaction', 'ping'],
-    ADD_ATTR: ['target'],
-    ALLOW_DATA_ATTR: false,
-  }) as HTMLElement
-  for (const element of Array.from(body.querySelectorAll('*'))) {
-    for (const attribute of Array.from(element.attributes)) {
-      const name = attribute.name.toLowerCase()
-      if (name.startsWith('on') || blockedAttributes.has(name)
-        || (name === 'src' && (element.tagName !== 'IMG' || !safeImageSource(attribute.value)))
-        || (name === 'href' && !safeHref(attribute.value))
-        || (name === 'style' && unsafeCss.test(attribute.value))
-        || (name === 'target' && attribute.value !== '_blank' && attribute.value !== '_self')) {
-        element.removeAttribute(attribute.name)
-      }
-    }
-    if (element.getAttribute('target') === '_blank') element.setAttribute('rel', 'noopener noreferrer')
-    // Avoid importing an empty image node whose default src could request the app URL.
-    if (element.tagName === 'IMG' && !element.hasAttribute('src')) element.remove()
-  }
-  return body.innerHTML.trim() || '<p></p>'
-}
-
-export function prepareEditorContent(html: string, metadata?: CampaignEditorMetadata | null): { content: Record<string, unknown> | string; canCompose: boolean; reason?: string } {
-  if (metadata?.format === 'react-email' && metadata.version === 1) {
-    try {
-      const content = sanitizeEditorDocument(metadata.document)
-      if (JSON.stringify(content) !== JSON.stringify(metadata.document)) return {
-        content: '<p></p>', canCompose: false,
-        reason: 'The composer cannot preserve parts of this document. The original content is kept until you edit converted blocks.',
-      }
-      return { content, canCompose: true }
-    } catch {
-      return { content: '<p></p>', canCompose: false, reason: 'The composer cannot open this document. The original content is preserved.' }
-    }
-  }
-  return { content: sanitizedImportHtml(html), canCompose: metadata == null && isSemanticHtml(html) }
 }
 
 export async function prepareLocalImage(file: File): Promise<{ url: string }> {
@@ -171,12 +59,6 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
   throw new Error('This image is still too large for email. Choose a smaller image.')
 }
 
-export type InlineImageReference = { attachmentId: string; contentId: string; hash: string }
-export function inlineImageReferences(document?: Record<string, unknown>): InlineImageReference[] {
-  const value = document?.opensendInlineImages
-  if (!Array.isArray(value)) return []
-  return value.filter((item): item is InlineImageReference => isRecord(item) && typeof item.attachmentId === 'string' && typeof item.contentId === 'string' && /^[a-zA-Z0-9_.@-]{1,120}$/.test(item.contentId) && typeof item.hash === 'string' && /^[a-f0-9]{64}$/.test(item.hash))
-}
 export function inlineImageSources(document: Record<string, unknown>): string[] {
   const sources = new Set<string>()
   const pending: unknown[] = [document]
@@ -193,24 +75,6 @@ export async function inlineImageHash(source: string): Promise<string> {
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source))
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
 }
-export function replaceImageSource(html: string, source: string, replacement: string): string {
-  // Only quoted img src attributes are rewritten; never arbitrary text or CSS.
-  return html.replace(/<img\b[^>]*>/gi, tag => tag.replace(/(\bsrc\s*=\s*)(["'])(.*?)\2/gi, (attribute, prefix: string, quote: string, value: string) => value === source ? `${prefix}${quote}${replacement}${quote}` : attribute))
-}
-export async function inlinePreviewHtml(html: string, editor?: CampaignEditorMetadata | null): Promise<string> {
-  if (!editor) return html
-  const references = inlineImageReferences(editor.document)
-  if (!references.length) return html
-  const document = sanitizeEditorDocument(editor.document)
-  let result = html
-  for (const source of inlineImageSources(document)) {
-    const hash = await inlineImageHash(source)
-    const reference = references.find(item => item.hash === hash)
-    if (reference) result = replaceImageSource(result, `cid:${reference.contentId}`, source)
-  }
-  return result
-}
-
 export function replaceEditorImageSources(document: Record<string, unknown>, sources: ReadonlyMap<string, string>): Record<string, unknown> {
   const copy = structuredClone(document)
   const pending: unknown[] = [copy]

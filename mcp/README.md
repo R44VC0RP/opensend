@@ -44,7 +44,9 @@ For example, call `getEmails` with either:
 { "id": "email_id" }
 ```
 
-Other operations stay explicit: `getEmailContent({ "id": "email_id" })`, for example, retrieves content without loading it into every email listing. Campaigns, contact imports, and webhook deliveries retain distinct list/detail tools because their detailed responses contain additional information. All existing API operations remain available within the existing safety exclusions: **64 hosted tools**, or **25 in read-only mode**.
+Other operations stay explicit: `getEmailContent({ "id": "email_id" })`, for example, retrieves content without loading it into every email listing. Campaigns, contact imports, and webhook deliveries retain distinct list/detail tools because their detailed responses contain additional information. All existing API operations remain available within the existing safety exclusions: **68 hosted tools**, or **28 in read-only mode**.
+
+Campaign content is **block HTML**: a small vocabulary (headings, paragraphs, lists, quotes, code, dividers, images, buttons and columns) that opens as editable blocks in the dashboard composer and comes back unchanged when people edit it there. Call `getCampaignContentGuide` once for the vocabulary and examples before writing `html` with `createCampaign`/`updateCampaign`; anything outside it is rejected with the offending tag or attribute named. `previewCampaign` returns the rendered email and its plain-text alternative.
 
 Existing hosted integrations must refresh their tool catalog, replace the six original list/get pairs, and move nested `path`/`query` fields to the top level. The public HTTP API and generated SDK signatures are unchanged.
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CampaignEditorMetadata, OpenSendApi } from '../data/types';
+import type { OpenSendApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import DOMPurify from 'dompurify';
@@ -12,8 +12,8 @@ export function htmlToText(html: string): string {
   return (email.body.textContent ?? '').replace(/[\t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export type EmailPreviewProps = { html: string; title?: string; className?: string; editor?: CampaignEditorMetadata | null; attachmentIds?: string[]; respectStyles?: boolean };
-export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], respectStyles = false }: EmailPreviewProps) {
+export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; respectStyles?: boolean; remoteImages?: boolean };
+export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], respectStyles = false, remoteImages = false }: EmailPreviewProps) {
   const api = useApi();
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: OpenSendApi; sources: Map<string, string>} | null>(null);
@@ -52,7 +52,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       WHOLE_DOCUMENT: true,
       USE_PROFILES: { html: true },
       ADD_TAGS: ['style'],
-      ALLOWED_URI_REGEXP: /^(?:cid:[a-zA-Z0-9_.@-]{1,120}$|data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/=]+$)/i,
+      ALLOWED_URI_REGEXP: remoteImages ? /^(?:https:\/\/[^\s"'<>]+$|cid:[a-zA-Z0-9_.@-]{1,120}$|data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/=]+$)/i : /^(?:cid:[a-zA-Z0-9_.@-]{1,120}$|data:image\/(?:png|jpeg|gif|webp|avif);base64,[A-Za-z0-9+/=]+$)/i,
       FORBID_TAGS: ['script', 'iframe', 'frame', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'video', 'audio', 'source', 'link', 'base', 'meta'],
       FORBID_ATTR: ['href', 'srcset', 'ping', 'action', 'formaction', 'target', 'download', 'autofocus', 'xlink:href', 'background'],
     });
@@ -62,11 +62,11 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       const source = element.getAttribute('src') ?? '';
       const owned = element.tagName === 'IMG' ? sources?.get(source) : undefined;
       if (owned) element.setAttribute('src', owned);
-      else if (element.tagName !== 'IMG' || !isRasterDataUrl(source)) element.removeAttribute('src');
+      else if (element.tagName !== 'IMG' || !(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.removeAttribute('src');
     });
     const csp = email.createElement('meta');
     csp.httpEquiv = 'Content-Security-Policy';
-    csp.content = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'";
+    csp.content = `default-src 'none'; style-src 'unsafe-inline'; img-src data:${remoteImages ? ' https:' : ''}; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'`;
     email.head.prepend(csp);
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
@@ -75,7 +75,7 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'} :where(img) { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
-  }, [html, sources, fonts, respectStyles]);
+  }, [html, sources, fonts, respectStyles, remoteImages]);
   return <>{error && <p className="ui-field__error" role="alert">{error}</p>}<iframe title={title} className={['ui-email-preview', className].filter(Boolean).join(' ')} srcDoc={srcDoc} sandbox="" referrerPolicy="no-referrer" /></>;
 }
 export default EmailPreview;

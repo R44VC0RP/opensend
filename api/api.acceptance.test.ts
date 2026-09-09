@@ -704,8 +704,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 66);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 26);
+    assert.equal(catalog.tools.length, 68);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 28);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
@@ -853,7 +853,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 26);
+    assert.equal(catalog.tools.length, 28);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCampaignState'));
@@ -1481,8 +1481,7 @@ describe('Dashboard API capabilities', () => {
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, {
-      html: `<p>${'x'.repeat(64 * 1024)}</p>`,
-      editor: { format: 'react-email', version: 1, document: { content: 'x'.repeat(16 * 1024) } },
+      html: `<p>${'x'.repeat(80 * 1024)}</p>`,
     });
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
@@ -1493,7 +1492,7 @@ describe('Dashboard API capabilities', () => {
     const initial = await http('GET', `${path}/state`, reader.secret);
     assert.deepEqual(ok(initial), project(campaign));
     assert.equal(initial.headers.get('cache-control'), 'no-store');
-    assert.ok(Buffer.byteLength(JSON.stringify(initial.body)) < 1000, 'Polling must not transfer draft bodies, editor metadata or counts.');
+    assert.ok(Buffer.byteLength(JSON.stringify(initial.body)) < 1000, 'Polling must not transfer draft bodies or counts.');
     assert.deepEqual(ok(await http('GET', path, reader.secret)), campaign, 'The full campaign read must remain unchanged.');
     error(await http('GET', `${path}/state`), 401, 'AUTH_REQUIRED');
     error(await http('GET', `${path}/state`, 'not-a-valid-key'), 401);
@@ -1549,42 +1548,51 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
   });
 
-  test('campaign HTML edits clear unchanged editor metadata and preserve newly supplied metadata', async t => {
+  test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
     const key = await keyFixture(t);
-    const list = await resource(t, key.secret, '/v1/lists', { name: unique('editor-coherence') });
-    const editor = { format: 'react-email', version: 1, document: { type: 'Email', children: [{ type: 'Text', props: { children: 'Original' } }] } };
-    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Original</p>', editor });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('block-content') });
+    const guide = ok(await http('GET', '/v1/campaign-content-guide', key.secret));
+    assert.equal(guide.format, 'markdown');
+    assert.ok(guide.markdown.includes('data-button') && guide.markdown.includes('data-columns'), 'The guide documents the block vocabulary.');
+    const blocks = '<h1>Hello {{name}}</h1><p align="center">Read <a href="https://example.com/{{email}}">this</a>.</p><ul><li>One</li><li><p>Two</p></li></ul><img src="https://cdn.example.com/a.png" alt="Art" width="560"><a data-button href="https://example.com/go" align="center">Go</a><hr><div data-columns="2"><div data-column><p>Left</p></div><div data-column><p>Right</p></div></div>';
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: blocks });
     const path = `/v1/campaigns/${campaign.id}`;
-    const unchanged = ok(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, subject: 'Metadata retained' } }));
-    assert.deepEqual(unchanged.draft.editor, editor, 'An edit that leaves HTML unchanged must retain supplied metadata.');
-    // JSON object key order is immaterial when deciding whether retained metadata changed.
-    const reorderedEditor = { version: 1, document: { children: [{ props: { children: 'Original' }, type: 'Text' }], type: 'Email' }, format: 'react-email' };
-    const htmlOnly = ok(await http('PATCH', path, key.secret, { revision: unchanged.revision, draft: { ...unchanged.draft, html: '<p>Changed by API</p>', editor: reorderedEditor } }));
-    assert.equal(htmlOnly.draft.html, '<p>Changed by API</p>');
-    assert.equal(htmlOnly.draft.editor, null);
-    assert.equal(htmlOnly.revision, unchanged.revision + 1);
-    assert.deepEqual(ok(await http('GET', path, key.secret)), htmlOnly, 'Cleared metadata and new HTML must persist together.');
-    error(await http('PATCH', path, key.secret, { revision: unchanged.revision, draft: unchanged.draft }), 409, 'STALE_CAMPAIGN_REVISION');
+    assert.equal(campaign.draft.html, blocks, 'Block HTML is stored verbatim.');
+    assert.equal(campaign.draft.editor, undefined, 'No separate editor document exists.');
+    for (const [html, fragment] of [
+      ['<div style="max-width:560px"><p>Wrapped</p></div>', '<div>'],
+      ['<p class="lead">Classy</p>', 'class'],
+      ['<table><tr><td>Cell</td></tr></table>', '<table>'],
+      ['<html><body><p>Doc</p></body></html>', 'wrappers'],
+      ['<p><a href="javascript:alert(1)">x</a></p>', 'href'],
+      ['<img src="data:image/png;base64,AAAA">', 'src'],
+      ['<div data-columns="3"><div data-column><p>a</p></div></div>', 'data-columns'],
+      ['<p onclick="x()">Handler</p>', 'onclick'],
+    ] as const) {
+      const rejected = error(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html } }), 422, 'CAMPAIGN_CONTENT_INVALID');
+      assert.ok(rejected.message.includes(fragment) && rejected.message.includes('getCampaignContentGuide'), `Rejection for ${html} names ${fragment}: ${rejected.message}`);
+    }
+    error(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, editor: { format: 'react-email', version: 1, document: {} } } }), 422, 'VALIDATION_FAILED');
+    assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Rejected content never changes the draft.');
 
-    const metadataOnly = ok(await http('PATCH', path, key.secret, { revision: htmlOnly.revision, draft: { ...htmlOnly.draft, editor } }));
-    assert.deepEqual(metadataOnly.draft.editor, editor, 'Metadata-only updates remain allowed; the server does not render editor JSON.');
-    assert.equal(metadataOnly.draft.html, htmlOnly.draft.html);
-    const newEditor = { ...editor, document: { ...editor.document, children: [{ type: 'Text', props: { children: 'New visual revision' } }] } };
-    const bothChanged = ok(await http('PATCH', path, key.secret, { revision: metadataOnly.revision, draft: { ...metadataOnly.draft, html: '<p>New visual revision</p>', editor: newEditor } }));
-    assert.equal(bothChanged.draft.html, '<p>New visual revision</p>');
-    assert.deepEqual(bothChanged.draft.editor, newEditor);
-    assert.deepEqual(ok(await http('GET', path, key.secret)), bothChanged);
+    const preview = ok(await http('GET', `${path}/preview`, key.secret));
+    assert.ok(preview.html.startsWith('<!DOCTYPE html>') && preview.html.includes('max-width:600px'), 'Preview renders a complete styled document.');
+    assert.ok(preview.html.includes('Hello {{name}}') && preview.html.includes('href="https://example.com/{{email}}"'), 'Preview keeps placeholders visible.');
+    assert.ok(preview.html.includes('role="presentation"') && preview.html.includes('>Go</a>'), 'Buttons and columns render as presentation tables.');
+    assert.ok(!preview.html.includes('data-button') && !preview.html.includes('data-columns'), 'Rendered output contains no block markers.');
+    assert.ok(!preview.html.includes('Unsubscribe'), 'Preview omits the unsubscribe footer.');
+    assert.equal(preview.text, 'Hello {{name}}\n\nRead this (https://example.com/{{email}}).\n\n- One\n- Two\n\n[Art] https://cdn.example.com/a.png\n\nGo: https://example.com/go\n\n----------\n\nLeft\n\nRight');
 
-    const { editor: _editor, ...withoutEditor } = bothChanged.draft;
-    const omitted = ok(await http('PATCH', path, key.secret, { revision: bothChanged.revision, draft: { ...withoutEditor, html: '<p>HTML without metadata</p>' } }));
-    assert.equal(omitted.draft.editor, undefined);
-    assert.equal(omitted.draft.html, '<p>HTML without metadata</p>');
-    const restored = ok(await http('PATCH', path, key.secret, { revision: omitted.revision, draft: { ...omitted.draft, editor: newEditor } }));
-    const cleared = ok(await http('PATCH', path, key.secret, { revision: restored.revision, draft: { ...restored.draft, html: '<p>Explicit HTML-only revision</p>', editor: null } }));
-    assert.equal(cleared.draft.editor, null);
-    assert.equal(cleared.draft.html, '<p>Explicit HTML-only revision</p>');
-    assert.deepEqual(ok(await http('GET', path, key.secret)), cleared);
-    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Block Reader' });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const review = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
+    ok(await http('POST', `${path}/schedule`, key.secret, { revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    const [message] = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    const content = ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret));
+    assert.ok(content.html.includes('Hello Block Reader') && content.html.includes(`href="https://example.com/${contact.email}"`), 'Rendered email is personalized.');
+    assert.ok(/<a href="[^"]+" style="[^"]*">Unsubscribe<\/a><\/p><\/td>/.test(content.html), 'The unsubscribe footer sits inside the rendered layout.');
+    assert.ok(content.text.startsWith('Hello Block Reader') && content.text.includes('\n\nUnsubscribe: '), 'A plain-text alternative is derived from the blocks.');
   });
 
   test('campaign archive filters lists, binds pagination and restores unchanged reviewed drafts', async t => {
@@ -1734,26 +1742,20 @@ describe('Dashboard API capabilities', () => {
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
-    const editor = { format: 'react-email', version: 1, document: { type: 'Email', children: [{ type: 'Text', props: { children: 'Inert editor metadata' } }] } };
     const fromName = 'Élodie 日本語 ✉';
     const previewText = '<img src=x onerror=alert(1)> & "Preview"';
-    const html = '<html><body><p>Visible body</p></body></html>';
-    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { editor, fromName, previewText, html });
+    const html = '<p>Visible body</p>';
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { fromName, previewText, html });
     const persisted = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
-    assert.deepEqual(persisted.draft.editor, editor);
     assert.equal(persisted.draft.fromName, fromName);
     assert.equal(persisted.draft.previewText, previewText);
     assert.equal(persisted.draft.html, html, 'Preheader injection belongs to the snapshot, not editable HTML.');
     assert.equal(persisted.counts.total, 0);
     const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
-    let deep: Json = {};
-    for (let depth = 0; depth < 34; depth++) deep = { child: deep };
-    for (const document of [deep, { content: 'x'.repeat(256 * 1024) }]) {
-      error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, editor: { ...editor, document } } }), 422);
-    }
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<section><p>Not a block</p></section>' } }), 422, 'CAMPAIGN_CONTENT_INVALID');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, fromName: 'Name\r\nBcc: victim@example.com' } }), 422);
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).reviewId, review.id, 'Invalid metadata must not invalidate or mutate the existing revision.');
-    const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: `${previewText}!`, editor: { ...editor, document: { ...editor.document, label: 'revision two' } } } }));
+    const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: `${previewText}!` } }));
     assert.equal(revised.reviewId, null);
     error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
     const finalReview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }));
@@ -1901,7 +1903,7 @@ describe('Bounded campaign admission', () => {
     // The body remains below 512 KiB. Thirty-four recipients expand a 500 KiB
     // HTML part beyond the 16 MiB test budget from a request smaller than 10 KiB.
     const expansion = await campaignFixture(t, key.secret, { listId: expansionList.id }, {
-      subject: 'Bounded expansion', html: '{{chunk}}'.repeat(256), defaults: { chunk: 'x'.repeat(2000) },
+      subject: 'Bounded expansion', html: `<p>${'{{chunk}}'.repeat(256)}</p>`, defaults: { chunk: 'x'.repeat(2000) },
     });
     const before = ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails;
     error(await http('POST', `/v1/campaigns/${expansion.id}/review`, key.secret, { revision: expansion.revision }, {}, 15_000), 413, 'EXPANDED_CAMPAIGN_TOO_LARGE');
@@ -1954,22 +1956,22 @@ describe('Personalization context boundaries', () => {
     });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    // Executable and unquoted contexts cannot be expressed in block HTML; they fail at save time.
+    const probe = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Probe</p>' });
     for (const html of [
-      '<a href={{firstName}}>Injected attribute</a>',
       '<script>const name = "{{firstName}}";</script>',
       '<style>.name { content: "{{firstName}}"; }</style>',
-      '<a href="https://example.com" onclick="{{firstName}}">Event handler</a>',
+      '<p><a href="https://example.com" onclick="{{firstName}}">Event handler</a></p>',
       '<!-- {{firstName}} --><p>Comment context</p>',
+      '<p title="{{firstName}}">Unsupported attribute</p>',
     ]) {
-      const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html });
-      error(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }), 422, 'UNSAFE_TEMPLATE_CONTEXT');
-      const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
-      assert.equal(unchanged.status, 'draft');
-      assert.equal(unchanged.reviewId, null);
-      assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
+      error(await http('PATCH', `/v1/campaigns/${probe.id}`, key.secret, { revision: probe.revision, draft: { ...probe.draft, html } }), 422, 'CAMPAIGN_CONTENT_INVALID');
+      const unchanged = ok(await http('GET', `/v1/campaigns/${probe.id}`, key.secret));
+      assert.equal(unchanged.draft.html, '<p>Probe</p>');
+      assert.equal(unchanged.revision, probe.revision);
     }
     const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
-      html: '<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style><a href="{{url}}" title="{{firstName}}">{{name}}</a><a href="https://example.com:{{port}}/account">{{note}}</a><p>Plain {{name}}: {{firstName}}</p>',
+      html: '<p><a href="{{url}}">{{name}}</a> <a href="https://example.com:{{port}}/account">{{note}}</a></p><img src="https://example.com/i.png" alt="{{firstName}}"><p>Plain {{name}}: {{firstName}}</p>',
     });
     const review = ok(await http('POST', `/v1/campaigns/${valid.id}/review`, key.secret, { revision: valid.revision }));
     ok(await http('POST', `/v1/campaigns/${valid.id}/schedule`, key.secret, {
@@ -1978,14 +1980,14 @@ describe('Personalization context boundaries', () => {
     const messages = page(await http('GET', `/v1/emails?campaignId=${valid.id}`, key.secret));
     assert.equal(messages.length, 1);
     const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
-    assert.ok(content.html.includes('@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}'), 'Adjacent closing CSS braces from a real composer export are not template delimiters.');
+    assert.ok(content.html.includes('@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}'), 'Adjacent closing CSS braces in the rendered document are not template delimiters.');
     assert.ok(content.html.includes('href="https://example.com/path?q=one&amp;next=two"'), 'Quoted URL substitutions must remain supported and escape the URL’s ampersand.');
-    assert.ok(content.html.includes('title="https://example.com onmouseover=alert(1)"'), 'The injected attribute-shaped value must remain inside the quoted title, not become an event handler.');
+    assert.ok(content.html.includes('alt="https://example.com onmouseover=alert(1)"'), 'The injected attribute-shaped value must remain inside the quoted alt, not become an event handler.');
     assert.ok(content.html.includes('>Name {{literal}}</a>'));
-    assert.ok(content.html.includes('href="https://example.com:443/account">metadata: literal text</a>'), 'Validate complete URLs after interpolation, without rejecting harmless text values.');
-    assert.ok(content.html.includes('<p>Plain Name {{literal}}: https://example.com onmouseover=alert(1)</p>'), 'Recipient data containing braces must not be parsed recursively.');
+    assert.ok(/href="https:\/\/example.com:443\/account"[^>]*>metadata: literal text<\/a>/.test(content.html), 'Validate complete URLs after interpolation, without rejecting harmless text values.');
+    assert.ok(content.html.includes('Plain Name {{literal}}: https://example.com onmouseover=alert(1)</p>'), 'Recipient data containing braces must not be parsed recursively.');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { ...contact.properties, url: 'javascript:alert(1)' } }));
-    const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<a href="{{url}}">Quoted but unsafe URL</a>' });
+    const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p><a href="{{url}}">Quoted but unsafe URL</a></p>' });
     error(await http('POST', `/v1/campaigns/${unsafeUrl.id}/review`, key.secret, { revision: unsafeUrl.revision }), 422, 'UNSAFE_HTML_URL');
     assert.equal(ok(await http('GET', `/v1/campaigns/${unsafeUrl.id}`, key.secret)).status, 'draft');
   });

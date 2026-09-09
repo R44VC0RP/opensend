@@ -297,7 +297,7 @@ export type Campaign = {
     url: string;
     environment: 'live' | 'test';
     revision: number;
-    draft: CampaignDraftInput;
+    draft: CampaignDraft;
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     reviewId: string | null;
     scheduledAt: string | null;
@@ -329,9 +329,9 @@ export type Campaign = {
 };
 
 /**
- * Drafts may omit sender, subject, content and audience until review. Content is HTML only; there is no separate plain-text body. For a plain-looking email, send simple HTML such as paragraphs with line breaks. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
+ * Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
  */
-export type CampaignDraftInput = {
+export type CampaignDraft = {
     name: string;
     from?: string | '';
     fromName?: string;
@@ -339,11 +339,9 @@ export type CampaignDraftInput = {
      * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
      */
     previewText?: string;
-    editor?: CampaignEditor;
     replyTo?: Array<string>;
     region: string;
     subject?: string | '';
-    html?: string;
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -355,18 +353,8 @@ export type CampaignDraftInput = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    html?: string;
 };
-
-/**
- * Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML remains the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.
- */
-export type CampaignEditor = {
-    format: 'react-email';
-    version: 1;
-    document: {
-        [key: string]: unknown;
-    };
-} | null;
 
 export type CreateCampaignInput = {
     name: string;
@@ -376,14 +364,12 @@ export type CreateCampaignInput = {
      * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
      */
     previewText?: string;
-    editor?: CampaignEditor;
     replyTo?: Array<string>;
     /**
      * Defaults to the installation’s persisted default region when omitted.
      */
     region?: string;
     subject?: string | '';
-    html?: string;
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -395,10 +381,14 @@ export type CreateCampaignInput = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    /**
+     * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
+     */
+    html?: string;
 };
 
 /**
- * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.
+ * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.
  */
 export type CampaignSummary = {
     id: string;
@@ -455,6 +445,19 @@ export type CampaignDraftSummary = {
     };
 };
 
+export type CampaignContentGuide = {
+    format: 'markdown';
+    markdown: string;
+};
+
+export type CampaignPreview = {
+    /**
+     * Complete rendered email document; empty when the draft has no content.
+     */
+    html: string;
+    text: string;
+};
+
 /**
  * Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.
  */
@@ -479,14 +482,12 @@ export type CampaignUpdateInput = {
          * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
          */
         previewText?: string;
-        editor?: CampaignEditor;
         replyTo?: Array<string>;
         /**
          * Keeps the campaign’s current region when omitted.
          */
         region?: string;
         subject?: string | '';
-        html?: string;
         attachments?: Array<string>;
         tracking?: boolean;
         audience?: {
@@ -498,6 +499,10 @@ export type CampaignUpdateInput = {
         defaults?: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
+         */
+        html?: string;
     };
 };
 
@@ -3755,6 +3760,130 @@ export type UpdateCampaignResponses = {
 };
 
 export type UpdateCampaignResponse = UpdateCampaignResponses[keyof UpdateCampaignResponses];
+
+export type GetCampaignContentGuideData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/campaign-content-guide';
+};
+
+export type GetCampaignContentGuideErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignContentGuideError = GetCampaignContentGuideErrors[keyof GetCampaignContentGuideErrors];
+
+export type GetCampaignContentGuideResponses = {
+    /**
+     * Success
+     */
+    200: CampaignContentGuide;
+};
+
+export type GetCampaignContentGuideResponse = GetCampaignContentGuideResponses[keyof GetCampaignContentGuideResponses];
+
+export type PreviewCampaignData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/preview';
+};
+
+export type PreviewCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PreviewCampaignError = PreviewCampaignErrors[keyof PreviewCampaignErrors];
+
+export type PreviewCampaignResponses = {
+    /**
+     * Success
+     */
+    200: CampaignPreview;
+};
+
+export type PreviewCampaignResponse = PreviewCampaignResponses[keyof PreviewCampaignResponses];
 
 export type GetCampaignStateData = {
     body?: never;

@@ -1503,7 +1503,7 @@
             "type": "integer"
           },
           "draft": {
-            "$ref": "#/components/schemas/CampaignDraftInput"
+            "$ref": "#/components/schemas/CampaignDraft"
           },
           "status": {
             "type": "string",
@@ -1631,7 +1631,7 @@
           "counts"
         ]
       },
-      "CampaignDraftInput": {
+      "CampaignDraft": {
         "type": "object",
         "properties": {
           "name": {
@@ -1664,9 +1664,6 @@
             "maxLength": 200,
             "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
           },
-          "editor": {
-            "$ref": "#/components/schemas/CampaignEditor"
-          },
           "replyTo": {
             "type": "array",
             "items": {
@@ -1697,10 +1694,6 @@
               }
             ],
             "default": ""
-          },
-          "html": {
-            "type": "string",
-            "maxLength": 524288
           },
           "attachments": {
             "type": "array",
@@ -1771,6 +1764,9 @@
               ]
             },
             "default": {}
+          },
+          "html": {
+            "type": "string"
           }
         },
         "required": [
@@ -1778,38 +1774,7 @@
           "region"
         ],
         "additionalProperties": false,
-        "description": "Drafts may omit sender, subject, content and audience until review. Content is HTML only; there is no separate plain-text body. For a plain-looking email, send simple HTML such as paragraphs with line breaks. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
-      },
-      "CampaignEditor": {
-        "type": [
-          "object",
-          "null"
-        ],
-        "properties": {
-          "format": {
-            "type": "string",
-            "enum": [
-              "react-email"
-            ]
-          },
-          "version": {
-            "type": "number",
-            "enum": [
-              1
-            ]
-          },
-          "document": {
-            "type": "object",
-            "additionalProperties": {}
-          }
-        },
-        "required": [
-          "format",
-          "version",
-          "document"
-        ],
-        "additionalProperties": false,
-        "description": "Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML remains the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes."
+        "description": "Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -1844,9 +1809,6 @@
             "maxLength": 200,
             "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
           },
-          "editor": {
-            "$ref": "#/components/schemas/CampaignEditor"
-          },
           "replyTo": {
             "type": "array",
             "items": {
@@ -1878,10 +1840,6 @@
               }
             ],
             "default": ""
-          },
-          "html": {
-            "type": "string",
-            "maxLength": 524288
           },
           "attachments": {
             "type": "array",
@@ -1952,6 +1910,11 @@
               ]
             },
             "default": {}
+          },
+          "html": {
+            "type": "string",
+            "maxLength": 524288,
+            "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples."
           }
         },
         "required": [
@@ -2108,7 +2071,7 @@
           "counts",
           "draft"
         ],
-        "description": "Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted."
+        "description": "Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted."
       },
       "CampaignDraftSummary": {
         "type": "object",
@@ -2187,6 +2150,40 @@
           "region"
         ],
         "additionalProperties": false
+      },
+      "CampaignContentGuide": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "markdown"
+            ]
+          },
+          "markdown": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "markdown"
+        ]
+      },
+      "CampaignPreview": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "Complete rendered email document; empty when the draft has no content."
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "html",
+          "text"
+        ]
       },
       "CampaignState": {
         "type": "object",
@@ -2289,9 +2286,6 @@
                 "maxLength": 200,
                 "description": "Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader."
               },
-              "editor": {
-                "$ref": "#/components/schemas/CampaignEditor"
-              },
               "replyTo": {
                 "type": "array",
                 "items": {
@@ -2323,10 +2317,6 @@
                   }
                 ],
                 "default": ""
-              },
-              "html": {
-                "type": "string",
-                "maxLength": 524288
               },
               "attachments": {
                 "type": "array",
@@ -2397,6 +2387,11 @@
                   ]
                 },
                 "default": {}
+              },
+              "html": {
+                "type": "string",
+                "maxLength": 524288,
+                "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples."
               }
             },
             "required": [
@@ -10529,7 +10524,7 @@
     "/v1/campaigns": {
       "post": {
         "operationId": "createCampaign",
-        "description": "Create an unfinished campaign with only a name. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing; sender, subject, content and audience are required at review, not creation.",
+        "description": "Create a campaign; only a name is required. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together; sender, subject, content and audience are required at review, not creation. Content is block HTML: call getCampaignContentGuide before writing html.",
         "tags": [
           "Campaigns"
         ],
@@ -10669,7 +10664,7 @@
       },
       "get": {
         "operationId": "listCampaigns",
-        "description": "Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.",
+        "description": "Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions.",
         "tags": [
           "Campaigns"
         ],
@@ -11033,7 +11028,7 @@
       },
       "patch": {
         "operationId": "updateCampaign",
-        "description": "Replace the draft at the current revision. HTML is authoritative for the HTML body; editor metadata must match it and is never rendered by the server. When HTML changes, unchanged retained editor metadata is cleared; supply matching new metadata to preserve visual editing, or omit/null editor for HTML-only edits.",
+        "description": "Replace the whole draft at the current revision. Read the campaign first: html is block HTML that people may have edited in the dashboard composer, so send the complete updated html rather than a fragment. Rejected content names the unsupported tag or attribute.",
         "tags": [
           "Campaigns"
         ],
@@ -11218,6 +11213,282 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeletedSendingResource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/campaign-content-guide": {
+      "get": {
+        "operationId": "getCampaignContentGuide",
+        "description": "The complete campaign content vocabulary (block HTML) with examples, as Markdown. Read it once before writing or editing campaign html.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignContentGuide"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/campaigns/{id}/preview": {
+      "get": {
+        "operationId": "previewCampaign",
+        "description": "Renders the saved draft’s block HTML as the styled email and its plain-text alternative, without personalization or the unsubscribe footer. Placeholders remain visible as {{name}}.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignPreview"
                 }
               }
             }

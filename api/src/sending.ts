@@ -14,6 +14,7 @@ import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.j
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, regionalLimits, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
@@ -44,34 +45,6 @@ const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII e
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
 const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f]/.test(v), 'Sender name cannot contain control characters.');
 const PreviewText = z.string().max(200).describe('Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.');
-function inertDocument(document: Record<string, unknown>): boolean {
-  const stack: Array<{ value: unknown; depth: number }> = [{ value: document, depth: 0 }];
-  const seen = new Set<object>(); let values = 0;
-  while (stack.length) {
-    const { value, depth } = stack.pop()!;
-    if (++values > 20000 || depth > 32) return false;
-    if (value === null || typeof value === 'string' || typeof value === 'boolean') continue;
-    if (typeof value === 'number') { if (!Number.isFinite(value)) return false; continue; }
-    if (typeof value !== 'object' || seen.has(value)) return false;
-    seen.add(value);
-    const array = Array.isArray(value), prototype = Object.getPrototypeOf(value);
-    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false;
-    const keys = Reflect.ownKeys(value);
-    if (keys.length > 20001 || (array && value.length > 20000)) return false;
-    let entries = 0;
-    for (const key of keys) {
-      if (array && key === 'length') continue;
-      if (typeof key !== 'string') return false;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-      if (!descriptor.enumerable || !('value' in descriptor)) return false;
-      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) return false;
-      stack.push({ value: descriptor.value, depth: depth + 1 }); entries++;
-    }
-    if (array && entries !== value.length) return false;
-  }
-  return true;
-}
-const Editor = z.object({ format: z.literal('react-email'), version: z.literal(1), document: z.record(z.string(), z.unknown()) }).strict().refine(value => inertDocument(value.document) && Buffer.byteLength(JSON.stringify(value), 'utf8') <= 256 * 1024, 'Editor metadata must be inert JSON, at most 256 KiB UTF-8, 32 document levels and 20,000 values.').describe('Inert editor metadata; never executed or rendered by the server. HTML is authoritative for the HTML body and editor metadata must match it; HTML remains the sendable content. When updating HTML, provide matching new metadata or omit/null editor. Unchanged retained metadata is cleared when HTML changes.').openapi('CampaignEditor');
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
 const Data = z.record(z.string().max(120), Scalar).default({});
 const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(value => {
@@ -102,16 +75,21 @@ const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentT
 const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
-const CampaignInput = z.object({ name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), editor: Editor.nullable().optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), html: z.string().max(MAX_BODY).optional(), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data }).strict().describe('Drafts may omit sender, subject, content and audience until review. Content is HTML only; there is no separate plain-text body. For a plain-looking email, send simple HTML such as paragraphs with line breaks. Simple {{name}} personalization supports HTML text nodes and quoted URL/title/alt/aria-label/aria-description attributes only. Unquoted attributes, comments, script/style, event handlers, foreign markup and helpers are rejected when rendered. Values are HTML-escaped and complete rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.').openapi('CampaignDraftInput');
+const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.');
+const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
+const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.';
+const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
+// Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
+const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
 const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.') }).strict().openapi('CreateCampaignInput');
 const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
 const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
-const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignInput, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
+const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment and region. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignDraftView, status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
 const CampaignState = Campaign.pick({ id: true, environment: true, revision: true, updatedAt: true, status: true, reviewId: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
-const CampaignDraftSummary = CampaignInput.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
-const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, editor metadata, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
+const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
+const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal, case-insensitive recipient (To/Cc/Bcc), subject or ID text.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), status: CampaignStatus.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters and environment. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).openapi('CampaignAudienceCounts');
@@ -119,6 +97,8 @@ const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), r
 const Revision = z.object({ revision: z.number().int().positive() }).strict().openapi('CampaignRevisionInput');
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Keeps the campaign’s current region when omitted.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
+const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
+const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
 const CampaignSend = z.object({ reviewId: z.string().min(1), revision: z.number().int().positive() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
@@ -405,7 +385,11 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
   }
   if (input.kind === 'marketing' && !preview) {
     const url = await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db);
-    if (snapshot.html) snapshot.html += `<p><a href="${escaped(url)}">Unsubscribe</a></p>`;
+    if (snapshot.html) {
+      const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(url)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
+      const close = snapshot.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
+      snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
+    }
     snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
     snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
   }
@@ -425,10 +409,25 @@ function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (revision !== undefined && row.revision !== revision) throw new ApiError(409, 'STALE_CAMPAIGN_REVISION', 'The campaign has changed; fetch it and review again.');
   if (!['draft', 'reviewed'].includes(row.status)) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Only drafts and reviewed campaigns may be changed.');
 }
+/** Rejects campaign html outside the block vocabulary with the offending tag or attribute named. */
+function assertBlockContent(html: string | undefined, complete = false) {
+  if (!html) return;
+  try { validateBlockHtml(html, { complete }); } catch (error) {
+    if (error instanceof BlockContentError) throw new ApiError(422, 'CAMPAIGN_CONTENT_INVALID', error.message, 'html');
+    throw error;
+  }
+}
+/** Block HTML becomes the styled email plus a plain-text alternative. Legacy drafts fail here with the block error until re-saved. */
+function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft, 'html' | 'subject'>, complete = true): { html: string | undefined; text: string | undefined } {
+  if (!draft.html?.trim()) return { html: undefined, text: undefined };
+  assertBlockContent(draft.html, complete);
+  return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
+}
 async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(draft.html || undefined, values, true), draft.previewText), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const rendered = renderCampaignContent(runtime, draft);
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(rendered.html, values, true), draft.previewText), text: interpolate(rendered.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
@@ -538,8 +537,9 @@ export function registerSending(app: App) {
       await db.delete(attachments).where(and(scope(attachments, a), eq(attachments.id, attachmentId)));
     }); return c.json({ id: attachmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create an unfinished campaign with only a name. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing; sender, subject, content and audience are required at review, not creation.', tags: ['Campaigns'], security, request: { body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign; only a name is required. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together; sender, subject, content and audience are required at review, not creation. Content is block HTML: call getCampaignContentGuide before writing html.', tags: ['Campaigns'], security, request: { body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
+    assertBlockContent(input.html);
     const result = await idempotent(c, a, input, async db => {
       const draft = { ...input, region: await assertRegionEnabled(db, a.workspaceId, input.region) };
       draftSender(c.env, a, draft);
@@ -549,7 +549,7 @@ export function registerSending(app: App) {
     });
     return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result) }), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, editor metadata, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
@@ -565,12 +565,22 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
   });
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign content vocabulary (block HTML) with examples, as Markdown. Read it once before writing or editing campaign html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
+    actor(c);
+    return c.json({ format: 'markdown' as const, markdown: CAMPAIGN_CONTENT_GUIDE }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, without personalization or the unsubscribe footer. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
+    const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    const rendered = renderCampaignContent(c.env, row.draft, false);
+    return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);
     return c.json(CampaignState.parse(row ?? notFound('Campaign')), 200);
   });
-  app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', description: 'Replace the draft at the current revision. HTML is authoritative for the HTML body; editor metadata must match it and is never rendered by the server. When HTML changes, unchanged retained editor metadata is cleared; supply matching new metadata to preserve visual editing, or omit/null editor for HTML-only edits.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', description: 'Replace the whole draft at the current revision. Read the campaign first: html is block HTML that people may have edited in the dashboard composer, so send the complete updated html rather than a fragment. Rejected content names the unsupported tag or attribute.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
+    assertBlockContent(input.draft.html);
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
       const selectedRegion = await assertRegionEnabled(db, a.workspaceId, input.draft.region ?? current.draft.region);
@@ -579,7 +589,7 @@ export function registerSending(app: App) {
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
-      const draft = { ...input.draft, region: selectedRegion, ...(input.draft.html !== current.draft.html && input.draft.editor != null && canonical(input.draft.editor) === canonical(current.draft.editor) ? { editor: null } : {}) };
+      const draft = { ...input.draft, region: selectedRegion };
       const [updated] = await db.update(campaigns).set({ draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
       return updated;
     });
