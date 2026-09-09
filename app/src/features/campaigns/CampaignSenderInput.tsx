@@ -59,9 +59,10 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
   const candidates = parsed ? (allowed(parsed) ? [parsed] : []) : suggestSenders(draft, verified)
   const expanded = open && !disabled && candidates.length > 0
   const activeIndex = expanded && active < candidates.length ? active : -1
-  const error = !validName(draftName(draft)) ? 'Use a sender name of 200 characters or fewer, without control characters.'
+  const error = draftName(draft).length > 200 ? 'Sender name: 200 characters maximum.'
+    : !validName(draftName(draft)) ? 'Remove control characters from the name.'
     : parsed && !allowed(parsed) ? 'Choose an address on a verified domain.'
-    : candidates.length ? 'Choose a sender address.' : 'Enter a full email address, with an optional sender name.'
+    : candidates.length ? 'Choose a sender address.' : 'Enter a valid sender email address.'
   const showError = touched && (!parsed || !allowed(parsed))
 
   useEffect(() => {
@@ -129,6 +130,6 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
         {formatSender(sender)}
       </button>)}
     </div>}
-    {showError && <span id={errorId} className="sr-only">{error}</span>}
+    {showError && <div id={errorId} className="campaign-sender-options campaign-sender-error" role="alert">{error}</div>}
   </div>
 }
