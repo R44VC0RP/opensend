@@ -1,17 +1,19 @@
 import { lazy, Suspense, useCallback, useRef, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { Paperclip, X } from 'lucide-react'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, Attachment, SendCampaignInput } from '../../data/types'
 import {
-  Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
-  Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
+  Alert, Button, ConfirmDialog, Dialog, EmptyState, ErrorState,
+  Field, IconButton, Input, PageHeader, SectionHeader, Select,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { date, number, percent, time } from '../../lib/format'
-import { campaignColumns, CampaignAudienceSkeleton, CampaignEditorSkeleton, CampaignRouteSkeleton } from './skeletons'
+import { date, number, time } from '../../lib/format'
+import { CampaignAudienceSkeleton, CampaignEditorSkeleton, CampaignRouteSkeleton } from './skeletons'
+import { CampaignArchiveButton } from './CampaignArchiveButton'
+export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
 import { CampaignSenderInput } from './CampaignSenderInput'
@@ -20,48 +22,6 @@ const EmailComposer = lazy(() => import('./EmailComposer').then(module => ({ def
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
-const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(campaign.id)}/${['draft', 'reviewed'].includes(campaign.status) ? 'edit' : 'review'}`
-
-export function CampaignsPage() {
-  const { regionId } = useRegion()
-  return <CampaignList key={regionId} regionId={regionId} />
-}
-
-function CampaignList({ regionId }: { regionId: string }) {
-  const navigate = useNavigate()
-  const [params, setParams] = useSearchParams()
-  const search = params.get('search') || ''
-  const status = ['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled'].includes(params.get('status') || '') ? params.get('status')! : 'all'
-  const requestedPage = Number(params.get('page'))
-  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
-  const pageSize = 10
-  const request = { regionId, search, status: status === 'all' ? undefined : status, page, pageSize }
-  const query = useApiQuery(['campaigns', request], (api, signal) => api.campaigns.list(request, signal))
-  function filter(key: string, value: string) {
-    setParams(previous => { const next = new URLSearchParams(previous); value ? next.set(key, value) : next.delete(key); next.delete('page'); return next })
-  }
-  return <>
-    <PageHeader title="Campaigns" actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
-    <Tabs value={status} onValueChange={value => filter('status', value === 'all' ? '' : value)} items={[
-      { value: 'all', label: 'All campaigns' },
-      { value: 'draft', label: 'Drafts' },
-      { value: 'scheduled', label: 'Scheduled' },
-      { value: 'reviewed', label: 'Reviewed' }, { value: 'sending', label: 'Sending' }, { value: 'completed', label: 'Completed' }, { value: 'canceled', label: 'Canceled' },
-    ]} />
-    <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /></div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={search || status !== 'all' ? 'No matching campaigns' : 'No campaigns yet'} action={search || status !== 'all' ? <Button variant="secondary" onClick={() => setParams({})}>Clear filters</Button> : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
-        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject}</span></div> },
-        { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
-        { ...campaignColumns[2], render: row => number(row.recipients) },
-        { ...campaignColumns[3], render: row => ['sent', 'completed'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
-        { ...campaignColumns[4], render: row => <span className="muted">{date(row.scheduledAt || row.updatedAt)} · {time(row.scheduledAt || row.updatedAt)} UTC</span> },
-      ]} />
-      {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
-    </>}
-  </>
-}
-
 export function CampaignEditorPage() {
   const { id } = useParams()
   const { regionId } = useRegion()
@@ -69,6 +29,11 @@ export function CampaignEditorPage() {
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   if (query.data && query.data.regionId !== regionId) return <RegionMismatch campaign={query.data} />
+  if (query.data?.archivedAt) return <>
+    <PageHeader title={query.data.name} backTo="/campaigns?archived=true" actions={<CampaignArchiveButton campaign={query.data} />} />
+    <Alert tone="info">This campaign is archived. Restore it to edit or send it.</Alert>
+    <Link to={`/campaigns/${encodeURIComponent(query.data.id)}/review`}>View campaign</Link>
+  </>
   if (query.data && !['draft', 'reviewed'].includes(query.data.status)) return <>
     <PageHeader title={query.data.name} backTo="/campaigns" />
     <Alert tone="info">This campaign is {query.data.status} and cannot be edited.</Alert>
@@ -261,7 +226,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
   const [testOpen, setTestOpen] = useState(false)
   const guard = useRef(false)
   const api = useApi()
-  const draft = ['draft', 'reviewed'].includes(campaign.status)
+  const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
   const audience = useApiMutation(async api => api.review ? api.review(campaign.id, campaign.revision!) : {...await api.campaigns.audience({listId: campaign.listId, segmentId: campaign.segmentId}), id: 'demo', revision: 1} as ReviewResult)
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
@@ -287,7 +252,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     finally { guard.current = false }
   }
   return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo="/campaigns" actions={<StatusBadge status={campaign.status} />} />
+    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster"><StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
