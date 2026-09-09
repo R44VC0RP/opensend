@@ -1,5 +1,5 @@
 import {
-  Button, ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
+  Button, ControlSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
   Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import './campaigns.css'
@@ -24,30 +24,19 @@ export function CampaignAudienceSkeleton() {
 }
 
 export function ComposerSkeleton() {
-  return <LoadingRegion label="Loading composer"><div className="campaign-message-toolbar"><Tabs value="compose" onValueChange={() => {}} items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} /></div><div className="composer-skeleton-tools"><ControlSkeleton width={108} /><ControlSkeleton width={34} /><ControlSkeleton width={34} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
+  return <LoadingRegion label="Loading composer" className="composer-loading"><div className="composer-skeleton-tools"><ControlSkeleton width={90} /><ControlSkeleton width={28} /><ControlSkeleton width={28} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
 }
 
-export function CampaignEditorSkeleton({ isNew = false, hasSegment = false }: { isNew?: boolean; hasSegment?: boolean }) {
-  return <LoadingRegion label="Loading campaign editor" className="campaign-editor-layout">
-    <div className="campaign-fields">
-      <FieldSkeleton label="Name" />
-      <FieldSkeleton label="Subject" />
-      <FieldSkeleton label="Preview text" />
-      <FieldSkeleton label="From name" />
-      <div className="campaign-sender"><FieldSkeleton label="From email" /><span aria-hidden="true">@</span><FieldSkeleton label="Verified domain" /></div>
-      <section className="section">
-        <SectionHeader title="Recipients" />
-        <div className="campaign-fields">
-          <FieldSkeleton label="Include list" />
-          <div className="ui-field"><FieldSkeleton label="Limit to a segment" />{hasSegment && <div className="ui-field__hint">Matches both the list and segment.</div>}</div>
-        </div>
-      </section>
-    </div>
-    <section className="campaign-message">
+export function CampaignEditorSkeleton({ isNew = false }: { isNew?: boolean }) {
+  return <LoadingRegion label="Loading campaign editor" className="campaign-compose-workspace">
+    <div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+      <div className="campaign-compose-metadata" aria-hidden="true">
+        {['Name', 'From', 'To'].map(label => <div className="campaign-compose-row" key={label}><span className="muted">{label}</span><ControlSkeleton /></div>)}
+        <div className="campaign-compose-row campaign-compose-subject"><span className="muted">Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text</Button></div>
+      </div>
       <ComposerSkeleton />
-      {!isNew && <div className="campaign-test-action"><Button variant="secondary" disabled>Send test</Button></div>}
-      {isNew && <p className="muted">Save your draft to send a test email.</p>}
-    </section>
+    </div></div>
+    <div className="campaign-compose-footer"><div className="campaign-compose-controls"><Button variant="ghost" disabled>Attach file</Button><div className="campaign-compose-actions"><Button variant="ghost" disabled title={isNew ? 'Save your draft first' : undefined}>Send test</Button><Button disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div></div></div>
   </LoadingRegion>
 }
 
@@ -58,10 +47,10 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" disabled /></div>
     <TableSkeleton columns={campaignColumns} rows={4} pagination />
   </>
-  if (kind === 'editor') return <>
-    <PageHeader title={isNew ? 'Create campaign' : <SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div>} />
+  if (kind === 'editor') return <div className="campaign-compose-page">
+    <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" />
     <CampaignEditorSkeleton isNew={isNew} />
-  </>
+  </div>
   return <>
     <PageHeader title={<SkeletonText width={220} lineHeight={28} />} backTo="/campaigns" actions={<SkeletonText width={65} lineHeight={18} />} />
     <p className="muted campaign-review-name"><SkeletonText width={220} /></p>

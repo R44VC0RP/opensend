@@ -2,21 +2,55 @@
 .campaign-row-name { display: flex; flex-direction: column; gap: var(--space-4); padding: 0; line-height: 18px; }
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
-.campaign-editor-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--space-40); }
-.ui-alert + .campaign-editor-layout { margin-top: var(--page-gap); }
+.page-surface:has(.campaign-compose-page) { padding: var(--space-16); }
+.campaign-compose-page { --font-body: var(--font-email); display: flex; flex-direction: column; height: 100%; min-height: 0; font-family: var(--font-body); font-size: var(--text-md); }
+body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) { --font-body: var(--font-email); --color-focus: var(--color-muted); --color-active-bg: color-mix(in srgb, var(--color-text) 8%, var(--color-surface)); font-family: var(--font-body); font-size: var(--text-md); }
+.campaign-compose-page :focus-visible,
+body:has(.campaign-compose-page) :is(.ui-popover, .ui-dialog, [data-re-bubble-menu], [data-re-slash-command], [data-re-node-selector-content], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]) :focus-visible { outline: none; }
+.campaign-compose-page .ui-button:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
+.campaign-compose-page :is(.ui-button--ghost, .ui-button--secondary):focus-visible { background: var(--color-canvas); }
+.campaign-compose-row:has(:focus-visible) { border-bottom-color: var(--color-muted); }
+body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: var(--color-text); }
+.campaign-compose-page > .ui-page-header, .campaign-compose-page > .ui-alert { flex-shrink: 0; }
+.campaign-compose-page > .ui-page-header { margin-bottom: var(--space-8); }
+.campaign-compose-page > .ui-alert { margin-bottom: var(--space-16); }
+/* The email paper stays light; the surrounding application retains its theme. */
+.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F6F6F6; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E8E8E8; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-email-surface); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
+.campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.campaign-compose-sheet, .campaign-compose-controls { width: 100%; max-width: 632px; margin-inline: auto; }
+.campaign-compose-sheet { display: flex; flex-direction: column; min-height: 100%; padding: var(--space-16); }
+.campaign-compose-metadata { flex-shrink: 0; margin-bottom: var(--space-4); }
+.campaign-compose-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; min-height: 38px; gap: var(--space-8); border-bottom: 1px solid var(--color-border); }
+.campaign-compose-row > label { color: var(--color-muted); font-size: var(--text-xs); }
+.campaign-compose-row .ui-input { height: 36px; padding: var(--space-4) 0; border: 0; border-radius: 0; background: transparent; }
+.campaign-compose-subject { grid-template-columns: 56px minmax(0, 1fr) auto; }
+.campaign-compose-subject input { font-size: var(--text-md); }
+.campaign-preview-toggle { color: var(--color-muted); }
+.campaign-preview-toggle[aria-expanded='true'] { color: var(--color-text); }
+.campaign-compose-preview { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out; }
+.campaign-compose-preview[data-open] { grid-template-rows: 1fr; opacity: 1; }
+.campaign-compose-preview > div { min-height: 0; overflow: hidden; }
+.campaign-compose-feedback { padding-block: var(--space-8); }
+.campaign-compose-metadata > .ui-alert { margin-block: var(--space-8); }
+@media (prefers-reduced-motion: reduce) { .campaign-compose-preview { transition: none; } }
+.campaign-compose-footer { flex-shrink: 0; border-top: 1px solid var(--color-border); }
+.campaign-compose-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-8); padding: var(--space-8) var(--space-16); }
+.campaign-compose-actions { grid-column: 2; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); }
+.campaign-compose-attach { grid-column: 1; }
+.campaign-compose-attachments { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-8); list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; }
+.campaign-compose-attachments > li { display: flex; align-items: center; gap: var(--space-6); min-width: 0; padding-inline-start: var(--space-8); border: 1px solid var(--color-border); border-radius: var(--radius-sm); font-size: var(--text-xs); }
+.campaign-compose-attachments > li > svg, .campaign-compose-attachments .ui-icon-button { flex-shrink: 0; }
+.campaign-attachment-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-compose-attachment-status { grid-column: 1 / -1; }
+.campaign-compose-plain { flex: 1; display: flex; min-height: 280px; }
+.campaign-compose-plain > .ui-field { flex: 1; }
+.campaign-compose-plain textarea { flex: 1; min-height: 240px; resize: none; font-family: var(--font-email); font-size: 16px; line-height: 1.6; }
 .campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--page-gap); }
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-16); }
-.campaign-message { min-width: 0; }
-.campaign-test-action { display: flex; justify-content: flex-end; margin-top: var(--space-16); }
-.composer-skeleton-tools { display: flex; gap: var(--space-8); padding-bottom: var(--space-12); }
-.composer-skeleton-canvas { min-height: 520px; padding: var(--space-24); background: var(--color-email-surface); display: flex; flex-direction: column; gap: var(--space-16); }
+.composer-loading { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.composer-skeleton-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding-block: var(--space-8); margin-bottom: var(--space-8); }
+.composer-skeleton-canvas { min-height: 260px; flex: 1; background: var(--color-email-surface); display: flex; flex-direction: column; gap: var(--space-16); }
 .composer-skeleton-canvas .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
-.campaign-message-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); margin-bottom: var(--space-16); }
-.campaign-message-toolbar > :first-child { flex: 1; }
-.ui-textarea.campaign-html { min-height: 430px; resize: vertical; }
-.campaign-sender { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--space-8); align-items: end; }
-.campaign-sender > span { height: var(--control-height); display: flex; align-items: center; }
-.campaign-message > p { margin-top: var(--space-12); }
 .campaign-audience-summary { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-summary-line { display: flex; justify-content: space-between; gap: var(--space-16); }
 .campaign-message-details { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-16); row-gap: var(--space-8); margin: 0; }
@@ -25,9 +59,8 @@
 .campaign-delivery { display: flex; flex-direction: column; gap: var(--space-20); }
 .campaign-delivery-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-12); }
 @media (max-width: 1050px) {
-  .campaign-editor-layout, .campaign-review-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-28); }
+  .campaign-review-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-28); }
 }
 @media (max-width: 600px) {
-  .campaign-message-toolbar { flex-wrap: wrap; }
   .campaign-message-details { grid-template-columns: minmax(0, 1fr); }
 }

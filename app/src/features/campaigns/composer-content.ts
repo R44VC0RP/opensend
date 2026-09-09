@@ -23,7 +23,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function cleanJson(value: unknown, depth: number, attributes = false): unknown {
-  if (depth > 50) throw new Error('This visual document is too deeply nested. Open its HTML instead.')
+  if (depth > 50) throw new Error('This visual document is too deeply nested to edit in the composer.')
   if (value === null || typeof value === 'boolean') return value
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
   if (typeof value === 'string') return attributes && unsafeCss.test(value) ? undefined : value
@@ -55,7 +55,7 @@ function cleanJson(value: unknown, depth: number, attributes = false): unknown {
 
 export function sanitizeEditorDocument(document: Record<string, unknown>): Record<string, unknown> {
   if (!isRecord(document) || document.type !== 'doc' || (document.content !== undefined && !Array.isArray(document.content))) {
-    throw new Error('This visual document is invalid. Open its HTML instead.')
+    throw new Error('This visual document is invalid and cannot be edited in the composer.')
   }
   return cleanJson(document, 0) as Record<string, unknown>
 }
@@ -110,11 +110,11 @@ export function prepareEditorContent(html: string, metadata?: CampaignEditorMeta
       const content = sanitizeEditorDocument(metadata.document)
       if (JSON.stringify(content) !== JSON.stringify(metadata.document)) return {
         content: '<p></p>', canCompose: false,
-        reason: 'Compose cannot preserve parts of this document. HTML mode keeps the original content.',
+        reason: 'The composer cannot preserve parts of this document. The original content is kept until you edit converted blocks.',
       }
       return { content, canCompose: true }
     } catch {
-      return { content: '<p></p>', canCompose: false, reason: 'Compose cannot open this document. HTML mode keeps the original content.' }
+      return { content: '<p></p>', canCompose: false, reason: 'The composer cannot open this document. The original content is preserved.' }
     }
   }
   return { content: sanitizedImportHtml(html), canCompose: metadata == null && isSemanticHtml(html) }
@@ -126,7 +126,7 @@ export async function prepareLocalImage(file: File): Promise<{ url: string }> {
   if (!supported.has(file.type)) throw new Error('Choose a PNG, JPEG, WebP, or AVIF image.')
   if (file.size > 10 * 1024 * 1024) throw new Error('Choose an image smaller than 10 MB.')
   if (!file.size) throw new Error('This image is empty. Choose another image.')
-  if (typeof createImageBitmap !== 'function') throw new Error('This browser cannot optimize images. Try a current browser or use HTML mode.')
+  if (typeof createImageBitmap !== 'function') throw new Error('This browser cannot optimize images. Try a current browser.')
 
   let bitmap: ImageBitmap
   try {

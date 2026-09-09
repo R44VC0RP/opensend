@@ -1,26 +1,31 @@
-.email-composer { min-width: 0; }
-.composer-mode-bar { display: flex; align-items: center; justify-content: space-between; min-height: var(--control-height); gap: var(--space-12); margin-bottom: var(--space-16); }
-.composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding-bottom: var(--space-12); }
+.email-composer { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.composer-toolbar { flex-shrink: 0; padding-block: var(--space-8); margin-bottom: var(--space-8); }
+.composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
+.composer-tools .cluster { flex-wrap: nowrap; gap: var(--space-4); }
 .composer-history { margin-left: auto; }
-.composer-canvas { position: relative; background: var(--color-email-surface); color: var(--color-email-text); min-height: 520px; padding: var(--space-24); }
-.composer-starting { position: absolute; inset: var(--space-24); display: flex; flex-direction: column; gap: var(--space-16); }
-.composer-document .tiptap { min-height: 472px; max-width: 600px; margin: 0 auto; color: var(--color-email-text); font-family: var(--font-email); font-size: 16px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
+.composer-conversion { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-12); }
+.composer-visual { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.composer-visual[hidden] { display: none; }
+.composer-canvas { position: relative; display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; min-height: 260px; padding: 0; background: var(--color-email-surface); color: var(--color-email-text); }
+.composer-starting { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--space-16); }
+.composer-document { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.composer-document .tiptap { flex: 1 0 auto; min-height: 260px; width: 100%; max-width: 600px; margin: 0 auto; color: var(--color-email-text); font-family: var(--font-email); font-size: 16px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
+/* The sheet owns editor spacing; keep the export theme's container padding unchanged. */
+.composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { padding: 0; }
 .composer-document .tiptap * { font-family: var(--font-email); }
-.composer-document .tiptap:focus-visible { outline: 2px solid var(--color-email-text); outline-offset: 4px; }
+.composer-document .tiptap:focus-visible { outline: none; }
 :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-slash-command]) { visibility: hidden; pointer-events: none; }
 .composer-document .tiptap h1, .composer-document .tiptap h2, .composer-document .tiptap h3 { color: inherit; }
-.composer-document .tiptap p.is-empty::before { color: var(--color-email-text); opacity: .4; }
+.composer-document .tiptap p.is-empty::before { color: var(--color-email-text); opacity: .6; }
 .composer-document .tiptap img { max-width: 100%; height: auto; }
-.composer-document .tiptap .ProseMirror-selectednode { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+.composer-document .tiptap .ProseMirror-selectednode { outline: 1px solid var(--color-muted); outline-offset: 3px; }
 .composer-document .tiptap .node-column { min-width: 0; min-height: 64px; padding: 8px; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); }
-.composer-document .tiptap .node-column:focus-within { outline-color: var(--color-accent); }
+.composer-document .tiptap .node-column:focus-within { outline-color: var(--color-muted); }
 .composer-document .tiptap .node-columns { gap: 16px; }
 .composer-document .tiptap a { cursor: text; }
 .composer-document .tiptap table { max-width: 100%; }
 .email-composer > .ui-alert { margin-bottom: var(--space-16); }
-.email-composer .ui-email-preview { height: 520px; }
-.email-composer .ui-textarea.campaign-html { min-height: 520px; }
 :root {
   --re-bg: var(--color-surface);
   --re-text: var(--color-text);
@@ -41,4 +46,3 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 [data-re-bubble-menu] *, [data-re-slash-command] *, [data-re-node-selector-content] *, [data-re-link-bm-form] *, [data-re-btn-bm-form] *, [data-re-img-bm-form] * { font-family: var(--font-body); }
 [data-re-slash-command-category] { text-transform: none; letter-spacing: normal; }
 [data-re-slash-command] { max-height: 320px; overflow-y: auto; }
-@media (max-width: 1050px) { .composer-canvas { padding: var(--space-20); } }

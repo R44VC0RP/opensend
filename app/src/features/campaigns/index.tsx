@@ -1,11 +1,12 @@
 import { lazy, Suspense, useCallback, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
+import { Paperclip, X } from 'lucide-react'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, Attachment, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
-  Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
+  Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
   StatusBadge, Tabs,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
@@ -13,6 +14,7 @@ import { date, number, percent, time } from '../../lib/format'
 import { campaignColumns, CampaignAudienceSkeleton, CampaignEditorSkeleton, CampaignRouteSkeleton } from './skeletons'
 import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
+import { CampaignSenderInput } from './CampaignSenderInput'
 import { ComposerSkeleton } from './skeletons'
 const EmailComposer = lazy(() => import('./EmailComposer').then(module => ({ default: module.EmailComposer })))
 
@@ -98,14 +100,16 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   const handleComposerReady = useCallback(() => setComposerReady(true), [])
   const [error, setError] = useState('')
   const [testOpen, setTestOpen] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(Boolean(initial?.previewText))
+  const previewInput = useRef<HTMLInputElement>(null)
   const guard = useRef(false)
-  const [optionCursors, setOptionCursors] = useState<{lists?: string; segments?: string; domains?: string}>({})
+  const [optionCursors, setOptionCursors] = useState<{lists?: string; domains?: string}>({})
   const options = useApiQuery(['campaign-options', { regionId, pageSize: 100, ...optionCursors }], async (api, signal) => {
-    const [listPage, segmentPage, domainPage] = await Promise.all([
-      api.lists.list({ pageSize: 100, cursor: optionCursors.lists }, signal), api.segments.list({ pageSize: 100, cursor: optionCursors.segments }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({regionId, pageSize: 100, cursor: optionCursors.domains}, signal),
+    const [listPage, domainPage] = await Promise.all([
+      api.lists.list({ pageSize: 100, cursor: optionCursors.lists }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({regionId, pageSize: 100, cursor: optionCursors.domains}, signal),
     ])
-    const lists = listPage.items, segments = segmentPage.items, domains = domainPage.items
-    return { lists, segments, domains: domains.filter(domain => domain.status === 'verified'), next: {lists: listPage.nextCursor, segments: segmentPage.nextCursor, domains: domainPage.nextCursor} }
+    const lists = listPage.items, domains = domainPage.items
+    return { lists, domains: domains.filter(domain => domain.status === 'verified'), next: {lists: listPage.nextCursor, domains: domainPage.nextCursor} }
   })
   const previousOptions = useRef<typeof options.data>(undefined)
   if (options.data) previousOptions.current = options.data
@@ -113,9 +117,6 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   const saveMutation = useApiMutation((api, input: CampaignInput) => api.campaigns.save(input), 'Draft saved')
   const pending = preparing || attachmentsBusy || saveMutation.isPending
   const handleComposerDirty = useCallback(() => setError(''), [])
-  const senderParts = form.fromEmail.split('@')
-  const senderLocal = senderParts[0] || ''
-  const senderDomain = senderParts[1] || ''
   function change<K extends keyof CampaignInput>(key: K, value: CampaignInput[K]) {
     setForm(previous => ({ ...previous, [key]: value }))
     setError('')
@@ -140,52 +141,50 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     } catch (cause) { setError(message(cause)) }
     finally { guard.current = false; setPreparing(false) }
   }
-  return <>
-    <PageHeader title={initial?.name || 'Create campaign'} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('edit')}>Save draft</Button><Button variant="primary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('review')}>Continue to review</Button></div>} />
+  return <div className="campaign-compose-page">
+    <PageHeader title={initial ? 'Edit campaign' : 'Create campaign'} backTo="/campaigns" />
     {error && <Alert tone="danger">{error}</Alert>}{options.isError && choices && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
-    {options.isPending && !choices ? <CampaignEditorSkeleton isNew={!initial} hasSegment={Boolean(form.segmentId)} /> : options.isError && !choices ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : choices && <div className="campaign-editor-layout">
-      <div className="campaign-fields">
-        <Field label="Name" htmlFor="campaign-name"><Input id="campaign-name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={pending} /></Field>
-        <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={pending} /></Field>
-        <Field label="Preview text" htmlFor="campaign-preview"><Input id="campaign-preview" maxLength={200} value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={pending} /></Field>
-        <Field label="From name" htmlFor="campaign-from-name"><Input id="campaign-from-name" maxLength={200} value={form.fromName} onChange={event => change('fromName', event.target.value)} disabled={pending} /></Field>
-        {testEnvironment && <Field label="Simulation region" htmlFor="campaign-test-region"><Select id="campaign-test-region" required value={form.regionId} onValueChange={value => change('regionId', value)} disabled={pending || regionCatalog.isPending} options={(regionCatalog.data?.data ?? []).filter(region => region.enabled || region.region === form.regionId).map(region => ({value: region.region, label: `${region.region}${region.enabled ? '' : ' · Disabled'}`, disabled: !region.enabled}))} /></Field>}
-        {testEnvironment ? <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" type="email" required value={form.fromEmail} onChange={event => change('fromEmail', event.target.value)} disabled={pending} /></Field> : <div className="campaign-sender">
-          <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={pending} /></Field>
-          <span aria-hidden="true">@</span>
-          <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={pending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select', disabled: true }, ...(senderDomain && !choices.domains.some(d => d.name === senderDomain) ? [{value: senderDomain, label: senderDomain}] : []), ...choices.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
-        </div>}
-        {!testEnvironment && (optionCursors.domains || choices.next.domains) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
-        {!testEnvironment && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
-        <section className="section">
-          <SectionHeader title="Recipients" />
-          <div className="campaign-fields">
-            <Field label="Include list" htmlFor="campaign-list"><Select id="campaign-list" disabled={pending} value={form.listId} onValueChange={value => change('listId', value)} options={[{ value: '', label: 'Select a list' }, ...(form.listId && !choices.lists.some(l => l.id === form.listId) ? [{value: form.listId, label: form.listId}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.total === undefined ? list.name : `${list.name} · ${number(list.total)} contacts` }))]} /></Field>
-            {(optionCursors.lists || choices.next.lists) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, lists: undefined})}>First lists</Button><Button disabled={!choices.next.lists} onClick={() => setOptionCursors({...optionCursors, lists: choices.next.lists ?? undefined})}>More lists</Button></div>}
+    {options.isPending && !choices ? <CampaignEditorSkeleton isNew={!initial} /> : options.isError && !choices ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : choices && <section className="campaign-compose-workspace" aria-label="Campaign composer">
+      <div className="campaign-compose-scroll">
+        <div className="campaign-compose-sheet">
+          <div className="campaign-compose-metadata">
+            <div className="campaign-compose-row"><label htmlFor="campaign-name">Name</label><Input id="campaign-name" placeholder="Campaign name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={pending} /></div>
+            <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} allowUnverified={testEnvironment} disabled={pending} onChange={({name, email}) => {setForm(previous => ({...previous, fromName: name, fromEmail: email})); setError('')}} /></div>
+            {!testEnvironment && (optionCursors.domains || choices.next.domains) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
+            {!testEnvironment && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
+            <div className="campaign-compose-row"><label htmlFor="campaign-list">To</label><Select id="campaign-list" aria-label="Include list" disabled={pending} value={form.listId} onValueChange={value => change('listId', value)} options={[{ value: '', label: 'Select a recipient list' }, ...(form.listId && !choices.lists.some(l => l.id === form.listId) ? [{value: form.listId, label: form.listId}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.total === undefined ? list.name : `${list.name} · ${number(list.total)} contacts` }))]} /></div>
+            {(optionCursors.lists || choices.next.lists) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, lists: undefined})}>First lists</Button><Button disabled={!choices.next.lists} onClick={() => setOptionCursors({...optionCursors, lists: choices.next.lists ?? undefined})}>More lists</Button></div>}
             {choices.lists.length === 0 && <Alert tone="info">No lists on this page. <Link to="/lists">Create a list</Link></Alert>}
-            <Field label="Limit to a segment" htmlFor="campaign-segment" hint={form.segmentId ? 'Matches both the list and segment.' : undefined}><Select id="campaign-segment" disabled={pending} value={form.segmentId || ''} onValueChange={value => change('segmentId', value || null)} options={[{ value: '', label: 'All subscribed contacts in list' }, ...(form.segmentId && !choices.segments.some(s => s.id === form.segmentId) ? [{value: form.segmentId, label: form.segmentId}] : []), ...choices.segments.map(segment => ({ value: segment.id, label: segment.name }))]} /></Field>
-            {(optionCursors.segments || choices.next.segments) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, segments: undefined})}>First segments</Button><Button disabled={!choices.next.segments} onClick={() => setOptionCursors({...optionCursors, segments: choices.next.segments ?? undefined})}>More segments</Button></div>}
+            {testEnvironment && <div className="campaign-compose-row"><label htmlFor="campaign-test-region">Region</label><Select id="campaign-test-region" aria-label="Simulation region" required value={form.regionId} onValueChange={value => change('regionId', value)} disabled={pending || regionCatalog.isPending} options={(regionCatalog.data?.data ?? []).filter(region => region.enabled || region.region === form.regionId).map(region => ({value: region.region, label: `${region.region}${region.enabled ? '' : ' · Disabled'}`, disabled: !region.enabled}))} /></div>}
+            <div id="campaign-preview-row" className="campaign-compose-preview" data-open={previewOpen || undefined} aria-hidden={!previewOpen} inert={!previewOpen}>
+              <div><div className="campaign-compose-row"><label htmlFor="campaign-preview">Preview</label><Input ref={previewInput} id="campaign-preview" aria-label="Preview text" maxLength={200} placeholder="Inbox preview text" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={pending} /></div></div>
+            </div>
+            <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="campaign-subject">Subject</label><Input id="campaign-subject" placeholder="Add a subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={pending} /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled={pending} aria-expanded={previewOpen} aria-controls="campaign-preview-row" onClick={() => {setPreviewOpen(!previewOpen); if (!previewOpen) requestAnimationFrame(() => previewInput.current?.focus({preventScroll: true}))}}>Preview text</Button></div>
           </div>
-        </section>
+          {textOnly ? <div className="campaign-compose-plain"><Field label="Plain-text body" hint="Read-only; preserved when saved."><textarea className="ui-input" value={String(form.draft?.text ?? '')} readOnly /></Field></div> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} disabled={pending} onReady={handleComposerReady} onDirty={handleComposerDirty} /></Suspense>}
+        </div>
       </div>
-      <section className="campaign-message">
+      <footer className="campaign-compose-footer"><div className="campaign-compose-controls">
         <CampaignAttachments ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={setAttachmentsBusy} disabled={preparing || saveMutation.isPending} />
-        {textOnly ? <Field label="Plain-text body" hint="Read-only; preserved when saved."><textarea className="ui-input" rows={14} value={String(form.draft?.text ?? '')} readOnly /></Field> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} previewText={form.previewText} disabled={pending} onReady={handleComposerReady} onDirty={handleComposerDirty} /></Suspense>}
-        {initial && <div className="campaign-test-action"><Button variant="secondary" disabled={!composerReady} loading={pending} onClick={() => save('test')}>Send test</Button></div>}
-        {!initial && <p className="muted">Save your draft to send a test email.</p>}
-      </section>
-    </div>}
+        <div className="campaign-compose-actions">
+          <Button variant="ghost" disabled={!initial || options.isPending || options.isError || !composerReady || pending} title={!initial ? 'Save your draft first' : undefined} onClick={() => save('test')}>Send test</Button>
+          <Button variant="secondary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('edit')}>Save draft</Button>
+          <Button variant="primary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('review')}>Continue to review</Button>
+        </div>
+      </div></footer>
+    </section>}
     {initial && testOpen && <TestEmailDialog id={initial.id} open={testOpen} onOpenChange={setTestOpen} />}
-  </>
+  </div>
 }
 
 function CampaignAttachments({ ids, persisted, onChange, onBusy, disabled }: {ids: string[]; persisted: string[]; onChange: (ids: string[]) => void; onBusy: (busy: boolean) => void; disabled: boolean}) {
   const api = useApi()
+  const input = useRef<HTMLInputElement>(null)
   const owned = useRef(new Set<string>())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const metadata = useApiQuery(['attachments', ids], async api => api.attachments ? Promise.all(ids.map(id => api.attachments!.get(id))) : [] as Attachment[])
-  if (!api.attachments) return null
+  if (!api.attachments) return <div className="campaign-compose-attach"><Button variant="ghost" disabled title="Attachments are unavailable for this connection"><Paperclip size={16} />Attach file</Button></div>
   async function upload(file?: File) {
     if (!file || busy || disabled) return
     setError('')
@@ -200,7 +199,15 @@ function CampaignAttachments({ ids, persisted, onChange, onBusy, disabled }: {id
     try { if (owned.current.has(id) && !persisted.includes(id)) {await api.attachments!.remove(id); owned.current.delete(id)} onChange(ids.filter(value => value !== id)) }
     catch (cause) {setError(message(cause))} finally {setBusy(false); onBusy(false)}
   }
-  return <section className="stack"><SectionHeader title="Attachments" />{metadata.isError && <ErrorState error={metadata.error} onRetry={() => metadata.refetch()} />}{(metadata.data ?? []).map(item => <div className="cluster between" key={item.id}><span>{item.filename} · {item.contentType} · {number(item.size)} bytes</span><Button disabled={busy || disabled || item.disposition === 'inline'} title={item.disposition === 'inline' ? 'Inline image attachment; retained with the saved message' : undefined} onClick={() => remove(item.id)}>Remove</Button></div>)}<Field label="Upload file (8 MiB total)" htmlFor="campaign-attachment"><Input type="file" id="campaign-attachment" disabled={busy || disabled || metadata.isPending} onChange={event => {void upload(event.target.files?.[0]); event.currentTarget.value = ''}} /></Field>{error && <Alert tone="danger">{error}</Alert>}</section>
+  return <>
+    {metadata.isError && <div className="campaign-compose-attachment-status"><ErrorState error={metadata.error} onRetry={() => metadata.refetch()} /></div>}
+    {Boolean(metadata.data?.length) && <ul className="campaign-compose-attachments" aria-label="Attachments">{metadata.data!.map(item => <li key={item.id} title={`${item.filename} · ${item.contentType} · ${number(item.size)} bytes`}>
+      <Paperclip size={14} aria-hidden="true" /><span className="campaign-attachment-name">{item.filename}</span><span className="muted">{number(item.size)} B</span>
+      <IconButton label={`Remove ${item.filename}`} disabled={busy || disabled || item.disposition === 'inline'} title={item.disposition === 'inline' ? 'Inline image attachment; retained with the saved message' : undefined} onClick={() => remove(item.id)}><X size={14} /></IconButton>
+    </li>)}</ul>}
+    {error && <div className="campaign-compose-attachment-status"><Alert tone="danger">{error}</Alert></div>}
+    <div className="campaign-compose-attach"><Button variant="ghost" loading={busy} disabled={busy || disabled || metadata.isPending} onClick={() => input.current?.click()} title="Up to 20 attachments, 8 MiB total"><Paperclip size={16} />Attach file</Button><input ref={input} type="file" hidden id="campaign-attachment" aria-label="Upload attachment" disabled={busy || disabled || metadata.isPending} onChange={event => {void upload(event.target.files?.[0]); event.currentTarget.value = ''}} /></div>
+  </>
 }
 
 function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean; onOpenChange: (value: boolean) => void }) {
