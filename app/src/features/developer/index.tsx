@@ -3,10 +3,9 @@ import { CopyButton, Field, PageHeader, SectionHeader, Select } from '../../comp
 import './developer.css'
 
 const accessOptions = [
-  { value: 'test-read', label: 'Read only · test', scope: 'opensend:read offline_access', hint: 'Read test data without sending email.' },
-  { value: 'test-manage', label: 'Full access · test', scope: 'opensend:read opensend:send opensend:manage offline_access', hint: 'Request management access in test mode. Email delivery is simulated.' },
   { value: 'live-read', label: 'Read only · live', scope: 'opensend:read opensend:live offline_access', hint: 'Read live data without sending email.' },
   { value: 'live-manage', label: 'Full access · live', scope: 'opensend:read opensend:send opensend:manage opensend:live offline_access', hint: 'Includes sending real email and changing live configuration.' },
+  { value: 'test-manage', label: 'Full access · test', scope: 'opensend:read opensend:send opensend:manage offline_access', hint: 'Request management access in test mode. Email delivery is simulated.' },
 ]
 
 export function DeveloperPage() {
