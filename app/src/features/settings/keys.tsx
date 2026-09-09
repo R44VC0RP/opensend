@@ -1,13 +1,13 @@
 import { useState, type FormEvent } from 'react'
-import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Select, Skeleton } from '../../components/ui'
-import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
-import type { ApiKey, ApiKeyInput } from '../../data/types'
+import { useInfiniteQuery } from '@tanstack/react-query'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Select } from '../../components/ui'
+import { useApiMutation, useApiQuery, useApi } from '../../data/context'
+import type { ApiKey, ApiKeyInput, PageRequest } from '../../data/types'
 import { date } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from './shared'
 import { settingsColumns } from './skeletons'
 
 export function ApiKeysPage() {
-  const { regionId } = useRegion()
   const api = useApi()
   const [cursor, setCursor] = useState<string | undefined>()
   const keys = useApiQuery(['keys', cursor], (api, signal) => api.keys.list(signal, cursor))
@@ -17,18 +17,37 @@ export function ApiKeysPage() {
   const [name, setName] = useState('')
   const [keyEnvironment, setKeyEnvironment] = useState<'live' | 'test'>('test')
   const [permission, setPermission] = useState<ApiKeyInput['permission']>('send')
-  const [domainId, setDomainId] = useState('all')
+  const [allDomains, setAllDomains] = useState(true)
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([])
+  const [domainError, setDomainError] = useState('')
+  const domainOptions = useInfiniteQuery({
+    queryKey: ['opensend', api.mode, api.environment, 'domains', 'key-options'],
+    enabled: open,
+    initialPageParam: {page: 1} as Pick<PageRequest, 'page' | 'cursor'>,
+    queryFn: ({pageParam, signal}) => api.domains.list({...pageParam, pageSize: 10}, signal),
+    getNextPageParam: last => last.nextCursor ? {cursor: last.nextCursor} : api.mode === 'demo' && last.total !== undefined && last.page * last.pageSize < last.total ? {page: last.page + 1} : undefined,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const domains = [...new Set(domainOptions.data?.pages.flatMap(page => page.items.map(domain => domain.name.toLowerCase())) ?? [])].sort()
+  function toggleDomain(name: string, checked: boolean) {
+    setDomainError('')
+    setAllDomains(false)
+    setSelectedDomains(current => checked ? [...new Set([...current, name])] : current.filter(domain => domain !== name))
+  }
   const [nameError, setNameError] = useState('')
   const [secret, setSecret] = useState<string | null>(null)
   const [revokeKey, setRevokeKey] = useState<ApiKey | null>(null)
-  function openCreate() { create.reset(); setName(''); setKeyEnvironment('test'); setNameError(''); setPermission('send'); setDomainId('all'); setOpen(true) }
+  function openCreate() { create.reset(); setName(''); setKeyEnvironment('test'); setNameError(''); setPermission('send'); setAllDomains(true); setSelectedDomains([]); setDomainError(''); setOpen(true) }
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!name.trim()) { setNameError('Enter a name for this key.'); return }
     setNameError('')
-    if (domainId !== 'all' && domainId.trim() && !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(domainId.trim().toLowerCase())) {setNameError('Enter a valid domain hostname without a scheme or path.'); return}
+    if (!allDomains && selectedDomains.length === 0) { setDomainError('Select at least one domain, or choose All domains.'); return }
+    if (!allDomains && selectedDomains.length > 50) { setDomainError('Select up to 50 domains.'); return }
+    setDomainError('')
     try {
-      const result = await create.mutateAsync({ name: name.trim(), environment: keyEnvironment, permission, domainId: domainId === 'all' || !domainId.trim() ? null : domainId.trim().toLowerCase() })
+      const result = await create.mutateAsync({ name: name.trim(), environment: keyEnvironment, permission, domains: allDomains ? [] : selectedDomains })
       setOpen(false)
       setSecret(result.secret)
       create.reset()
@@ -40,7 +59,7 @@ export function ApiKeysPage() {
     {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No API keys" action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
       { ...settingsColumns.keys[0], render: row => <>{row.name}<div className="muted">{row.environment ?? 'Demo'}</div></> },
       { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
-      { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domainId || 'All domains'}</> },
+      { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</> },
       { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
       { ...settingsColumns.keys[4], render: row => row.revokedAt ? 'Revoked' : <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
     ]} />}
@@ -51,7 +70,18 @@ export function ApiKeysPage() {
         <Field label="Name" htmlFor="key-name" error={nameError || fieldError(create.error, 'name')}><Input id="key-name" value={name} onChange={event => setName(event.target.value)} autoFocus required disabled={create.isPending} placeholder="Order notifications" /></Field>
         <Field label="Key environment" htmlFor="key-environment"><Select id="key-environment" value={keyEnvironment} onValueChange={value => setKeyEnvironment(value as 'live' | 'test')} options={[{value: 'test', label: 'Test · simulated'}, {value: 'live', label: 'Live · real delivery'}]} /></Field>
         <Field label="Permission" htmlFor="key-permission"><Select id="key-permission" value={permission} onValueChange={value => setPermission(value as ApiKeyInput['permission'])} disabled={create.isPending} options={[{ value: 'send', label: 'Sending access' }, { value: 'read', label: 'Read only' }]} /></Field>
-        <Field label="Domain restriction" htmlFor="key-domain" error={fieldError(create.error, 'domains')} hint="Optional hostname, such as example.com. The public API validates this restriction; no AWS lookup is needed."><Input id="key-domain" value={domainId === 'all' ? '' : domainId} placeholder="All domains" onChange={event => setDomainId(event.target.value)} disabled={create.isPending} /></Field>
+        <fieldset className="settings-key-domains" disabled={create.isPending} aria-describedby={domainError || fieldError(create.error, 'domains') ? 'key-domain-error' : undefined}>
+          <legend className="ui-field__label">Domains</legend>
+          <Checkbox label="All domains" checked={allDomains} onCheckedChange={checked => {setAllDomains(checked); setSelectedDomains([]); setDomainError('')}} disabled={create.isPending} />
+          {allDomains && <p className="ui-field__hint">Includes future domains.</p>}
+          <div className="settings-key-domain-options">
+            {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains available.</p> : domains.map(name => <Checkbox key={name} label={name} checked={!allDomains && selectedDomains.includes(name)} onCheckedChange={checked => toggleDomain(name, checked)} disabled={create.isPending || !selectedDomains.includes(name) && selectedDomains.length >= 50} />)}
+          </div>
+          {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => {void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch())}}>Retry loading domains</Button></div>}
+          {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
+          {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
+          {(domainError || fieldError(create.error, 'domains')) && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError || fieldError(create.error, 'domains')}</p>}
+        </fieldset>
       </form>
     </Dialog>
     <SecretDialog secret={secret} title="API key created" onClose={() => { setSecret(null); create.reset() }} />

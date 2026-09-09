@@ -91,6 +91,12 @@
 .settings-setup-confirmation { max-width: 640px; }
 .settings-setup-confirmation > a { margin-top: var(--space-12); }
 .settings-setup-callback { display: flex; flex-wrap: wrap; gap: var(--space-8); border-top: 1px solid var(--color-border); margin-top: var(--space-8); padding-top: var(--space-12); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.settings-key-domains { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; margin: 0; padding: 0; border: 0; }
+.settings-key-domains > legend { padding: 0; margin-bottom: var(--space-12); }
+.settings-key-domains p { margin: 0; }
+.settings-key-domain-options { display: flex; flex-direction: column; gap: var(--space-12); max-height: 180px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: var(--space-12) 2px 2px; }
+.settings-key-domain-options .ui-check-field { flex-shrink: 0; }
+.settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }
 .settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:hover { text-decoration-color: currentColor; }

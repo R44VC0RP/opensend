@@ -294,7 +294,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
   if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && validEditor(row.editor))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
-  if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && (row.domainId === null || references('domains', row.domainId)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
+  if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
 }
 
@@ -309,6 +309,19 @@ export function createMockApi(): OpenSendApi {
     if (stored) {
       try {
         const parsed: unknown = JSON.parse(stored)
+        // Preserve legacy restrictions by resolving IDs, never by defaulting missing domains to all.
+        if (isRecord(parsed) && Array.isArray(parsed.keys) && Array.isArray(parsed.domains)) {
+          const domains = parsed.domains.filter(isRecord)
+          for (const key of parsed.keys.filter(isRecord)) {
+            if (Object.hasOwn(key, 'domains')) continue
+            if (key.domainId === null) key.domains = []
+            else {
+              const domain = domains.find(domain => domain.id === key.domainId)
+              if (typeof domain?.name === 'string') key.domains = [domain.name]
+            }
+            if (Array.isArray(key.domains)) delete key.domainId
+          }
+        }
         if (!validSnapshot(parsed)) throw new Error('Invalid demo snapshot')
         state = parsed
       } catch {
@@ -544,9 +557,9 @@ export function createMockApi(): OpenSendApi {
       create: (input, signal) => run(signal, true, s => {
         const name = text(input.name, 'name', 100)
         if (input.permission !== 'send' && input.permission !== 'read') invalid('permission', 'Choose send or read permission.')
-        if (input.domainId !== null) find(s.domains, input.domainId, 'Domain')
+        if (!Array.isArray(input.domains) || !input.domains.every(name => typeof name === 'string' && s.domains.some(domain => domain.name === name))) invalid('domains', 'Choose connected domain hostnames.')
         const secret = `demo_key_${crypto.randomUUID().replaceAll('-', '')}`
-        const key = { id: id('key'), name, prefix: secret.slice(0, 17), permission: input.permission, domainId: input.domainId, createdAt: now(), lastUsedAt: null }
+        const key = { id: id('key'), name, prefix: secret.slice(0, 17), permission: input.permission, domains: [...input.domains], createdAt: now(), lastUsedAt: null }
         s.keys.push(key)
         return { key, secret }
       }),
