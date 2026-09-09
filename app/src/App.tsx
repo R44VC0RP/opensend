@@ -37,6 +37,6 @@ export function App() {
     <Route path="segments" element={<SegmentsPage />} /><Route path="segments/new" element={<SegmentEditorPage />} /><Route path="segments/:id" element={<SegmentEditorPage />} />
     <Route path="api-keys" element={<ApiKeysPage />} /><Route path="domains" element={<DomainsPage />} /><Route path="domains/:id" element={<DomainDetailPage />} />
     <Route path="settings" element={<SettingsPage />} /><Route path="settings/webhooks" element={<WebhooksPage />} /><Route path="settings/webhooks/new" element={<WebhookDetailPage />} /><Route path="settings/webhooks/:id" element={<WebhookDetailPage />} />
-    <Route path="*" element={<EmptyState title="Page not found" description="This page may have moved or no longer exists." action={<Link to="/">Return to overview</Link>} />} />
+    <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" description="This page may have moved or no longer exists." action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

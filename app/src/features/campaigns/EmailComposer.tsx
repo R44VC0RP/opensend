@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { composeReactEmail, isDocumentVisuallyEmpty } from '@react-email/editor/core'
@@ -14,6 +14,7 @@ type Draft = { html: string; editor: CampaignEditorMetadata | null }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
 type Props = { initialHtml: string; initialEditor?: CampaignEditorMetadata | null; previewText: string; disabled?: boolean; onReady: () => void; onDirty: () => void }
 type Mode = 'compose' | 'html' | 'preview'
+const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
 export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ initialHtml, initialEditor, previewText, disabled = false, onReady, onDirty }, ref) {
   const [initial] = useState(() => prepareEditorContent(initialHtml, initialEditor))
@@ -54,6 +55,29 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     } }
   })
 
+  function synchronizeEditor(instance: EmailEditorRef) {
+    const value = instance.editor
+    if (!value) return
+    // Tiptap preserves isEditable during React option updates; synchronize it explicitly.
+    value.setEditable(!locked && source === 'compose', false)
+    value.setOptions({ editorProps: {
+      ...value.options.editorProps,
+      attributes: { 'aria-label': 'Email content', role: 'textbox', 'aria-multiline': 'true' },
+      handlePaste: (_view, event) => {
+        if (locked || source !== 'compose') return true
+        if (event.clipboardData?.files.length) return false
+        const html = event.clipboardData?.getData('text/html')
+        if (!html) return false
+        event.preventDefault()
+        value.commands.insertContent(prepareEditorContent(html).content)
+        return true
+      },
+      transformPastedHTML: html => String(prepareEditorContent(html).content),
+    } })
+  }
+  // Run after child option reconciliation so the name and paste boundary remain installed.
+  useEffect(() => { if (editor.current) synchronizeEditor(editor.current) })
+
   async function prepare(allowEmpty = false): Promise<Draft> {
     if (uploads.current) throw new Error('Wait for your image to finish loading before continuing.')
     if (sourceRef.current === 'html') return { html: latestRaw.current, editor: null }
@@ -85,14 +109,15 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     setConvert(false)
   }
   async function selectMode(next: string) {
-    if (locked || operation.current || next === mode) return
+    if (locked || operation.current) return false
+    if (next === mode) return true
     setError('')
     if (next === 'compose') {
       if (sourceRef.current === 'html') {
-        if (!prepareEditorContent(latestRaw.current).canCompose) { setConvert(true); return }
+        if (!prepareEditorContent(latestRaw.current).canCompose) { setConvert(true); return false }
         openVisual()
       } else setMode('compose')
-      return
+      return true
     }
     operation.current = true
     setBusy(true)
@@ -101,7 +126,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       if (next === 'html') { latestRaw.current = draft.html; setRaw(draft.html) }
       else setPreview(draft.html)
       setMode(next as Mode)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not prepare this email.') }
+      return true
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not prepare this email.'); return false }
     finally { operation.current = false; setBusy(false) }
   }
   const upload = useCallback(async (file: File) => {
@@ -133,8 +159,17 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     }
     run(instance)
   }
-  return <div className="email-composer">
-    <div className="composer-mode-bar"><Tabs value={mode} onValueChange={selectMode} label="Email content mode" items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} />{busy && <span className="muted" role="status">Preparing…</span>}</div>
+  return <div className="email-composer" data-inactive={locked || mode !== 'compose' || undefined} onClickCapture={event => { if (locked) { event.preventDefault(); event.stopPropagation() } }} onKeyDownCapture={event => {
+    if (event.key === 'Escape' && (event.target as Element).closest(linkForms)) {
+      event.preventDefault()
+      event.stopPropagation()
+      const trigger = (event.target as Element).closest('[data-re-link-selector]')?.querySelector<HTMLButtonElement>('[data-re-link-selector-trigger]')
+      // These library forms stop bubbling before their own window Escape listener can run.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      requestAnimationFrame(() => { if (trigger?.isConnected) trigger.focus(); else editor.current?.editor?.commands.focus() })
+    } else if (locked) { event.preventDefault(); event.stopPropagation() }
+  }}>
+    <div className="composer-mode-bar"><Tabs value={mode} onValueChange={selectMode} disabled={locked} label="Email content mode" items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} />{busy && <span className="muted" role="status">Preparing…</span>}</div>
     {error && <Alert tone="danger">{error}</Alert>}
     <div hidden={mode !== 'compose'} className="composer-visual">
       <div className="composer-tools" aria-label="Email formatting" onMouseDown={event => { if ((event.target as HTMLElement).closest('button')) event.preventDefault() }}>
@@ -153,7 +188,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       </div>
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your newsletter, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { instance.editor?.setOptions({ editorProps: { ...instance.editor.options.editorProps, attributes: { 'aria-label': 'Email content', role: 'textbox', 'aria-multiline': 'true' }, handlePaste: (_view, event) => { if (event.clipboardData?.files.length) return false; const html = event.clipboardData?.getData('text/html'); if (!html) return false; event.preventDefault(); instance.editor?.commands.insertContent(prepareEditorContent(html).content); return true }, transformPastedHTML: html => String(prepareEditorContent(html).content) } }); setReady(true); onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
+        <EmailEditor key={generation} ref={editor} content={content} theme={theme} editable={!locked && source === 'compose'} placeholder="Write your newsletter, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); setReady(true); onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
       </div>
     </div>
     {mode === 'html' && <Field label="Email HTML" htmlFor="campaign-html"><Textarea id="campaign-html" className="campaign-html" value={raw} disabled={locked} spellCheck={false} onChange={event => { latestRaw.current = event.target.value; setRaw(event.target.value); sourceRef.current = 'html'; setSource('html'); onDirty() }} /></Field>}

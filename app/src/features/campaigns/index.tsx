@@ -164,7 +164,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
         <div className="campaign-sender">
           <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={pending} /></Field>
           <span aria-hidden="true">@</span>
-          <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={pending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select domain', disabled: true }, ...options.data.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
+          <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={pending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select', disabled: true }, ...options.data.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
         </div>
         {options.data.domains.length === 0 && <Alert tone="warning">No verified domains in this region. <Link to="/domains">Set up a sending domain</Link> before saving.</Alert>}
         <section className="section">

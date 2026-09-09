@@ -48,9 +48,26 @@ export function Switch({ checked, onCheckedChange, label, disabled, id: supplied
   const id = suppliedId ?? generatedId;
   return <div className="ui-check-field"><SwitchPrimitive.Root {...props} id={id} checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} className="ui-switch"><SwitchPrimitive.Thumb className="ui-switch__thumb" /></SwitchPrimitive.Root><label htmlFor={id}>{label}</label></div>;
 }
-export function Tabs({ value, onValueChange, items, label = 'Sections' }: { value: string; onValueChange: (value: string) => void; items: { value: string; label: string; count?: number }[]; label?: string }) {
+export function Tabs({ value, onValueChange, items, label = 'Sections', disabled = false }: { value: string; onValueChange: (value: string) => void | boolean | Promise<void | boolean>; items: { value: string; label: string; count?: number }[]; label?: string; disabled?: boolean }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
-  return <div className="ui-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => onValueChange(item.value)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); onValueChange(items[next].value); refs.current[next]?.focus(); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
+  const activating = useRef(false);
+  const [focusTarget, setFocusTarget] = useState<string | null>(null);
+  useEffect(() => {
+    if (disabled || focusTarget === null || value !== focusTarget) return;
+    const tab = refs.current[items.findIndex(item => item.value === focusTarget)];
+    if (tab && (tab.parentElement?.contains(document.activeElement) || document.activeElement === document.body)) tab.focus();
+    setFocusTarget(null);
+  }, [disabled, focusTarget, items, value]);
+  async function activate(index: number) {
+    if (disabled || activating.current) return;
+    activating.current = true;
+    try {
+      const accepted = await onValueChange(items[index].value);
+      // Restore focus after React commits both the selected mode and the enabled controls.
+      setFocusTarget(accepted === false ? value : items[index].value);
+    } finally { activating.current = false; }
+  }
+  return <div className="ui-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.value} ref={node => { refs.current[index] = node; }} type="button" role="tab" disabled={disabled} aria-selected={value === item.value} tabIndex={value === item.value ? 0 : -1} className="ui-tab" onClick={() => void activate(index)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % items.length : event.key === 'ArrowLeft' ? (index + items.length - 1) % items.length : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : null; if (next !== null) { event.preventDefault(); void activate(next); } }}>{item.label}{item.count !== undefined && <span className="ui-tab__count">{item.count.toLocaleString()}</span>}</button>)}</div>;
 }
 export type DialogProps = { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; className?: string };
 export function Dialog({ open, onOpenChange, title, description, children, footer, className }: DialogProps) {
@@ -111,8 +128,8 @@ export function StatusBadge({ status, tone = statusTone(status) }: { status: str
 export function Alert({ tone = 'neutral', title, children, onDismiss }: { tone?: Tone; title?: ReactNode; children: ReactNode; onDismiss?: () => void }) {
   return <div className={cx('ui-alert', `ui-tone--${tone}`)} role={tone === 'danger' ? 'alert' : 'status'}><div>{title && <div className="ui-alert__title">{title}</div>}<div>{children}</div></div>{onDismiss && <IconButton label="Dismiss notification" onClick={onDismiss}><X size={14} /></IconButton>}</div>;
 }
-export function EmptyState({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
-  return <div className="ui-empty-state"><h3>{title}</h3>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
+export function EmptyState({ title, description, action, headingAs: Heading = 'h3' }: { title: string; description?: string; action?: ReactNode; headingAs?: 'h1' | 'h3' }) {
+  return <div className="ui-empty-state"><Heading>{title}</Heading>{description && <p className="muted">{description}</p>}{action && <div>{action}</div>}</div>;
 }
 export function LoadingState({ rows = 5 }: { rows?: number }) {
   return <div className="ui-loading" role="status" aria-label="Loading"><span className="sr-only">Loading…</span>{Array.from({ length: rows }, (_, index) => <div key={index} className="ui-skeleton-row" aria-hidden="true"><span className="ui-skeleton" /><span className="ui-skeleton" /><span className="ui-skeleton" /></div>)}</div>;

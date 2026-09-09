@@ -54,7 +54,7 @@ export function ContactDetailBodySkeleton() {
   </>
 }
 export function SegmentEditorBodySkeleton() {
-  return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div><section className="section stack"><SectionHeader title="Conditions" /><div className="cluster"><span>Match</span><ControlSkeleton width={194} /></div><div className="audience-rule"><FieldSkeleton label="Property" /><FieldSkeleton label="Operator" /><FieldSkeleton label="Value" /><div className="audience-rule-remove"><ControlSkeleton width={34} /></div></div><div className="cluster"><ControlSkeleton width={133} /><ControlSkeleton width={141} /></div></section></div>
+  return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div><section className="section stack"><SectionHeader title="Conditions" /><div className="cluster"><span>Match</span><ControlSkeleton width={220} /></div><div className="audience-rule"><FieldSkeleton label="Property" /><FieldSkeleton label="Operator" /><FieldSkeleton label="Value" /><div className="audience-rule-remove"><ControlSkeleton width={34} /></div></div><div className="cluster"><ControlSkeleton width={133} /><ControlSkeleton width={141} /></div></section></div>
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {
   if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={200} lineHeight={24} />} backTo="/contacts" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>

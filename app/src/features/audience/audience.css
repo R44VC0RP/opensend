@@ -5,13 +5,13 @@
 .audience-count { min-width: 100px; min-height: 20px; }
 .audience-summary > .ui-skeleton-line, .audience-page > .data-toolbar > .ui-skeleton-line { width: auto; }
 .ui-input.audience-search { width: 320px; max-width: 100%; flex-shrink: 0; }
-.ui-select-trigger.audience-match { width: 194px; max-width: 100%; flex-shrink: 0; }
+.ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-summary { min-height: 58px; padding-block: var(--space-16); border-bottom: 1px solid var(--color-border); gap: var(--space-24); }
 .audience-properties { padding-block: var(--space-16); }
 .audience-properties dl { display: grid; grid-template-columns: 164px minmax(0, 1fr); margin: 0; }
 .audience-properties dt, .audience-properties dd { margin: 0; padding-block: var(--space-12); overflow-wrap: anywhere; }
 .audience-properties dt { color: var(--color-muted); }
-.audience-editor { padding-top: var(--space-24); }
+.audience-editor { padding-top: 0; }
 .audience-name { max-width: 480px; }
 .audience-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px; gap: var(--space-12); align-items: start; }
 .audience-rule-remove { margin-top: var(--space-24); }
