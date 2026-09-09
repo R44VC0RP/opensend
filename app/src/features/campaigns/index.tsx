@@ -4,11 +4,12 @@ import { useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { Campaign, CampaignInput, PageResult, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
-  Field, Input, LoadingState, PageHeader, Pagination, SectionHeader, Select,
+  Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
   StatusBadge, Tabs, Textarea,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, percent, time } from '../../lib/format'
+import { campaignColumns, CampaignAudienceSkeleton, CampaignEditorSkeleton, CampaignRouteSkeleton } from './skeletons'
 import './campaigns.css'
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
@@ -36,21 +37,21 @@ function CampaignList({ regionId }: { regionId: string }) {
   return <>
     <PageHeader title="Campaigns" actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
     <Tabs value={status} onValueChange={value => filter('status', value === 'all' ? '' : value)} items={[
-      { value: 'all', label: 'All campaigns', count: query.data?.facets?.all },
-      { value: 'draft', label: 'Drafts', count: query.data?.facets?.draft },
-      { value: 'scheduled', label: 'Scheduled', count: query.data?.facets?.scheduled },
-      { value: 'sent', label: 'Sent', count: query.data?.facets?.sent },
+      { value: 'all', label: 'All campaigns' },
+      { value: 'draft', label: 'Drafts' },
+      { value: 'scheduled', label: 'Scheduled' },
+      { value: 'sent', label: 'Sent' },
     ]} />
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /></div>
-    {query.isPending ? <LoadingState /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable rows={query.data.items} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={search || status !== 'all' ? 'No matching campaigns' : 'No campaigns yet'} description={search || status !== 'all' ? 'Try another search or status.' : 'Create your first campaign in this region.'} action={search || status !== 'all' ? <Button variant="secondary" onClick={() => setParams({})}>Clear filters</Button> : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
-        { key: 'name', label: 'Campaign', width: '35%', render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject}</span></div> },
-        { key: 'status', label: 'Status', render: row => <StatusBadge status={row.status} /> },
-        { key: 'recipients', label: 'Recipients', render: row => number(row.recipients) },
-        { key: 'delivered', label: 'Delivered', render: row => row.status === 'sent' && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
-        { key: 'updated', label: 'Last activity', render: row => <span className="muted">{date(row.scheduledAt || row.updatedAt)} · {time(row.scheduledAt || row.updatedAt)} UTC</span> },
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
+      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rowSize="large" rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={search || status !== 'all' ? 'No matching campaigns' : 'No campaigns yet'} description={search || status !== 'all' ? 'Try another search or status.' : 'Create your first campaign in this region.'} action={search || status !== 'all' ? <Button variant="secondary" onClick={() => setParams({})}>Clear filters</Button> : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject}</span></div> },
+        { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
+        { ...campaignColumns[2], render: row => number(row.recipients) },
+        { ...campaignColumns[3], render: row => row.status === 'sent' && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
+        { ...campaignColumns[4], render: row => <span className="muted">{date(row.scheduledAt || row.updatedAt)} · {time(row.scheduledAt || row.updatedAt)} UTC</span> },
       ]} />
-      <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />
+      {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
     </>}
   </>
 }
@@ -59,7 +60,7 @@ export function CampaignEditorPage() {
   const { id } = useParams()
   const { regionId } = useRegion()
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new', regionId], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
-  if (query.isPending) return <LoadingState />
+  if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   if (query.data && query.data.regionId !== regionId) return <RegionMismatch campaign={query.data} />
   if (query.data && query.data.status !== 'draft') return <>
@@ -77,7 +78,7 @@ function RegionMismatch({ campaign }: { campaign: Campaign }) {
 
 function AudienceSummary({ listId, segmentId, regionId }: { listId: string; segmentId: string | null; regionId: string }) {
   const query = useApiQuery(['campaign-audience', { listId, segmentId, regionId }], (api, signal) => api.campaigns.audience({ listId, segmentId }, signal))
-  if (query.isPending) return <LoadingState />
+  if (query.isPending) return <CampaignAudienceSkeleton />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <div className="campaign-audience-summary">
     <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(query.data.matched)}</span></div>
@@ -143,7 +144,7 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   return <>
     <PageHeader title={initial?.name || 'Create campaign'} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled={options.isPending || options.isError} loading={saveMutation.isPending} onClick={() => save('edit')}>Save draft</Button><Button variant="primary" disabled={options.isPending || options.isError} loading={saveMutation.isPending} onClick={() => save('review')}>Continue to review</Button></div>} />
     {error && <Alert tone="danger">{error}</Alert>}
-    {options.isPending ? <LoadingState /> : options.isError ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : <div className="campaign-editor-layout">
+    {options.isPending ? <CampaignEditorSkeleton isNew={!initial} hasAudience={Boolean(form.listId)} hasSegment={Boolean(form.segmentId)} /> : options.isError ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : <div className="campaign-editor-layout">
       <div className="campaign-fields">
         <Field label="Name" htmlFor="campaign-name"><Input id="campaign-name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={saveMutation.isPending} /></Field>
         <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={saveMutation.isPending} /></Field>
@@ -206,7 +207,7 @@ export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const { regionId } = useRegion()
   const query = useApiQuery(['campaign', id, regionId], (api, signal) => api.campaigns.get(id, signal))
-  if (query.isPending) return <LoadingState />
+  if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   if (query.data.regionId !== regionId) return <RegionMismatch campaign={query.data} />
   return <CampaignReview key={`${id}:${regionId}`} campaign={query.data} />
@@ -252,7 +253,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     <div className="campaign-review-layout">
       <section className="campaign-fields">
         <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`)}>Edit audience</Button> : undefined} />
-        {draft ? audience.isPending ? <LoadingState /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.refetch()} /> : <>
+        {draft ? audience.isPending ? <CampaignAudienceSkeleton review /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.refetch()} /> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">will receive this email</p></div>
           <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>

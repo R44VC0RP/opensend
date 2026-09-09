@@ -3,10 +3,11 @@ import { useNavigate, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight, Download, Search } from 'lucide-react'
 import { useApiQuery, useRegion } from '../../data/context'
 import type { Email } from '../../data/types'
-import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, LoadingState, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, SkeletonText, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { EmailPreview, htmlToText } from '../../components/EmailPreview'
 import { date, label, number, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
+import { EmailDetailSkeleton, logColumns } from './skeletons'
 
 export function LogsPage() {
   const { regionId } = useRegion()
@@ -26,24 +27,24 @@ function RegionalLogs({ regionId }: { regionId: string }) {
       <Select aria-label="Email stream filter" value={stream} onValueChange={value => { setStream(value); setPage(1) }} options={[{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div>
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv('opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Sent at', 'Region'], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, email.regionId])])}><Download size={16} />Export page</Button>
     </div>
-    {query.isPending ? <LoadingState rows={8} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : query.data && <>
-      <div className="table-summary"><span>{number(query.data.total)} emails</span><span>Times in UTC</span></div>
-      <DataTable rows={query.data.items} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
-        { key: 'status', label: 'Status', width: '13%', render: row => <StatusBadge status={row.status} /> },
-        { key: 'to', label: 'Recipient', width: '24%', render: row => row.to },
-        { key: 'subject', label: 'Subject', width: '32%', render: row => row.subject },
-        { key: 'stream', label: 'Stream', render: row => <span className="muted">{label(row.stream)}</span> },
-        { key: 'time', label: 'Sent at', render: row => <span className="muted nowrap">{time(row.sentAt)}</span> },
-        { key: 'open', label: '', width: 24, render: () => <ChevronRight size={16} aria-hidden /> },
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
+      <div className="table-summary"><span>{query.data ? `${number(query.data.total)} emails` : <SkeletonText width={100} />}</span><span>Times in UTC</span></div>
+      <DataTable<Email> loading={query.isPending} skeletonRows={10} minRows={10} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
+        { ...logColumns[0], render: row => <StatusBadge status={row.status} /> },
+        { ...logColumns[1], render: row => row.to },
+        { ...logColumns[2], render: row => row.subject },
+        { ...logColumns[3], render: row => <span className="muted">{label(row.stream)}</span> },
+        { ...logColumns[4], render: row => <span className="muted nowrap">{time(row.sentAt)}</span> },
+        { ...logColumns[5], render: () => <ChevronRight size={16} aria-hidden /> },
       ]} empty={<EmptyState title="No emails found" description="Try another search, status, or region." action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1) }}>Clear filters</Button>} />} />
-      <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} onPageChange={setPage} />
+      {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
   </>
 }
 export function EmailDetailPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['email', id], (api, signal) => api.emails.get(id, signal))
-  if (query.isPending) return <LoadingState />
+  if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return query.data ? <EmailDetail email={query.data} /> : null
 }

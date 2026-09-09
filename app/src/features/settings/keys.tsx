@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react'
-import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingState, PageHeader, Select } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Select, Skeleton } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { ApiKey, ApiKeyInput } from '../../data/types'
 import { date } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from './shared'
+import { settingsColumns } from './skeletons'
 
 export function ApiKeysPage() {
   const { regionId } = useRegion()
@@ -34,12 +35,12 @@ export function ApiKeysPage() {
   return <div className="stack">
     <PageHeader title="API keys" actions={<Button variant="primary" onClick={openCreate}>Create key</Button>} />
     <div className="page-toolbar muted">Workspace-wide keys · Domain restrictions available in {regionId}</div>
-    {keys.isPending ? <LoadingState /> : keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable rows={keys.data} rowKey={row => row.id} empty={<EmptyState title="No API keys" action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
-      { key: 'name', label: 'Name', width: '23%', render: row => row.name },
-      { key: 'prefix', label: 'Key prefix', width: '20%', render: row => <code>{row.prefix}</code> },
-      { key: 'permission', label: 'Permissions', width: '30%', render: row => <>{row.permission === 'read' ? 'Read only' : 'Send'} · {row.domainId ? domains.data?.items.find(domain => domain.id === row.domainId)?.name ?? row.domainId : 'All domains'}</> },
-      { key: 'last', label: 'Last used', render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
-      { key: 'actions', label: '', align: 'right', width: 100, render: row => <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
+    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No API keys" action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
+      { ...settingsColumns.keys[0], render: row => row.name },
+      { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
+      { ...settingsColumns.keys[2], render: row => <>{row.permission === 'read' ? 'Read only' : 'Send'} · {row.domainId ? domains.isPending ? <Skeleton width={130} className="settings-inline-skeleton" /> : domains.data?.items.find(domain => domain.id === row.domainId)?.name ?? row.domainId : 'All domains'}</> },
+      { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
+      { ...settingsColumns.keys[4], render: row => <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
     ]} />}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Create API key" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-api-key">Create key</Button></>}>
       <form id="create-api-key" className="stack" onSubmit={submit} noValidate>

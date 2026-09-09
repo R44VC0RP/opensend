@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApiQuery, useRegion } from '../../data/context'
 import type { ChartPoint, Stream, TimeRange } from '../../data/types'
-import { Button, DataTable, EmptyState, ErrorState, LoadingState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { Button, DataTable, EmptyState, ErrorState, Skeleton, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { date, number, percent, label } from '../../lib/format'
+import { OverviewBodySkeleton, recentCampaignColumns } from './skeletons'
 
 export function OverviewPage() {
   const { regionId } = useRegion()
@@ -16,8 +17,8 @@ export function OverviewPage() {
   const current = regions.data?.find(region => region.id === regionId)
   const data = query.data
   const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
-  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span>{current && <StatusBadge status={current.access} tone={current.access === 'production' ? 'success' : 'warning'} />}</div>} />{filterBar}
-    {query.isPending ? <LoadingState rows={6} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <>
+  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span>{current ? <StatusBadge status={current.access} tone={current.access === 'production' ? 'success' : 'warning'} /> : <Skeleton width={84} height={20} />}</div>} />{filterBar}
+    {query.isPending ? <OverviewBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <>
       <div className="metrics-grid">
         <Metric title="Sent" value={number(data.sent)} note={data.previousSent ? `${percent((data.sent - data.previousSent) / data.previousSent, 1)} vs. previous period` : 'No previous-period sends'} tone="accent" />
         <Metric title="Delivered" value={percent(data.sent ? data.delivered / data.sent : 0)} note={`${number(data.delivered)} ${data.delivered === 1 ? 'email' : 'emails'}`} />
@@ -25,7 +26,7 @@ export function OverviewPage() {
         <Metric title="Complaints" value={percent(data.sent ? data.complaints / data.sent : 0)} note={`${number(data.complaints)} ${data.complaints === 1 ? 'email' : 'emails'}`} tone="danger" />
       </div>
       <section className="chart-section" aria-label="Sending activity"><SectionHeader title="Email activity" actions={<div className="chart-legend"><span><i className="legend-sent" />Sent</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span><span>UTC</span></div>} />{data.sent ? <ActivityChart points={data.points} /> : <EmptyState title="No emails in this period" description="Choose another period or email stream." />}</section>
-      <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>View all <ArrowUpRight size={16} /></Button>} /><DataTable rows={data.recentCampaigns} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${row.status === 'draft' ? 'edit' : 'review'}`)} columns={[{ key: 'name', label: 'Campaign', render: row => <div><span>{row.name}</span><div className="muted cell-caption">{date(row.updatedAt)}</div></div> }, { key: 'sent', label: 'Recipients', render: row => number(row.recipients), align: 'right' }, { key: 'delivered', label: 'Delivered', render: row => row.status === 'sent' ? <span className="text-success">{percent(row.recipients ? row.delivered / row.recipients : 0)}</span> : <StatusBadge status={row.status} />, align: 'right' }]} empty={<EmptyState title="No campaigns yet" action={<Button onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} /></section>
+      <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>View all <ArrowUpRight size={16} /></Button>} /><DataTable minRows={4} rowSize="large" rows={data.recentCampaigns} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${row.status === 'draft' ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <div><span>{row.name}</span><div className="muted cell-caption">{date(row.updatedAt)}</div></div> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => row.status === 'sent' ? <span className="text-success">{percent(row.recipients ? row.delivered / row.recipients : 0)}</span> : <StatusBadge status={row.status} />, align: 'right' }]} empty={<EmptyState title="No campaigns yet" action={<Button onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} /></section>
       <section className="sending-streams"><SectionHeader title="Sending streams" />{data.streams.map(item => <div className="stream-row" key={item.name}><div className="cluster between"><span>{label(item.name)}</span><span>{number(item.sent)}</span></div><div className={`stream-track stream-track--${item.name}`}><span style={{ width: `${data.sent ? item.sent / data.sent * 100 : 0}%` }} /></div></div>)}<Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>Explore email logs <ArrowUpRight size={16} /></Button></section></div>
     </>}
   </>

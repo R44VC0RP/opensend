@@ -7,6 +7,7 @@ import * as SwitchPrimitive from '@radix-ui/react-switch';
 import { ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, LoaderCircle, MoreHorizontal, X } from 'lucide-react';
 import { Link } from 'react-router';
 import { label as formatLabel } from '../../lib/format';
+import { SkeletonText, PaginationSkeleton } from './skeleton';
 
 const cx = (...values: (string | false | null | undefined)[]) => values.filter(Boolean).join(' ');
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'info';
@@ -69,9 +70,20 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
 export function DropdownMenu({ items, label = 'More actions', trigger }: { items: { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean }[]; label?: string; trigger?: ReactNode }) {
   return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align="end" sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
 }
-export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right' };
-export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, empty }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; selectedId?: string; empty?: ReactNode }) {
-  return <div className="ui-table-scroll"><table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead><tbody>{rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}</tbody></table>{rows.length === 0 && (empty ?? <EmptyState title="No results" />)}</div>;
+export type Column<T> = { key: string; label: ReactNode; render: (row: T) => ReactNode; width?: string | number; align?: 'left' | 'right'; skeleton?: ReactNode };
+export type SkeletonColumn = Pick<Column<never>, 'key' | 'label' | 'width' | 'align' | 'skeleton'>;
+export function DataTable<T>({ columns, rows, rowKey, onRowClick, selectedId, empty, loading = false, skeletonRows = 5, minRows = 0, rowSize = 'default' }: { columns: Column<T>[]; rows: T[]; rowKey: (row: T) => string; onRowClick?: (row: T) => void; selectedId?: string; empty?: ReactNode; loading?: boolean; skeletonRows?: number; minRows?: number; rowSize?: 'default' | 'large' }) {
+  return <div className={cx('ui-table-scroll', rowSize === 'large' && 'ui-table-scroll--large')} aria-busy={loading || undefined}>
+    {loading && <span className="sr-only" role="status">Loading table</span>}
+    <table className="ui-table"><thead><tr>{columns.map(column => <th scope="col" key={column.key} style={{ width: column.width, textAlign: column.align }}>{column.label}</th>)}</tr></thead>
+      <tbody>{loading ? Array.from({ length: skeletonRows }, (_, index) => <tr key={index} aria-hidden="true">{columns.map((column, columnIndex) => <td key={column.key} data-skeleton-align={column.align}>{column.skeleton ?? <SkeletonText width={columnIndex === 0 ? '72%' : '58%'} />}</td>)}</tr>) : rows.map(row => { const id = rowKey(row); return <tr key={id} data-selected={selectedId === id || undefined} className={onRowClick ? 'ui-table__clickable' : undefined} tabIndex={onRowClick ? 0 : undefined} onClick={event => { if (onRowClick && !(event.target as HTMLElement).closest('button, a, input, [role="checkbox"], [role="switch"]')) onRowClick(row); }} onKeyDown={event => { if (onRowClick && event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onRowClick(row); } }}>{columns.map(column => <td key={column.key} style={{ textAlign: column.align }}>{column.render(row)}</td>)}</tr>; })}
+        {!loading && rows.length > 0 && rows.length < minRows && <tr className="ui-table-spacer" aria-hidden="true"><td colSpan={columns.length} style={{ height: `calc(${minRows - rows.length} * var(--table-row-height))` }} /></tr>}
+      </tbody></table>
+    {!loading && rows.length === 0 && <div className="ui-table-empty" style={{ minHeight: `calc(${minRows} * var(--table-row-height))` }}>{empty ?? <EmptyState title="No results" />}</div>}
+  </div>;
+}
+export function TableSkeleton({ columns, rows = 5, rowSize = 'default', pagination = false }: { columns: SkeletonColumn[]; rows?: number; rowSize?: 'default' | 'large'; pagination?: boolean }) {
+  return <><DataTable columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} rowSize={rowSize} />{pagination && <PaginationSkeleton />}</>;
 }
 export function Pagination({ page, pageSize, total, onPageChange }: { page: number; pageSize: number; total: number; onPageChange: (page: number) => void }) {
   const pages = Math.max(1, Math.ceil(total / Math.max(1, pageSize)));

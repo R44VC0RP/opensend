@@ -1,3 +1,13 @@
+.settings-region-scope.stack { min-height: 102px; gap: 8px; }
+.settings-loading-body { display: contents; }
+.settings-loading-body > .section { margin-block: 0; }
+.settings-account { min-height: 50px; }
+.settings-account > .ui-control-skeleton { flex-shrink: 0; }
+.settings-account > .ui-skeleton-line > .ui-skeleton-block { max-width: 270px; }
+.settings-inline-skeleton { display: inline-block; vertical-align: middle; }
+.settings-copy-cell > .ui-skeleton-line { flex: 1; }
+.settings-copy-cell > .ui-control-skeleton { flex-shrink: 0; }
+
 .settings-secret,
 .settings-copy-cell {
   display: flex;

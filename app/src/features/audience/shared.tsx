@@ -1,7 +1,8 @@
 import { useApiQuery } from '../../data/context'
 import { ApiError, type AudienceList, type Contact } from '../../data/types'
-import { Alert, DataTable, StatusBadge } from '../../components/ui'
+import { Alert, DataTable, SkeletonText, StatusBadge } from '../../components/ui'
 import { Link } from 'react-router'
+import { contactColumns, memberColumns } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
 
 export const pageSize = 8
@@ -22,14 +23,18 @@ export function useAudienceLists() {
     return items
   })
 }
-export function ContactTable({ contacts, lists = [], members = false }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean }) {
-  return <DataTable rows={contacts} rowKey={row => row.id} columns={[
-    { key: 'email', label: 'Email', width: '28%', render: row => <Link to={`/contacts/${row.id}`}>{row.email}</Link> },
-    { key: 'status', label: 'Status', width: '17%', render: row => <StatusBadge status={row.status} /> },
-    ...(members ? [{ key: 'suppression', label: 'Suppression reason', render: (row: Contact) => row.suppressionReason || 'None' }] : [
-      { key: 'name', label: 'Name', render: (row: Contact) => row.name || '—' },
-      { key: 'lists', label: 'Lists', render: (row: Contact) => row.listIds.length ? row.listIds.map(id => lists.find(list => list.id === id)?.name || id).join(', ') : '—' },
-    ]),
-    { key: 'created', label: 'Added', width: '17%', render: row => date(row.createdAt) },
-  ]} />
+export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean }) {
+  const columns = members ? memberColumns : contactColumns
+  return <DataTable rows={contacts} loading={loading} skeletonRows={pageSize} minRows={minRows} rowKey={row => row.id} columns={columns.map(column => ({ ...column, render: (row: Contact) => {
+    if (column.key === 'email') return <Link className="audience-cell-text" title={row.email} to={`/contacts/${row.id}`}>{row.email}</Link>
+    if (column.key === 'status') return <StatusBadge status={row.status} />
+    if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || 'None'}>{row.suppressionReason || 'None'}</span>
+    if (column.key === 'name') return <span className="audience-cell-text" title={row.name}>{row.name || '—'}</span>
+    if (column.key === 'lists') {
+      if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
+      const names = row.listIds.map(id => lists.find(list => list.id === id)?.name || id).join(', ')
+      return <span className="audience-cell-text" title={names}>{names || '—'}</span>
+    }
+    return date(row.createdAt)
+  } }))} />
 }

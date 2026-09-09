@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { ArrowUpRight } from 'lucide-react'
-import { Button, DataTable, Dialog, ErrorState, Field, Input, LoadingState, PageHeader, SectionHeader, StatusBadge } from '../../components/ui'
+import { Button, DataTable, Dialog, ErrorState, Field, Input, PageHeader, SectionHeader, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { Workspace } from '../../data/types'
 import { label, number, percent } from '../../lib/format'
 import { fieldError, MutationError, SettingsTabs } from './shared'
+import { settingsColumns, SettingsBodySkeleton } from './skeletons'
 
 function WorkspaceForm({ workspace }: { workspace: Workspace }) {
   const [name, setName] = useState(workspace.name)
@@ -45,17 +46,17 @@ export function SettingsPage() {
   return <div className="stack">
     <PageHeader title="Settings" actions={<a className="ui-button ui-button--secondary" href={`https://${regionId}.console.aws.amazon.com/ses/home?region=${regionId}#/account`} target="_blank" rel="noopener noreferrer">Open AWS console <ArrowUpRight size={16} aria-hidden /></a>} />
     <SettingsTabs value="ses" />
-    {workspace.isPending || regions.isPending ? <LoadingState /> : workspace.error || regions.error ? <ErrorState error={workspace.error || regions.error} onRetry={() => { void workspace.refetch(); void regions.refetch() }} /> : <>
+    {workspace.isPending || regions.isPending ? <SettingsBodySkeleton regionId={regionId} /> : workspace.error || regions.error ? <ErrorState error={workspace.error || regions.error} onRetry={() => { void workspace.refetch(); void regions.refetch() }} /> : <>
       <div className="settings-account"><div>{workspace.data.name} AWS · •••• {workspace.data.accountId.slice(-4)}</div><StatusBadge status="Connected" /><Button loading={workspace.isFetching || regions.isFetching} onClick={() => { void workspace.refetch(); void regions.refetch() }}>Refresh</Button></div>
       <section className="section stack">
         <SectionHeader title="Connected regions" actions={<Button onClick={() => { setNewRegion(''); setInvalid(''); connect.reset(); setOpen(true) }}>Add region</Button>} />
-        <DataTable rows={regions.data} rowKey={region => region.id} columns={[
-          { key: 'region', label: 'Region', width: '22%', render: region => <div><div>{region.id}</div><div className="muted">{region.name}</div></div> },
-          { key: 'access', label: 'Access', width: '17%', render: region => <div><div>{label(region.access)}</div><div className="muted">{region.access === 'sandbox' ? 'Verified recipients only' : 'Any recipient'}</div></div> },
-          { key: 'health', label: 'Health', width: '17%', render: region => <div><StatusBadge status={label(region.health)} tone={region.health === 'probation' ? 'warning' : region.health === 'shutdown' ? 'danger' : 'success'} /><div className="muted">Sending {region.sendingEnabled ? 'enabled' : 'disabled'}</div></div> },
-          { key: 'quota', label: 'Sent in last 24h', width: '22%', render: region => <div>{number(region.sent24h)} / {number(region.dailyQuota)}<div className="muted">{number(Math.max(0, region.dailyQuota - region.sent24h))} remaining</div></div> },
-          { key: 'rate', label: 'Max. send rate', render: region => `${number(region.maxSendRate)} / sec` },
-          { key: 'action', label: '', align: 'right', render: region => <Button variant="ghost" aria-pressed={regionId === region.id} disabled={regionId === region.id} onClick={() => setRegionId(region.id)}>{regionId === region.id ? 'Selected' : 'View details'}</Button> },
+        <DataTable minRows={3} rowSize="large" rows={regions.data} rowKey={region => region.id} columns={[
+          { ...settingsColumns.regions[0], render: region => <div><div>{region.id}</div><div className="muted">{region.name}</div></div> },
+          { ...settingsColumns.regions[1], render: region => <div><div>{label(region.access)}</div><div className="muted">{region.access === 'sandbox' ? 'Verified only' : 'Any recipient'}</div></div> },
+          { ...settingsColumns.regions[2], render: region => <div><StatusBadge status={label(region.health)} tone={region.health === 'probation' ? 'warning' : region.health === 'shutdown' ? 'danger' : 'success'} /><div className="muted">Sending {region.sendingEnabled ? 'enabled' : 'disabled'}</div></div> },
+          { ...settingsColumns.regions[3], render: region => <div>{number(region.sent24h)} / {number(region.dailyQuota)}<div className="muted">{number(Math.max(0, region.dailyQuota - region.sent24h))} remaining</div></div> },
+          { ...settingsColumns.regions[4], render: region => `${number(region.maxSendRate)} / sec` },
+          { ...settingsColumns.regions[5], render: region => <Button variant="ghost" aria-pressed={regionId === region.id} disabled={regionId === region.id} onClick={() => setRegionId(region.id)}>{regionId === region.id ? 'Selected' : 'View details'}</Button> },
         ]} />
       </section>
       {selected && <section className="section stack">
