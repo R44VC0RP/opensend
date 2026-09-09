@@ -1,0 +1,19 @@
+.developer-page > .section { max-width: 840px; gap: var(--space-16); }
+.developer-url { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding: var(--space-8) var(--space-12); background: var(--color-canvas); border-radius: var(--radius-sm); min-width: 0; }
+.developer-url > code { min-width: 0; overflow-wrap: anywhere; }
+.developer-url > .cluster { flex-shrink: 0; }
+.developer-page .ui-icon-button { min-width: 40px; min-height: 40px; }
+.developer-copy { max-width: 72ch; margin: 0; text-wrap: pretty; }
+.developer-access { max-width: 420px; }
+.developer-access .ui-select-trigger { min-height: 40px; height: auto; }
+.developer-access .ui-select-trigger > span:first-child { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+.developer-code { margin: 0; padding: var(--space-16); background: var(--color-canvas); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.developer-code:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 3px; }
+.developer-steps { margin: 0; padding-inline-start: var(--space-24); max-width: 72ch; }
+.developer-steps li + li { margin-top: var(--space-12); }
+.developer-steps code { overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .developer-page .ui-icon-button { min-width: 44px; min-height: 44px; }
+  .developer-access .ui-select-trigger { min-height: 44px; font-size: 16px; }
+  .developer-code { padding: var(--space-12); font-size: var(--text-xs); white-space: pre; overflow: auto; }
+}
