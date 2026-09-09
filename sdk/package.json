@@ -1,13 +1,27 @@
 {
-  "name": "@opensend/sdk",
+  "name": "opensend-js",
   "version": "0.1.0",
-  "private": true,
+  "description": "TypeScript SDK for the self-hosted OpenSend email API",
   "type": "module",
   "files": ["dist"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./client": { "types": "./dist/client/index.d.ts", "import": "./dist/client/index.js" }
   },
-  "scripts": { "build": "tsc -p tsconfig.json" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/R44VC0RP/opensend.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/R44VC0RP/opensend/tree/main/sdk#readme",
+  "bugs": { "url": "https://github.com/R44VC0RP/opensend/issues" },
+  "keywords": ["opensend", "email", "ses", "sdk", "typescript", "self-hosted"],
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org/" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build"
+  },
   "devDependencies": { "typescript": "^6.0.3" }
 }

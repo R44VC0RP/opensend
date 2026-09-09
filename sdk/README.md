@@ -1,14 +1,26 @@
 # OpenSend TypeScript SDK
 
-Generated from the API's OpenAPI 3.1 contract. From `api/`, run `npm run sdk` to regenerate and compile it. This package is private/unpublished; use a local package dependency until publishing is explicitly requested.
+TypeScript client for the self-hosted [OpenSend email API](https://github.com/R44VC0RP/opensend). Includes generated request and response types, with no runtime dependencies.
+
+## Install
+
+```sh
+npm install opensend-js
+```
+
+This package uses ESM and the Fetch API. Use it on your server; never ship an OpenSend API key in a browser bundle.
+
+## Send an email
+
+Set `OPENSEND_API_KEY` to a key from your OpenSend installation. Replace the example base URL with your deployment's public URL.
 
 ```ts
-import { createClient } from '@opensend/sdk/client';
-import { sendEmail, getEmail } from '@opensend/sdk';
+import { createClient } from 'opensend-js/client';
+import { sendEmail, getEmail } from 'opensend-js';
 
 const client = createClient({
-  baseUrl: 'http://127.0.0.1:8793',
-  auth: process.env.OPENSEND_API_KEY,
+  baseUrl: 'https://mail.example.com',
+  auth: scheme => scheme.scheme === 'bearer' ? process.env.OPENSEND_API_KEY : undefined,
 });
 
 const result = await sendEmail({
@@ -31,7 +43,7 @@ const message = await getEmail({
 });
 ```
 
-Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
+The auth callback supplies the API key only to the bearer scheme; dashboard cookie authentication is not needed for SDK calls. Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
 The generated exports include contacts, lists, segments, campaigns, attachments, keys, webhooks, settings and message logs. Cursor responses use `nextCursor`. Error bodies include a stable `error.code` and `error.requestId`. Read-level responses redact app unsubscribe capabilities from content/events/delivery payloads and withhold raw MIME; management access is required for unredacted content. A key revoked before dispatch no longer authorizes its queued sends. Request/resource limits return explicit 429/413 errors; do not retry permanent configuration errors blindly.
 
