@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
-import { apiKeys } from './db/core.js';
+import { apiKeys, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
@@ -21,10 +21,12 @@ const SENDING_LIMITS = {
   test: { pending: 500, keyPending: 100, storedAttachmentBytes: 64 * 1024 * 1024, expandedCampaignBytes: 16 * 1024 * 1024 },
   live: { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 },
 } as const;
-// All admissions take this transaction-scoped lock before campaign/attachment locks.
-// Dispatch only reduces admission counts, so it need not take this lock.
+// Called only inside admission transactions, before campaign/attachment locks.
+// A workspace row lock serializes both environments without Hyperdrive-unsupported
+// advisory locks. Reuse the scheduler row without changing its rotation counter.
 async function lockAdmission(db: DbExecutor, a: Actor) {
-  await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`sending:${a.workspaceId}:${a.environment}`}, 0))`);
+  await db.insert(jobSchedule).values({ workspaceId: a.workspaceId }).onConflictDoNothing();
+  await db.select({ workspaceId: jobSchedule.workspaceId }).from(jobSchedule).where(eq(jobSchedule.workspaceId, a.workspaceId)).for('update');
 }
 async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
   const limits = SENDING_LIMITS[a.environment];
