@@ -188,12 +188,6 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
     feedbackUrl: null, status: 'blocked', provisioned: false, blockers: [], warnings: [],
   };
   try { report.feedbackUrl = feedbackUrl(runtime.config); } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
-  if (report.feedbackUrl && runtime.config.sesFeedbackUrl !== undefined) {
-    try {
-      const host = new URL(runtime.config.publicUrl).hostname.toLowerCase().replace(/\.$/, '');
-      if (host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127\./.test(host)) add(report, 'PUBLIC_URL_LOCAL', 'SNS feedback uses the public override, but recipient unsubscribe links still use local PUBLIC_URL. This is not ready for production marketing.', true);
-    } catch { /* PUBLIC_URL validation belongs to server configuration, not the feedback override. */ }
-  }
   const subscriptions: Subscription[] = [];
   let c: Clients;
   try { c = clients(runtime, options.region, context); } catch (error) { const e = awsError(error); add(report, e.code, e.message); return { report, subscriptions }; }
