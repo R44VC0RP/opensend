@@ -28,7 +28,7 @@ export function EmailPreview({ html, title = 'Email preview', className }: Email
     email.head.prepend(csp);
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
-    style.textContent = `:root { --font-email: ${tokens.getPropertyValue('--font-email')}; --color-text: ${tokens.getPropertyValue('--color-text')}; --color-surface: ${tokens.getPropertyValue('--color-surface')}; } html { background: var(--color-surface); color: var(--color-text); } body { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; } body, body * { font-family: var(--font-email) !important; } img { max-width: 100%; height: auto; }`;
+    style.textContent = `:root { --font-email: ${tokens.getPropertyValue('--font-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } html { color-scheme: light; background: var(--color-surface); color: var(--color-text); } body { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; } body, body * { font-family: var(--font-email) !important; } img { max-width: 100%; height: auto; }`;
     email.head.append(style);
     return `<!doctype html>${email.documentElement.outerHTML}`;
   }, [html]);

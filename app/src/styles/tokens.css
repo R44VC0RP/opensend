@@ -13,6 +13,9 @@
   font-display: swap;
 }
 :root {
+  color-scheme: light;
+  --color-email-surface: #FFFFFF;
+  --color-email-text: #181818;
   --color-canvas: #F6F6F6;
   --color-surface: #FFFFFF;
   --color-text: #181818;
@@ -67,4 +70,23 @@
   --motion-duration: 120ms;
   --shadow-popover: 0 4px 16px var(--color-shadow);
   --shadow-dialog: 0 12px 40px var(--color-shadow);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-canvas: #101112;
+  --color-surface: #191A1C;
+  --color-text: #ECEDEF;
+  --color-muted: #A2A5AD;
+  --color-border: #34363C;
+  --color-accent: #8DA4FF;
+  --color-active-bg: #242C45;
+  --color-success: #7BCCAB;
+  --color-success-marker: #65B88D;
+  --color-warning: #E2AF80;
+  --color-warning-marker: #D99459;
+  --color-danger: #E99DB7;
+  --color-overlay: rgb(0 0 0 / 65%);
+  --color-shadow: rgb(0 0 0 / 40%);
+  --color-on-accent: var(--color-canvas);
 }

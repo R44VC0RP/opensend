@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useApiQuery, useRegion } from '../data/context'
 import { number, percent } from '../lib/format'
 import { Button, LoadingState, Select } from './ui'
+import { ThemeToggle } from './ThemeToggle'
 
 const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/campaigns', 'Campaigns'], ['/contacts', 'Contacts'], ['/lists', 'Lists'], ['/segments', 'Segments'], ['/api-keys', 'API keys'], ['/domains', 'Domains'], ['/settings', 'Settings']] as const
 export function AppShell() {
@@ -31,6 +32,7 @@ export function AppShell() {
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
+      <ThemeToggle />
       <div className="sidebar-context">
         <Select aria-label="AWS region" value={regionId} onValueChange={changeRegion} options={(regions.data ?? []).map(region => ({ value: region.id, label: region.id }))} disabled={!regions.data?.length} />
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
