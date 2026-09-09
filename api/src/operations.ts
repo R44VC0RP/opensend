@@ -279,9 +279,10 @@ async function verifySns(runtime: Runtime, envelope: SnsEnvelope) {
   let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
   if (!cert) {
     // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
+    // Workers require manual redirects; every non-2xx response below fails closed.
     let res: Response;
-    try { res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10000) }); } catch { throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
-    if (!res.ok) { await res.body?.cancel(); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    try { res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) }); } catch (error) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', errorType: error instanceof Error ? error.name : 'Unknown', stack: error instanceof Error ? error.stack?.split('\n').slice(1, 7).join('\n') : undefined }); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    if (!res.ok) { log('warn', { code: 'SNS_CERTIFICATE_FETCH_FAILED', status: res.status }); await res.body?.cancel(); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
   }
@@ -318,7 +319,7 @@ function registerPublicEvents(app: App) {
       if (envelope.Type === 'SubscriptionConfirmation') {
         const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);
         if (url.searchParams.get('Action') !== 'ConfirmSubscription' || url.searchParams.get('TopicArn') !== envelope.TopicArn || url.searchParams.get('Token') !== envelope.Token || [...url.searchParams.keys()].some(k => !['Action', 'TopicArn', 'Token'].includes(k))) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS confirmation URL fields do not match the signed envelope.');
-        const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10000) }); await res.body?.cancel(); if (!res.ok) throw new ApiError(503, 'SNS_CONFIRMATION_FAILED', 'SNS subscription confirmation failed.', undefined, true);
+        const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) }); await res.body?.cancel(); if (!res.ok) throw new ApiError(503, 'SNS_CONFIRMATION_FAILED', 'SNS subscription confirmation failed.', undefined, true);
       }
       // An authenticated UnsubscribeConfirmation is acknowledged, never automatically resubscribed.
       return c.json({ accepted: true }, 202);
@@ -383,7 +384,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const url = webhookUrl(runtime, endpoint.url), secret = await decrypt(runtime, endpoint.encryptedSecret, secretBinding(job, endpoint.id));
     const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.eventId}.${timestamp}.${body}`);
-    const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
+    const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, redirect: 'manual', signal: AbortSignal.timeout(5000) });
     statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;

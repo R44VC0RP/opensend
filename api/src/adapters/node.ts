@@ -10,6 +10,9 @@ export function postgresConnection(connectionString: string | undefined) {
   if (!['postgres:', 'postgresql:'].includes(url.protocol)) throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL must use PostgreSQL.');
   const local = ['localhost', '127.0.0.1', '[::1]', 'postgres'].includes(url.hostname);
   if (!local && url.searchParams.get('sslmode') !== 'verify-full') throw new ApiError(503, 'DATABASE_TLS_REQUIRED', 'Remote PostgreSQL requires sslmode=verify-full. Only local development database hosts may omit TLS.');
+  // libpq accepts "system" as a CA-store selector; node-postgres treats it as a filename.
+  // Use Node's trusted CA store instead, retaining verify-full certificate/hostname checks.
+  if (url.searchParams.get('sslrootcert') === 'system') { url.searchParams.delete('sslrootcert'); connectionString = url.toString(); }
   return { connectionString, connectionTimeoutMillis: 10000 };
 }
 export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {

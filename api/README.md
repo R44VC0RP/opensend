@@ -112,15 +112,23 @@ Attachments belong in a **private** S3/R2 bucket. Set the bucket, region, endpoi
 
 ## Cloudflare
 
-`wrangler.jsonc` is a deployment template, **not a provisioned deployment**. Provision the named R2 bucket, Queue, and Hyperdrive connection in your own account, then replace all placeholder IDs/origins. Use separate resources/configuration for each environment. The dashboard build is served from `app/dist` as Workers assets on the API's origin.
+`wrangler.jsonc` contains the production bindings for **https://opensend.anoma.ly**. To self-host in another account, replace `account_id`, the custom-domain route and `PUBLIC_URL`, the Hyperdrive ID, and the R2/Queue names with your own resources. Do not reuse production bindings for staging or preview builds. The dashboard build is served from `app/dist` as Workers assets on the API's origin.
+
+Use a read/write database role for Hyperdrive and a separate schema-owner credential for direct Node migrations. Configure Hyperdrive origin TLS as `verify-full`; Cloudflare requires an uploaded CA certificate ID for that mode. The deployed connection uses the validated ISRG Root X1 trust anchor. Node migration connections accept PlanetScale's `sslrootcert=system` URI parameter without treating it as a filesystem path, while retaining certificate and hostname verification.
 
 **Disable Hyperdrive query caching** with `--caching-disabled`; a shorter TTL is not equivalent. Authentication, consent, idempotency, and job state need fresh reads. Hyperdrive still provides pooling. See [query caching](https://developers.cloudflare.com/hyperdrive/concepts/query-caching/).
 
-Supply `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_SECRET` using Worker secrets; configure your real `GOOGLE_CLIENT_ID`, allowlists, and HTTPS `PUBLIC_URL` for this deployment. For AWS discovery, explicit provisioning, or live SES sending, also supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` securely. Use interactive `wrangler secret put`, not secrets in config or command arguments. Pasted temporary credentials are not automatically renewed.
+Supply `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_SECRET` using Worker secrets; configure your real `GOOGLE_CLIENT_ID`, allowlists, and HTTPS `PUBLIC_URL` for this deployment. This deployment also stores `GOOGLE_CLIENT_ID` and the allowlists as Worker secrets rather than committing those installation values. For AWS discovery, explicit provisioning, or live SES sending, also supply `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN` securely. Use interactive `wrangler secret put`, not secrets in config or command arguments. Pasted temporary credentials are not automatically renewed.
 
 Build `app/` with `npm ci` and `npm run build` before `npm run cf:check` in `api/`. `cf:check` is a deployment **dry run**, not a deployment or remote-resource check. For local Workers, keep an ignored `api/.dev.vars` containing only the required Worker settings and secrets, including both Google credentials, allowlists, `BETTER_AUTH_SECRET`, and the local `PUBLIC_URL`. This avoids loading unrelated Docker/storage credentials from `.env`. Securely set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE`, then use `npm run cf:dev -- --port 8794` and a matching `PUBLIC_URL`/Google callback. Local Hyperdrive cannot certify production pooling/caching; see [local development](https://developers.cloudflare.com/hyperdrive/configuration/local-development/).
 
 HTTP, Queue, and scheduled handlers share the outbox. Queue messages are wakeups; committed jobs survive a lost wakeup. Cron recovers due work and performs hourly retention. Each invocation processes one leased job. Scheduling prefers live/test work 3:1 with fallback; within an environment, SES feedback precedes sending and callbacks. PostgreSQL transactions/leases, not process-local state, control dispatch.
+
+### Automatic deployments
+
+To enable automatic deployments, connect `R44VC0RP/opensend` in the Worker's **Settings → Builds** and authorize the Cloudflare GitHub App. Use production branch `main`, root directory `api`, build command `npm ci && npm ci --prefix ../app && npm run check && npm run build --prefix ../app`, and deploy command `npx wrangler deploy`. Leave non-production branch builds disabled until they have separate database, bucket, queue, and credentials. Schema migrations remain an explicit step using the migration role, not an automatic side effect of deploying code.
+
+The XML-builder alias in Wrangler selects the AWS SDK's non-browser parser: Workers do not provide `DOMParser`. Outbound certificate, confirmation, and webhook requests use manual redirect handling and reject non-success responses without following redirects.
 
 ## SDK and MCP
 

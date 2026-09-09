@@ -1,24 +1,26 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "opensend-api",
+  "account_id": "15d29c8639fd3733b1b5486a2acfd968",
+  "workers_dev": false,
+  "routes": [{ "pattern": "opensend.anoma.ly", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  // Workers have no DOMParser; use the SDK's bundled non-browser XML parser for STS/SNS.
+  "alias": { "@aws-sdk/xml-builder": "@aws-sdk/xml-builder/dist-cjs/index.js" },
   "assets": {
     "directory": "../app/dist",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/v1", "/v1/*", "/api", "/api/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json"]
   },
   "vars": {
-    "PUBLIC_URL": "https://opensend.example.com",
-    "DEFAULT_SES_REGION": "us-east-1",
-    "ENABLE_LIVE_SES": "false",
-    "WEBHOOK_ALLOWED_HOSTS": "",
-    "GOOGLE_CLIENT_ID": "",
-    "AUTH_ALLOWED_EMAILS": "",
-    "AUTH_ALLOWED_DOMAINS": ""
+    "PUBLIC_URL": "https://opensend.anoma.ly",
+    "DEFAULT_SES_REGION": "us-east-2",
+    "ENABLE_LIVE_SES": "true",
+    "WEBHOOK_ALLOWED_HOSTS": ""
   },
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
     "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],

@@ -1786,6 +1786,89 @@ describe('Operational configuration and public event boundaries', () => {
     // Topic authorization is checked before certificate/signature work, even for malformed signatures.
     error(await http('POST', '/v1/events/ses', undefined, { ...envelope, Signature: '!!!' }), 403, 'SNS_TOPIC_NOT_ALLOWED');
   });
+
+  test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {
+    const [{ createServer }, { once }, { createApp }, { nodeRuntime }, { drizzle }, { drain }, regional, { setupResources }, { sesRegions }] = await Promise.all([
+      import('node:http'), import('node:events'), import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'),
+      import('./src/dispatch.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js'),
+    ]);
+    const requests: Array<{ path: string; method: string }> = [];
+    // Real loopback 302 responses exercise fetch's redirect behavior. No AWS or
+    // public webhook endpoint is contacted, even if redirect refusal regresses.
+    const server = createServer((request, response) => {
+      requests.push({ path: request.url!, method: request.method! });
+      if (request.url === '/certificate' || request.url === '/webhook') {
+        response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by OpenSend.');
+      } else { response.writeHead(200); response.end('The redirect target must never be requested.'); }
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    cleanup(t, async () => { server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(cause => cause ? reject(cause) : resolve())); });
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const loopback = `http://127.0.0.1:${address.port}`;
+    const certUrl = `https://sns.${REGION}.amazonaws.com/SimpleNotificationService-${unique('redirect')}.pem`;
+    const webhookUrl = `https://example.com/hooks/${unique('redirect')}`;
+    const nativeFetch = globalThis.fetch;
+    t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const path = request.url === certUrl ? '/certificate' : request.url === webhookUrl ? '/webhook' : undefined;
+      assert.ok(path, `Unexpected transport origin: ${new URL(request.url).origin}`);
+      return nativeFetch(`${loopback}${path}`, { method: request.method, headers: request.headers,
+        ...(request.method === 'POST' ? { body: await request.text() } : {}), redirect: request.redirect, signal: request.signal });
+    });
+    const db = await fixtureDatabase(t);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+      GOOGLE_CLIENT_ID: 'synthetic-redirect-client', GOOGLE_CLIENT_SECRET: 'synthetic-redirect-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', WEBHOOK_ALLOWED_HOSTS: 'example.com',
+      S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const runtime = instance.runtime;
+    runtime.config.workspaceId = unique('redirect-workspace');
+    const app = createApp();
+    const rollback = new Error('Rollback isolated redirect acceptance fixtures');
+    try {
+      await drizzle(db).transaction(async tx => {
+        runtime.db = tx;
+        await regional.ensureRegionSettings(runtime.db, runtime.config);
+        const settings = await regional.getRegionSettings(runtime.db, runtime.config.workspaceId);
+        const topicArn = `arn:aws:sns:${REGION}:111122223333:${setupResources(settings.installationId).topicName}`;
+        await tx.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region: REGION, trustedAccountId: '111122223333', trustedTopicArn: topicArn });
+        async function local(method: string, path: string, body?: Json): Promise<Reply> {
+          const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
+            headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': 'test', ...(body ? { 'content-type': 'application/json' } : {}) },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          }), runtime);
+          return { status: response.status, body: await response.json(), headers: response.headers };
+        }
+        const certificate = error(await local('POST', '/v1/events/ses', {
+          Type: 'Notification', MessageId: unique('redirect-sns'), TopicArn: topicArn, Message: '{}', Timestamp: new Date().toISOString(),
+          SignatureVersion: '2', Signature: Buffer.alloc(256, 1).toString('base64'), SigningCertURL: certUrl,
+        }), 503, 'SNS_CERTIFICATE_UNAVAILABLE');
+        assert.equal(certificate.retryable, true);
+        assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }]);
+        assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 0);
+
+        const endpoint = ok(await local('POST', '/v1/webhooks', { url: webhookUrl, paused: true }), 201);
+        // These rows never commit: the external runner cannot see or deliver this
+        // synthetic endpoint test. Only this normal drain uses the loopback transport.
+        const queued = ok(await local('POST', `/v1/webhooks/${endpoint.id}/test`), 202);
+        assert.equal(await drain(runtime), 1);
+        const delivery = ok(await local('GET', `/v1/webhooks/${endpoint.id}/deliveries/${queued.id}`));
+        assert.equal(delivery.status, 'pending');
+        assert.equal(delivery.lastStatusCode, 302);
+        assert.equal(delivery.lastError, 'WEBHOOK_HTTP_ERROR');
+        assert.equal(delivery.attemptCount, 1);
+        assert.equal(delivery.attempts.length, 1);
+        assert.equal(delivery.attempts[0].statusCode, 302);
+        assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
+        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook'", [runtime.config.workspaceId]);
+        assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
+        assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
+        throw rollback;
+      });
+    } catch (cause) { if (cause !== rollback) throw cause; }
+  });
 });
 
 // Live sending remains opt-in, separately from the remote database-fixture skips.
