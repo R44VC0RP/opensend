@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignEditorMetadata, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { createSeed } from './seed'
 import type { DemoState } from './seed'
 
@@ -124,11 +124,62 @@ function validateSender(state: DemoState, campaign: CampaignInput) {
   const senderDomain = campaign.fromEmail.split('@')[1]
   if (!state.domains.some(domain => domain.regionId === campaign.regionId && domain.status === 'verified' && domain.name === senderDomain)) invalid('fromEmail', 'Verify the sender domain in this region before sending.')
 }
+function validateEditor(value: unknown): CampaignEditorMetadata | null {
+  if (value === null) return null
+  const ancestors = new Set<object>()
+  let nodes = 0
+  let characters = 0
+  function copy(value: unknown, depth: number): unknown {
+    if (depth > 50) invalid('editor', 'Editor data must be no more than 50 levels deep.')
+    if (++nodes > 5000) invalid('editor', 'Editor data must contain no more than 5,000 values.')
+    if (typeof value === 'string') {
+      characters += value.length
+      if (characters > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+      return value
+    }
+    if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value
+    if (typeof value !== 'object') return invalid('editor', 'Editor data must contain only plain JSON values.')
+    const array = Array.isArray(value)
+    const prototype = Object.getPrototypeOf(value)
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) invalid('editor', 'Editor data must contain only plain JSON objects and arrays.')
+    if (ancestors.has(value)) invalid('editor', 'Editor data cannot contain circular references.')
+    ancestors.add(value)
+    const keys = Reflect.ownKeys(value)
+    if (keys.length > 5001 || (array && value.length > 5000)) invalid('editor', 'Editor data must contain no more than 5,000 values.')
+    const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null)
+    let entries = 0
+    for (const key of keys) {
+      if (array && key === 'length') continue
+      if (typeof key !== 'string') return invalid('editor', 'Editor data cannot contain symbol keys.')
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!
+      if (!descriptor.enumerable || !('value' in descriptor)) invalid('editor', 'Editor data cannot contain accessors or hidden properties.')
+      if (array && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)) invalid('editor', 'Editor arrays cannot contain named properties.')
+      if (!array) characters += key.length
+      if (characters > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+      Object.defineProperty(result, key, { value: copy(descriptor.value, depth + 1), enumerable: true, writable: true, configurable: true })
+      entries++
+    }
+    if (array && entries !== value.length) invalid('editor', 'Editor arrays cannot contain empty slots.')
+    ancestors.delete(value)
+    return result
+  }
+  // Copy inert JSON only; never call toJSON, an accessor, an editor, or a renderer.
+  const clean = copy(value, 0)
+  if (!isRecord(clean) || clean.format !== 'react-email' || clean.version !== 1) return invalid('editor', 'Editor data must use react-email format version 1.')
+  if (!isRecord(clean.document) || clean.document.type !== 'doc' || (Object.hasOwn(clean.document, 'content') && !Array.isArray(clean.document.content))) invalid('editor', 'Editor document must have type “doc” and an optional content array.')
+  const serialized = JSON.stringify(clean)
+  if (serialized.length > 500_000) invalid('editor', 'Editor data must serialize to 500,000 characters or fewer.')
+  return JSON.parse(serialized) as CampaignEditorMetadata
+}
+function validEditor(value: unknown): boolean {
+  if (value === undefined) return true
+  try { validateEditor(value); return true } catch { return false }
+}
 function validateCampaign(state: DemoState, input: CampaignInput): CampaignInput {
   checkRegion(state, input.regionId)
   find(state.lists, input.listId, 'List')
   if (input.segmentId !== null) find(state.segments, input.segmentId, 'Segment')
-  return { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 500, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000) }
+  return { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998), previewText: text(input.previewText, 'previewText', 500, true), fromName: text(input.fromName, 'fromName'), fromEmail: email(input.fromEmail, 'fromEmail'), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000), ...(input.editor !== undefined ? { editor: validateEditor(input.editor) } : {}) }
 }
 function validDateTime(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value)
@@ -168,7 +219,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('contacts').every(row => strings(row, ['email', 'name', 'country', 'status']) && CONTACT_STATUSES.includes(String(row.status)) && stringArray(row.listIds) && row.listIds.every(ref => references('lists', ref)) && date(row.createdAt) && (row.lastOpenedAt === null || date(row.lastOpenedAt)) && isRecord(row.consent) && strings(row.consent, ['source']) && (row.consent.at === null || date(row.consent.at)))) return false
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
-  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']))) return false
+  if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && references('lists', row.listId) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && validEditor(row.editor))) return false
   if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && (row.domainId === null || references('domains', row.domainId)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
@@ -256,7 +307,7 @@ export function createMockApi(): OpenSendApi {
         if (existing && existing.status !== 'draft') throw new ApiError('Only draft campaigns can be edited.', 'conflict')
         if (existing && existing.regionId !== input.regionId) invalid('regionId', 'A campaign cannot be moved between regions.')
         const clean = validateCampaign(s, input)
-        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...clean }
+        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(existing?.editor !== undefined ? { editor: existing.editor } : {}), ...clean }
         campaign.recipients = campaignAudience(s, campaign.listId, campaign.segmentId).eligible
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)

@@ -1,5 +1,5 @@
 import {
-  Button, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
+  Button, ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
   Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
 import './campaigns.css'
@@ -25,6 +25,10 @@ export function CampaignAudienceSkeleton({ review = false }: { review?: boolean 
   </LoadingRegion>
 }
 
+export function ComposerSkeleton() {
+  return <LoadingRegion label="Loading composer"><div className="campaign-message-toolbar"><Tabs value="compose" onValueChange={() => {}} items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} /></div><div className="composer-skeleton-tools"><ControlSkeleton width={108} /><ControlSkeleton width={34} /><ControlSkeleton width={34} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
+}
+
 export function CampaignEditorSkeleton({ isNew = false, hasAudience = !isNew, hasSegment = false }: { isNew?: boolean; hasAudience?: boolean; hasSegment?: boolean }) {
   return <LoadingRegion label="Loading campaign editor" className="campaign-editor-layout">
     <div className="campaign-fields">
@@ -43,8 +47,8 @@ export function CampaignEditorSkeleton({ isNew = false, hasAudience = !isNew, ha
       </section>
     </div>
     <section className="campaign-message">
-      <div className="campaign-message-toolbar"><Tabs value="html" onValueChange={() => {}} items={[{ value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} />{!isNew && <Button variant="secondary" disabled>Send test</Button>}</div>
-      <div className="ui-field" aria-hidden="true"><span className="ui-field__label">Email HTML</span><Skeleton height={430} /></div>
+      <ComposerSkeleton />
+      {!isNew && <div className="campaign-test-action"><Button variant="secondary" disabled>Send test</Button></div>}
       {isNew && <p className="muted">Save your draft to send a test email.</p>}
     </section>
   </LoadingRegion>

@@ -1,16 +1,19 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useCallback, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { Campaign, CampaignInput, PageResult, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState,
   Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select,
-  StatusBadge, Tabs, Textarea,
+  StatusBadge, Tabs,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, percent, time } from '../../lib/format'
 import { campaignColumns, CampaignAudienceSkeleton, CampaignEditorSkeleton, CampaignRouteSkeleton } from './skeletons'
 import './campaigns.css'
+import type { EmailComposerRef } from './EmailComposer'
+import { ComposerSkeleton } from './skeletons'
+const EmailComposer = lazy(() => import('./EmailComposer').then(module => ({ default: module.EmailComposer })))
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -94,9 +97,12 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   const [form, setForm] = useState<CampaignInput>(() => initial ? {
     id: initial.id, regionId: initial.regionId, name: initial.name, subject: initial.subject,
     previewText: initial.previewText, fromName: initial.fromName, fromEmail: initial.fromEmail,
-    listId: initial.listId, segmentId: initial.segmentId, html: initial.html,
+    listId: initial.listId, segmentId: initial.segmentId, html: initial.html, editor: initial.editor,
   } : { regionId, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' })
-  const [tab, setTab] = useState('html')
+  const composer = useRef<EmailComposerRef>(null)
+  const [composerReady, setComposerReady] = useState(false)
+  const [preparing, setPreparing] = useState(false)
+  const handleComposerReady = useCallback(() => setComposerReady(true), [])
   const [error, setError] = useState('')
   const [testOpen, setTestOpen] = useState(false)
   const guard = useRef(false)
@@ -119,6 +125,8 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     return { lists, segments, domains: domains.filter(domain => domain.status === 'verified') }
   })
   const saveMutation = useApiMutation((api, input: CampaignInput) => api.campaigns.save(input), 'Draft saved')
+  const pending = preparing || saveMutation.isPending
+  const handleComposerDirty = useCallback(() => setError(''), [])
   const senderParts = form.fromEmail.split('@')
   const senderLocal = senderParts[0] || ''
   const senderDomain = senderParts[1] || ''
@@ -127,48 +135,51 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
     setError('')
   }
   async function save(next: 'edit' | 'review' | 'test') {
-    if (guard.current || saveMutation.isPending) return
+    if (guard.current || pending || !composerReady) return
     setError('')
-    if (!form.name.trim() || !form.subject.trim() || !form.fromName.trim() || !form.html.trim()) { setError('Enter a campaign name, subject, sender name, and email HTML.'); return }
+    if (!form.name.trim() || !form.subject.trim() || !form.fromName.trim()) { setError('Enter a campaign name, subject, and sender name.'); return }
     if (!emailIsValid(form.fromEmail)) { setError('Enter a valid sender email address.'); return }
     if (!options.data?.domains.some(domain => domain.name.toLowerCase() === senderDomain.toLowerCase())) { setError('Select a verified sending domain in this region.'); return }
     if (!form.listId) { setError('Choose a recipient list.'); return }
     guard.current = true
+    setPreparing(true)
     try {
-      const saved = await saveMutation.mutateAsync({ ...form, name: form.name.trim(), subject: form.subject.trim(), fromName: form.fromName.trim(), fromEmail: form.fromEmail.trim() })
+      const draft = await composer.current?.prepare()
+      if (!draft?.html.trim()) throw new Error('Add some email content before continuing.')
+      const saved = await saveMutation.mutateAsync({ ...form, ...draft, name: form.name.trim(), subject: form.subject.trim(), fromName: form.fromName.trim(), fromEmail: form.fromEmail.trim() })
       if (next === 'test') setTestOpen(true)
       else navigate(`/campaigns/${encodeURIComponent(saved.id)}/${next}`, { replace: !initial })
     } catch (cause) { setError(message(cause)) }
-    finally { guard.current = false }
+    finally { guard.current = false; setPreparing(false) }
   }
   return <>
-    <PageHeader title={initial?.name || 'Create campaign'} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled={options.isPending || options.isError} loading={saveMutation.isPending} onClick={() => save('edit')}>Save draft</Button><Button variant="primary" disabled={options.isPending || options.isError} loading={saveMutation.isPending} onClick={() => save('review')}>Continue to review</Button></div>} />
+    <PageHeader title={initial?.name || 'Create campaign'} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('edit')}>Save draft</Button><Button variant="primary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('review')}>Continue to review</Button></div>} />
     {error && <Alert tone="danger">{error}</Alert>}
     {options.isPending ? <CampaignEditorSkeleton isNew={!initial} hasAudience={Boolean(form.listId)} hasSegment={Boolean(form.segmentId)} /> : options.isError ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : <div className="campaign-editor-layout">
       <div className="campaign-fields">
-        <Field label="Name" htmlFor="campaign-name"><Input id="campaign-name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={saveMutation.isPending} /></Field>
-        <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={saveMutation.isPending} /></Field>
-        <Field label="Preview text" htmlFor="campaign-preview"><Input id="campaign-preview" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={saveMutation.isPending} /></Field>
-        <Field label="From name" htmlFor="campaign-from-name"><Input id="campaign-from-name" value={form.fromName} onChange={event => change('fromName', event.target.value)} required disabled={saveMutation.isPending} /></Field>
+        <Field label="Name" htmlFor="campaign-name"><Input id="campaign-name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={pending} /></Field>
+        <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={pending} /></Field>
+        <Field label="Preview text" htmlFor="campaign-preview"><Input id="campaign-preview" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={pending} /></Field>
+        <Field label="From name" htmlFor="campaign-from-name"><Input id="campaign-from-name" value={form.fromName} onChange={event => change('fromName', event.target.value)} required disabled={pending} /></Field>
         <div className="campaign-sender">
-          <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={saveMutation.isPending} /></Field>
+          <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={pending} /></Field>
           <span aria-hidden="true">@</span>
-          <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={saveMutation.isPending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select domain', disabled: true }, ...options.data.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
+          <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={pending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select domain', disabled: true }, ...options.data.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
         </div>
         {options.data.domains.length === 0 && <Alert tone="warning">No verified domains in this region. <Link to="/domains">Set up a sending domain</Link> before saving.</Alert>}
         <section className="section">
           <SectionHeader title="Recipients" />
           <div className="campaign-fields">
-            <Field label="Include list" htmlFor="campaign-list"><Select id="campaign-list" disabled={saveMutation.isPending} value={form.listId} onValueChange={value => change('listId', value)} options={[{ value: '', label: 'Select a list' }, ...options.data.lists.map(list => ({ value: list.id, label: `${list.name} · ${number(list.total)} contacts` }))]} /></Field>
+            <Field label="Include list" htmlFor="campaign-list"><Select id="campaign-list" disabled={pending} value={form.listId} onValueChange={value => change('listId', value)} options={[{ value: '', label: 'Select a list' }, ...options.data.lists.map(list => ({ value: list.id, label: `${list.name} · ${number(list.total)} contacts` }))]} /></Field>
             {options.data.lists.length === 0 && <Alert tone="info">No lists yet. <Link to="/lists">Create a list</Link> to select recipients.</Alert>}
-            <Field label="Limit to a segment" htmlFor="campaign-segment" hint={form.segmentId ? 'Only contacts in both this list and segment are included.' : undefined}><Select id="campaign-segment" disabled={saveMutation.isPending} value={form.segmentId || ''} onValueChange={value => change('segmentId', value || null)} options={[{ value: '', label: 'All subscribed contacts in list' }, ...options.data.segments.map(segment => ({ value: segment.id, label: `${segment.name} · ${number(segment.matched)} matches` }))]} /></Field>
+            <Field label="Limit to a segment" htmlFor="campaign-segment" hint={form.segmentId ? 'Only contacts in both this list and segment are included.' : undefined}><Select id="campaign-segment" disabled={pending} value={form.segmentId || ''} onValueChange={value => change('segmentId', value || null)} options={[{ value: '', label: 'All subscribed contacts in list' }, ...options.data.segments.map(segment => ({ value: segment.id, label: `${segment.name} · ${number(segment.matched)} matches` }))]} /></Field>
             {form.listId && <AudienceSummary listId={form.listId} segmentId={form.segmentId} regionId={regionId} />}
           </div>
         </section>
       </div>
       <section className="campaign-message">
-        <div className="campaign-message-toolbar"><Tabs value={tab} onValueChange={setTab} items={[{ value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} />{initial && <Button variant="secondary" loading={saveMutation.isPending} onClick={() => save('test')}>Send test</Button>}</div>
-        {tab === 'html' ? <Field label="Email HTML" htmlFor="campaign-html"><Textarea id="campaign-html" className="campaign-html" placeholder="<h1>Your subject</h1>" value={form.html} onChange={event => change('html', event.target.value)} disabled={saveMutation.isPending} spellCheck={false} /></Field> : form.html.trim() ? <EmailPreview html={form.html} title="Campaign email preview" /> : <EmptyState title="No email content yet" description="Add HTML to preview your message." action={<Button variant="secondary" onClick={() => setTab('html')}>Write HTML</Button>} />}
+        <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} initialHtml={form.html} initialEditor={form.editor} previewText={form.previewText} disabled={pending} onReady={handleComposerReady} onDirty={handleComposerDirty} /></Suspense>
+        {initial && <div className="campaign-test-action"><Button variant="secondary" disabled={!composerReady} loading={pending} onClick={() => save('test')}>Send test</Button></div>}
         {!initial && <p className="muted">Save your draft to send a test email.</p>}
       </section>
     </div>}

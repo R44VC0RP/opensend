@@ -2,15 +2,21 @@
 .campaign-row-name { display: flex; flex-direction: column; gap: var(--space-4); padding: 0; line-height: 18px; }
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
-.campaign-editor-layout { display: grid; grid-template-columns: minmax(0, 470fr) minmax(0, 618fr); gap: var(--space-40); }
+.campaign-editor-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--space-40); }
 .ui-alert + .campaign-editor-layout { margin-top: var(--page-gap); }
 .campaign-review-layout { display: grid; grid-template-columns: minmax(0, 430fr) minmax(0, 658fr); gap: var(--space-40); padding-block: var(--page-gap); }
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-16); }
 .campaign-message { min-width: 0; }
+.campaign-test-action { display: flex; justify-content: flex-end; margin-top: var(--space-16); }
+.composer-skeleton-tools { display: flex; gap: var(--space-8); padding-bottom: var(--space-12); }
+.composer-skeleton-canvas { min-height: 520px; padding: var(--space-24); background: var(--color-email-surface); display: flex; flex-direction: column; gap: var(--space-16); }
+.composer-skeleton-canvas .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
 .campaign-message-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); margin-bottom: var(--space-16); }
 .campaign-message-toolbar > :first-child { flex: 1; }
 .ui-textarea.campaign-html { min-height: 430px; resize: vertical; }
-.campaign-sender { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--space-8); align-items: center; }
+.campaign-sender { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: var(--space-8); align-items: end; }
+.campaign-sender > span { height: var(--control-height); display: flex; align-items: center; }
+.campaign-message > p { margin-top: var(--space-12); }
 .campaign-audience-summary { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-summary-line { display: flex; justify-content: space-between; gap: var(--space-16); }
 .campaign-message-details { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: var(--space-16); row-gap: var(--space-8); margin: 0; }

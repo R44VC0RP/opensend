@@ -21,8 +21,9 @@ export interface SegmentRule { id: string; field: 'status' | 'country' | 'listId
 export interface Segment { id: string; name: string; match: 'all' | 'any'; rules: SegmentRule[]; matched: number; eligible: number; updatedAt: ISODate }
 export type SegmentInput = Pick<Segment, 'name' | 'match' | 'rules'> & { id?: string }
 export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; contacts: Contact[] }
-export interface Campaign { id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
-export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { id?: string }
+export type CampaignEditorMetadata = { format: 'react-email'; version: 1; document: Record<string, unknown> }
+export interface Campaign { id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; listId: string; segmentId: string | null; html: string; editor?: CampaignEditorMetadata | null; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
+export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html' | 'editor'> & { id?: string }
 export interface SendCampaignInput { id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string }
 export interface ApiKey { id: string; name: string; prefix: string; permission: 'send' | 'read'; domainId: string | null; createdAt: ISODate; lastUsedAt: ISODate | null }
 export interface ApiKeyInput { name: string; permission: 'send' | 'read'; domainId: string | null }
