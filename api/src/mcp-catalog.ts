@@ -176,10 +176,9 @@ function combineReads(operations: Map<string, McpOperation>, spec: ObjectValue):
     const schema: Tool['inputSchema'] = {
       ...listInput, type: 'object',
       properties: { id: { ...detailInput.properties.id, description: 'Optional exact resource ID. Use id alone; omit it to list/filter.' }, ...listInput.properties },
-      anyOf: [
-        { not: { required: ['id'] } },
-        { required: ['id'], properties: Object.fromEntries(list.queryParameters.map(parameter => [parameter, false])) },
-      ],
+      // Keep an object-shaped signature for Code Mode; a constraint-only anyOf
+      // branch otherwise collapses the generated argument type to unknown.
+      dependentSchemas: { id: { properties: Object.fromEntries(list.queryParameters.map(parameter => [parameter, false])) } },
       ...(Object.keys(definitions).length ? { $defs: definitions } : {}),
     };
     if (bytes(schema) > 512 * 1024) invalid(`Tool schema exceeds its byte limit: ${name}.`);
