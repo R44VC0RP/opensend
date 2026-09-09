@@ -263,7 +263,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         } while (token);
         const matching = subscriptions.filter(s => s.Protocol === 'https' && s.Endpoint === report.feedbackUrl && s.TopicArn === topic.arn);
         topic.staleSubscriptions = subscriptions.filter(s => s.Protocol === 'https' && s.Endpoint !== report.feedbackUrl).length;
-        if (topic.staleSubscriptions) add(report, 'STALE_FEEDBACK_SUBSCRIPTIONS', 'Other HTTPS endpoints remain subscribed to the feedback topic. They were not removed; review and remove them manually only after approval.', true);
+        if (topic.staleSubscriptions) add(report, 'STALE_FEEDBACK_SUBSCRIPTIONS', `The feedback topic has ${topic.staleSubscriptions} additional HTTPS subscription${topic.staleSubscriptions === 1 ? '' : 's'}.`, true);
         topic.subscription = topic.subscriptionsTruncated ? 'unknown' : 'missing';
         const rawStates: (boolean | null)[] = [];
         for (const sub of matching) {

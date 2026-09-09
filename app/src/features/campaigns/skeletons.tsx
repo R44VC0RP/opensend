@@ -12,16 +12,14 @@ export const campaignColumns: SkeletonColumn[] = [
   { key: 'updated', label: 'Last activity', skeleton: <SkeletonText width="90%" /> },
 ]
 
-export function CampaignAudienceSkeleton({ review = false }: { review?: boolean }) {
-  const summary = <div className="campaign-audience-summary">
-    <div className="campaign-summary-line"><span>Matched contacts</span><SkeletonText width={45} /></div>
-    <div className="campaign-summary-line muted"><span>{review ? 'Suppressed' : 'Suppressed excluded'}</span><SkeletonText width={35} /></div>
-    <div className="campaign-summary-line muted"><span>{review ? 'Unsubscribed' : 'Unsubscribed excluded'}</span><SkeletonText width={35} /></div>
-    {!review && <div className="campaign-summary-line"><strong>Estimated recipients</strong><SkeletonText width={45} /></div>}
-  </div>
-  return <LoadingRegion label="Loading audience" className={review ? 'campaign-audience-review-skeleton' : undefined}>
-    {review && <div><SkeletonText width={70} /><p className="muted">will receive this email</p></div>}
-    {summary}
+export function CampaignAudienceSkeleton() {
+  return <LoadingRegion label="Loading audience" className="campaign-audience-review-skeleton">
+    <div><SkeletonText width={70} /><p className="muted">eligible recipients</p></div>
+    <div className="campaign-audience-summary">
+      <div className="campaign-summary-line"><span>Matched contacts</span><SkeletonText width={45} /></div>
+      <div className="campaign-summary-line muted"><span>Suppressed</span><SkeletonText width={35} /></div>
+      <div className="campaign-summary-line muted"><span>Not subscribed (including unknown)</span><SkeletonText width={35} /></div>
+    </div>
   </LoadingRegion>
 }
 
@@ -29,7 +27,7 @@ export function ComposerSkeleton() {
   return <LoadingRegion label="Loading composer"><div className="campaign-message-toolbar"><Tabs value="compose" onValueChange={() => {}} items={[{ value: 'compose', label: 'Compose' }, { value: 'html', label: 'HTML' }, { value: 'preview', label: 'Preview' }]} /></div><div className="composer-skeleton-tools"><ControlSkeleton width={108} /><ControlSkeleton width={34} /><ControlSkeleton width={34} /></div><div className="composer-skeleton-canvas"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></LoadingRegion>
 }
 
-export function CampaignEditorSkeleton({ isNew = false, hasAudience = !isNew, hasSegment = false }: { isNew?: boolean; hasAudience?: boolean; hasSegment?: boolean }) {
+export function CampaignEditorSkeleton({ isNew = false, hasSegment = false }: { isNew?: boolean; hasSegment?: boolean }) {
   return <LoadingRegion label="Loading campaign editor" className="campaign-editor-layout">
     <div className="campaign-fields">
       <FieldSkeleton label="Name" />
@@ -41,8 +39,7 @@ export function CampaignEditorSkeleton({ isNew = false, hasAudience = !isNew, ha
         <SectionHeader title="Recipients" />
         <div className="campaign-fields">
           <FieldSkeleton label="Include list" />
-          <div className="ui-field"><FieldSkeleton label="Limit to a segment" />{hasSegment && <div className="ui-field__hint">Only contacts in both this list and segment are included.</div>}</div>
-          {hasAudience && <CampaignAudienceSkeleton />}
+          <div className="ui-field"><FieldSkeleton label="Limit to a segment" />{hasSegment && <div className="ui-field__hint">Matches both the list and segment.</div>}</div>
         </div>
       </section>
     </div>
@@ -71,7 +68,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
     <LoadingRegion label="Loading campaign review" className="campaign-review-layout">
       <section className="campaign-fields">
         <SectionHeader title="Recipients" actions={<Button variant="ghost" disabled>Edit audience</Button>} />
-        <CampaignAudienceSkeleton review />
+        <CampaignAudienceSkeleton />
       </section>
       <section className="campaign-fields">
         <SectionHeader title="Message preview" actions={<div className="cluster"><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></div>} />

@@ -110,11 +110,11 @@ export function prepareEditorContent(html: string, metadata?: CampaignEditorMeta
       const content = sanitizeEditorDocument(metadata.document)
       if (JSON.stringify(content) !== JSON.stringify(metadata.document)) return {
         content: '<p></p>', canCompose: false,
-        reason: 'This saved document contains image sources or attributes that Compose cannot safely preserve. HTML mode retains the original content without loading remote images.',
+        reason: 'Compose cannot preserve parts of this document. HTML mode keeps the original content.',
       }
       return { content, canCompose: true }
     } catch {
-      return { content: '<p></p>', canCompose: false, reason: 'This visual document cannot be opened safely. HTML mode retains the original content.' }
+      return { content: '<p></p>', canCompose: false, reason: 'Compose cannot open this document. HTML mode keeps the original content.' }
     }
   }
   return { content: sanitizedImportHtml(html), canCompose: metadata == null && isSemanticHtml(html) }

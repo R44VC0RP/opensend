@@ -48,7 +48,7 @@ function CampaignList({ regionId }: { regionId: string }) {
     ]} />
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rowSize="large" rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={search || status !== 'all' ? 'No matching campaigns' : 'No campaigns yet'} description={search || status !== 'all' ? 'Try another search or status.' : 'Create your first campaign in this region.'} action={search || status !== 'all' ? <Button variant="secondary" onClick={() => setParams({})}>Clear filters</Button> : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rowSize="large" rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={search || status !== 'all' ? 'No matching campaigns' : 'No campaigns yet'} action={search || status !== 'all' ? <Button variant="secondary" onClick={() => setParams({})}>Clear filters</Button> : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
         { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject}</span></div> },
         { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
         { ...campaignColumns[2], render: row => number(row.recipients) },
@@ -77,7 +77,7 @@ export function CampaignEditorPage() {
 
 function RegionMismatch({ campaign }: { campaign: Campaign }) {
   const { setRegionId } = useRegion()
-  return <><PageHeader title="Campaign in another region" backTo="/campaigns" /><EmptyState title={`This campaign belongs to ${campaign.regionId}`} description="Switch regions to view or edit this campaign." action={<Button onClick={() => setRegionId(campaign.regionId)}>Switch to {campaign.regionId}</Button>} /></>
+  return <><PageHeader title="Campaign in another region" backTo="/campaigns" /><EmptyState title={`This campaign belongs to ${campaign.regionId}`} action={<Button onClick={() => setRegionId(campaign.regionId)}>Switch to {campaign.regionId}</Button>} /></>
 }
 
 function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regionId: string }) {
@@ -143,35 +143,34 @@ function CampaignEditor({ initial, regionId }: { initial: Campaign | null; regio
   return <>
     <PageHeader title={initial?.name || 'Create campaign'} backTo="/campaigns" actions={<div className="cluster"><Button variant="secondary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('edit')}>Save draft</Button><Button variant="primary" disabled={options.isPending || options.isError || !composerReady} loading={pending} onClick={() => save('review')}>Continue to review</Button></div>} />
     {error && <Alert tone="danger">{error}</Alert>}{options.isError && choices && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
-    {options.isPending && !choices ? <CampaignEditorSkeleton isNew={!initial} hasAudience={Boolean(form.listId)} hasSegment={Boolean(form.segmentId)} /> : options.isError && !choices ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : choices && <div className="campaign-editor-layout">
+    {options.isPending && !choices ? <CampaignEditorSkeleton isNew={!initial} hasSegment={Boolean(form.segmentId)} /> : options.isError && !choices ? <ErrorState error={options.error} onRetry={() => options.refetch()} /> : choices && <div className="campaign-editor-layout">
       <div className="campaign-fields">
         <Field label="Name" htmlFor="campaign-name"><Input id="campaign-name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={pending} /></Field>
         <Field label="Subject" htmlFor="campaign-subject"><Input id="campaign-subject" value={form.subject} onChange={event => change('subject', event.target.value)} required disabled={pending} /></Field>
         <Field label="Preview text" htmlFor="campaign-preview"><Input id="campaign-preview" maxLength={200} value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={pending} /></Field>
         <Field label="From name" htmlFor="campaign-from-name"><Input id="campaign-from-name" maxLength={200} value={form.fromName} onChange={event => change('fromName', event.target.value)} disabled={pending} /></Field>
-        {testEnvironment && <Field label="Simulation region" htmlFor="campaign-test-region" hint="Enabled regions from the catalog. No AWS lookup is performed."><Select id="campaign-test-region" required value={form.regionId} onValueChange={value => change('regionId', value)} disabled={pending || regionCatalog.isPending} options={(regionCatalog.data?.data ?? []).filter(region => region.enabled || region.region === form.regionId).map(region => ({value: region.region, label: `${region.region}${region.enabled ? '' : ' · Disabled'}`, disabled: !region.enabled}))} /></Field>}
+        {testEnvironment && <Field label="Simulation region" htmlFor="campaign-test-region"><Select id="campaign-test-region" required value={form.regionId} onValueChange={value => change('regionId', value)} disabled={pending || regionCatalog.isPending} options={(regionCatalog.data?.data ?? []).filter(region => region.enabled || region.region === form.regionId).map(region => ({value: region.region, label: `${region.region}${region.enabled ? '' : ' · Disabled'}`, disabled: !region.enabled}))} /></Field>}
         {testEnvironment ? <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" type="email" required value={form.fromEmail} onChange={event => change('fromEmail', event.target.value)} disabled={pending} /></Field> : <div className="campaign-sender">
           <Field label="From email" htmlFor="campaign-from-email"><Input id="campaign-from-email" placeholder="updates" value={senderLocal} onChange={event => change('fromEmail', `${event.target.value}@${senderDomain}`)} disabled={pending} /></Field>
           <span aria-hidden="true">@</span>
           <Field label="Verified domain" htmlFor="campaign-domain"><Select id="campaign-domain" value={senderDomain || '__choose__'} disabled={pending} onValueChange={value => change('fromEmail', `${senderLocal}@${value === '__choose__' ? '' : value}`)} options={[{ value: '__choose__', label: 'Select', disabled: true }, ...(senderDomain && !choices.domains.some(d => d.name === senderDomain) ? [{value: senderDomain, label: senderDomain}] : []), ...choices.domains.map(domain => ({ value: domain.name, label: domain.name }))]} /></Field>
         </div>}
         {!testEnvironment && (optionCursors.domains || choices.next.domains) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
-        {!testEnvironment && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Set up a sending domain</Link> before saving.</Alert>}
+        {!testEnvironment && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
         <section className="section">
           <SectionHeader title="Recipients" />
           <div className="campaign-fields">
             <Field label="Include list" htmlFor="campaign-list"><Select id="campaign-list" disabled={pending} value={form.listId} onValueChange={value => change('listId', value)} options={[{ value: '', label: 'Select a list' }, ...(form.listId && !choices.lists.some(l => l.id === form.listId) ? [{value: form.listId, label: form.listId}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.total === undefined ? list.name : `${list.name} · ${number(list.total)} contacts` }))]} /></Field>
             {(optionCursors.lists || choices.next.lists) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, lists: undefined})}>First lists</Button><Button disabled={!choices.next.lists} onClick={() => setOptionCursors({...optionCursors, lists: choices.next.lists ?? undefined})}>More lists</Button></div>}
-            {choices.lists.length === 0 && <Alert tone="info">No lists on this page. <Link to="/lists">Create a list</Link> to select recipients.</Alert>}
-            <Field label="Limit to a segment" htmlFor="campaign-segment" hint={form.segmentId ? 'Only contacts in both this list and segment are included.' : undefined}><Select id="campaign-segment" disabled={pending} value={form.segmentId || ''} onValueChange={value => change('segmentId', value || null)} options={[{ value: '', label: 'All subscribed contacts in list' }, ...(form.segmentId && !choices.segments.some(s => s.id === form.segmentId) ? [{value: form.segmentId, label: form.segmentId}] : []), ...choices.segments.map(segment => ({ value: segment.id, label: segment.name }))]} /></Field>
+            {choices.lists.length === 0 && <Alert tone="info">No lists on this page. <Link to="/lists">Create a list</Link></Alert>}
+            <Field label="Limit to a segment" htmlFor="campaign-segment" hint={form.segmentId ? 'Matches both the list and segment.' : undefined}><Select id="campaign-segment" disabled={pending} value={form.segmentId || ''} onValueChange={value => change('segmentId', value || null)} options={[{ value: '', label: 'All subscribed contacts in list' }, ...(form.segmentId && !choices.segments.some(s => s.id === form.segmentId) ? [{value: form.segmentId, label: form.segmentId}] : []), ...choices.segments.map(segment => ({ value: segment.id, label: segment.name }))]} /></Field>
             {(optionCursors.segments || choices.next.segments) && <div className="cluster"><Button onClick={() => setOptionCursors({...optionCursors, segments: undefined})}>First segments</Button><Button disabled={!choices.next.segments} onClick={() => setOptionCursors({...optionCursors, segments: choices.next.segments ?? undefined})}>More segments</Button></div>}
-            {form.listId && <p className="muted">Save and continue to review for server-verified recipient counts.</p>}
           </div>
         </section>
       </div>
       <section className="campaign-message">
         <CampaignAttachments ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={setAttachmentsBusy} disabled={preparing || saveMutation.isPending} />
-        {textOnly ? <Field label="Plain-text body (preserved)" hint="This campaign was created with a plain-text body. Metadata and attachments can be edited without converting it."><textarea className="ui-input" rows={14} value={String(form.draft?.text ?? '')} readOnly /></Field> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} previewText={form.previewText} disabled={pending} onReady={handleComposerReady} onDirty={handleComposerDirty} /></Suspense>}
+        {textOnly ? <Field label="Plain-text body" hint="Read-only; preserved when saved."><textarea className="ui-input" rows={14} value={String(form.draft?.text ?? '')} readOnly /></Field> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} initialEditor={form.editor} previewText={form.previewText} disabled={pending} onReady={handleComposerReady} onDirty={handleComposerDirty} /></Suspense>}
         {initial && <div className="campaign-test-action"><Button variant="secondary" disabled={!composerReady} loading={pending} onClick={() => save('test')}>Send test</Button></div>}
         {!initial && <p className="muted">Save your draft to send a test email.</p>}
       </section>
@@ -224,9 +223,9 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
     } catch (cause) { setError(message(cause)) }
     finally { guard.current = false }
   }
-  return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email" description={`Send the saved message to one recipient in ${api.environment ?? 'demo'} mode. Queued does not mean delivered.`}>
+  return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email" description={`Sends the saved draft to one recipient in ${api.environment ?? 'demo'} mode.`}>
     <form className="stack" onSubmit={submit}>
-      {receipt && <Alert tone="success">{receipt.simulated ? 'Simulated test queued' : 'Email queued'} · {receipt.id ?? 'Demo'}. Delivery is not yet confirmed.</Alert>}
+      {receipt && <Alert tone="success">{receipt.simulated ? 'Simulated test queued' : 'Test queued'} · {receipt.id ?? 'Demo'}</Alert>}
       <Field label="Recipient email" htmlFor="campaign-test-recipient"><Input id="campaign-test-recipient" type="email" autoComplete="email" value={to} onChange={event => { setTo(event.target.value); setError(''); setReceipt(null) }} required disabled={mutation.isPending} /></Field>
       {error && <Alert tone="danger">{error}</Alert>}
       <div className="cluster"><Button variant="secondary" type="button" disabled={mutation.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" loading={mutation.isPending}>Send test</Button></div>
@@ -275,26 +274,26 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     if (!confirmation || !draft || guard.current || sendMutation.isPending) return
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`API confirmed ${result.status}${'queued' in result ? ` · ${result.queued} queued` : ''} in ${api.environment ?? 'demo'} mode${'simulated' in result && result.simulated ? ' (simulated)' : ''}. Delivery is tracked in logs.`); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} queued` : ''} · ${api.environment ?? 'demo'} mode${'simulated' in result && result.simulated ? ' (simulated)' : ''}`); setConfirmation(null) }
     catch (cause) { setError(message(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
   return <>
     <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo="/campaigns" actions={<StatusBadge status={campaign.status} />} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
-    {receipt && <Alert tone="success">{receipt}</Alert>}{!draft && <Alert tone="info">Campaign {campaign.status}.{campaign.scheduledAt ? ` Scheduled for ${date(campaign.scheduledAt)} at ${time(campaign.scheduledAt)} UTC.` : ''} This campaign is read-only.</Alert>}
+    {receipt && <Alert tone="success">{receipt}</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
         <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`)}>Edit audience</Button> : undefined} />
-        {draft ? audience.isPending ? <CampaignAudienceSkeleton review /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <Button variant="primary" onClick={() => audience.mutate(undefined)}>Generate recipient review</Button> : <>
-          <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible in this review</p></div>
+        {draft ? audience.isPending ? <CampaignAudienceSkeleton /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <Button variant="primary" onClick={() => audience.mutate(undefined)}>Generate recipient review</Button> : <>
+          <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>
             <div className="campaign-summary-line muted"><span>Suppressed</span><span>−{number(audience.data.suppressed)}</span></div>
             <div className="campaign-summary-line muted"><span>Not subscribed (including unknown)</span><span>−{number(audience.data.unsubscribed)}</span></div>
           </div>
           <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Generate new review</Button>
-          {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients. Edit your audience before sending.</Alert>}
+          {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
         </> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
           {['sent', 'completed'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
@@ -313,7 +312,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       {error && <Alert tone="danger">{error}</Alert>}
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`)}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={audience.isPending || audience.isError || !audience.data?.eligible} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” to ${number(audience.data?.eligible ?? 0)} eligible recipients on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC. This confirmation uses the saved review; eligibility changes may require a new review.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” to ${number(audience.data?.eligible ?? 0)} eligible recipients now. This action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients now. This action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>
 }

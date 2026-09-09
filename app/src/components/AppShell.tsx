@@ -51,7 +51,7 @@ export function AppShell() {
       <div className="sidebar-context">
         <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />
         {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
-        {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
+        {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">

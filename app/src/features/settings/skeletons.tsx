@@ -66,7 +66,7 @@ export function RegionDiscoverySkeleton() {
 
 export function SettingsBodySkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading workspace and sending regions" className="settings-loading-body">
-    <section className="section stack"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used when no region is specified. Applies to Live and Test.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} rowSize="large" /></section>
+    <section className="section stack"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used when a send doesn't specify a region.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} rowSize="large" /></section>
     <section className="section stack settings-region-detail"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={112} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><div className="settings-setup-checklist"><h3>Provisioning</h3><ul className="settings-setup-steps">{['AWS account access', 'SES configuration sets', 'SNS topic and permissions', 'SES event destinations', 'HTTPS subscription'].map(name => <li key={name}><Skeleton width={16} /><div className="settings-setup-step-heading settings-setup-step"><span>{name}</span><SkeletonText width={100} /></div></li>)}</ul></div><RegionDiscoverySkeleton /></section>
     <section className="section stack"><SectionHeader title="Workspace" actions={<ControlSkeleton width={70} />} /><FieldSkeleton label="Name" /></section>
   </LoadingRegion>
@@ -75,7 +75,7 @@ export function SettingsBodySkeleton({ regionId }: { regionId: string }) {
 export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   return <div className="stack">
     <div className="form-grid"><FieldSkeleton label="Name" /><FieldSkeleton label="Endpoint URL" /></div>
-    <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton />{!selectedRegions && <div className="ui-field__hint">{isNew ? 'This workspace · Includes future connected regions' : <SkeletonText width={350} lineHeight={18} />}</div>}</div>
+    <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton />{!selectedRegions && <div className="ui-field__hint">{isNew ? 'Includes future regions.' : <SkeletonText width={350} lineHeight={18} />}</div>}</div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>
     <div className="stack"><div>Events</div><div className="settings-choices">{['Send', 'Delivered', 'Bounced', 'Complaint', 'Rejected', 'Delivery delayed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
   </div>
@@ -83,11 +83,10 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
 
 export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: { isNew?: boolean; selectedRegions?: boolean }) {
   return <LoadingRegion label={isNew ? 'Loading webhook form' : 'Loading webhook endpoint'} className="settings-loading-body">
-    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="muted">A separate signing secret is created for each endpoint.</div><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
-      <div className="muted"><SkeletonText width={400} /></div>
+    {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
-      <section className="section stack"><SectionHeader title={<SkeletonText width={300} />} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /><SkeletonText width={250} /></section>
-      <section className="section stack"><SectionHeader title="Delivery history" actions={<SkeletonText width={300} />} /><TableSkeleton columns={settingsColumns.deliveries} rows={3} rowSize="large" /></section>
+      <section className="section stack"><SectionHeader title="Signing secret" actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /><SkeletonText width={250} /></section>
+      <section className="section stack"><SectionHeader title="Delivery history" actions={<span className="muted">UTC</span>} /><TableSkeleton columns={settingsColumns.deliveries} rows={3} rowSize="large" /></section>
       <div><ControlSkeleton width={146} /></div>
     </>}
   </LoadingRegion>
@@ -97,7 +96,7 @@ export function DomainDetailSkeleton() {
   return <LoadingRegion className="stack" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<ControlSkeleton width={138} />} />
     <div className="cluster"><Skeleton width={90} /><Skeleton width={100} /><span className="cluster">Custom mail from · <Skeleton width={90} /></span></div>
-    <section className="section stack"><SectionHeader title="DNS records" /><div className="muted">Copy these records to your DNS provider, then verify.</div><TableSkeleton columns={settingsColumns.dns} rows={3} rowSize="large" /><div className="ui-alert" aria-hidden="true"><SkeletonText width={320} /></div></section>
+    <section className="section stack"><SectionHeader title="DNS records" /><TableSkeleton columns={settingsColumns.dns} rows={3} rowSize="large" /><div className="ui-alert" aria-hidden="true"><SkeletonText width={320} /></div></section>
   </LoadingRegion>
 }
 
@@ -106,6 +105,6 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings/webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'ses') return <LoadingRegion className="stack settings-ses" label="Loading settings"><PageHeader title="Settings" /><RouteTabs value="ses" /><SettingsBodySkeleton regionId={regionId} /></LoadingRegion>
-  if (kind === 'webhooks') return <LoadingRegion className="stack" label="Loading webhooks"><PageHeader title="Settings" actions={<ControlSkeleton width={120} />} /><RouteTabs value="webhooks" /><SectionHeader title={<SkeletonText width={110} />} actions={<span className="muted">Workspace-wide · All regions</span>} /><TableSkeleton columns={settingsColumns.webhooks} rows={3} rowSize="large" /></LoadingRegion>
-  return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'API keys' : 'Domains'} actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><div className="page-toolbar muted">{kind === 'keys' ? `Workspace-wide keys · Domain restrictions available in ${regionId}` : `Sending region · ${regionId}`}</div><TableSkeleton columns={settingsColumns[kind]} rows={3} rowSize={kind === 'domains' ? 'large' : 'default'} pagination={kind === 'domains'} /></LoadingRegion>
+  if (kind === 'webhooks') return <LoadingRegion className="stack" label="Loading webhooks"><PageHeader title="Settings" actions={<ControlSkeleton width={120} />} /><RouteTabs value="webhooks" /><SectionHeader title={<SkeletonText width={110} />} /><TableSkeleton columns={settingsColumns.webhooks} rows={3} rowSize="large" /></LoadingRegion>
+  return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'API keys' : 'Domains'} actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton columns={settingsColumns[kind]} rows={3} rowSize={kind === 'domains' ? 'large' : 'default'} pagination={kind === 'domains'} /></LoadingRegion>
 }

@@ -42,7 +42,7 @@ function regionCatalog(value: unknown): RegionCatalog {
     && ['not_discovered', 'discovering', 'stale', 'ready', 'needs_provisioning', 'blocked'].includes(row.discoveryStatus)
     && nullableString(row.lastDiscoveredAt) && nullableString(row.provisionJobId) && nullableString(row.provisionError)
     && (row.provisionStatus === null || ['pending', 'running', 'completed', 'failed'].includes(row.provisionStatus)))) {
-    throw new ApiError('The API did not return a region catalog. Update the running API service and run its database migrations; older region account responses are not supported.', 'INVALID_RESPONSE')
+    throw new ApiError('The API returned an invalid region catalog.', 'INVALID_RESPONSE')
   }
   return value as RegionCatalog
 }

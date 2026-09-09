@@ -52,7 +52,6 @@ function SegmentEditor({ initial }: { initial: SegmentInput }) {
           <Button aria-label={`Remove condition ${index + 1}`} className="audience-rule-remove" variant="ghost" onClick={() => change({ ...input, rules: input.rules.filter(item => item.id !== rule.id) })}><X size={16} /></Button>
         </div>)}
         <div className="cluster"><Button onClick={() => change({ ...input, rules: [...input.rules, newRule()] })}><Plus size={16} />Add condition</Button><Button disabled={!valid} onClick={() => setPreview({ ...input, name: input.name || 'Audience preview' })}>Preview audience</Button></div>
-        {input.rules.length === 0 && <Alert tone="info">Add a condition to define this segment.</Alert>}
       </section>
     </form>
     {preview && <SegmentPreview input={preview} />}

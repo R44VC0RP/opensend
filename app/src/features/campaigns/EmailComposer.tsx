@@ -265,6 +265,6 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     </div>
     {mode === 'html' && <Field label="Email HTML" htmlFor="campaign-html"><Textarea id="campaign-html" className="campaign-html" value={raw} disabled={locked} spellCheck={false} onChange={event => { latestRaw.current = event.target.value; setRaw(event.target.value); sourceRef.current = 'html'; setSource('html'); onDirty() }} /></Field>}
     {mode === 'preview' && <EmailPreview html={preview} title="Campaign email preview" editor={previewEditor} attachmentIds={previewAttachmentIds} />}
-    <ConfirmDialog open={convert} onOpenChange={setConvert} title="Convert HTML to visual blocks?" description="Custom HTML and styles may not convert exactly. Your original HTML is kept until you edit the visual content. Review the preview before saving." confirmLabel="Convert to blocks" onConfirm={openVisual} />
+    <ConfirmDialog open={convert} onOpenChange={setConvert} title="Convert HTML to visual blocks?" description="Custom HTML and styles may not convert exactly. The original HTML is kept until you edit the blocks." confirmLabel="Convert to blocks" onConfirm={openVisual} />
   </div>
 })

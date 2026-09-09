@@ -31,7 +31,6 @@ function LiveDomainsPage() {
   }
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
-    <div className="page-toolbar muted">Sending region · {regionId}</div>
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rowSize="large" rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
@@ -68,18 +67,17 @@ function LiveDomainDetailPage() {
     <section className="section stack">
       <SectionHeader title="DNS records" />
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
-      <div className="muted">Copy these records to your DNS provider, then verify.</div>
       <DataTable minRows={3} rowSize="large" rows={current.records} rowKey={record => record.id} columns={[
         { ...settingsColumns.dns[0], render: record => record.type },
         { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
         { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
         { ...settingsColumns.dns[3], render: record => <StatusBadge status={label(record.status)} /> },
       ]} />
-      {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`}>Review the pending records, then verify again.</Alert> : <Alert tone="info">DNS record values are provided by SES. Use the domain readiness status above; individual DNS records are not independently verified.</Alert>}
+      {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`} children={null} /> : <Alert tone="info">Individual DNS records are not independently verified.</Alert>}
     </section>
   </div>
 }
 
-function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domain verification is a live SES operation. Switch to live mode to manage sending domains. Test campaigns accept an explicit sender address without an AWS lookup.</Alert></> }
+function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domains are managed in live mode only.</Alert></> }
 export function DomainsPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainsPage /> }
 export function DomainDetailPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainDetailPage /> }

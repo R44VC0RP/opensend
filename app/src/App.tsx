@@ -25,7 +25,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   componentDidCatch(_error: Error, _info: ErrorInfo) { /* A production reporter can be injected here; never log message bodies. */ }
-  render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Reload to fetch the latest saved data from the API. Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
+  render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
 }
 export function App() {
   return <AppErrorBoundary><Routes><Route element={<AppShell />}>
@@ -37,6 +37,6 @@ export function App() {
     <Route path="segments" element={<SegmentsPage />} /><Route path="segments/new" element={<SegmentEditorPage />} /><Route path="segments/:id" element={<SegmentEditorPage />} />
     <Route path="api-keys" element={<ApiKeysPage />} /><Route path="domains" element={<DomainsPage />} /><Route path="domains/:id" element={<DomainDetailPage />} />
     <Route path="settings" element={<SettingsPage />} /><Route path="settings/webhooks" element={<WebhooksPage />} /><Route path="settings/webhooks/new" element={<WebhookDetailPage />} /><Route path="settings/webhooks/:id" element={<WebhookDetailPage />} />
-    <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" description="This page may have moved or no longer exists." action={<Link to="/">Return to overview</Link>} />} />
+    <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

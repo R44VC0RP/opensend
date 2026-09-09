@@ -27,13 +27,13 @@ export function SetupChecklist({report, running, queued}: {report?: SesDiscovery
   const snsUrl = report && topic?.arn ? `https://${report.region}.console.aws.amazon.com/sns/v3/home?region=${report.region}#/topic/${encodeURIComponent(topic.arn)}` : undefined
   return <div className="settings-setup-checklist" aria-label="Provisioning checklist">
     <div className="settings-setup-heading"><h3>Provisioning</h3>{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>
-    {running && <p className="muted">{report ? 'Showing the last check. Results update after provisioning finishes.' : 'Checks appear after AWS verification finishes.'}</p>}
+    {running && report && <p className="muted">Last checked state.</p>}
     <ul className="settings-setup-steps">{checks.map(check => {
       const Icon = check.state === 'complete' ? Check : check.state === 'waiting' ? Clock3 : check.state === 'blocked' ? CircleAlert : Circle
       return <li key={check.name} data-state={check.state}>
         <Icon size={16} aria-hidden="true" />
         <div className="settings-setup-step"><div className="settings-setup-step-heading"><span>{check.name}</span><span className="settings-setup-status">{labels[check.state]}</span></div>{check.detail && <p className="muted">{check.detail}</p>}
-          {check.name === 'HTTPS subscription' && pending && <div className="settings-setup-confirmation"><p>AWS has not confirmed the callback. Provisioning again will not resend confirmation.</p><p>In SNS, select the pending subscription and choose <strong>Request confirmation</strong>. Then use <strong>Check AWS</strong> above.</p>{snsUrl && <a className="ui-button ui-button--secondary" href={snsUrl} target="_blank" rel="noopener noreferrer">Open SNS</a>}</div>}
+          {check.name === 'HTTPS subscription' && pending && <div className="settings-setup-confirmation"><p>In SNS, choose <strong>Request confirmation</strong> for the pending subscription, then <strong>Check AWS</strong>. Provisioning does not resend confirmation.</p>{snsUrl && <a className="ui-button ui-button--secondary" href={snsUrl} target="_blank" rel="noopener noreferrer">Open SNS</a>}</div>}
         </div>
       </li>
     })}</ul>

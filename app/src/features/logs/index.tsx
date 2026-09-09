@@ -36,7 +36,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
         { ...logColumns[3], render: row => <span className="muted">{label(row.stream)}</span> },
         { ...logColumns[4], label: 'Created', render: row => <span className="muted nowrap">{time(row.sentAt)}</span> },
         { ...logColumns[5], render: () => <ChevronRight size={16} aria-hidden /> },
-      ]} empty={<EmptyState title="No emails found" description="Try another search, status, or region." action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1) }}>Clear filters</Button>} />} />
+      ]} empty={<EmptyState title="No emails found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1) }}>Clear filters</Button>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
   </>
@@ -60,10 +60,10 @@ function EmailDetail({ email }: { email: Email }) {
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
   return <><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
     <dl className="email-metadata"><div><dt>To</dt><dd>{email.to}</dd></div><div><dt>From</dt><dd>{email.fromName ? `${email.fromName} <${email.from}>` : email.from}</dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
-    {email.simulated && <Alert tone="info">Test-mode simulation. No message was delivered by SES.</Alert>}
-    {email.status === 'bounced' && <Alert tone="warning">Delivery failed. Review the delivery diagnostics below.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
+    {email.simulated && <Alert tone="info">Simulated in test mode; not sent to SES.</Alert>}
+    {email.status === 'bounced' && <Alert tone="warning">Delivery failed.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
     {['complaint', 'complained'].includes(email.status) && <Alert tone="danger">The recipient reported this message as spam.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
-    {['deferred', 'delayed'].includes(email.status) && <Alert tone="warning">Delivery is delayed. SES will retry according to its delivery policy.</Alert>}
+    {['deferred', 'delayed'].includes(email.status) && <Alert tone="warning">Delivery delayed.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'html', label: 'HTML' }, { value: 'plain', label: 'Plain text' }]} />
       {view === 'preview' ? email.html ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} /> : <EmptyState title="No HTML snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html : email.text ?? (api.mode === 'demo' ? htmlToText(email.html) : 'No plain-text snapshot available.')}</pre>}
     </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} /><ol>{events.map(event => <li key={event.id}><span className={`timeline-dot ${['bounced', 'complaint'].includes(event.type) ? 'timeline-dot--warning' : ''}`} /><div><div className="cluster between"><span>{label(event.type)}</span><time className="muted">{time(event.at)}</time></div><p className="muted">{event.description}</p>{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Could not load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>

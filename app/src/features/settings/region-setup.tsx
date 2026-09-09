@@ -63,7 +63,7 @@ export function RegionSetup() {
       <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button variant="primary" disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}
-      <Field label="Default sending region" htmlFor="default-sending-region" hint="Used when no region is specified. Applies to Live and Test.">
+      <Field label="Default sending region" htmlFor="default-sending-region" hint="Used when a send doesn't specify a region.">
         <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: row.region}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
       </Field>
       <DataTable loading={catalog.isPending} skeletonRows={2} rowSize="large" rows={catalog.data?.data ?? []} rowKey={row => row.region} selectedId={entry?.region} empty={<EmptyState title="No regions configured" />} columns={[
@@ -123,7 +123,7 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     <MutationError error={discovery.error || refresh.error} />
     {!confirmOpen && <MutationError error={provision.error} />}
     {ready ? <details className="settings-provisioning-details"><summary>Provisioning details</summary><div className="stack">{actions}{checklist}</div></details> : checklist}
-    {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : entry.enabled && <p className="muted">Check AWS to load setup status. No resources are created.</p>}
+    {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : null}
     <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={`Creates or repairs SES configuration sets and SNS feedback in live AWS account ${report?.account?.id ?? '(not identified)'}, in ${entry.region}. Does not send email, change DNS, or grant production access.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
   </section>
 }

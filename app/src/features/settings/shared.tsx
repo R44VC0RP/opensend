@@ -16,7 +16,7 @@ export function SettingsTabs({ value }: { value: 'ses' | 'webhooks' }) {
   return <Tabs value={value} onValueChange={next => navigate(next === 'ses' ? '/settings' : '/settings/webhooks')} items={[{ value: 'ses', label: 'Amazon SES' }, { value: 'webhooks', label: 'Webhooks' }]} />
 }
 export function SecretDialog({ secret, title, onClose }: { secret: string | null; title: string; onClose: () => void }) {
-  return <Dialog open={secret !== null} onOpenChange={open => { if (!open) onClose() }} title={title} description="Copy this secret now. It will not be shown again after you close this dialog." footer={<Button variant="primary" onClick={onClose}>Done</Button>}>
+  return <Dialog open={secret !== null} onOpenChange={open => { if (!open) onClose() }} title={title} description="Shown once. Copy it now." footer={<Button variant="primary" onClick={onClose}>Done</Button>}>
     <div className="settings-secret"><code>{secret}</code>{secret && <CopyButton value={secret} label="Copy secret" />}</div>
   </Dialog>
 }
