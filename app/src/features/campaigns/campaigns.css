@@ -33,7 +33,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-compose-metadata { flex-shrink: 0; margin-bottom: var(--space-4); }
 .campaign-compose-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; min-height: 38px; gap: var(--space-8); border-bottom: 1px solid var(--color-border); }
 .campaign-compose-row > :is(label, span) { color: var(--color-muted); font-size: var(--text-xs); }
-.campaign-compose-row .ui-input { height: 36px; padding: var(--space-4) 0; border: 0; border-radius: 0; background: transparent; }
+.campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 36px; padding: var(--space-4) 0; border: 0; border-radius: 0; background: transparent; }
 .campaign-compose-subject { grid-template-columns: 56px minmax(0, 1fr) auto; }
 .campaign-compose-subject input { font-size: var(--text-md); }
 /* Ghost buttons hang out by their own padding so labels align with the row's right edge and the text column. */
@@ -53,6 +53,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-fields { display: flex; min-width: 0; flex-direction: column; gap: var(--space-16); }
 .composer-loading { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
 .composer-skeleton-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); padding-block: var(--space-8); margin-bottom: var(--space-8); }
+.composer-skeleton-tools .ui-control-skeleton { border: 0; border-radius: 0; }
 .composer-skeleton-canvas { min-height: 260px; flex: 1; background: var(--color-email-surface); display: flex; flex-direction: column; gap: var(--space-16); }
 .composer-skeleton-canvas .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
 .campaign-audience-summary { display: flex; flex-direction: column; gap: var(--space-12); }
