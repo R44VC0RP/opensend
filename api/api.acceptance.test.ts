@@ -1,7 +1,7 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import pg from 'pg';
 
 // Run against the actual server and normal background-job runner with npm test.
@@ -594,6 +594,211 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('LIVE GOOGLE OAUTH: approved login and denied Google identity require browser verification', {
     skip: 'NOT RUN by synthetic fixtures. Manually complete real Google login and denied-identity flows with configured OAuth credentials; seeding does not verify OAuth, consent, provider claims, redirect registration, or browser cookies.',
   }, () => {});
+});
+
+describe('Hosted MCP OAuth and tools', () => {
+  const resourceUrl = `${PUBLIC_ORIGIN}/mcp`;
+  const writableScope = 'opensend:read opensend:manage offline_access';
+  const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
+  function protectOAuth(reply: Reply): Reply {
+    if (reply.body && typeof reply.body === 'object') for (const [field, value] of Object.entries(reply.body)) {
+      if (typeof value === 'string' && /token|secret|^url$/.test(field)) secrets.add(value);
+    }
+    return reply;
+  }
+  async function registerClient(t: TestContext, db: pg.Client, metadata: Json = {}): Promise<Reply> {
+    const name = unique('acceptance-mcp-client');
+    const reply = protectOAuth(await http('POST', '/api/auth/oauth2/register', undefined, {
+      client_name: name, redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: writableScope, ...metadata,
+    }));
+    if (typeof reply.body?.client_id === 'string') cleanup(t, async () => {
+      // Client-owned consents, resource links and tokens cascade; never delete another client's grants.
+      await db.query('DELETE FROM oauth_client WHERE client_id = $1 AND name = $2', [reply.body.client_id, name]);
+    });
+    return reply;
+  }
+  async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope) {
+    const client = ok(await registerClient(t, db, { scope }), 201);
+    const redirectUri = 'http://127.0.0.1/callback';
+    const verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
+    secrets.add(verifier);
+    const state = unique('acceptance-mcp-state');
+    const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
+      scope, state, resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
+    const authorization = ok(protectOAuth(await http('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER)));
+    assert.equal(authorization.redirect, true);
+    assert.equal(typeof authorization.url, 'string');
+    const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN);
+    assert.equal(consentUrl.origin, PUBLIC_ORIGIN);
+    assert.equal(consentUrl.pathname, '/mcp/consent');
+    const oauthQuery = consentUrl.search.slice(1);
+    secrets.add(oauthQuery);
+    const approval = ok(protectOAuth(await http('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+    assert.equal(typeof approval.url, 'string');
+    const callback = new URL(approval.url);
+    assert.equal(`${callback.origin}${callback.pathname}`, redirectUri);
+    assert.equal(callback.searchParams.get('state'), state);
+    const code = callback.searchParams.get('code');
+    assert.ok(code, 'Approved OAuth consent must issue an authorization code.');
+    secrets.add(code);
+    const tokenReply = protectOAuth(await http('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({
+      grant_type: 'authorization_code', client_id: client.client_id, redirect_uri: redirectUri, code, code_verifier: verifier, resource: resourceUrl,
+    }).toString(), { 'content-type': 'application/x-www-form-urlencoded' }));
+    const tokens = ok(tokenReply);
+    assert.equal(typeof tokens.access_token, 'string');
+    assert.equal(typeof tokens.refresh_token, 'string');
+    assert.equal(String(tokens.token_type).toLowerCase(), 'bearer');
+    const grant = await db.query('SELECT id FROM oauth_consent WHERE client_id = $1 AND user_id = $2', [client.client_id, manager!.userId]);
+    assert.equal(grant.rowCount, 1);
+    return { token: tokens.access_token as string, consentId: grant.rows[0].id as string };
+  }
+  async function rpc(token: string, method: string, params: Json = {}): Promise<Json> {
+    const id = unique('acceptance-mcp-rpc');
+    const reply = await http('POST', '/mcp', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
+    const body = ok(reply);
+    assert.equal(body.jsonrpc, '2.0', diagnostic(reply));
+    assert.equal(body.id, id, diagnostic(reply));
+    assert.equal(body.error, undefined, diagnostic(reply));
+    assert.ok(body.result && typeof body.result === 'object', diagnostic(reply));
+    return body.result;
+  }
+  async function callTool(token: string, name: string, args: Json = {}, status = 200): Promise<Json> {
+    const result = await rpc(token, 'tools/call', { name, arguments: args });
+    assert.equal(result.isError, false, redact(result));
+    const output = result.structuredContent;
+    assert.equal(output?.status, status, redact(result));
+    assert.equal(typeof output.requestId, 'string', redact(result));
+    assert.ok(output.requestId, redact(result));
+    assert.deepEqual(JSON.parse(result.content[0].text), output);
+    return output.response;
+  }
+
+  test('hosted MCP accepts omitted-type loopback desktop registration without weakening redirect validation', async t => {
+    const db = await fixtureDatabase(t);
+    for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
+      const client = ok(await registerClient(t, db, { redirect_uris: [redirect] }), 201);
+      assert.equal(client.application_type, 'native');
+      assert.equal(client.token_endpoint_auth_method, 'none');
+      assert.deepEqual(client.redirect_uris, [redirect]);
+    }
+    for (const metadata of [
+      { application_type: 'web', redirect_uris: ['http://127.0.0.1/callback'] },
+      { redirect_uris: ['http://example.com/callback'] },
+      { redirect_uris: ['http://127.0.0.1/callback', 'https://example.com/callback'] },
+      { redirect_uris: ['http://127.0.0.1.evil.example/callback'] },
+      { redirect_uris: ['http://user:password@127.0.0.1/callback'] },
+      { redirect_uris: ['http://127.0.0.1/callback#fragment'] },
+    ]) {
+      const reply = await registerClient(t, db, metadata);
+      assert.equal(reply.status, 400, diagnostic(reply));
+      assert.equal(typeof reply.body.error, 'string', diagnostic(reply));
+      assert.equal(reply.body.client_id, undefined, diagnostic(reply));
+    }
+  });
+
+  test('hosted MCP publishes flat schemas and preserves collection, exact-ID, content and summary/detail contracts', async t => {
+    const db = await fixtureDatabase(t);
+    const { token } = await oauthGrant(t, db);
+    const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
+    assert.equal(initialized.protocolVersion, '2025-11-25');
+    assert.equal(initialized.serverInfo.name, 'opensend');
+    const catalog = await rpc(token, 'tools/list');
+    assert.equal(catalog.tools.length, 64);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);
+    const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
+    for (const tool of tools.values()) {
+      assert.equal(tool.outputSchema?.type, 'object', tool.name);
+      assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
+      assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
+    }
+    for (const [name, oldList, oldDetail] of [
+      ['getEmails', 'listEmails', 'getEmail'], ['getContacts', 'listContacts', 'getContact'],
+      ['getContactLists', 'listContactLists', 'getContactList'], ['getSegments', 'listSegments', 'getSegment'],
+      ['getDomains', 'listDomains', 'getDomain'], ['getWebhooks', 'listWebhooks', 'getWebhook'],
+    ]) {
+      const tool = tools.get(name);
+      assert.ok(tool, name);
+      assert.equal(tool.inputSchema.properties.id.type, 'string', name);
+      assert.ok(!tool.inputSchema.required?.includes('id'), name);
+      assert.ok(!tools.has(oldList) && !tools.has(oldDetail), name);
+      const missing = await rpc(token, 'tools/call', { name, arguments: { id: unique('missing') } });
+      assert.equal(missing.isError, true, redact(missing));
+      // Domain routes reject test-mode access before looking up live SES identities.
+      assert.equal(missing.structuredContent.status, name === 'getDomains' ? 403 : 404, redact(missing));
+      assert.equal(missing.structuredContent.error.code, name === 'getDomains' ? 'TEST_EXTERNAL_OPERATION' : 'NOT_FOUND', redact(missing));
+      assert.equal(missing.structuredContent.response.data, undefined, 'A missing exact ID must not become an empty successful page.');
+    }
+    for (const name of ['listCampaigns', 'getCampaign', 'listContactImports', 'getContactImport', 'listWebhookDeliveries', 'getWebhookDelivery']) assert.ok(tools.has(name), name);
+    assert.deepEqual(tools.get('getEmailContent')!.inputSchema.required, ['id']);
+    assert.equal(tools.get('createContact')!.inputSchema.properties.confirm.const, true);
+    assert.equal(tools.get('createContact')!.inputSchema.properties.idempotencyKey.type, 'string');
+
+    const label = unique('acceptance-mcp-contact');
+    const contacts: Json[] = [];
+    for (let index = 0; index < 2; index++) {
+      const created = await callTool(token, 'createContact', { body: { email: address(), name: label }, confirm: true, idempotencyKey: unique('mcp-contact') }, 201);
+      cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${created.id}`, MANAGER), [200, 404]); });
+      contacts.push(created);
+    }
+    const first = await callTool(token, 'getContacts', { search: label, limit: 1 });
+    assert.deepEqual(first, ok(await http('GET', `/v1/contacts?search=${encodeURIComponent(label)}&limit=1`, MANAGER)));
+    assert.equal(first.data.length, 1);
+    assert.equal(typeof first.nextCursor, 'string');
+    const second = await callTool(token, 'getContacts', { search: label, limit: 1, cursor: first.nextCursor });
+    assert.equal(second.nextCursor, null);
+    assert.deepEqual([...first.data, ...second.data].map((row: Json) => row.id).sort(), contacts.map(row => row.id).sort());
+    const exact = await callTool(token, 'getContacts', { id: contacts[0].id });
+    assert.deepEqual(exact, { data: [ok(await http('GET', `/v1/contacts/${contacts[0].id}`, MANAGER))], nextCursor: null });
+    for (const args of [{ id: contacts[0].id, search: label }, { id: contacts[0].id, limit: 1 }, { path: { id: contacts[0].id } }, { query: { search: label } }]) {
+      const invalid = await rpc(token, 'tools/call', { name: 'getContacts', arguments: args });
+      assert.equal(invalid.isError, true, redact(invalid));
+      assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENTS', redact(invalid));
+      assert.equal(invalid.structuredContent.status, null, 'Invalid input must be rejected before API dispatch.');
+    }
+    const noConfirmation = await rpc(token, 'tools/call', { name: 'updateContact', arguments: { id: contacts[0].id, body: { name: 'not authorized' } } });
+    assert.equal(noConfirmation.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(noConfirmation));
+    const updated = await callTool(token, 'updateContact', { id: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
+    assert.equal(updated.name, `${label}-updated`);
+
+    // The dashboard fixture is explicitly test-mode; no worker or SES delivery is needed for content reads.
+    const message = mail({ text: 'Synthetic hosted MCP content snapshot.' });
+    const sent = ok(await http('POST', '/v1/emails/send', MANAGER, message), 202);
+    const content = await callTool(token, 'getEmailContent', { id: sent.id });
+    assert.equal(content.text, message.text);
+    assert.equal(content.simulated, true);
+    const email = await callTool(token, 'getEmails', { id: sent.id });
+    assert.equal(email.data[0].id, sent.id);
+    assert.equal(email.nextCursor, null);
+    const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-audience') });
+    const campaign = await campaignFixture(t, MANAGER, { listId: list.id }, { name: unique('mcp-campaign') });
+    const summaries = await callTool(token, 'listCampaigns', { search: campaign.draft.name });
+    const summary = summaries.data.find((row: Json) => row.id === campaign.id);
+    assert.ok(summary);
+    assert.equal(summary.draft.html, undefined);
+    const detail = await callTool(token, 'getCampaign', { id: campaign.id });
+    assert.equal(detail.draft.html, campaign.draft.html);
+  });
+
+  test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
+    const db = await fixtureDatabase(t);
+    const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
+    const catalog = await rpc(token, 'tools/list');
+    assert.equal(catalog.tools.length, 25);
+    assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContacts'));
+    const denied = await rpc(token, 'tools/call', { name: 'createContact', arguments: { confirm: true, body: { email: address() } } });
+    assert.equal(denied.isError, true, redact(denied));
+    assert.equal(denied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(denied));
+    const deletion = await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId });
+    assert.equal(deletion.status, 200, diagnostic(deletion));
+    const revoked = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
+    assert.equal(revoked.status, 401, diagnostic(revoked));
+    assert.match(revoked.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+    const key = await keyFixture(t);
+    const fallback = await http('POST', '/mcp', key.secret, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, rpcHeaders);
+    assert.equal(fallback.status, 401, 'Hosted MCP must not fall back to API-key authentication.');
+  });
 });
 
 describe('DB region catalog and explicit SES setup', () => {

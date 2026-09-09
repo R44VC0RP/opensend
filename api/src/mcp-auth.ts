@@ -202,6 +202,19 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
         (metadata.token_endpoint_auth_method !== undefined && !['none', 'client_secret_basic', 'client_secret_post'].includes(String(metadata.token_endpoint_auth_method)))) {
         return publicCors(oauthError(400, 'invalid_client_metadata', 'Use authorization code with PKCE and a public or client-secret client.'));
       }
+      // Legacy desktop clients omit application_type. Infer native only for
+      // exact loopback hosts; keep the provider's remaining URI checks intact.
+      if (metadata.application_type === undefined && Array.isArray(metadata.redirect_uris) && metadata.redirect_uris.length > 0 &&
+        metadata.redirect_uris.every(uri => {
+          if (typeof uri !== 'string' || uri.includes('#') || !/^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d*)?(?:[/?]|$)/i.test(uri)) return false;
+          try {
+            const redirect = new URL(uri);
+            return ['http:', 'https:'].includes(redirect.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(redirect.hostname) &&
+              !redirect.username && !redirect.password;
+          } catch { return false; }
+        })) metadata.application_type = 'native';
+      body = JSON.stringify(metadata);
+      headers.delete('content-length');
     }
     if (path === '/oauth2/authorize') {
       if (!url.searchParams.has('scope')) url.searchParams.set('scope', 'opensend:read');
