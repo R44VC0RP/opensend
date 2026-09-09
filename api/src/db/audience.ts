@@ -1,0 +1,23 @@
+import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+
+export type SegmentRule = { field: 'email' | 'firstName' | 'plan' | 'country'; operator: 'eq' | 'neq' | 'contains'; value: string } | { field: 'lastOpenAt' | 'lastClickAt'; operator: 'within' | 'inactive'; days: number } | { operator: 'and' | 'or'; rules: SegmentRule[] };
+export type ImportRow = { row: number; email: string; name?: string; properties: Record<string, string | number | boolean | null> };
+export type ImportError = { row: number; field: string; message: string };
+const scope = () => ({ workspaceId: text('workspace_id').notNull(), environment: text('environment').$type<'live' | 'test'>().notNull() });
+const dates = () => ({ createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(), updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() });
+
+export const contacts = pgTable('audience_contacts', {
+  id: text('id').primaryKey(), ...scope(), email: text('email').notNull(), name: text('name'),
+  properties: jsonb('properties').$type<Record<string, string | number | boolean | null>>().notNull().default({}),
+  marketingConsent: text('marketing_consent').$type<'unknown' | 'subscribed' | 'unsubscribed'>().notNull().default('unknown'),
+  suppressed: boolean('suppressed').notNull().default(false), suppressionReason: text('suppression_reason'),
+  lastOpenAt: timestamp('last_open_at', { withTimezone: true, mode: 'string' }), lastClickAt: timestamp('last_click_at', { withTimezone: true, mode: 'string' }),
+  observedSince: timestamp('observed_since', { withTimezone: true, mode: 'string' }),
+  openObservedSince: timestamp('open_observed_since', { withTimezone: true, mode: 'string' }), clickObservedSince: timestamp('click_observed_since', { withTimezone: true, mode: 'string' }),
+  deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }), ...dates(),
+}, t => [uniqueIndex('audience_contacts_email_scope').on(t.workspaceId, t.environment, t.email), index('audience_contacts_page').on(t.workspaceId, t.environment, t.id)]);
+export const lists = pgTable('audience_lists', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), description: text('description').notNull().default(''), ...dates() }, t => [index('audience_lists_page').on(t.workspaceId, t.environment, t.id)]);
+export const listMembers = pgTable('audience_list_members', { ...scope(), listId: text('list_id').notNull(), contactId: text('contact_id').notNull(), createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() }, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.listId, t.contactId] }), index('audience_members_contact').on(t.workspaceId, t.environment, t.contactId)]);
+export const segments = pgTable('audience_segments', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), rule: jsonb('rule').$type<SegmentRule>().notNull(), ...dates() }, t => [index('audience_segments_page').on(t.workspaceId, t.environment, t.id)]);
+export const imports = pgTable('audience_imports', { id: text('id').primaryKey(), ...scope(), listId: text('list_id'), status: text('status').$type<'preview' | 'committed'>().notNull().default('preview'), rows: jsonb('rows').$type<ImportRow[]>().notNull(), errors: jsonb('errors').$type<ImportError[]>().notNull(), imported: integer('imported').notNull().default(0), ...dates() }, t => [index('audience_imports_page').on(t.workspaceId, t.environment, t.id)]);
+export const consentAudit = pgTable('audience_consent_audit', { id: text('id').primaryKey(), ...scope(), contactId: text('contact_id').notNull(), email: text('email').notNull(), status: text('status').$type<'subscribed' | 'unsubscribed'>().notNull(), source: text('source').notNull(), policyVersion: text('policy_version'), evidence: text('evidence'), actorKeyId: text('actor_key_id'), occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' }).notNull(), createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() }, t => [index('audience_consent_page').on(t.workspaceId, t.environment, t.contactId, t.id)]);

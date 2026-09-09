@@ -1,0 +1,42 @@
+{
+  "name": "@opensend/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/server.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
+    "worker": "node --env-file-if-exists=.env --import tsx src/runner.ts",
+    "migrate": "node --env-file-if-exists=.env --import tsx src/migrate.ts",
+    "check": "tsc --noEmit",
+    "test": "node --env-file-if-exists=.env --import tsx --test api.acceptance.test.ts",
+    "openapi": "tsx src/export-openapi.ts",
+    "sdk": "npm run openapi && openapi-ts && tsc -p ../sdk/tsconfig.json",
+    "cf:dev": "wrangler dev",
+    "cf:check": "wrangler deploy --dry-run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1128.0",
+    "@aws-sdk/client-sesv2": "^3.1128.0",
+    "@hono/node-server": "^2.1.1",
+    "@hono/zod-openapi": "^1.6.3",
+    "@smithy/fetch-http-handler": "^5.8.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.13.7",
+    "pg": "^8.23.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@hey-api/openapi-ts": "^0.99.0",
+    "@types/node": "^26.5.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.13",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.130.0"
+  },
+  "overrides": {
+    "js-yaml": "5.4.1",
+    "sharp": "0.35.4"
+  }
+}

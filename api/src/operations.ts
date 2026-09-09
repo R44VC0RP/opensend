@@ -1,0 +1,382 @@
+import { createRoute, z } from '@hono/zod-openapi';
+import { and, asc, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import type { AnyPgColumn } from 'drizzle-orm/pg-core';
+import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
+import { X509Certificate, verify } from 'node:crypto';
+import { isIP } from 'node:net';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, region, response, security, log, type App, type Actor, type Ctx, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { recordUnsubscribe } from './audience.js';
+import { contacts } from './db/audience.js';
+import { emails } from './db/sending.js';
+import { recordEmailEvent } from './sending.js';
+import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
+export type { PublishedEvent } from './db/operations.js';
+
+const now = () => new Date().toISOString();
+const scoped = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
+const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), environment: z.enum(['live', 'test']), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
+const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
+const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false) }).openapi('CreateWebhook');
+const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
+const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
+const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
+const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional() })) }).openapi('DomainReadiness');
+const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
+const settingsSchema = z.object({ name: z.string(), environment: z.enum(['live', 'test']) }).openapi('WorkspaceSettings');
+const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
+const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
+const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
+const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
+function external(a: Actor) { if (a.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Test keys cannot access or modify live SES resources.'); }
+function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
+function allowedDomain(a: Actor, name: string) { if (a.domains.length && !a.domains.includes(name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain.'); }
+async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); } catch (error) {
+    if (error instanceof ApiError) throw error;
+    const provider = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+    const name = provider?.name ?? '', status = provider?.$metadata?.httpStatusCode;
+    if (status === 403 || /AccessDenied|Unauthorized|InvalidClientTokenId|UnrecognizedClient|ExpiredToken/.test(name)) throw new ApiError(403, 'SES_ACCESS_DENIED', 'AWS denied the SES operation. Check deployment credentials and IAM permissions.');
+    if (status === 429 || /TooManyRequests|Throttl|LimitExceeded/.test(name)) throw new ApiError(429, 'SES_RATE_LIMITED', 'The SES control-plane quota was exceeded. Retry after a short delay.', undefined, true);
+    if (status === 404 || name === 'NotFoundException') throw new ApiError(404, 'SES_IDENTITY_NOT_FOUND', 'The requested identity does not exist in this SES region.');
+    if (status === 409 || name === 'AlreadyExistsException') throw new ApiError(409, 'SES_IDENTITY_EXISTS', 'The identity already exists in this SES region.');
+    if (status === 400 || name === 'BadRequestException') throw new ApiError(422, 'SES_INVALID_REQUEST', 'SES rejected the operation. Check the identity, region, and account configuration.');
+    throw new ApiError(503, 'SES_UNAVAILABLE', 'SES could not complete the operation. Check service availability and deployment connectivity.', undefined, true);
+  }
+}
+function metadata(row: typeof webhooks.$inferSelect) { const { encryptedSecret: _, workspaceId: _w, environment: _e, ...value } = row; return value; }
+
+// Only administrator-controlled public DNS names belong in this exact-match allowlist.
+// It is the trust boundary against DNS rebinding: untrusted tenants cannot add hosts.
+function webhookUrl(runtime: Runtime, value: string) {
+  let url: URL; try { url = new URL(value); } catch { throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'A public HTTPS webhook URL is required.', 'url'); }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash || (url.port && url.port !== '443') || isIP(host.replace(/^\[|\]$/g, '')) || !host.includes('.') || /(^|\.)(localhost|local|internal|invalid|test|home|lan|arpa)$/.test(host) || host.endsWith('.')) throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'Webhook endpoints must use public HTTPS DNS names without credentials, fragments or custom ports.', 'url');
+  if (!runtime.config.webhookAllowedHosts.map(h => h.toLowerCase()).includes(host)) throw new ApiError(422, 'WEBHOOK_HOST_NOT_ALLOWED', 'The endpoint hostname must be in the deployment administrator’s trusted webhook allowlist.', 'url');
+  return url.toString();
+}
+async function encryptionKey(runtime: Runtime) {
+  const value = runtime.config.encryptionKey;
+  if (!/^[0-9a-f]{64}$/i.test(value)) throw new ApiError(503, 'ENCRYPTION_NOT_CONFIGURED', 'A 32-byte hexadecimal encryption key is required.');
+  return crypto.subtle.importKey('raw', Uint8Array.from(value.match(/../g)!, h => parseInt(h, 16)), 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+const hex = (value: Uint8Array) => Array.from(value, b => b.toString(16).padStart(2, '0')).join('');
+const unhex = (value: string) => Uint8Array.from(value.match(/../g) ?? [], h => parseInt(h, 16));
+async function encrypt(runtime: Runtime, secret: string, binding: string) { const iv = crypto.getRandomValues(new Uint8Array(12)); const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, await encryptionKey(runtime), new TextEncoder().encode(secret)); return `${hex(iv)}.${hex(new Uint8Array(encrypted))}`; }
+async function decrypt(runtime: Runtime, ciphertext: string, binding: string) { const [iv, value] = ciphertext.split('.'); return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unhex(iv!), additionalData: new TextEncoder().encode(binding) }, await encryptionKey(runtime), unhex(value!))); }
+function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
+async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
+const secretBinding = (a: Pick<Actor, 'workspaceId' | 'environment'>, webhookId: string) => `${a.workspaceId}:${a.environment}:${webhookId}`;
+
+export async function publishEvent(runtime: Runtime, event: PublishedEvent): Promise<void> {
+  if (!eventTypes.includes(event.type)) throw new ApiError(422, 'INVALID_EVENT_TYPE', 'Unknown webhook event type.');
+  await runtime.db.transaction(async tx => {
+    const inserted = await tx.insert(events).values(event).onConflictDoNothing().returning({ id: events.id });
+    if (!inserted.length) return;
+    const endpoints = await tx.select().from(webhooks).where(and(scoped(webhooks, event), eq(webhooks.paused, false)));
+    for (const endpoint of endpoints) {
+      if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
+      // Simulated emails must never enter a live-configured endpoint, even if a caller supplied a wrong mode.
+      if (event.environment === 'live' && (event.id.startsWith('os_test_') || event.data.emailId?.startsWith('os_test_') || event.data.simulated === true)) continue;
+      const deliveryId = id('whd');
+      await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event });
+      await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
+    }
+  });
+  try { await runtime.wake?.(); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
+}
+
+export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, environment: Mode, email: string, db: DbExecutor = runtime.db): Promise<string> {
+  const token = randomSecret('u_');
+  await db.insert(unsubscribeTokens).values({ tokenHash: await digest(token), workspaceId, environment, email: email.trim().toLowerCase() });
+  return `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`;
+}
+async function domainReadiness(runtime: Runtime, row: typeof domains.$inferSelect, identity?: GetEmailIdentityCommandOutput) {
+  const value = identity ?? await sesCall(() => getSes(runtime, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })));
+  const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
+  const dns: z.infer<typeof domainSchema>['dns'] = [];
+  let dnsUnavailableReason: string | null = null;
+  if (dkim?.SigningAttributesOrigin === 'EXTERNAL') dnsUnavailableReason = 'Bring-your-own DKIM records must be obtained from the identity owner.';
+  else if (!suffix || !/^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}\.?$/.test(suffix) || !dkim?.Tokens?.length) dnsUnavailableReason = 'SES did not return an authoritative DKIM signing zone and tokens; DNS records are unavailable.';
+  else dns.push(...dkim.Tokens.map(token => ({ name: `${token}._domainkey.${row.name}`, type: 'CNAME' as const, value: `${token}.${suffix}` })));
+  const mailFrom = value.MailFromAttributes;
+  if (mailFrom?.MailFromDomain) {
+    if (/^(?:us-(?:east|west)|af-south|ap-(?:east|south|northeast|southeast)|ca-(?:central|west)|eu-(?:central|north|south|west)|il-central|me-(?:south|central)|mx-central|sa-east)-\d+$/.test(row.region)) {
+      dns.push({ name: mailFrom.MailFromDomain, type: 'MX', value: `feedback-smtp.${row.region}.amazonses.com`, priority: 10 });
+      dns.push({ name: mailFrom.MailFromDomain, type: 'TXT', value: 'v=spf1 include:amazonses.com ~all' });
+    } else dnsUnavailableReason = 'MAIL FROM DNS instructions are supported only for commercial AWS regions.';
+  }
+  return { id: row.id, name: row.name, region: row.region, verificationStatus: value.VerificationStatus ?? 'NOT_STARTED', verified: value.VerifiedForSendingStatus === true, dkimStatus: value.DkimAttributes?.Status ?? 'NOT_STARTED', ready: value.VerifiedForSendingStatus === true && value.DkimAttributes?.Status === 'SUCCESS' && value.DkimAttributes.SigningEnabled === true && (!mailFrom?.MailFromDomain || mailFrom.MailFromDomainStatus === 'SUCCESS'), mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
+}
+async function account(runtime: Runtime, selectedRegion: string) { const a = await sesCall(() => getSes(runtime, selectedRegion).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
+async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
+
+export function registerOperations(app: App) {
+  app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
+    const a = workspaceActor(c); const [row] = await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
+    return c.json({ name: row?.name ?? 'OpenSend', environment: a.environment }, 200);
+  });
+  app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
+    await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
+    return c.json({ name, environment: a.environment }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/regions', operationId: 'listRegions', tags: ['Settings'], security, responses: { 200: response(z.object({ data: z.array(accountSchema) }).openapi('Regions')), ...errors } }), async c => { const a = workspaceActor(c); external(a); if (!c.env.config.regions.length) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'No SES regions are configured.'); return c.json({ data: await Promise.all(c.env.config.regions.map(r => account(c.env, r))) }, 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Default page size is 5; use individual domain detail for a single refresh. Concurrent clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional() }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
+    const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
+    const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), a.domains.length ? inArray(domains.name, a.domains) : undefined, q.region ? eq(domains.region, region(c.env, q.region)) : undefined, q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
+    const data: z.infer<typeof domainSchema>[] = [];
+    for (const row of rows.slice(0, q.limit)) { if (data.length) await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
+    return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/), region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
+    const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
+    try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'SES_IDENTITY_NOT_FOUND') throw error;
+      try { await sesCall(() => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
+      catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    // Existing SES identities are adopted without changing verification or DKIM configuration.
+    const [row] = await c.env.db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
+    return c.json(await domainReadiness(c.env, row!, identity), 201);
+  });
+  for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, verifyRoute ? 'manage' : 'read'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
+    const a = workspaceActor(c), q = c.req.valid('query'); const rows = await c.env.db.select().from(webhooks).where(and(scoped(webhooks, a), q.cursor ? lt(webhooks.id, q.cursor) : undefined)).orderBy(desc(webhooks.id)).limit(q.limit + 1);
+    return c.json({ data: rows.slice(0, q.limit).map(metadata), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), body = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url); body.regions?.forEach(r => region(c.env, r));
+    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, environment: a.environment, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, webhookId)) }).returning();
+    return c.json(metadata(row!), 201);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => c.json(metadata(await getWebhook(c.env, workspaceActor(c), c.req.valid('param').id)), 200));
+  app.openapi(createRoute({ method: 'patch', path: '/v1/webhooks/{id}', operationId: 'updateWebhook', tags: ['Webhooks'], security, request: { params: IdParams, body: json(webhookPatch) }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), body = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url); body.regions?.forEach(r => region(c.env, r));
+    const row = await c.env.db.transaction(async tx => {
+      const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
+      const [updated] = await tx.update(webhooks).set({ ...body, updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
+      if (locked.paused && body.paused === false) {
+        const paused = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, current.id), eq(deliveries.status, 'paused'))).for('update');
+        for (const delivery of paused) {
+          const generation = delivery.generation + 1;
+          await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(and(scoped(deliveries, a), eq(deliveries.id, delivery.id)));
+          await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId: delivery.id, generation } });
+        }
+      }
+      return updated!;
+    }); return c.json(metadata(row), 200);
+  });
+  app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
+  });
+  for (const rotate of [false, true]) app.openapi(createRoute({ method: rotate ? 'post' : 'get', path: rotate ? '/v1/webhooks/{id}/rotate-secret' : '/v1/webhooks/{id}/secret', operationId: rotate ? 'rotateWebhookSecret' : 'revealWebhookSecret', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(secretSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id), binding = secretBinding(a, row.id); c.header('Cache-Control', 'no-store');
+    const secret = rotate ? webhookSecret() : await decrypt(c.env, row.encryptedSecret, binding);
+    if (rotate) await c.env.db.update(webhooks).set({ encryptedSecret: await encrypt(c.env, secret, binding), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, row.id)));
+    return c.json({ secret }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/test', operationId: 'testWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), endpoint = await getWebhook(c.env, a, c.req.valid('param').id); webhookUrl(c.env, endpoint.url);
+    const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, environment: a.environment, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
+    await c.env.db.transaction(async tx => { await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, environment: a.environment, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId, generation: 0 } }); });
+    return c.json({ id: deliveryId, status: 'pending' as const }, 202);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
+    const a = workspaceActor(c), endpoint = await getWebhook(c.env, a, c.req.valid('param').id), q = c.req.valid('query'); const rows = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, endpoint.id), q.cursor ? lt(deliveries.id, q.cursor) : undefined)).orderBy(desc(deliveries.id)).limit(q.limit + 1); return c.json({ data: rows.slice(0, q.limit), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+  });
+  const deliveryParams = z.object({ id: z.string(), deliveryId: z.string() }).openapi('WebhookDeliveryParams');
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries/{deliveryId}', operationId: 'getWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 200: response(deliverySchema.extend({ attempts: z.array(attemptSchema) }).openapi('WebhookDeliveryDetail')), ...errors } }), async c => {
+    const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...row, attempts }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/deliveries/{deliveryId}/retry', operationId: 'retryWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
+    const a = workspaceActor(c, 'manage'), p = c.req.valid('param'); await getWebhook(c.env, a, p.id);
+    await c.env.db.transaction(async tx => {
+      const [row] = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))).for('update'); if (!row) return notFound('Delivery');
+      if (row.status === 'pending') throw new ApiError(409, 'DELIVERY_PENDING', 'This delivery already has a pending attempt.');
+      const generation = row.generation + 1; await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(eq(deliveries.id, row.id)); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId: row.id, generation } });
+    });
+    return c.json({ id: p.deliveryId, status: 'pending' as const }, 202);
+  });
+  registerPublicEvents(app);
+  registerMetrics(app);
+}
+
+const snsSchema = z.object({ Type: z.enum(['Notification', 'SubscriptionConfirmation', 'UnsubscribeConfirmation']), MessageId: z.string().min(1).max(200), TopicArn: z.string().min(1).max(300), Message: z.string().max(262144), Timestamp: z.string().datetime(), SignatureVersion: z.enum(['1', '2']), Signature: z.string().min(1).max(4096), SigningCertURL: z.string().url().max(2048), Subject: z.string().max(1000).optional(), SubscribeURL: z.string().url().max(4096).optional(), Token: z.string().max(4096).optional() }).openapi('SnsSignedEnvelope');
+type SnsEnvelope = z.infer<typeof snsSchema>;
+function snsHost(runtime: Runtime, envelope: SnsEnvelope) {
+  if (!runtime.config.snsTopicArns.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'The SNS topic is not configured for this deployment.');
+  const match = /^arn:aws:sns:([a-z0-9-]+):\d{12}:[A-Za-z0-9_-]+$/.exec(envelope.TopicArn);
+  if (!match || !runtime.config.regions.includes(match[1]!)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'Only configured standard AWS regional SNS topics are supported.');
+  return { host: `sns.${match[1]}.amazonaws.com`, region: match[1]! };
+}
+function trustedSnsUrl(value: string, host: string, certificate: boolean) {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.hostname !== host || url.port || url.username || url.password || url.hash || (certificate ? !/^\/SimpleNotificationService-[a-zA-Z0-9_-]+\.pem$/.test(url.pathname) || Boolean(url.search) : url.pathname !== '/')) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS certificate or subscription URL is not trusted.');
+  return url;
+}
+// Cache only completed, public certificate values; never share an in-flight fetch between Worker requests.
+const snsCertificates = new Map<string, { cert: X509Certificate; expiresAt: number }>();
+async function verifySns(runtime: Runtime, envelope: SnsEnvelope) {
+  const trusted = snsHost(runtime, envelope);
+  const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
+  const signature = Buffer.from(envelope.Signature, 'base64');
+  if (signature.length < 256 || signature.length > 1024 || signature.toString('base64') !== envelope.Signature) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature encoding or length is invalid.');
+  const fields = envelope.Type === 'Notification' ? ['Message', 'MessageId', ...(envelope.Subject !== undefined ? ['Subject'] : []), 'Timestamp', 'TopicArn', 'Type'] : ['Message', 'MessageId', 'SubscribeURL', 'Timestamp', 'Token', 'TopicArn', 'Type'];
+  const values = envelope as Record<string, unknown>;
+  if (fields.some(field => typeof values[field] !== 'string')) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Required signed SNS fields are missing.');
+  const cached = snsCertificates.get(url.href);
+  let cert = cached && cached.expiresAt > Date.now() ? cached.cert : undefined;
+  if (!cert) {
+    // Certificate bytes come only from the allowlisted AWS HTTPS origin, protected by TLS PKI.
+    let res: Response;
+    try { res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10000) }); } catch { throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    if (!res.ok) { await res.body?.cancel(); throw new ApiError(503, 'SNS_CERTIFICATE_UNAVAILABLE', 'The SNS signing certificate could not be retrieved.', undefined, true); }
+    const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
+    try { cert = new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
+  }
+  if (Date.now() < Date.parse(cert.validFrom) || Date.now() > Date.parse(cert.validTo) || cert.publicKey.asymmetricKeyType !== 'rsa') throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is expired or invalid.');
+  if (!cached || cached.expiresAt <= Date.now()) {
+    if (snsCertificates.size >= 8) snsCertificates.delete(snsCertificates.keys().next().value!);
+    snsCertificates.set(url.href, { cert, expiresAt: Math.min(Date.now() + 300000, Date.parse(cert.validTo)) });
+  }
+  const canonical = fields.map(field => `${field}\n${values[field]}\n`).join('');
+  if (!verify(envelope.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1', Buffer.from(canonical), cert.publicKey, signature)) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature verification failed.');
+  return trusted;
+}
+function registerPublicEvents(app: App) {
+  app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(z.object({ accepted: z.boolean() }).openapi('SnsAccepted')), ...errors } }), async c => {
+    let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
+    const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
+    const envelope = parsed.data; const trusted = await verifySns(c.env, envelope);
+    if (envelope.Type !== 'Notification') {
+      if (envelope.Type === 'SubscriptionConfirmation') {
+        const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);
+        if (url.searchParams.get('Action') !== 'ConfirmSubscription' || url.searchParams.get('TopicArn') !== envelope.TopicArn || url.searchParams.get('Token') !== envelope.Token || [...url.searchParams.keys()].some(k => !['Action', 'TopicArn', 'Token'].includes(k))) throw new ApiError(403, 'SNS_UNTRUSTED_URL', 'SNS confirmation URL fields do not match the signed envelope.');
+        const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(10000) }); await res.body?.cancel(); if (!res.ok) throw new ApiError(503, 'SNS_CONFIRMATION_FAILED', 'SNS subscription confirmation failed.', undefined, true);
+      }
+      // An authenticated UnsubscribeConfirmation is acknowledged, never automatically resubscribed.
+      return c.json({ accepted: true }, 202);
+    }
+    let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
+    await c.env.db.transaction(async tx => {
+      const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, workspaceId: c.env.config.workspaceId, environment: 'live' }).onConflictDoNothing().returning(); if (!inserted.length) return;
+      await enqueue(tx, { type: 'operation.ses', workspaceId: c.env.config.workspaceId, environment: 'live', payload: { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region } });
+    });
+    return c.json({ accepted: true }, 202);
+  });
+  const tokenParams = z.object({ token: z.string().regex(/^u_[a-f0-9]{64}$/) }).openapi('UnsubscribeToken');
+  for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: 'Marketing consent is now unsubscribed.', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...errors } }), async c => {
+    c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
+    const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
+    // The audience helper commits consent, audit, and the subscription event outbox atomically.
+    await recordUnsubscribe(c.env, token.workspaceId, token.environment, token.email);
+    return c.html('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unsubscribed</title><body style="font-family:Helvetica Neue,sans-serif;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">You’re unsubscribed</h1><p>You will no longer receive marketing emails from this workspace.</p></main></body></html>', 200);
+  });
+}
+
+function registerMetrics(app: App) {
+  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional() }).openapi('MetricsQuery');
+  const schema = z.object({ from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(z.object({ date: z.string(), count: z.number() })) }).openapi('Metrics');
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
+    const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+    const emailCounts = await c.env.db.select({ status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(filter).groupBy(emails.status);
+    const eventCounts = await c.env.db.select({ type: events.type, count: sql<number>`count(distinct ${events.data}->>'emailId')::int` }).from(events).innerJoin(emails, and(eq(emails.id, sql`${events.data}->>'emailId'`), eq(emails.workspaceId, events.workspaceId), eq(emails.environment, events.environment))).where(and(scoped(events, a), gte(events.createdAt, start), lt(events.createdAt, end), q.region ? eq(events.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined)).groupBy(events.type);
+    const daily = await c.env.db.select({ date: sql<string>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`, count: sql<number>`count(*)::int` }).from(emails).where(filter).groupBy(sql`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`).orderBy(sql`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`);
+    const status = (s: string) => Number(emailCounts.find(row => row.status === s)?.count ?? 0), event = (s: EventType) => Number(eventCounts.find(row => row.type === s)?.count ?? 0);
+    return c.json({ from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals: { emails: emailCounts.reduce((total, row) => total + Number(row.count), 0), accepted: ['accepted','sent','delivered','bounced','complained','delayed'].reduce((total,s) => total + status(s),0), delivered: event('email.delivered'), bounced: event('email.bounced'), complained: event('email.complained'), opened: event('email.opened'), clicked: event('email.clicked'), failed: event('email.rejected') + event('email.rendering_failed'), deliveryDelayed: event('email.delivery_delayed'), simulated: status('simulated') }, daily }, 200);
+  });
+}
+
+const webhookJob: JobHandler = async (runtime, payload, job) => {
+  const [delivery] = await runtime.db.select().from(deliveries).where(and(scoped(deliveries, job), eq(deliveries.id, String(payload.deliveryId))));
+  if (!delivery || delivery.generation !== payload.generation || delivery.status === 'delivered') return;
+  const [endpoint] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, job), eq(webhooks.id, delivery.webhookId)));
+  const where = and(scoped(deliveries, job), eq(deliveries.id, delivery.id), eq(deliveries.generation, delivery.generation));
+  if (!endpoint) { await runtime.db.update(deliveries).set({ status: 'failed', lastError: 'ENDPOINT_DELETED', updatedAt: now() }).where(where); return; }
+  if (endpoint.paused && !delivery.synthetic) {
+    const stopped = await runtime.db.transaction(async tx => {
+      const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, job), eq(webhooks.id, endpoint.id))).for('update');
+      if (locked && !locked.paused) return false;
+      await tx.update(deliveries).set({ status: locked ? 'paused' : 'failed', lastError: locked ? 'ENDPOINT_PAUSED' : 'ENDPOINT_DELETED', updatedAt: now() }).where(where); return true;
+    }); if (stopped) return;
+  }
+  if (delivery.payload.environment !== job.environment || (job.environment === 'live' && !delivery.synthetic && (delivery.payload.id.startsWith('os_test_') || delivery.payload.data.emailId?.startsWith('os_test_') || delivery.payload.data.simulated === true))) throw new ApiError(403, 'WEBHOOK_ENVIRONMENT_MISMATCH', 'Test events cannot be delivered to live endpoints.');
+  const start = Date.now(); let statusCode: number | null = null, error: string | null = null;
+  try {
+    const url = webhookUrl(runtime, endpoint.url), secret = await decrypt(runtime, endpoint.encryptedSecret, secretBinding(job, endpoint.id));
+    const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = await hmac(secret, `${delivery.eventId}.${timestamp}.${body}`);
+    const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, redirect: 'error', signal: AbortSignal.timeout(5000) });
+    statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';
+  } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; }
+  const retry = Boolean(error) && job.attempts < MAX_ATTEMPTS;
+  await runtime.db.transaction(async tx => {
+    await tx.insert(deliveryAttempts).values({ id: id('wha'), workspaceId: job.workspaceId, environment: job.environment, deliveryId: delivery.id, statusCode, error, durationMs: Date.now() - start });
+    await tx.update(deliveries).set({ attemptCount: sql`${deliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: now() }).where(where);
+  });
+  if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
+};
+
+const sesJob: JobHandler = async (runtime, payload, job) => {
+  if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
+  const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
+  const [receipt] = await runtime.db.select().from(snsReceipts).where(receiptWhere); if (!receipt || receipt.processedAt) return;
+  const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
+  if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
+  const [email] = await runtime.db.select().from(emails).where(and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId)));
+  if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
+  const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
+  if (kind === 'Subscription') {
+    const preferences = data.subscription?.newTopicPreferences;
+    // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
+    if (preferences?.unsubscribeAll === true && email.to.length === 1 && !email.cc.length && !email.bcc.length) {
+      await recordUnsubscribe(runtime, job.workspaceId, job.environment, email.to[0]!);
+    } else {
+      await publishEvent(runtime, { id: `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`, type: 'contact.subscription_changed', createdAt: receipt.createdAt, workspaceId: job.workspaceId, environment: job.environment, region: email.region, data: { emailId: email.id, source: 'ses', preferences: preferences ?? null, appliedToWorkspaceConsent: false } });
+    }
+    await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere); return;
+  }
+  const mapping: Record<string, { type: EventType; rawType: string }> = { Send: { type: 'email.sent', rawType: 'send' }, Delivery: { type: 'email.delivered', rawType: 'delivery' }, Bounce: { type: 'email.bounced', rawType: 'bounce' }, Complaint: { type: 'email.complained', rawType: 'complaint' }, DeliveryDelay: { type: 'email.delivery_delayed', rawType: 'delivery_delay' }, Reject: { type: 'email.rejected', rawType: 'reject' }, RenderingFailure: { type: 'email.rendering_failed', rawType: 'rendering_failure' }, Open: { type: 'email.opened', rawType: 'open' }, Click: { type: 'email.clicked', rawType: 'click' } };
+  const mapped = mapping[kind]; if (!mapped) throw new ApiError(422, 'SES_UNSUPPORTED_EVENT', 'Unsupported SES event type.');
+  const eventDetail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
+  const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
+  const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;
+  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, environment: job.environment, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
+  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: mapped.rawType, externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime });
+  await runtime.db.transaction(async tx => {
+    const candidates = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
+    const recipients = candidates.filter((value: unknown): value is string => typeof value === 'string').map((value: string) => value.toLowerCase()).filter((value: string) => [...email.to, ...email.cc, ...email.bcc].map(v => v.toLowerCase()).includes(value));
+    for (const address of recipients) {
+      const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
+      if (kind === 'Complaint' || (kind === 'Bounce' && eventDetail.bounceType === 'Permanent')) {
+        await tx.insert(contacts).values({ id: id('con'), workspaceId: job.workspaceId, environment: job.environment, email: address, suppressed: true, suppressionReason: kind === 'Complaint' ? 'complaint' : 'hard_bounce' }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { suppressed: true, suppressionReason: kind === 'Complaint' ? 'complaint' : 'hard_bounce', updatedAt: now() } });
+      } else if ((kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely') {
+        const column = kind === 'Open' ? contacts.lastOpenAt : contacts.lastClickAt;
+        const observed = kind === 'Open' ? contacts.openObservedSince : contacts.clickObservedSince;
+        await tx.update(contacts).set({ [kind === 'Open' ? 'lastOpenAt' : 'lastClickAt']: sql`greatest(${column}, ${eventTime}::timestamptz)`, [kind === 'Open' ? 'openObservedSince' : 'clickObservedSince']: sql`least(coalesce(${observed}, ${eventTime}::timestamptz), ${eventTime}::timestamptz)`, observedSince: sql`least(coalesce(${contacts.observedSince}, ${eventTime}::timestamptz), ${eventTime}::timestamptz)`, updatedAt: now() }).where(contactWhere);
+      }
+    }
+  });
+  await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere);
+};
+const publishJob: JobHandler = async (runtime, payload, job) => {
+  const parsed = eventSchema.safeParse(payload.event);
+  if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'The queued event is invalid or has mismatched scope.');
+  await publishEvent(runtime, parsed.data as PublishedEvent);
+};
+const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
+  try { await handler(runtime, payload, job); } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
+  }
+};
+export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.publish': retryDatabaseFailures(publishJob) };

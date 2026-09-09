@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "opensend-api",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "WORKSPACE_ID": "default",
+    "PUBLIC_URL": "https://opensend.example.com",
+    "SES_REGIONS": "us-east-1",
+    "ENABLE_LIVE_SES": "false",
+    "SNS_TOPIC_ARNS": "",
+    "WEBHOOK_ALLOWED_HOSTS": ""
+  },
+  "secrets": { "required": ["ADMIN_API_KEY", "ENCRYPTION_KEY"] },
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
+  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
+  "queues": {
+    "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],
+    "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3, "max_concurrency": 2 }]
+  },
+  "triggers": { "crons": ["* * * * *", "7 * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

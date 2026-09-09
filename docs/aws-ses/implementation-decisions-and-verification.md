@@ -1,6 +1,6 @@
 # Implementation decisions and future verification
 
-[Hub](README.md) · Prepared 2026-09-08 · **No API has been implemented and none of the AWS integration checks below has been run.**
+[Hub](README.md) · Prepared 2026-09-08 · The portable API is now implemented; [API README](../../api/README.md) records its verified scope and limits. Local HTTP acceptance, Docker and local Workers checks are distinct from the still-unrun live AWS integration gates below.
 
 This turns the reference research into a later build checklist. The initial scope is now a deployment-managed, environment-configured AWS connection and OpenSend-owned marketing consent with a hosted one-click unsubscribe page. The hosting stack remains undecided. [Root TODO](../../todo.md) records the selected defaults and deferred UI work; those decisions supersede the earlier alternatives in the research documents.
 

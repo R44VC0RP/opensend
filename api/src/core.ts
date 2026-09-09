@@ -1,0 +1,73 @@
+import { z } from '@hono/zod-openapi';
+import type { OpenAPIHono } from '@hono/zod-openapi';
+import type { Context } from 'hono';
+import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { SESv2Client } from '@aws-sdk/client-sesv2';
+import { FetchHttpHandler } from '@smithy/fetch-http-handler';
+
+export type Database = NodePgDatabase;
+export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
+export type Mode = 'live' | 'test';
+export type Permission = 'read' | 'send' | 'manage';
+export interface Actor { workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; }
+export interface Storage {
+  put(key: string, body: Uint8Array, contentType: string): Promise<void>;
+  get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
+  delete(key: string): Promise<void>;
+}
+export interface Config {
+  workspaceId: string;
+  adminToken: string;
+  publicUrl: string;
+  regions: string[];
+  liveEnabled: boolean;
+  encryptionKey: string;
+  snsTopicArns: string[];
+  webhookAllowedHosts: string[];
+  aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
+  configurationSets: { transactional: string; marketing: string };
+}
+export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; }
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string } };
+export type App = OpenAPIHono<AppEnv>;
+export type Ctx = Context<AppEnv>;
+export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string; environment: Mode }) => Promise<void>;
+
+export class ApiError extends Error {
+  constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false) { super(message); }
+}
+export const ErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string(), requestId: z.string(), field: z.string().optional(), retryable: z.boolean() }) }).openapi('ApiError');
+export const errors = Object.fromEntries([400, 401, 403, 404, 409, 413, 422, 429, 500, 503].map(status => [status, { description: 'Request failed; use error.code and requestId to diagnose.', content: { 'application/json': { schema: ErrorSchema } } }]));
+export const security = [{ bearerAuth: [] }];
+export const IdParams = z.object({ id: z.string().min(1).max(120) });
+export const PageQuery = z.object({ cursor: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(100).default(25) });
+export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'application/json': { schema } }, required: true });
+export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
+export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
+export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
+export function actor(c: Ctx, permission: Permission = 'read'): Actor {
+  const value = c.get('actor');
+  if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
+  return value;
+}
+export function region(runtime: Runtime, value: string) {
+  if (!runtime.config.regions.includes(value)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested region is not configured for this deployment.', 'region');
+  return value;
+}
+export function getSes(runtime: Runtime, selectedRegion: string): SESv2Client {
+  region(runtime, selectedRegion);
+  if (!runtime.config.liveEnabled || !runtime.config.aws) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
+  return new SESv2Client({ region: selectedRegion, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) });
+}
+export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
+  // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
+  console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
+}
+export async function digest(value: string) {
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), n => n.toString(16).padStart(2, '0')).join('');
+}
+export function randomSecret(prefix: string) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return prefix + Array.from(bytes, n => n.toString(16).padStart(2, '0')).join('');
+}
+export function notFound(entity: string): never { throw new ApiError(404, 'NOT_FOUND', `${entity} was not found.`); }
