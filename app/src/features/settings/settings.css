@@ -71,6 +71,8 @@
   overflow-wrap: anywhere;
   margin: 0;
 }
+.settings-ses > .section > .ui-table-scroll .ui-table th:first-child,
+.settings-ses > .section > .ui-table-scroll .ui-table td:first-child { padding-left: var(--space-12); }
 .settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:hover { text-decoration-color: currentColor; }

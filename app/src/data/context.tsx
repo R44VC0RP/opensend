@@ -6,13 +6,10 @@ import { createLiveApi, request } from './live'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 
 const ApiContext = createContext<OpenSendApi | null>(null)
-const SessionContext = createContext<{ identity: Identity | null; environment: 'live' | 'test'; setEnvironment: (value: 'live' | 'test') => void; logout: () => Promise<void> } | null>(null)
+const SessionContext = createContext<{ identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void> } | null>(null)
 export const useSession = () => useContext(SessionContext)
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
-  const [environment, setSelected] = useState<'live' | 'test'>(() => {
-    try { return sessionStorage.getItem('opensend.environment') === 'test' ? 'test' : 'live' }
-    catch { return 'live' }
-  })
+  const environment = 'live' as const
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment])
   const cache = useQueryClient()
@@ -23,12 +20,6 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     return request<Identity>('/v1/me', {signal, environment})
   } })
   useEffect(() => { const denied = () => { cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
-  function setEnvironment(value: 'live' | 'test') {
-    if (value !== environment) {
-      try { sessionStorage.setItem('opensend.environment', value) } catch { /* Keep the explicit choice for this page if storage is unavailable. */ }
-      cache.clear(); setSelected(value)
-    }
-  }
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
@@ -37,7 +28,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }
   const error = authError ?? identity.error
   const unconfigured = error instanceof ApiError && error.code === 'AUTH_NOT_CONFIGURED'
-  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, setEnvironment, logout}}>{client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>{identity.isPending ? <p role="status">Checking Google session…</p> : <><h2>Sign in with Google</h2>{unconfigured ? <Alert tone="warning">Google sign-in is not configured. The deployment operator must configure the Google OAuth client, auth secret, public URL, and approved identities.</Alert> : error && !(error instanceof ApiError && error.status === 401) ? <Alert tone="danger">{error instanceof Error ? error.message : 'Sign-in is unavailable.'}</Alert> : null}{new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed. Use an approved Google identity.</Alert>}<Button variant="primary" disabled={unconfigured} loading={busy} onClick={login}>Continue with Google</Button><Button onClick={() => identity.refetch()}>Check session again</Button></>}</div></main>}</SessionContext.Provider></ApiContext.Provider>
+  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>{client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>{identity.isPending ? <p role="status">Checking Google session…</p> : <><h2>Sign in with Google</h2>{unconfigured ? <Alert tone="warning">Google sign-in is not configured. The deployment operator must configure the Google OAuth client, auth secret, public URL, and approved identities.</Alert> : error && !(error instanceof ApiError && error.status === 401) ? <Alert tone="danger">{error instanceof Error ? error.message : 'Sign-in is unavailable.'}</Alert> : null}{new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed. Use an approved Google identity.</Alert>}<Button variant="primary" disabled={unconfigured} loading={busy} onClick={login}>Continue with Google</Button><Button onClick={() => identity.refetch()}>Check session again</Button></>}</div></main>}</SessionContext.Provider></ApiContext.Provider>
 }
 export function useApi() {
   const api = useContext(ApiContext)

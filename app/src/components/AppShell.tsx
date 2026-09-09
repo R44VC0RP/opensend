@@ -17,6 +17,8 @@ export function AppShell() {
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
   const discovery = useRegionDiscovery(current)
   const quota = discovery.data?.account?.quota
+  const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
+  const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const location = useLocation()
   const navigate = useNavigate()
   const needsRegion = location.pathname === '/' || ['/logs', '/campaigns', '/domains'].some(path => location.pathname.startsWith(path))
@@ -52,13 +54,16 @@ export function AppShell() {
         {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data. Changes stay in this browser; no email, AWS, or webhook requests are made.">Demo mode</span>}
       </div>
-      {api.mode !== 'demo' && session && <div className="sidebar-context"><Select aria-label="Environment" value={session.environment} onValueChange={value => { session.setEnvironment(value as 'live' | 'test'); navigate('/') }} options={[{value: 'live', label: 'Live'}, {value: 'test', label: 'Test'}]} /><span className="muted">{session.environment === 'test' ? 'Simulated sends' : 'Real delivery'}</span><Button variant="ghost" onClick={() => session.logout()}>Sign out</Button></div>}
+      {api.mode !== 'demo' && session && <Button variant="ghost" onClick={() => session.logout()}>Sign out</Button>}
       <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
+      <div className="sidebar-footer">
+        {needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
       <div className="sidebar-quota">{api.environment === 'test' ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
         {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
         <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>
       </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
+      </div>
     </aside>
     <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} /> : regions.isPending || (!current && enabled.length > 0) ? <RouteSkeleton /> : needsRegion && !enabled.length ? <EmptyState title="No enabled regions" action={<Link to="/settings">Set up SES</Link>} /> : <Outlet />}</Suspense></main>
   </div>

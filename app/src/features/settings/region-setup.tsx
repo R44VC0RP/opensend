@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
+import { useLocation } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApi, useRegion } from '../../data/context'
 import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog, useRegionDiscovery } from '../../data/regions'
@@ -32,6 +33,7 @@ export function RegionSetup() {
   const api = useApi()
   const client = useQueryClient()
   const {regionId} = useRegion()
+  const location = useLocation()
   const {canManage, canDiscover} = useRegionAccess()
   const catalog = useRegionCatalog()
   const [viewRegion, setViewRegion] = useState<string | null>(null)
@@ -40,7 +42,7 @@ export function RegionSetup() {
   const [disableRegion, setDisableRegion] = useState<RegionCatalogEntry | null>(null)
   const [inspectedRegion, setInspectedRegion] = useState<string | null>(null)
   const entry = catalog.data?.data.find(item => item.region === (viewRegion ?? regionId))
-  useEffect(() => {setViewRegion(null); setInspectedRegion(null)}, [regionId])
+  useEffect(() => {setViewRegion(new URLSearchParams(location.search).get('region') === regionId ? regionId : null); setInspectedRegion(null)}, [regionId, location.key, location.search])
   const configure = useMutation({
     mutationFn: ({region, ...input}: {region: string; enabled?: boolean; makeDefault?: boolean}) => api.regions.configure(region, input),
     onSuccess: data => client.setQueryData(regionCatalogKey(api), data),
