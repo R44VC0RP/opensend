@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { ApiError, log } from './core.js';
+import { ApiError, log, timed } from './core.js';
 import type { AppEnv } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
@@ -21,12 +21,14 @@ export function createApp() {
   app.openAPIRegistry.registerComponent('securitySchemes', 'secureDashboardSession', { type: 'apiKey', in: 'cookie', name: '__Secure-opensend.session_token', description: 'Google-approved Secure HttpOnly session in production. Unsafe requests require the canonical dashboard Origin.' });
   app.use('*', async (c, next) => {
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
-    c.set('requestId', requestId); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     const start = Date.now();
     await next();
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
     c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
-    log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start });
+    const timings = c.get('serverTimings');
+    if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
+    log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
     if (c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.env.wake) {
       try { await c.env.wake(); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
     }
@@ -34,7 +36,7 @@ export function createApp() {
   app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
   app.use('/v1/*', async (c, next) => {
     const configured = async () => {
-      if (/^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path) || c.req.path === '/v1/settings/ses') c.env = await resolveRegionRuntime(c.env);
+      if (/^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path) || c.req.path === '/v1/settings/ses') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env));
       await next();
     };
     if (c.req.path === '/v1/events/ses') return configured();

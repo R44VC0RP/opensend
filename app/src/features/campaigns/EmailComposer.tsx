@@ -250,7 +250,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) onReady() }} onUpdate={() => { changed.current = true; onDirty() }} />
+        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info('[OpenSend timing] campaign editor ready', { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }} />
       </div>
     </div>
   </div>

@@ -16,8 +16,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   const [authError, setAuthError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const identity = useQuery({ queryKey: ['identity', environment], enabled: client.mode !== 'demo', retry: false, queryFn: async ({signal}) => {
+    const started = performance.now()
     await request('/api/auth/get-session', {signal})
-    return request<Identity>('/v1/me', {signal, environment})
+    const result = await request<Identity>('/v1/me', {signal, environment})
+    console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+    return result
   } })
   useEffect(() => { const denied = () => { cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }

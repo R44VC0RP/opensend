@@ -5,7 +5,7 @@ import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
@@ -552,17 +552,19 @@ export function registerSending(app: App) {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
-    const rows = await c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(scope(campaigns, a),
+    const rows = await timed(c, 'campaign-list-db', () => c.env.db.select(campaignSummaryColumns).from(campaigns).where(and(scope(campaigns, a),
       q.archived === 'true' ? isNotNull(campaigns.archivedAt) : isNull(campaigns.archivedAt),
       cursor ? sql`(${campaigns.createdAt}, ${campaigns.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.status ? eq(campaigns.status, q.status) : undefined,
       search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
-    )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1);
-    return c.json({ data: (await campaignViews(c.env, a, rows.slice(0, q.limit))).map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
+    )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit)));
+    return c.json({ data: views.map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
-    const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
+    const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, [row]));
+    return c.json(Campaign.parse(views[0]!), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign content vocabulary (block HTML) with examples, as Markdown. Read it once before writing or editing campaign html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
     actor(c);

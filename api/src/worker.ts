@@ -19,13 +19,22 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
 export default {
   async fetch(request, env) {
     try {
+      const admissionStarted = performance.now();
       const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';
       const peer = await digest(address);
       const gate = await env.ADMISSION.limit({ key: `opensend:default:${peer}` });
       if (!gate.success) return admissionDenied();
+      const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
       headers.set('x-opensend-client-ip', address);
-      return await withRuntime(env, async runtime => app.fetch(new Request(request, { headers }), runtime));
+      const runtimeStarted = performance.now();
+      const response = await withRuntime(env, async runtime => app.fetch(new Request(request, { headers }), runtime));
+      const runtimeMs = performance.now() - runtimeStarted;
+      const responseHeaders = new Headers(response.headers);
+      const innerTiming = responseHeaders.get('server-timing');
+      responseHeaders.set('server-timing', [...(innerTiming ? [innerTiming] : []), `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));
+      log('info', { requestId: responseHeaders.get('x-request-id'), operation: 'worker-runtime', status: response.status, admissionMs: Number(admissionMs.toFixed(1)), runtimeMs: Number(runtimeMs.toFixed(1)) });
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders });
     }
     catch (error) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;

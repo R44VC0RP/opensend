@@ -53,6 +53,9 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   const api = useApi()
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
   const opened = useRef<Campaign | null | undefined>(undefined)
+  useEffect(() => {
+    if (query.data) console.info('[OpenSend timing] campaign content ready', { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
+  }, [query.data])
   if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && ['draft', 'reviewed'].includes(query.data.status)))) opened.current = query.data
   // Once opened, background refetches must never unmount an unsaved working copy.
   if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />

@@ -36,7 +36,7 @@ export interface Config {
   configurationSets: { transactional: string; marketing: string };
 }
 export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; }
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string } };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string; environment: Mode }) => Promise<void>;
@@ -70,6 +70,11 @@ export function getSes(runtime: Runtime, selectedRegion: string): SESv2Client {
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
+}
+export async function timed<T>(c: Ctx, name: string, work: () => Promise<T>): Promise<T> {
+  const start = performance.now();
+  try { return await work(); }
+  finally { c.get('serverTimings').push({ name, durationMs: performance.now() - start }); }
 }
 export async function digest(value: string) {
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), n => n.toString(16).padStart(2, '0')).join('');

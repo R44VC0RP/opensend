@@ -7,7 +7,7 @@ import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, ne } from 'drizzle-orm';
-import { ApiError, errors, log, response, security } from './core.js';
+import { ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
 import { authAccount, authUser, googleAuthSchema } from './db/google-auth.js';
 
@@ -138,11 +138,11 @@ export function requireDashboardOrigin(runtime: Runtime, headers: Headers) {
     throw new ApiError(403, 'CSRF_ORIGIN_INVALID', 'This request must originate from the dashboard.');
   }
 }
-export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode): Promise<Actor | null> {
+export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work()): Promise<Actor | null> {
   requireConfigured(runtime);
   try {
-    const session = await createAuth(runtime).api.getSession({ headers });
-    if (!session || !await isApprovedUser(runtime, session.user.id)) return null;
+    const session = await measure('session-db', () => createAuth(runtime).api.getSession({ headers }));
+    if (!session || !await measure('approval-db', () => isApprovedUser(runtime, session.user.id))) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
     return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [] };
@@ -173,9 +173,10 @@ export function registerGoogleAuth(app: App) {
       const input = SignIn.safeParse(await c.req.raw.clone().json().catch(() => null));
       if (!input.success) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'Use Google browser sign-in without custom scopes or identity fields.');
     }
-    if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers)) return c.json(null);
+    if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work))) return c.json(null);
+    const started = performance.now();
     try {
-      const result = await createAuth(c.env).handler(c.req.raw);
+      const result = await timed(c, 'auth-handler-db', () => createAuth(c.env).handler(c.req.raw));
       // Provider errors may contain arbitrary descriptions: never send them to a browser or log.
       const location = result.headers.get('location');
       if (location && new URL(location, c.env.config.publicUrl).searchParams.has('error')) {
@@ -184,6 +185,7 @@ export function registerGoogleAuth(app: App) {
         return new Response(null, { status: 302, headers });
       }
       if (result.status >= 400) throw new ApiError(result.status, 'AUTH_FAILED', 'Google sign-in failed. Please try again.');
+      if (path === '/callback/google') log('info', { requestId: c.get('requestId'), operation: 'google-oauth-callback', status: 'success', durationMs: Number((performance.now() - started).toFixed(1)) });
       return result;
     } catch (error) {
       if (error instanceof ApiError) throw error;
