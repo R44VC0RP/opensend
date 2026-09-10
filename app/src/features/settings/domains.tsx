@@ -71,10 +71,11 @@ function LiveDomainDetailPage() {
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   const pending = current.records.filter(record => record.status === 'pending').length
+  const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
-    <PageHeader title={current.name} backTo="/domains" actions={<Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button>} />
+    <PageHeader title={current.name} backTo="/domains" actions={<div className="cluster"><a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a><Button variant="primary" onClick={openMailFrom}>{current.mailFromDomain ? 'Change MAIL FROM' : 'Add custom MAIL FROM'}</Button><Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></div>} />
     <MutationError error={verify.error} />
-    <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom MAIL FROM · {current.mailFromDomain && <>{current.mailFromDomain} · </>}<StatusBadge status={label(current.mailFromStatus)} /></span><Button variant="ghost" size="sm" onClick={openMailFrom}>{current.mailFromDomain ? 'Change MAIL FROM' : 'Add custom MAIL FROM'}</Button></div>
+    <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom MAIL FROM · {current.mailFromDomain && <>{current.mailFromDomain} · </>}<StatusBadge status={label(current.mailFromStatus)} /></span></div>
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <section className="section stack">
       <SectionHeader title="DNS records" />
