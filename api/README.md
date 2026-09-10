@@ -169,7 +169,7 @@ Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Re
 
 Generate a personalized, gitignored copy with `npm run iam-policy:personal -- YOUR_12_DIGIT_ACCOUNT_ID`. This writes `iam-policy-personal.json` beside the canonical template for pasting into IAM.
 
-The separate `ses:ApplyTrackingConfigurationOverrides` permission is needed for per-message open/click tracking settings, including `tracking: false`. SES can report a healthy account and completed setup while rejecting sends without this permission. This statement grants only that action on `*`; `ses:SendEmail` remains limited by the account-scoped identity/configuration-set/template statement. The subscription statement permits HTTPS callbacks at `/v1/events/ses`; you can replace its host wildcard with your exact public callback URL. Validate sending with an authorized recipient after applying the policy—read-only discovery cannot prove send authorization.
+Per-message open/click tracking overrides are part of `ses:SendEmail` and require no separate IAM action. The subscription statement permits HTTPS callbacks at `/v1/events/ses`; you can replace its host wildcard with your exact public callback URL. Validate sending with an authorized recipient after applying the policy—read-only discovery cannot prove send authorization.
 
 ### Setup IAM action groups
 
