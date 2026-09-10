@@ -75,13 +75,31 @@ function OperationPage({ document, operation }: {document: Document; operation: 
   </article>
 }
 
+function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
+  const groups = [...new Set(all.map(operation => operation.tag))]
+  const install = 'npm install opensend-js'
+  return <article className="docs-operation docs-overview">
+    <header className="docs-operation-header"><h1>OpenSend API</h1><p>{document.info.description}</p></header>
+    <section className="docs-section"><h2>Start with the TypeScript SDK</h2><div className="docs-install"><code>{install}</code><CopyButton value={install} label="Copy install command" /></div><p className="muted">Use an API key from your OpenSend installation on a trusted server. Test keys simulate delivery; live keys use configured SES regions.</p></section>
+    <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
+      <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
+      <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>
+      <a href="/openapi.json"><strong>OpenAPI 3.1</strong><span>Machine-readable schemas and generated code examples.</span></a>
+      <a href="https://www.npmjs.com/package/opensend-js"><strong>TypeScript SDK</strong><span>Generated client and request/response types.</span></a>
+    </div></section>
+    <section className="docs-section"><div className="docs-section-heading"><h2>API operations</h2><span className="muted">{all.length} operations</span></div>
+      <div className="docs-overview-groups">{groups.map(group => <section key={group}><h3>{group}<span>{all.filter(operation => operation.tag === group).length}</span></h3><div>{all.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span><code>{operation.path}</code></a>)}</div></section>)}</div>
+    </section>
+  </article>
+}
+
 export function DocsPage() {
   const query = useQuery<Document>({queryKey: ['public-openapi'], queryFn: async ({signal}) => { const response = await fetch('/openapi.json', {signal}); if (!response.ok) throw new Error('API definition could not be loaded.'); return response.json() }})
   const all = useMemo(() => operations(query.data), [query.data])
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(() => window.location.hash.slice(1))
   useEffect(() => { const change = () => setSelected(window.location.hash.slice(1)); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
-  useEffect(() => { if (all.length && !all.some(operation => operation.id === selected)) { const id = all.find(operation => operation.id === 'sendEmail')?.id ?? all[0].id; history.replaceState(null, '', `#${id}`); setSelected(id) } }, [all, selected])
+  useEffect(() => { if (selected && all.length && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
   const filtered = all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(search.toLowerCase()))
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
@@ -91,7 +109,7 @@ export function DocsPage() {
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
         <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
-      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : !current ? <EmptyState title={query.isPending ? 'Loading API documentation…' : 'No matching operation'} /> : <OperationPage document={query.data!} operation={current} />}</main>
+      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : current ? <OperationPage document={query.data!} operation={current} /> : <DocsOverview document={query.data!} all={all} />}</main>
     </div>
   </div>
 }
