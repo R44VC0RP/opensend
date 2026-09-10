@@ -199,6 +199,40 @@ export type AudienceImport = {
     updatedAt: string;
 };
 
+export type AudienceQueryResult = {
+    columns: Array<string>;
+    rows: Array<{
+        [key: string]: string | number | boolean | null | {
+            [key: string]: string | number | boolean | null;
+        };
+    }>;
+    matched: number;
+    truncated: boolean;
+};
+
+export type AudienceOperationPlan = {
+    id: string;
+    operation: 'update_contacts' | 'add_to_list' | 'remove_from_list';
+    matched: number;
+    sample: Array<{
+        id: string;
+        email: string;
+        name: string | null;
+        consent: 'unknown' | 'subscribed' | 'unsubscribed';
+        suppressed: boolean;
+    }>;
+    warnings: Array<string>;
+    requiresResubscribeConfirmation: boolean;
+    expiresAt: string;
+};
+
+export type AudienceOperationResult = {
+    id: string;
+    operation: 'update_contacts' | 'add_to_list' | 'remove_from_list';
+    affected: number;
+    appliedAt: string;
+};
+
 export type EmailQueued = {
     id: string;
     status: 'queued';
@@ -3184,6 +3218,202 @@ export type CommitContactImportResponses = {
 };
 
 export type CommitContactImportResponse = CommitContactImportResponses[keyof CommitContactImportResponses];
+
+export type QueryAudienceData = {
+    body: {
+        /**
+         * AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.
+         */
+        statement: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/audience-query/query';
+};
+
+export type QueryAudienceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type QueryAudienceError = QueryAudienceErrors[keyof QueryAudienceErrors];
+
+export type QueryAudienceResponses = {
+    /**
+     * Success
+     */
+    200: AudienceQueryResult;
+};
+
+export type QueryAudienceResponse = QueryAudienceResponses[keyof QueryAudienceResponses];
+
+export type PlanAudienceMutationData = {
+    body: {
+        /**
+         * AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.
+         */
+        statement: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/audience-query/plan';
+};
+
+export type PlanAudienceMutationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PlanAudienceMutationError = PlanAudienceMutationErrors[keyof PlanAudienceMutationErrors];
+
+export type PlanAudienceMutationResponses = {
+    /**
+     * Success
+     */
+    201: AudienceOperationPlan;
+};
+
+export type PlanAudienceMutationResponse = PlanAudienceMutationResponses[keyof PlanAudienceMutationResponses];
+
+export type ApplyAudiencePlanData = {
+    body: {
+        planId: string;
+        confirmResubscribe?: boolean;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/audience-query/apply';
+};
+
+export type ApplyAudiencePlanErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ApplyAudiencePlanError = ApplyAudiencePlanErrors[keyof ApplyAudiencePlanErrors];
+
+export type ApplyAudiencePlanResponses = {
+    /**
+     * Success
+     */
+    200: AudienceOperationResult;
+};
+
+export type ApplyAudiencePlanResponse = ApplyAudiencePlanResponses[keyof ApplyAudiencePlanResponses];
 
 export type SendEmailData = {
     body: SendEmailInput;

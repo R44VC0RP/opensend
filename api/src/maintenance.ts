@@ -10,6 +10,7 @@ export async function cleanup(runtime: Runtime) {
     // Never erase contacts, consent, suppression, drafts, idempotency keys or active scheduled work.
     await tx.execute(sql`DELETE FROM api_request_budgets WHERE workspace_id = ${workspace} AND window_start < now() - interval '1 day'`);
     await tx.execute(sql`DELETE FROM agent_tokens WHERE workspace_id = ${workspace} AND expires_at < now() - interval '30 days'`);
+    await tx.execute(sql`DELETE FROM audience_operation_plans WHERE workspace_id = ${workspace} AND expires_at < now() - interval '1 day'`);
     await tx.execute(sql`DELETE FROM sending_email_events WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM sending_attachment_links l USING sending_emails e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id AND l.environment = e.environment AND e.workspace_id = ${workspace} AND e.created_at < now() - interval '30 days' AND e.status NOT IN ('queued','attempting')`);
     await tx.execute(sql`DELETE FROM sending_emails WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days' AND status NOT IN ('queued','attempting')`);

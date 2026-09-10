@@ -5,7 +5,7 @@ import type { App } from './core.js';
 type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
-export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
+export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
@@ -247,10 +247,10 @@ function actionSchema(actions: Record<string, McpOperation>, field = 'action', r
   }
   return { type: 'object', properties, required: [field], oneOf: branches, ...(Object.keys(defs).length ? { $defs: defs } : {}) };
 }
-function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: (args: ObjectValue) => McpPlan, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput): McpOperation {
+function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: (args: ObjectValue) => McpPlan, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput, requiresConfirmation?: (args: ObjectValue) => boolean): McpOperation {
   const output = structuredClone(outputSchema);
   const tool: Tool = { name, description, inputSchema: input, outputSchema: output, annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } };
-  const operation: McpOperation = { tool, method: 'custom', path: '/v1/custom', queryParameters: [], write, validate: validator(input), validateOutput: validator(output), plan };
+  const operation: McpOperation = { tool, method: 'custom', path: '/v1/custom', queryParameters: [], write, ...(requiresConfirmation ? { requiresConfirmation } : {}), validate: validator(input), validateOutput: validator(output), plan };
   freeze(tool); Object.freeze(operation); return operation;
 }
 function actionOutputSchema(actions: Record<string, McpOperation>): NonNullable<Tool['outputSchema']> {
@@ -309,6 +309,23 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   add(actionTool('saveContact', 'Create or update a contact profile, or record explicit consent evidence. Profile metadata never implies consent.', { create: need('createContact', raw), update: need('updateContact', raw), consent: need('updateContactConsent', raw) }));
   direct('deleteContact', 'Remove a contact profile and memberships while retaining required consent and suppression safeguards.', 'deleteContact');
   add(actionTool('importContacts', 'Preview, inspect, list or commit CSV contact imports, including mapped contact metadata.', { preview: need('previewContactImport', raw), get: need('getContactImport', raw), list: need('listContactImports', raw), commit: need('commitContactImport', raw) }));
+  const queryAudience = need('queryAudience', raw), planAudience = need('planAudienceMutation', raw), applyAudience = need('applyAudiencePlan', raw);
+  const audienceStatement = { type: 'string', minLength: 1, maxLength: 20_000, description: "AudienceQL over the virtual contacts schema. Examples: SELECT count(*) FROM contacts WHERE list = 'Customers' AND consent = 'subscribed'; UPDATE contacts SET consent = 'subscribed', properties.plan = 'pro' WHERE list = 'Customers' AND consent = 'unknown'; ADD contacts TO LIST 'Newsletter' WHERE properties.plan = 'pro'; REMOVE contacts FROM LIST 'Newsletter' WHERE consent = 'unsubscribed'. Fields: id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt, properties.key. WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons. Mutations require plan then apply." };
+  const audienceInput = { type: 'object', properties: {
+    action: { type: 'string', enum: ['query', 'plan', 'apply'] }, statement: audienceStatement,
+    planId: { type: 'string', pattern: '^aqp_[0-9a-f]{32}$' }, confirmResubscribe: { type: 'boolean', default: false },
+    confirm: { type: 'boolean', const: true, description: 'Explicit authorization to apply the reviewed immutable plan.' },
+  }, required: ['action'], oneOf: [
+    { properties: { action: { type: 'string', const: 'query' }, statement: audienceStatement }, required: ['action', 'statement'] },
+    { properties: { action: { type: 'string', const: 'plan' }, statement: audienceStatement }, required: ['action', 'statement'] },
+    { properties: { action: { type: 'string', const: 'apply' }, planId: { type: 'string', pattern: '^aqp_[0-9a-f]{32}$' }, confirmResubscribe: { type: 'boolean', default: false }, confirm: { type: 'boolean', const: true } }, required: ['action', 'planId', 'confirm'] },
+  ], additionalProperties: false } as Tool['inputSchema'];
+  add(custom('audienceQuery', 'Run AudienceQL reads or create and apply reviewed bulk audience plans. Supports SELECT, bulk contact name/property/consent updates, and bulk list membership changes without raw database access.', audienceInput, true, args => {
+    if (args.action === 'query') return { steps: [{ operation: queryAudience, args: { body: { statement: args.statement }, confirm: true } }] };
+    if (args.action === 'plan') return { steps: [{ operation: planAudience, args: { body: { statement: args.statement }, confirm: true } }] };
+    if (args.action === 'apply') return { steps: [{ operation: applyAudience, args: { body: { planId: args.planId, confirmResubscribe: args.confirmResubscribe ?? false }, confirm: true } }] };
+    invalid('Unknown audienceQuery action.');
+  }, actionOutputSchema({ query: queryAudience, plan: planAudience, apply: applyAudience }), args => args.action === 'apply'));
 
   const lists = need('getContactLists');
   add(custom('findLists', 'List and search contact lists, or supply id alone to retrieve one list and its members.', findSchema(lists, { includeMembers: { type: 'boolean', default: true } }), false, args => {
@@ -353,7 +370,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 32) invalid(`Curated catalog must contain exactly 32 tools, got ${result.size}.`);
+  if (result.size !== 33) invalid(`Curated catalog must contain exactly 33 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

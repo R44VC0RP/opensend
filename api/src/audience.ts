@@ -63,7 +63,7 @@ async function readLists(db: DbExecutor, identity: Actor, rows: Array<typeof lis
   return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
 }
 
-function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
+export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
 function compileRuleCondition(rule: SegmentRule): SQL {
   if ('rules' in rule) return sql`(${sql.join(rule.rules.map(compileRule), rule.operator === 'and' ? sql` AND ` : sql` OR `)})`;
   if ('days' in rule) {

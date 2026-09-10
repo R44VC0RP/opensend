@@ -78,7 +78,8 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
     return output;
   }
   async function invoke(op: McpOperation, args: ObjectValue): Promise<McpStepResult> {
-      if (op.write && (!allowWrites || args.confirm !== true)) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
+      const confirmationRequired = op.requiresConfirmation ? op.requiresConfirmation(args) : op.write;
+      if (confirmationRequired && (!allowWrites || args.confirm !== true)) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
       if (!op.validate(args)) fail('INVALID_ARGUMENTS', 'Arguments do not match the tool input schema. No API request was made.');
       if (op.plan) {
         const plan = op.plan(args);

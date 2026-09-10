@@ -115,7 +115,7 @@ function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
   return a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } };
 }
 
-export async function publishEvent(runtime: Runtime, event: PublishedEvent): Promise<void> {
+export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake = true): Promise<void> {
   if (!eventTypes.includes(event.type)) throw new ApiError(422, 'INVALID_EVENT_TYPE', 'Unknown webhook event type.');
   await runtime.db.transaction(async tx => {
     const inserted = await tx.insert(events).values(event).onConflictDoNothing().returning({ id: events.id });
@@ -130,7 +130,7 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent): Pro
       await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
     }
   });
-  try { await runtime.wake?.(); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
+  if (wake) try { await runtime.wake?.(); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
 export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, environment: Mode, email: string, db: DbExecutor = runtime.db): Promise<string> {
@@ -463,10 +463,18 @@ const publishJob: JobHandler = async (runtime, payload, job) => {
   if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'The queued event is invalid or has mismatched scope.');
   await publishEvent(runtime, parsed.data as PublishedEvent);
 };
+const publishBatchJob: JobHandler = async (runtime, payload, job) => {
+  if (!Array.isArray(payload.events) || payload.events.length < 1 || payload.events.length > 100) throw new ApiError(422, 'INVALID_EVENT_BATCH', 'Event batches must contain between one and 100 events.');
+  for (const value of payload.events) {
+    const parsed = eventSchema.safeParse(value);
+    if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'A queued batch event is invalid or has mismatched scope.');
+    await publishEvent(runtime, parsed.data as PublishedEvent, false);
+  }
+};
 const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
   try { await handler(runtime, payload, job); } catch (error) {
     if (error instanceof ApiError) throw error;
     throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
   }
 };
-export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.publish': retryDatabaseFailures(publishJob) };
+export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

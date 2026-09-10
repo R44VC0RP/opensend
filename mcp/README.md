@@ -54,6 +54,8 @@ The full writable catalog has **31 tools**; read-only OAuth grants expose the ni
 
 `createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses test/live, 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx opensend-js upload <file> --api <origin> --token <token>` so raw bytes stream directly to OpenSend instead of passing through MCP or model context.
 
+`audienceQuery` runs the restricted AudienceQL language over contacts, lists and existing segments. `query` executes bounded `SELECT` reads. Mutations use `plan` followed by confirmed `apply`, freezing at most 10,000 contact IDs for 15 minutes and rejecting stale contact updates. Supported mutations update contact names, consent and `properties.key` values, or add/remove matching contacts from a list. AudienceQL never exposes physical tables, joins, DDL, comments or multiple statements. Prior opt-outs require `confirmResubscribe`; suppression is never lifted.
+
 Results contain matching JSON text and `structuredContent`. Each tool's output schema describes its successful API response and the existing error envelopes:
 
 ```json

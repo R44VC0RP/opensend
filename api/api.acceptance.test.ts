@@ -258,6 +258,7 @@ describe('Public contract and authentication', () => {
       '/v1/contacts': ['get', 'post'], '/v1/contacts/{id}': ['get', 'patch', 'delete'],
       '/v1/contacts/{id}/consent': ['get', 'post'],
       '/v1/contact-imports': ['get', 'post'], '/v1/contact-imports/{id}/commit': ['post'],
+      '/v1/audience-query/query': ['post'], '/v1/audience-query/plan': ['post'], '/v1/audience-query/apply': ['post'],
       '/v1/lists': ['get', 'post'], '/v1/lists/{id}/members': ['get', 'post'],
       '/v1/segments': ['get', 'post'], '/v1/segments/{id}/preview': ['post'],
       '/v1/emails/send': ['post'], '/v1/emails/batch': ['post'], '/v1/emails': ['get'],
@@ -715,11 +716,11 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 32);
+    assert.equal(catalog.tools.length, 33);
     assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 10);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
-      'archiveCampaign', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
+      'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getContext', 'getMetrics',
       'importContacts', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
@@ -762,6 +763,25 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(noConfirmation.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(noConfirmation));
     const updated = await callTool(token, 'saveContact', { action: 'update', id: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
     assert.equal(updated.name, `${label}-updated`);
+    const audienceStatement = `UPDATE contacts SET consent = 'subscribed', properties.audienceql = 'verified', properties.country = '${label.replaceAll("'", "''")}' WHERE name CONTAINS '${label.replaceAll("'", "''")}'`;
+    const audiencePlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: audienceStatement }, 201);
+    assert.equal(audiencePlan.matched, 2);
+    assert.equal(audiencePlan.requiresResubscribeConfirmation, false);
+    const audienceApplied = await callTool(token, 'audienceQuery', { action: 'apply', planId: audiencePlan.id, confirm: true });
+    assert.equal(audienceApplied.affected, 2);
+    const audienceRows = await callTool(token, 'audienceQuery', { action: 'query', statement: `SELECT id, consent, properties.audienceql FROM contacts WHERE name CONTAINS '${label.replaceAll("'", "''")}' LIMIT 10` });
+    assert.equal(audienceRows.matched, 2);
+    assert.ok(audienceRows.rows.every((row: Json) => row.consent === 'subscribed' && row['properties.audienceql'] === 'verified'));
+    const audienceSegment = await callTool(token, 'saveSegment', { action: 'create', body: { name: unique('audienceql-segment'), rule: { field: 'country', operator: 'eq', value: label } }, confirm: true }, 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/segments/${audienceSegment.id}`, MANAGER), [200, 404]); });
+    const segmentCount = await callTool(token, 'audienceQuery', { action: 'query', statement: `SELECT count(*) FROM contacts WHERE segment = '${audienceSegment.id}'` });
+    assert.equal(segmentCount.rows[0].count, 2);
+    await callTool(token, 'saveContact', { action: 'consent', id: contacts[0].id, body: { status: 'unsubscribed' }, confirm: true });
+    const resubscribePlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: `UPDATE contacts SET consent = 'subscribed' WHERE id = '${contacts[0].id}'` }, 201);
+    assert.equal(resubscribePlan.requiresResubscribeConfirmation, true);
+    const blockedResubscribe = await rpc(token, 'tools/call', { name: 'audienceQuery', arguments: { action: 'apply', planId: resubscribePlan.id, confirm: true } });
+    assert.equal(blockedResubscribe.structuredContent.error.code, 'RESUBSCRIBE_CONFIRMATION_REQUIRED', redact(blockedResubscribe));
+    assert.equal((await callTool(token, 'audienceQuery', { action: 'apply', planId: resubscribePlan.id, confirmResubscribe: true, confirm: true })).affected, 1);
 
     // The dashboard fixture is explicitly test-mode; no worker or SES delivery is needed for content reads.
     const message = mail({ text: 'Synthetic hosted MCP content snapshot.' });
@@ -802,6 +822,10 @@ describe('Hosted MCP OAuth and tools', () => {
     await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: false }, confirm: true });
 
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-audience') });
+    const membershipPlan = await callTool(token, 'audienceQuery', { action: 'plan', statement: `ADD contacts TO LIST '${list.id}' WHERE name CONTAINS '${label.replaceAll("'", "''")}'` }, 201);
+    assert.equal(membershipPlan.matched, 2);
+    assert.equal((await callTool(token, 'audienceQuery', { action: 'apply', planId: membershipPlan.id, confirm: true })).affected, 2);
+    assert.equal((await callTool(token, 'findLists', { id: list.id })).data[0].members.length, 2);
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id }, { name: unique('mcp-campaign') });
     const summaries = await callTool(token, 'findCampaigns', { search: campaign.draft.name });
     const summary = summaries.data.find((row: Json) => row.id === campaign.id);
@@ -852,6 +876,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContext'));
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'audienceQuery'));
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
     assert.equal((await callTool(token, 'findCampaigns', { id: campaign.id })).data[0].id, campaign.id);
