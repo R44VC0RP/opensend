@@ -61,6 +61,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
   const keyCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, {method, body, signal, environment: 'live'})
   const cursors = new Map<string, Map<number, string | undefined>>()
+  const uploadFile = async (path: string, file: File, inline?: {contentId: string}) => {
+    if (file.size > 8 * 1024 * 1024) throw new ApiError('Assets must total at most 8 MiB.', 'ATTACHMENT_TOO_LARGE')
+    const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
+    return call<any>(path, 'POST', {filename: file.name, contentType: file.type || 'application/octet-stream', content: btoa(binary), ...(inline ? {disposition: 'inline', contentId: inline.contentId} : {})})
+  }
   async function page<T>(path: string, input: PageRequest = {}, map: (r: Json) => T, filters: Json = {}, signal?: AbortSignal): Promise<PageResult<T>> {
     const limit = Math.min(path === '/domains' ? 10 : 100, input.pageSize ?? 20)
     const key = JSON.stringify([path, limit, filters])
@@ -130,7 +136,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
         const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
-        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : draft, signal, environment, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
+        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, environment, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
       audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
       send: async (input, signal) => {
@@ -144,13 +150,14 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),
       content: (id, signal) => call<any>(`/attachments/${idPath(id)}/content`, 'GET', undefined, signal),
-      upload: async (file, inline) => {
-        if (file.size > 8 * 1024 * 1024) throw new ApiError('Attachments must total at most 8 MiB.', 'ATTACHMENT_TOO_LARGE')
-        const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''
-        for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
-        return call<any>('/attachments', 'POST', {filename: file.name, contentType: file.type || 'application/octet-stream', content: btoa(binary), ...(inline ? {disposition: 'inline', contentId: inline.contentId} : {})})
-      },
+      upload: (file, inline) => uploadFile('/attachments', file, inline),
       remove: async id => { await call(`/attachments/${idPath(id)}`, 'DELETE') }
+    },
+    templateAssets: {
+      get: (id, signal) => call<any>(`/template-assets/${idPath(id)}`, 'GET', undefined, signal),
+      content: (id, signal) => call<any>(`/template-assets/${idPath(id)}/content`, 'GET', undefined, signal),
+      upload: (file, inline) => uploadFile('/template-assets', file, inline),
+      remove: async id => { await call(`/template-assets/${idPath(id)}`, 'DELETE') },
     },
     contacts: {
       list: (input, signal) => page('/contacts', input, mapContact, {search: input.search, listId: input.listId, ...(input.status === 'suppressed' ? {suppressed: true} : input.status ? {consent: input.status, suppressed: false} : {})}, signal),
@@ -184,6 +191,16 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       revokeAgentToken: async (id, signal) => { await keyCall(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
       mcpConnections: async signal => (await keyCall('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
       revokeMcpConnection: async (id, signal) => { await keyCall(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
+    },
+    templates: {
+      list: (input = {}, signal) => page('/templates', input, row => row as import('./types').CampaignTemplateSummary, {search: input.search, archived: input.archived === true ? 'true' : 'false', publishedOnly: input.publishedOnly === true ? 'true' : 'false'}, signal),
+      get: (id, signal) => call(`/templates/${idPath(id)}`, 'GET', undefined, signal),
+      create: (input, signal) => call('/templates', 'POST', input, signal),
+      update: (id, revision, draft, signal) => call(`/templates/${idPath(id)}`, 'PATCH', {revision, draft}, signal),
+      publish: (id, revision, signal) => call(`/templates/${idPath(id)}/publish`, 'POST', {revision}, signal),
+      archive: (id, archived, signal) => call(`/templates/${idPath(id)}/archive`, 'PATCH', {archived}, signal),
+      remove: async (id, signal) => { await call(`/templates/${idPath(id)}`, 'DELETE', undefined, signal) },
+      preview: (id, published = false, signal) => call(`/templates/${idPath(id)}/preview?published=${published}`, 'GET', undefined, signal),
     },
     domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)) },
     webhooks: {

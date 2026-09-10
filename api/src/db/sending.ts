@@ -32,7 +32,7 @@ export const emailEvents = pgTable('sending_email_events', {
 }, t => [index('sending_events_page').on(t.workspaceId, t.environment, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.environment, t.externalId)]);
 export const attachments = pgTable('sending_attachments', {
   id: text('id').primaryKey(), ...scope(), filename: text('filename').notNull(), contentType: text('content_type').notNull(), size: integer('size').notNull(),
-  disposition: text('disposition').$type<'attachment' | 'inline'>().notNull(), contentId: text('content_id'), storageKey: text('storage_key').notNull(), checksum: text('checksum').notNull(),
+  disposition: text('disposition').$type<'attachment' | 'inline'>().notNull(), contentId: text('content_id'), storageKey: text('storage_key').notNull(), checksum: text('checksum').notNull(), sourceTemplateAssetId: text('source_template_asset_id'),
   createdAt: time('created_at').notNull().defaultNow(),
 }, t => [index('sending_attachments_page').on(t.workspaceId, t.environment, t.id)]);
 export const attachmentLinks = pgTable('sending_attachment_links', {
@@ -40,6 +40,7 @@ export const attachmentLinks = pgTable('sending_attachment_links', {
 }, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.attachmentId, t.ownerType, t.ownerId] }), index('sending_attachment_owner').on(t.workspaceId, t.environment, t.ownerType, t.ownerId)]);
 export const campaigns = pgTable('sending_campaigns', {
   id: text('id').primaryKey(), ...scope(), revision: integer('revision').notNull().default(1), draft: jsonb('draft').$type<CampaignDraft>().notNull(),
+  sourceTemplateId: text('source_template_id'), sourceTemplateRevision: integer('source_template_revision'),
   status: text('status').$type<'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled'>().notNull().default('draft'), reviewId: text('review_id'), scheduledAt: time('scheduled_at'), archivedAt: time('archived_at'),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.environment, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.environment, t.archivedAt, t.createdAt.desc(), t.id.desc())]);

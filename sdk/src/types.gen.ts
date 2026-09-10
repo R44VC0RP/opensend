@@ -233,6 +233,84 @@ export type AudienceOperationResult = {
     appliedAt: string;
 };
 
+export type CampaignTemplateSummary = {
+    id: string;
+    url: string;
+    revision: number;
+    publishedRevision: number | null;
+    archivedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    name: string;
+    description: string;
+    subject: string;
+    published: boolean;
+};
+
+export type CampaignTemplate = {
+    id: string;
+    url: string;
+    revision: number;
+    draft: CampaignTemplateDraft;
+    published: CampaignTemplateDraft & ({
+        [key: string]: unknown;
+    } | null);
+    publishedRevision: number | null;
+    archivedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type CampaignTemplateDraft = {
+    name: string;
+    description?: string;
+    subject?: string;
+    previewText?: string;
+    fromName?: string;
+    replyTo?: Array<string>;
+    tracking?: boolean;
+    defaults?: {
+        [key: string]: string | number | boolean | null;
+    };
+    html?: string;
+    attachments?: Array<string>;
+};
+
+export type CreateCampaignTemplate = {
+    name: string;
+    description?: string;
+};
+
+export type UpdateCampaignTemplate = {
+    revision: number;
+    draft: CampaignTemplateDraft;
+};
+
+export type CampaignTemplatePreview = {
+    html: string;
+    text: string;
+    revision: number;
+    published: boolean;
+};
+
+export type TemplateAsset = {
+    id: string;
+    filename: string;
+    contentType: string;
+    size: number;
+    disposition: 'attachment' | 'inline';
+    contentId: string | null;
+    createdAt: string;
+};
+
+export type TemplateAssetUpload = {
+    filename: string;
+    contentType?: string;
+    disposition?: 'attachment' | 'inline';
+    contentId?: string;
+    content: string;
+};
+
 export type EmailQueued = {
     id: string;
     status: 'queued';
@@ -365,6 +443,8 @@ export type Campaign = {
     environment: 'live' | 'test';
     revision: number;
     draft: CampaignDraft;
+    sourceTemplateId: string | null;
+    sourceTemplateRevision: number | null;
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     reviewId: string | null;
     scheduledAt: string | null;
@@ -452,6 +532,10 @@ export type CreateCampaignInput = {
      * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
      */
     html?: string;
+    /**
+     * Copies the active published revision of this global campaign template into a new independent campaign draft.
+     */
+    templateId?: string;
 };
 
 /**
@@ -465,6 +549,8 @@ export type CampaignSummary = {
     url: string;
     environment: 'live' | 'test';
     revision: number;
+    sourceTemplateId: string | null;
+    sourceTemplateRevision: number | null;
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     reviewId: string | null;
     scheduledAt: string | null;
@@ -3414,6 +3500,779 @@ export type ApplyAudiencePlanResponses = {
 };
 
 export type ApplyAudiencePlanResponse = ApplyAudiencePlanResponses[keyof ApplyAudiencePlanResponses];
+
+export type ListCampaignTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        search?: string;
+        archived?: 'true' | 'false';
+        publishedOnly?: 'true' | 'false';
+    };
+    url: '/v1/templates';
+};
+
+export type ListCampaignTemplatesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListCampaignTemplatesError = ListCampaignTemplatesErrors[keyof ListCampaignTemplatesErrors];
+
+export type ListCampaignTemplatesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<CampaignTemplateSummary>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListCampaignTemplatesResponse = ListCampaignTemplatesResponses[keyof ListCampaignTemplatesResponses];
+
+export type CreateCampaignTemplateData = {
+    body: CreateCampaignTemplate;
+    path?: never;
+    query?: never;
+    url: '/v1/templates';
+};
+
+export type CreateCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateCampaignTemplateError = CreateCampaignTemplateErrors[keyof CreateCampaignTemplateErrors];
+
+export type CreateCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    201: CampaignTemplate;
+};
+
+export type CreateCampaignTemplateResponse = CreateCampaignTemplateResponses[keyof CreateCampaignTemplateResponses];
+
+export type DeleteCampaignTemplateData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/templates/{id}';
+};
+
+export type DeleteCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteCampaignTemplateError = DeleteCampaignTemplateErrors[keyof DeleteCampaignTemplateErrors];
+
+export type DeleteCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        deleted: true;
+    };
+};
+
+export type DeleteCampaignTemplateResponse = DeleteCampaignTemplateResponses[keyof DeleteCampaignTemplateResponses];
+
+export type GetCampaignTemplateData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/templates/{id}';
+};
+
+export type GetCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignTemplateError = GetCampaignTemplateErrors[keyof GetCampaignTemplateErrors];
+
+export type GetCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplate;
+};
+
+export type GetCampaignTemplateResponse = GetCampaignTemplateResponses[keyof GetCampaignTemplateResponses];
+
+export type UpdateCampaignTemplateData = {
+    body: UpdateCampaignTemplate;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/templates/{id}';
+};
+
+export type UpdateCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateCampaignTemplateError = UpdateCampaignTemplateErrors[keyof UpdateCampaignTemplateErrors];
+
+export type UpdateCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplate;
+};
+
+export type UpdateCampaignTemplateResponse = UpdateCampaignTemplateResponses[keyof UpdateCampaignTemplateResponses];
+
+export type PublishCampaignTemplateData = {
+    body: {
+        revision: number;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/templates/{id}/publish';
+};
+
+export type PublishCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PublishCampaignTemplateError = PublishCampaignTemplateErrors[keyof PublishCampaignTemplateErrors];
+
+export type PublishCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplate;
+};
+
+export type PublishCampaignTemplateResponse = PublishCampaignTemplateResponses[keyof PublishCampaignTemplateResponses];
+
+export type PreviewCampaignTemplateData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        published?: 'true' | 'false';
+    };
+    url: '/v1/templates/{id}/preview';
+};
+
+export type PreviewCampaignTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PreviewCampaignTemplateError = PreviewCampaignTemplateErrors[keyof PreviewCampaignTemplateErrors];
+
+export type PreviewCampaignTemplateResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplatePreview;
+};
+
+export type PreviewCampaignTemplateResponse = PreviewCampaignTemplateResponses[keyof PreviewCampaignTemplateResponses];
+
+export type SetCampaignTemplateArchivedData = {
+    body: {
+        archived: boolean;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/templates/{id}/archive';
+};
+
+export type SetCampaignTemplateArchivedErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetCampaignTemplateArchivedError = SetCampaignTemplateArchivedErrors[keyof SetCampaignTemplateArchivedErrors];
+
+export type SetCampaignTemplateArchivedResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplate;
+};
+
+export type SetCampaignTemplateArchivedResponse = SetCampaignTemplateArchivedResponses[keyof SetCampaignTemplateArchivedResponses];
+
+export type UploadTemplateAssetData = {
+    body: TemplateAssetUpload;
+    path?: never;
+    query?: never;
+    url: '/v1/template-assets';
+};
+
+export type UploadTemplateAssetErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UploadTemplateAssetError = UploadTemplateAssetErrors[keyof UploadTemplateAssetErrors];
+
+export type UploadTemplateAssetResponses = {
+    /**
+     * Success
+     */
+    201: TemplateAsset;
+};
+
+export type UploadTemplateAssetResponse = UploadTemplateAssetResponses[keyof UploadTemplateAssetResponses];
+
+export type DeleteTemplateAssetData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-assets/{id}';
+};
+
+export type DeleteTemplateAssetErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteTemplateAssetError = DeleteTemplateAssetErrors[keyof DeleteTemplateAssetErrors];
+
+export type DeleteTemplateAssetResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        deleted: true;
+    };
+};
+
+export type DeleteTemplateAssetResponse = DeleteTemplateAssetResponses[keyof DeleteTemplateAssetResponses];
+
+export type GetTemplateAssetData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-assets/{id}';
+};
+
+export type GetTemplateAssetErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetTemplateAssetError = GetTemplateAssetErrors[keyof GetTemplateAssetErrors];
+
+export type GetTemplateAssetResponses = {
+    /**
+     * Success
+     */
+    200: TemplateAsset;
+};
+
+export type GetTemplateAssetResponse = GetTemplateAssetResponses[keyof GetTemplateAssetResponses];
+
+export type GetTemplateAssetContentData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-assets/{id}/content';
+};
+
+export type GetTemplateAssetContentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetTemplateAssetContentError = GetTemplateAssetContentErrors[keyof GetTemplateAssetContentErrors];
+
+export type GetTemplateAssetContentResponses = {
+    /**
+     * Success
+     */
+    200: TemplateAsset & {
+        content: string;
+    };
+};
+
+export type GetTemplateAssetContentResponse = GetTemplateAssetContentResponses[keyof GetTemplateAssetContentResponses];
 
 export type SendEmailData = {
     body: SendEmailInput;

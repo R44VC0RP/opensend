@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, Contact, Domain, Email, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -16,6 +16,8 @@ export interface DemoState {
   emails: Email[]
   campaigns: Campaign[]
   attachments?: DemoAttachment[]
+  templateAssets?: DemoAttachment[]
+  templates?: CampaignTemplate[]
   domains: Domain[]
   keys: ApiKey[]
   agentTokens?: AgentTokenSummary[]
@@ -68,6 +70,8 @@ export function createSeed(now = Date.now()): DemoState {
     const deliveredEmails = value.id === 'cmp_update' ? emails.filter(e => e.regionId === 'us-east-1' && e.stream === 'marketing') : value.id === 'cmp_digest' ? emails.filter(e => e.regionId === 'us-east-1' && e.stream === 'transactional').slice(0, 8) : []
     return { ...value, status, subject: value.name, previewText: 'The latest news and updates from Acme.', fromName: 'Acme', fromEmail: value.regionId === 'eu-west-1' ? 'hello@acme.eu' : 'hello@acme.com', html: `<h1>${value.name}</h1><p>Here is what is new at Acme.</p><p>This is a demo campaign. No email will be sent.</p>`, createdAt: ago((15 + i) * 24), updatedAt: ago((i + 1) * 8), scheduledAt: null, timezone: 'UTC', recipients: deliveredEmails.length, delivered: deliveredEmails.filter(e => e.status === 'delivered').length, bounced: deliveredEmails.filter(e => e.status === 'bounced').length, complaints: deliveredEmails.filter(e => e.status === 'complaint').length }
   })
+  const templateDraft = { name: 'Product announcement', description: 'A reusable product-news layout.', subject: 'What’s new at Acme', previewText: 'A quick look at the latest release.', fromName: 'Acme', replyTo: [], tracking: true, defaults: {}, html: '<h1>Product announcement</h1><p>Share what changed and why it matters.</p><p><a href="https://example.com" data-button="true">Learn more</a></p>', attachments: [] }
+  const templates: CampaignTemplate[] = [{ id: 'tpl_product', url: '/templates/tpl_product', revision: 1, draft: templateDraft, published: structuredClone(templateDraft), publishedRevision: 1, archivedAt: null, createdAt: ago(30 * 24), updatedAt: ago(24) }]
   const domains: Domain[] = [
     { id: 'dom_acme', name: 'acme.com', regionId: 'us-east-1', status: 'verified' },
     { id: 'dom_mail', name: 'mail.acme.com', regionId: 'us-east-1', status: 'verified' },
@@ -84,5 +88,5 @@ export function createSeed(now = Date.now()): DemoState {
     { id: 'wh_bounces', name: 'Bounce monitoring', url: 'https://monitor.example.com/events', regionIds: ['us-east-1'], events: ['bounced', 'complaint'], status: 'active', secretHint: 'demo_wh_…bounces', deliveries: [] },
     { id: 'wh_warehouse', name: 'Data warehouse', url: 'https://data.example.com/email-events', regionIds: ['eu-west-1'], events: ['delivered'], status: 'paused', secretHint: 'demo_wh_…warehouse', deliveries: [] },
   ]
-  return { version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, domains, keys, agentTokens, mcpConnections, webhooks }
+  return { version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, templates, templateAssets: [], domains, keys, agentTokens, mcpConnections, webhooks }
 }

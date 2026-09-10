@@ -5,7 +5,7 @@ import { defaultSlashCommands } from '@react-email/editor/ui'
 import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, Type, Undo2 } from 'lucide-react'
 import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
-import type { Attachment } from '../../data/types'
+import type { Attachment, AttachmentApi } from '../../data/types'
 import { prepareLocalImage, inlineImageSources, inlineImageHash, replaceEditorImageSources, loadInlineAttachments, cidImageSources } from './composer-content'
 import { blockHtmlToDocument, documentToBlockHtml, isBlockDocumentEmpty, type EditorNode } from './block-content'
 import '@react-email/editor/themes/default.css'
@@ -15,7 +15,7 @@ import './composer.css'
 // API. Opening converts block HTML to editor blocks; saving converts blocks back.
 type Draft = { html: string; inlineAttachmentIds?: string[] }
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
-type Props = { attachmentIds?: string[]; initialHtml: string; disabled?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
+type Props = { attachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 
 // The library's slash menu reads this shared list and has no image entry, although the
@@ -32,8 +32,9 @@ if (!defaultSlashCommands.some(item => item.title === 'Image')) {
 const section = defaultSlashCommands.findIndex(item => item.title === 'Section')
 if (section >= 0) defaultSlashCommands.splice(section, 1)
 
-export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], initialHtml, disabled = false, onReady, onDirty, onAttach, onBusy }, ref) {
+export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
+  const attachmentApi = providedAttachmentApi ?? api.attachments
   const preparing = useRef<Promise<Draft> | null>(null)
   const [initialSnapshot] = useState(() => ({ html: initialHtml, attachmentIds: [...attachmentIds] }))
   // Inline attachments open as data URLs and save back as their cid references.
@@ -106,7 +107,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const controller = new AbortController()
     let release: (() => void) | undefined
     setHydrating(true)
-    loadInlineAttachments(api, initialSnapshot.attachmentIds, needed, controller.signal).then(result => {
+    loadInlineAttachments(attachmentApi, initialSnapshot.attachmentIds, needed, controller.signal).then(result => {
       if (controller.signal.aborted) { result.release(); return }
       release = result.release
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
@@ -114,7 +115,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
     }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Inline images could not be loaded.'); setHydrating(false); setGeneration(value => value + 1) } })
     return () => { controller.abort(); release?.() }
-  }, [api, initialSnapshot])
+  }, [attachmentApi, initialSnapshot])
 
   async function prepareContent(): Promise<Draft> {
     if (hydrating) throw new Error('Wait for inline images to finish loading before saving.')
@@ -124,9 +125,9 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     let document = instance.getJSON() as EditorNode
     if (isBlockDocumentEmpty(document)) return { html: '', inlineAttachmentIds: [] }
     const currentInline: string[] = []
-    if (api.attachments) {
+    if (attachmentApi) {
       const allIds = new Set(attachmentIds)
-      const metadata = await Promise.all([...allIds].map(id => api.attachments!.get(id)))
+      const metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
       const inlineSources = inlineImageSources(document as Record<string, unknown>)
       for (const source of inlineSources) {
         const cached = uploadedInline.current.get(source)
@@ -145,7 +146,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           const hash = await inlineImageHash(source)
           const contentId = `opensend-${crypto.randomUUID()}`
           const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
-          const item = await api.attachments.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
+          const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
           cid = `cid:${contentId}`
           cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
           currentInline.push(item.id)

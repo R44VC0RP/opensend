@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { createSeed } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
@@ -102,6 +102,11 @@ function find<T extends { id: string }>(items: T[], value: string, label: string
 function findAttachment(state: DemoState, attachmentId: string): DemoAttachment {
   const attachment = state.attachments?.find(row => row.id === attachmentId)
   if (!attachment) throw new ApiError('One or more attachments were not found.', 'ATTACHMENT_NOT_FOUND', {}, undefined, 404)
+  return attachment
+}
+function findTemplateAsset(state: DemoState, attachmentId: string): DemoAttachment {
+  const attachment = state.templateAssets?.find(row => row.id === attachmentId)
+  if (!attachment) throw new ApiError('One or more template assets were not found.', 'TEMPLATE_ASSET_NOT_FOUND', {}, undefined, 404)
   return attachment
 }
 function attachmentMetadata({ content: _content, ...metadata }: DemoAttachment) { return metadata }
@@ -439,6 +444,21 @@ export function createMockApi(): OpenSendApi {
         s.attachments = s.attachments!.filter(row => row.id !== attachmentId)
       }),
     },
+    templateAssets: {
+      upload: async (file, inline) => {
+        if (!file.name || file.name.length > 200 || !ATTACHMENT_FILENAME.test(file.name)) invalid('filename', 'Use a filename of 1–200 characters without path separators.')
+        const extension = file.name.split('.').pop()!.toLowerCase()
+        if (!ATTACHMENT_EXTENSIONS.includes(extension)) throw new ApiError('This template asset type is not supported.', 'UNSUPPORTED_TEMPLATE_ASSET', {}, undefined, 422)
+        if (!file.size || file.size > MAX_ATTACHMENT_BYTES) throw new ApiError('Template assets must be nonempty and at most 8 MiB.', 'TEMPLATE_ASSET_LIMIT_EXCEEDED', {}, undefined, 413)
+        const bytes = new Uint8Array(await file.arrayBuffer()); let binary = ''
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
+        const asset: DemoAttachment = {id: id('tasset'), filename: file.name, contentType: file.type || 'application/octet-stream', size: bytes.length, disposition: inline ? 'inline' : 'attachment', ...(inline ? {contentId: inline.contentId} : {}), content: btoa(binary)}
+        return run(undefined, true, s => { (s.templateAssets ??= []).push(asset); return attachmentMetadata(asset) })
+      },
+      get: (assetId, signal) => run(signal, false, s => attachmentMetadata(findTemplateAsset(s, assetId))),
+      content: (assetId, signal) => run(signal, false, s => { const row = findTemplateAsset(s, assetId); return {id: row.id, filename: row.filename, contentType: row.contentType, content: row.content} }),
+      remove: assetId => run(undefined, true, s => { findTemplateAsset(s, assetId); if ((s.templates ?? []).some(template => template.draft.attachments.includes(assetId) || template.published?.attachments.includes(assetId))) throw new ApiError('Remove this asset from templates first.', 'TEMPLATE_ASSET_IN_USE', {}, undefined, 409); s.templateAssets = s.templateAssets!.filter(row => row.id !== assetId) }),
+    },
     regions: {
       list: signal => run(signal, true, s => catalog(s, true)),
       configure: (region, input, signal) => run(signal, true, s => {
@@ -541,8 +561,16 @@ export function createMockApi(): OpenSendApi {
         if (existing && existing.regionId !== input.regionId) invalid('regionId', 'A campaign cannot be moved between regions.')
         if (input.revision !== undefined && (!Number.isInteger(input.revision) || input.revision < 1)) invalid('revision', 'Campaign revision must be a positive integer.')
         if (existing && input.revision !== undefined && input.revision !== (existing.revision ?? 1)) throw new ApiError('This campaign changed. Reload it before saving.', 'STALE_CAMPAIGN_REVISION', {}, undefined, 409)
-        const clean = validateCampaign(s, input, existing)
-        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...clean }
+        let next = input
+        let sourceTemplate: CampaignTemplate | undefined
+        if (!existing && input.templateId) {
+          sourceTemplate = find(s.templates ??= [], input.templateId, 'Template')
+          if (sourceTemplate.archivedAt || !sourceTemplate.published) throw new ApiError('Choose a published, active template.', 'TEMPLATE_NOT_AVAILABLE')
+          const copied = sourceTemplate.published.attachments.map(assetId => { const source = findTemplateAsset(s, assetId); const copy = {...source, id: id('attachment')}; (s.attachments ??= []).push(copy); return copy.id })
+          next = {...input, subject: input.subject || sourceTemplate.published.subject, previewText: input.previewText || sourceTemplate.published.previewText || '', fromName: input.fromName || sourceTemplate.published.fromName || '', html: input.html || sourceTemplate.published.html || '', attachments: [...copied, ...(input.attachments ?? [])]}
+        }
+        const clean = validateCampaign(s, next, existing)
+        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(sourceTemplate ? {sourceTemplateId: sourceTemplate.id, sourceTemplateRevision: sourceTemplate.publishedRevision} : {}), ...clean }
         campaign.recipients = campaign.listId ? campaignAudience(s, campaign.listId, campaign.segmentId).eligible : 0
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)
@@ -598,6 +626,16 @@ export function createMockApi(): OpenSendApi {
         validateSender(s, campaign)
         return { accepted: true }
       }),
+    },
+    templates: {
+      list: (input = {}, signal) => run(signal, false, s => page((s.templates ??= []).filter(template => (template.archivedAt != null) === (input.archived === true) && (!input.publishedOnly || template.published)).map(template => ({id: template.id, url: template.url, revision: template.revision, name: template.draft.name, description: template.draft.description, subject: template.draft.subject, published: !!template.published, publishedRevision: template.publishedRevision, archivedAt: template.archivedAt, createdAt: template.createdAt, updatedAt: template.updatedAt})), input, template => `${template.name} ${template.description}`)),
+      get: (templateId, signal) => run(signal, false, s => find(s.templates ??= [], templateId, 'Template')),
+      create: (input, signal) => run(signal, true, s => { const draft: CampaignTemplateDraft = {name: text(input.name, 'name', 200), description: text(input.description ?? '', 'description', 500, true), subject: '', replyTo: [], tracking: true, defaults: {}, attachments: []}; const template: CampaignTemplate = {id: id('tpl'), url: '', revision: 1, draft, published: null, publishedRevision: null, archivedAt: null, createdAt: now(), updatedAt: now()}; template.url = `/templates/${template.id}`; (s.templates ??= []).push(template); return template }),
+      update: (templateId, revision, draft, signal) => run(signal, true, s => { const template = find(s.templates ??= [], templateId, 'Template'); if (template.archivedAt) throw new ApiError('Restore this template before editing.', 'TEMPLATE_ARCHIVED'); if (template.revision !== revision) throw new ApiError('This template changed. Reload it before saving.', 'STALE_TEMPLATE_REVISION'); draft.attachments.forEach(id => findTemplateAsset(s, id)); template.draft = structuredClone(draft); template.revision++; template.updatedAt = now(); return template }),
+      publish: (templateId, revision, signal) => run(signal, true, s => { const template = find(s.templates ??= [], templateId, 'Template'); if (template.revision !== revision) throw new ApiError('This template changed. Reload it before publishing.', 'STALE_TEMPLATE_REVISION'); if (!template.draft.html?.trim()) throw new ApiError('Add template content before publishing.', 'TEMPLATE_CONTENT_INVALID'); template.published = structuredClone(template.draft); template.publishedRevision = template.revision; template.updatedAt = now(); return template }),
+      archive: (templateId, archived, signal) => run(signal, true, s => { const template = find(s.templates ??= [], templateId, 'Template'); template.archivedAt = archived ? now() : null; template.updatedAt = now(); return template }),
+      remove: (templateId, signal) => run(signal, true, s => { const template = find(s.templates ??= [], templateId, 'Template'); s.templates = s.templates!.filter(row => row.id !== template.id) }),
+      preview: (templateId, published = false, signal) => run(signal, false, s => { const template = find(s.templates ??= [], templateId, 'Template'); const draft = published ? template.published : template.draft; if (!draft) throw new ApiError('This template has no published revision.', 'not_found'); return {html: draft.html ?? '', text: (draft.html ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()} }),
     },
     contacts: {
       list: (input, signal) => run(signal, false, s => {

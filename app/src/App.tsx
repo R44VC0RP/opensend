@@ -5,6 +5,7 @@ import { Button, EmptyState } from './components/ui'
 const loadOverview = () => import('./features/overview')
 const loadLogs = () => import('./features/logs')
 const loadCampaigns = () => import('./features/campaigns')
+const loadTemplates = () => import('./features/templates')
 const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
 const loadDeveloper = () => import('./features/developer')
@@ -14,6 +15,8 @@ const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetai
 const CampaignsPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignsPage })))
 const CampaignEditorPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignEditorPage })))
 const CampaignReviewPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignReviewPage })))
+const TemplatesPage = lazy(() => loadTemplates().then(m => ({ default: m.TemplatesPage })))
+const TemplateEditorPage = lazy(() => loadTemplates().then(m => ({ default: m.TemplateEditorPage })))
 const ContactsPage = lazy(() => loadAudience().then(m => ({ default: m.ContactsPage })))
 const ContactDetailPage = lazy(() => loadAudience().then(m => ({ default: m.ContactDetailPage })))
 const ListsPage = lazy(() => loadAudience().then(m => ({ default: m.ListsPage })))
@@ -32,6 +35,7 @@ const initialPath = window.location.pathname
 if (initialPath === '/') void loadOverview()
 else if (initialPath.startsWith('/logs')) void loadLogs()
 else if (initialPath.startsWith('/campaigns')) void loadCampaigns()
+else if (initialPath.startsWith('/templates')) void loadTemplates()
 else if (['/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) void loadAudience()
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) void loadSettings()
 else if (initialPath.startsWith('/developer')) void loadDeveloper()
@@ -47,6 +51,7 @@ export function App() {
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
+    <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateEditorPage />} />
     <Route path="contacts" element={<ContactsPage />} /><Route path="contacts/:id" element={<ContactDetailPage />} />
     <Route path="lists" element={<ListsPage />} /><Route path="lists/:id" element={<ListDetailPage />} />
     <Route path="segments" element={<SegmentsPage />} /><Route path="segments/new" element={<SegmentEditorPage />} /><Route path="segments/:id" element={<SegmentEditorPage />} />

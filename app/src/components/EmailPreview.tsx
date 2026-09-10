@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { OpenSendApi } from '../data/types';
+import type { AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import DOMPurify from 'dompurify';
@@ -12,11 +12,12 @@ export function htmlToText(html: string): string {
   return (email.body.textContent ?? '').replace(/[\t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; respectStyles?: boolean; remoteImages?: boolean };
-export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], respectStyles = false, remoteImages = false }: EmailPreviewProps) {
+export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean };
+export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false }: EmailPreviewProps) {
   const api = useApi();
+  const attachmentApi = providedAttachmentApi ?? api.attachments;
   const attachmentKey = [...new Set(attachmentIds)].sort().join('\0');
-  const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: OpenSendApi; sources: Map<string, string>} | null>(null);
+  const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: AttachmentApi | undefined; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
   const [fonts, setFonts] = useState<string[]>([]);
   useEffect(() => {
@@ -36,15 +37,15 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
     const controller = new AbortController();
     let release: (() => void) | undefined;
     setError('');
-    loadInlineAttachments(api, attachmentKey ? attachmentKey.split('\0') : [], needed, controller.signal).then(result => {
+    loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split('\0') : [], needed, controller.signal).then(result => {
       if (controller.signal.aborted) { result.release(); return; }
       release = result.release;
-      setResolved({html, attachmentKey, api, sources: result.sources});
+      setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
       if (result.sources.size < needed.size) setError('Some inline images could not be resolved from this message’s attachments.');
     }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
     return () => {controller.abort(); release?.();};
-  }, [html, attachmentKey, api, needed]);
-  const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === api ? resolved.sources : undefined;
+  }, [html, attachmentKey, attachmentApi, needed]);
+  const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;
   const srcDoc = useMemo(() => {
     // Authenticated, validated raster data is assigned from the attachment map
     // after DOMPurify; the opaque sandbox never needs access to parent Blob URLs.

@@ -20,13 +20,20 @@ export async function cleanup(runtime: Runtime) {
     await tx.execute(sql`DELETE FROM operation_sns_receipts WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM jobs WHERE workspace_id = ${workspace} AND status IN ('completed','failed') AND type <> 'maintenance.deleteAttachment' AND created_at < now() - interval '30 days'`);
     // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
-    const unused = await tx.execute<{ id: string; storage_key: string; environment: Mode }>(sql`WITH old AS (
+    const unused = await tx.execute<{ id: string; storage_key: string; environment: Mode; source_template_asset_id: string | null }>(sql`WITH old AS (
       SELECT a.id FROM sending_attachments a WHERE a.workspace_id = ${workspace}
         AND a.created_at < now() - interval '30 days'
         AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.attachment_id = a.id)
       LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.environment`);
-    for (const object of unused.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: workspace, environment: object.environment, payload: { key: object.storage_key } });
+    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.environment, a.source_template_asset_id`);
+    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: workspace, environment: object.environment, payload: { key: object.storage_key } });
+    const unusedTemplateAssets = await tx.execute<{ storage_key: string }>(sql`WITH old AS (
+      SELECT a.id FROM template_assets a WHERE a.workspace_id = ${workspace} AND a.created_at < now() - interval '30 days'
+        AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)
+        AND NOT EXISTS (SELECT 1 FROM sending_attachments s WHERE s.workspace_id = a.workspace_id AND s.source_template_asset_id = a.id)
+      LIMIT 50 FOR UPDATE SKIP LOCKED
+    ) DELETE FROM template_assets a USING old WHERE a.id = old.id RETURNING a.storage_key`);
+    for (const object of unusedTemplateAssets.rows) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: workspace, environment: 'live', payload: { key: object.storage_key } });
     await tx.execute(sql`DELETE FROM jobs WHERE workspace_id = ${workspace} AND status = 'completed' AND type = 'maintenance.deleteAttachment' AND created_at < now() - interval '30 days'`);
   });
   log('info', { code: 'RETENTION_COMPLETED', workspaceId: workspace });

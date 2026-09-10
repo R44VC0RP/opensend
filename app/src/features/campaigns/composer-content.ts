@@ -1,4 +1,4 @@
-import type { OpenSendApi } from '../../data/types'
+import type { AttachmentApi } from '../../data/types'
 
 export function isRasterDataUrl(value: string): boolean {
   const content = value.slice(value.indexOf(',') + 1)
@@ -107,18 +107,18 @@ function rasterBytesMatch(bytes: Uint8Array, type: string): boolean {
   if (type === 'image/webp') return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'
   return type === 'image/avif' && ascii(4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(8, 12))
 }
-export async function loadInlineAttachments(api: OpenSendApi, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>; release: () => void}> {
+export async function loadInlineAttachments(attachments: AttachmentApi | undefined, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>; release: () => void}> {
   const sources = new Map<string, string>()
   const release = () => {} // Data URLs are scoped to the caller's transient preview state; no global URL registration.
-  if (!needed.size || !api.attachments) return {sources, release}
+  if (!needed.size || !attachments) return {sources, release}
   const ids = [...new Set(attachmentIds)]
   if (ids.length > 20) throw new Error('Too many attachments to preview.')
-  const metadata = await Promise.all(ids.map(id => api.attachments!.get(id, signal)))
+  const metadata = await Promise.all(ids.map(id => attachments.get(id, signal)))
   const inline = metadata.filter(item => item.disposition === 'inline' && item.contentId && needed.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
   if (inline.reduce((total, item) => total + item.size, 0) > 8 * 1024 * 1024) throw new Error('Inline images exceed the 8 MiB preview limit.')
   try {
     const results = await Promise.allSettled(inline.map(async item => {
-      const result = await api.attachments!.content(item.id, signal)
+      const result = await attachments.content(item.id, signal)
       const type = result.contentType.toLowerCase()
       if (result.id !== item.id || type !== item.contentType.toLowerCase() || !rasterTypes.has(type) || result.content.length > 11184812) throw new Error('Attachment preview metadata does not match.')
       // A repeated four-character regex group over 8 MiB can exhaust the JavaScript engine's stack.

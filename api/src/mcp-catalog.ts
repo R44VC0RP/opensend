@@ -295,6 +295,13 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     if (typeof args.id === 'string') return { steps: [{ operation: campaignDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) };
     return { steps: [{ operation: campaignList, args }] };
   }, pageOutput()));
+  const templateList = need('listCampaignTemplates', raw), templateDetail = need('getCampaignTemplate', raw);
+  const templateFindSchema = findSchema(templateList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
+  templateFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(templateList.queryParameters.map(parameter => [parameter, false])) } };
+  add(custom('findTemplates', 'List and filter global campaign templates, or supply id alone to retrieve the complete draft and published revision with asset IDs.', templateFindSchema as Tool['inputSchema'], false, args => typeof args.id === 'string' ? { steps: [{ operation: templateDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) } : { steps: [{ operation: templateList, args }] }, pageOutput()));
+  add(actionTool('saveTemplate', 'Create or update a global campaign template, or archive/restore it.', { create: need('createCampaignTemplate', raw), update: need('updateCampaignTemplate', raw), archive: need('setCampaignTemplateArchived', raw) }));
+  direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
+  direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
   const previewCampaign = need('previewCampaign', raw), reviewCampaign = need('reviewCampaign', raw);
   add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. ${EMAIL_SEND_CONFIRMATION}`, reviewCampaign.tool.inputSchema, true, args => ({
@@ -370,7 +377,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 33) invalid(`Curated catalog must contain exactly 33 tools, got ${result.size}.`);
+  if (result.size !== 37) invalid(`Curated catalog must contain exactly 37 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
