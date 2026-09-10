@@ -3,6 +3,7 @@ import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, t
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
 export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
+  campaignContent?: { runId: string; contactId: string };
   from: string; fromName?: string; previewText?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
   kind: 'transactional' | 'marketing'; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean; raw?: string;

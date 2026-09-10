@@ -23,6 +23,8 @@ const values = z.object({
   OPENCODE_USERNAME: z.string().default('opencode'), OPENCODE_PASSWORD: optional(z.string()),
   OPENCODE_DIRECTORY: z.string().default('/workspaces/opensend-templates'), OPENCODE_AGENT: z.string().default('opensend-author'),
   TEMPLATE_S3_BUCKET: optional(z.string()), TEMPLATE_S3_REGION: optional(z.string()), TEMPLATE_S3_ACCESS_KEY_ID: optional(z.string()), TEMPLATE_S3_SECRET_ACCESS_KEY: optional(z.string()),
+  CRM_DATABASE_URL: optional(z.string()), CRM_CONTACTS_VIEW: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$/).default('public.opensend_contacts'), CRM_LIST_ID: optional(z.string()), CRM_SYNC_MINUTES: z.coerce.number().int().min(5).max(1440).default(15),
+  WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(8),
 });
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
@@ -41,6 +43,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const regions = [v.DEFAULT_SES_REGION];
   if (v.OPENCODE_URL) { const host = new URL(v.OPENCODE_URL); if (host.username || host.password || host.search || host.hash || !['','/'].includes(host.pathname) || (host.protocol !== 'https:' && !(host.protocol === 'http:' && ['localhost','127.0.0.1'].includes(host.hostname)))) throw new ApiError(503, 'CONFIG_INVALID', 'OPENCODE_URL requires a canonical HTTPS origin, or localhost HTTP.'); }
   if (v.TEMPLATE_S3_BUCKET && (!v.TEMPLATE_S3_ACCESS_KEY_ID || !v.TEMPLATE_S3_SECRET_ACCESS_KEY)) throw new ApiError(503, 'CONFIG_INVALID', 'Template S3 storage requires its access key and secret.');
+  if (v.CRM_DATABASE_URL && !v.CRM_LIST_ID) throw new ApiError(503, 'CONFIG_INVALID', 'CRM sync requires CRM_LIST_ID.');
   const url = new URL(v.PUBLIC_URL);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
@@ -57,5 +60,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     configurationSets: { transactional: '', marketing: '' },
     templateS3: v.TEMPLATE_S3_BUCKET ? { S3_BUCKET: v.TEMPLATE_S3_BUCKET, S3_REGION: v.TEMPLATE_S3_REGION, S3_ACCESS_KEY_ID: v.TEMPLATE_S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY: v.TEMPLATE_S3_SECRET_ACCESS_KEY } : undefined,
     openCode: v.OPENCODE_URL ? { url: v.OPENCODE_URL, token: v.OPENCODE_TOKEN, username: v.OPENCODE_USERNAME, password: v.OPENCODE_PASSWORD, directory: v.OPENCODE_DIRECTORY, agent: v.OPENCODE_AGENT } : undefined,
+    crm: v.CRM_DATABASE_URL ? { url: v.CRM_DATABASE_URL, view: v.CRM_CONTACTS_VIEW, listId: v.CRM_LIST_ID!, intervalMinutes: v.CRM_SYNC_MINUTES } : undefined,
+    workerConcurrency: v.WORKER_CONCURRENCY,
   };
 }

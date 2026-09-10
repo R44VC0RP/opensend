@@ -15,7 +15,8 @@
     "cf:dev": "wrangler dev",
     "cf:check": "wrangler deploy --dry-run",
     "build": "tsc -p tsconfig.build.json",
-    "test:isolated": "node --import tsx scripts/acceptance-isolated.ts"
+    "test:isolated": "node --import tsx scripts/acceptance-isolated.ts",
+    "benchmark:isolated": "OPENSEND_SCALE_BENCHMARK=1 node --import tsx scripts/acceptance-isolated.ts --test-name-pattern=\"250,000-recipient preparation benchmark\""
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1128.0",

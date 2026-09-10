@@ -14,6 +14,8 @@ import { registerMcpAuth } from './mcp-auth.js';
 import { registerTemplateAssets } from './template-assets.js';
 import { registerTemplates } from './templates.js';
 import { registerAuthoring } from './authoring.js';
+import { registerAudienceSync } from './audience-sync.js';
+import { registerCampaignRuns } from './campaign-runs.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -59,6 +61,7 @@ export function createApp() {
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app); registerSesRegions(app);
   registerTemplates(app); registerAuthoring(app); registerTemplateAssets(app);
+  registerCampaignRuns(app); registerAudienceSync(app);
   registerMcp(app);
   app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending.' } });
   return app;

@@ -17,6 +17,11 @@ export async function cleanup(runtime: Runtime) {
     await tx.execute(sql`DELETE FROM operation_events WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM operation_sns_receipts WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM jobs WHERE workspace_id = ${workspace} AND status IN ('completed','failed') AND type <> 'maintenance.deleteAttachment' AND created_at < now() - interval '30 days'`);
+    // Compact campaign totals survive log retention; old recipient snapshots do not.
+    await tx.execute(sql`DELETE FROM campaign_recipients r USING campaign_runs c WHERE r.run_id=c.id AND c.workspace_id=${workspace} AND c.updated_at<now()-interval '30 days' AND c.status IN ('completed','canceled') AND NOT EXISTS(SELECT 1 FROM sending_emails e WHERE e.campaign_id=c.campaign_id)`);
+    await tx.execute(sql`UPDATE campaign_runs c SET content=NULL,actor='{}'::jsonb WHERE c.workspace_id=${workspace} AND c.updated_at<now()-interval '30 days' AND c.status IN ('completed','canceled') AND c.content IS NOT NULL AND NOT EXISTS(SELECT 1 FROM sending_emails e WHERE e.campaign_id=c.campaign_id)`);
+    await tx.execute(sql`DELETE FROM audience_bulk_rows r USING audience_bulk_imports i WHERE r.import_id=i.id AND i.workspace_id=${workspace} AND i.updated_at<now()-interval '30 days' AND i.status='committed'`);
+    await tx.execute(sql`DELETE FROM crm_sync_errors WHERE workspace_id=${workspace} AND created_at<now()-interval '30 days'`);
     // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
     const unused = await tx.execute<{ id: string; storage_key: string; environment: Mode }>(sql`WITH old AS (
       SELECT a.id FROM sending_attachments a WHERE a.workspace_id = ${workspace}

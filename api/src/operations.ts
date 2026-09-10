@@ -362,6 +362,15 @@ function registerPublicEvents(app: App) {
     const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
     // The audience helper commits consent, audit, and the subscription event outbox atomically.
     await recordUnsubscribe(c.env, token.workspaceId, token.environment, token.email, method === 'get' ? 'footer-get' : 'rfc8058-post');
+    if (token.environment === 'live' && token.campaignId && token.emailId) {
+      // The immutable capability binds this opt-out to its original campaign, even
+      // after message-log retention. Repeated GET/one-click requests count once.
+      await c.env.db.execute(sql`WITH added AS (
+        INSERT INTO campaign_email_outcomes(email_id,campaign_id,outcome) VALUES(${token.emailId},${token.campaignId},'unsubscribed') ON CONFLICT DO NOTHING RETURNING campaign_id
+      ), counted AS (
+        UPDATE campaign_statistics SET outcomes=jsonb_set(outcomes,ARRAY['unsubscribed'],to_jsonb(coalesce((outcomes->>'unsubscribed')::int,0)+1)),updated_at=now() WHERE campaign_id IN (SELECT campaign_id FROM added) RETURNING campaign_id
+      ) INSERT INTO campaign_daily_statistics(campaign_id,day,outcome,count) SELECT campaign_id,(now() AT TIME ZONE 'UTC')::date,'unsubscribed',1 FROM counted ON CONFLICT(campaign_id,day,outcome) DO UPDATE SET count=campaign_daily_statistics.count+1`);
+    }
     return c.html('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unsubscribed</title><style>@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}body,body *{letter-spacing:-0.01em}</style><body style="font-family:Inter,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">You’re unsubscribed</h1><p>You will no longer receive marketing emails from this workspace.</p></main></body></html>', 200);
   });
 }

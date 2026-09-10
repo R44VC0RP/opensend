@@ -704,14 +704,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 35);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 10);
+    assert.equal(catalog.tools.length, 42);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 13);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getMetrics',
       'importContacts', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveWebhook',
-      'getTemplateLibrary', 'saveTemplate', 'authorTemplate', 'publishTemplate',
+      'getTemplateLibrary', 'saveTemplate', 'authorTemplate', 'publishTemplate', 'prepareLargeCampaign', 'getCampaignProgress', 'resumeCampaignExpansion', 'getAudienceSync', 'refreshAudienceSync', 'getBulkImport', 'bulkImportContacts',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -823,7 +823,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 10);
+    assert.equal(catalog.tools.length, 13);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
@@ -2458,6 +2458,51 @@ describe('Versioned templates and durable campaign preparation', () => {
     const invalid=ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:2,artifact:{...artifact(),html:'<script>alert(1)</script>'}}),201);
     assert.equal(invalid.validation.valid,false);error(await http('POST',`/v1/template-library/${template.id}/versions/${invalid.id}/publish`,key.secret,{region:REGION}),422,'TEMPLATE_VALIDATION_FAILED');
   });
+  test('1100 recipients prepare and dispatch in bounded batches; shared content reads preserve unsubscribe capabilities', async t => {
+    const key=await keyFixture(t),db=await fixtureDatabase(t),list=await resource(t,key.secret,'/v1/lists',{name:unique('large-synthetic')});
+    const prefix=unique('large');
+    await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,name,properties,marketing_consent) SELECT $1||n,'default','test',$1||n||'@example.com','Synthetic',jsonb_build_object('firstName','Example'),'subscribed' FROM generate_series(1,1100) n`,[prefix]);
+    await db.query(`INSERT INTO audience_list_members(workspace_id,environment,list_id,contact_id) SELECT 'default','test',$1,id FROM audience_contacts WHERE id LIKE $2`,[list.id,`${prefix}%`]);
+    const template=ok(await http('POST','/v1/template-library',key.secret,{name:unique('large-template')}),201),saved=ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:0,artifact:artifact()}),201);
+    ok(await http('POST',`/v1/template-library/${template.id}/versions/${saved.id}/publish`,key.secret,{region:REGION}),202);await poll(`/v1/template-library/${template.id}/versions/${saved.id}`,key.secret,r=>r.version.status==='published');
+    const campaign=await campaignFixture(t,key.secret,{listId:list.id},{html:undefined,templateVersionId:saved.id});
+    const run=ok(await http('POST',`/v1/campaigns/${campaign.id}/prepare`,key.secret,{revision:1}),202);
+    assert.equal(ok(await http('POST',`/v1/campaigns/${campaign.id}/prepare`,key.secret,{revision:1}),202).id,run.id);
+    const reviewed=await poll(`/v1/campaigns/${campaign.id}/preparation`,key.secret,r=>r.status==='ready');assert.equal(reviewed.eligible,1100);assert.equal(reviewed.prepared,1100);
+    const received=ok(await http('POST',`/v1/campaigns/${campaign.id}/send`,key.secret,{reviewId:run.id,revision:1},{'Idempotency-Key':unique('large-send')}),202);assert.equal(received.queued,0);
+    const deadline=Date.now()+60000;let progress:Json={};
+    do{progress=ok(await http('GET',`/v1/campaigns/${campaign.id}/progress`,key.secret));if(progress.status==='completed')break;assert.notEqual(progress.preparation?.status,'failed',JSON.stringify(progress));await new Promise(r=>setTimeout(r,200));}while(Date.now()<deadline);
+    assert.equal(progress.status,'completed');assert.equal(progress.total,1100);assert.equal(progress.statuses.simulated,1100);assert.equal(progress.remaining,0);assert.equal(progress.outcomes.accepted,undefined,'Simulation must not inflate real delivery metrics.');
+    const first=page(await http('GET',`/v1/campaigns/${campaign.id}/recipients?limit=1`,key.secret))[0]!;
+    const stored=(await db.query('SELECT snapshot FROM sending_emails WHERE id=$1',[first.emailId])).rows[0].snapshot;assert.equal(stored.html,undefined);assert.equal(stored.text,undefined);assert.equal(stored.campaignContent.runId,run.id);
+    const before=(await db.query('SELECT count(*)::int n FROM operation_unsubscribe_tokens')).rows[0].n;
+    const content=ok(await http('GET',`/v1/emails/${first.emailId}/content`,key.secret));assert.match(content.html,/Hello Example/);
+    assert.deepEqual(ok(await http('GET',`/v1/emails/${first.emailId}/content`,key.secret)),content);
+    assert.equal((await db.query('SELECT count(*)::int n FROM operation_unsubscribe_tokens')).rows[0].n,before,'Reading compact content must not create capabilities.');
+    assert.equal((content.html.match(/>Unsubscribe</g)??[]).length,1,'A branded template must not receive a second footer.');
+    const ids=(await db.query('SELECT count(DISTINCT email_id)::int n FROM campaign_recipients WHERE run_id=$1',[run.id])).rows[0].n;assert.equal(ids,1100);
+  });
+  test('bulk chunks resume idempotently, deduplicate across chunks, and preserve opt-outs', async t => {
+    const key=await keyFixture(t),list=await resource(t,key.secret,'/v1/lists',{name:unique('bulk')}),contact=await resource(t,key.secret,'/v1/contacts',{email:address()});ok(await consent(key.secret,contact.id,'unsubscribed'));
+    const run=ok(await http('POST','/v1/bulk-contact-imports',key.secret,{name:'synthetic.csv',listId:list.id}),201);
+    const chunk={chunk:0,rows:[{email:contact.email.toUpperCase(),name:'Updated'},{email:'invalid'}]};
+    const first=ok(await http('POST',`/v1/bulk-contact-imports/${run.id}/chunks`,key.secret,chunk));assert.equal(first.received,2);assert.equal(first.errors,1);
+    assert.equal(ok(await http('POST',`/v1/bulk-contact-imports/${run.id}/chunks`,key.secret,chunk)).received,2);
+    error(await http('POST',`/v1/bulk-contact-imports/${run.id}/chunks`,key.secret,{...chunk,rows:[{email:address()}]}),409,'IMPORT_CHUNK_CONFLICT');
+    const second=ok(await http('POST',`/v1/bulk-contact-imports/${run.id}/chunks`,key.secret,{chunk:1,rows:[{email:contact.email},{email:address()}]}));assert.equal(second.valid,2);assert.equal(second.errors,2);
+    ok(await http('POST',`/v1/bulk-contact-imports/${run.id}/finalize`,key.secret),202);ok(await http('POST',`/v1/bulk-contact-imports/${run.id}/commit`,key.secret),202);
+    const completed=await poll(`/v1/bulk-contact-imports/${run.id}`,key.secret,r=>r.status==='committed');assert.equal(completed.imported,2);
+    assert.equal(ok(await http('GET',`/v1/contacts/${contact.id}`,key.secret)).marketingConsent,'unsubscribed');assert.equal(page(await http('GET',`/v1/bulk-contact-imports/${run.id}/rows?errorsOnly=true`,key.secret)).length,2);
+  });
+  test('campaign outcomes deduplicate feedback and survive message retention', async t => {
+    const key=await keyFixture(t,{environment:'live',permissions:['read']}),db=await fixtureDatabase(t),campaignId=unique('campaign'),emailId=unique('email');
+    await db.query(`INSERT INTO sending_campaigns(id,workspace_id,environment,draft,status) VALUES($1,'default','live',$2::jsonb,'completed')`,[campaignId,JSON.stringify({name:'Synthetic metrics',region:REGION,from:'sender@example.com'})]);
+    await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,campaign_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,snapshot,simulated) VALUES($1,'default','live',$2,'fixture',$3,'sender@example.com','["synthetic@example.com"]','[]','[]','Synthetic','delivered','{}',false)`,[emailId,REGION,campaignId]);
+    for(const type of ['accepted','send','delivery','open','open','click','delivery'])await db.query(`INSERT INTO sending_email_events(id,workspace_id,environment,email_id,type,simulated) VALUES($1,'default','live',$2,$3,false)`,[unique('evt'),emailId,type]);
+    const before=ok(await http('GET',`/v1/campaigns/${campaignId}/progress`,key.secret));assert.deepEqual(before.outcomes,{accepted:1,delivered:1,opened:1,clicked:1});
+    await db.query('DELETE FROM sending_email_events WHERE email_id=$1',[emailId]);await db.query('DELETE FROM sending_emails WHERE id=$1',[emailId]);
+    const after=ok(await http('GET',`/v1/campaigns/${campaignId}/progress`,key.secret));assert.deepEqual(after.outcomes,before.outcomes);assert.equal(after.total,1);
+  });
   test('the authoring outbox reconciles sessions and its capability can save only its own template', async t => {
     const [{drizzle},{loadConfig},{authoringJobs},{createApp},{createHmac}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/authoring.js'),import('./src/app.js'),import('node:crypto')]);
     const db=await fixtureDatabase(t),workspaceId=unique('author-fixture'),templateId=unique('tpl'),sessionId=unique('ses'),messageId=unique('msg'),expiresAt=new Date(Date.now()+3600000).toISOString();
@@ -2486,6 +2531,59 @@ describe('Versioned templates and durable campaign preparation', () => {
     const elevated=await app.fetch(new Request(`${BASE}/v1/template-library`,{method:'POST',headers,body:JSON.stringify({name:'Forbidden'})}),runtime);assert.equal(elevated.status,401);
     await db.query('UPDATE template_sessions SET expires_at=now()-interval \'1 second\' WHERE template_id=$1',[templateId]);
     assert.equal((await app.fetch(new Request(`${BASE}/authoring/templates/${templateId}`,{headers}),runtime)).status,401);
+  });
+  test('scheduled expansion can recover its checkpoint and cancellation prevents unexpanded recipients', async t => {
+    const key=await keyFixture(t),db=await fixtureDatabase(t),list=await resource(t,key.secret,'/v1/lists',{name:unique('recovery')});
+    const contact=await resource(t,key.secret,'/v1/contacts',{email:`${unique('recovery')}@example.com`});
+    await db.query("UPDATE audience_contacts SET marketing_consent='subscribed' WHERE id=$1",[contact.id]);
+    await db.query("INSERT INTO audience_list_members(workspace_id,environment,list_id,contact_id) VALUES('default','test',$1,$2)",[list.id,contact.id]);
+    const campaign=await campaignFixture(t,key.secret,{listId:list.id}),run=ok(await http('POST',`/v1/campaigns/${campaign.id}/prepare`,key.secret,{revision:1}),202);
+    await poll(`/v1/campaigns/${campaign.id}/preparation`,key.secret,r=>r.status==='ready');
+    assert.equal(ok(await http('GET',`/v1/campaigns/${campaign.id}/progress`,key.secret)).remaining,1);
+    ok(await http('POST',`/v1/campaigns/${campaign.id}/schedule`,key.secret,{reviewId:run.id,revision:1,scheduledAt:new Date(Date.now()+60000).toISOString()}),202);
+    await db.query("UPDATE campaign_runs SET status='failed',error_code='SYNTHETIC_FAILURE' WHERE id=$1",[run.id]);
+    assert.equal(ok(await http('POST',`/v1/campaigns/${campaign.id}/resume-expansion`,key.secret),202).id,run.id);
+    ok(await http('POST',`/v1/campaigns/${campaign.id}/cancel`,key.secret));
+    error(await http('POST',`/v1/campaigns/${campaign.id}/resume-expansion`,key.secret),409,'CAMPAIGN_NOT_RESUMABLE');
+    const progress=ok(await http('GET',`/v1/campaigns/${campaign.id}/progress`,key.secret));assert.equal(progress.statuses.canceled,1);assert.equal(progress.remaining,0);assert.equal(progress.total,0);
+  });
+  test('read-only CRM sync imports evidence, reports invalid rows, and never re-enrolls a local opt-out', async t => {
+    const [{drizzle},{loadConfig},{queueCrmSync,audienceSyncJobs}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/audience-sync.js')]);
+    const db=await fixtureDatabase(t),workspaceId=unique('crm-fixture'),listId=unique('list'),table=unique('crm_source').replaceAll('-','_');
+    await db.query(`CREATE TABLE "${table}"(source_id text PRIMARY KEY,email text,name text,properties jsonb,updated_at timestamptz,deleted boolean,consent_status text,consent_source text,policy_version text,evidence text,consent_at timestamptz)`);
+    cleanup(t,async()=>{await db.query(`DROP TABLE "${table}"`);});
+    await db.query(`INSERT INTO "${table}" VALUES('one','crm-synthetic@example.com','Before','{}',now(),false,'subscribed','synthetic fixture','v1','Synthetic consent proof',now()),('two','invalid','Bad','{}',now(),false,'unknown',NULL,NULL,NULL,NULL)`);
+    await db.query(`INSERT INTO audience_lists(id,workspace_id,environment,name) VALUES($1,$2,'live','Synthetic CRM list')`,[listId,workspaceId]);
+    const config=loadConfig({BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:BASE,CRM_DATABASE_URL:FIXTURE_DATABASE_URL,CRM_LIST_ID:listId,CRM_CONTACTS_VIEW:`public.${table}`});config.workspaceId=workspaceId;
+    const runtime:import('./src/core.js').Runtime={db:drizzle(db),config,storage:{async put(){throw new Error('Unexpected storage');},async get(){throw new Error('Unexpected storage');},async delete(){throw new Error('Unexpected storage');}}};
+    await queueCrmSync(runtime,true);await audienceSyncJobs['audience.crm']!(runtime,{}, {id:'fixture',attempts:1,workspaceId,environment:'live'});
+    const first=(await db.query('SELECT * FROM audience_contacts WHERE workspace_id=$1',[workspaceId])).rows;assert.equal(first.length,1);assert.equal(first[0].marketing_consent,'subscribed');assert.equal((await db.query('SELECT errors FROM crm_sync_state WHERE workspace_id=$1',[workspaceId])).rows[0].errors,1);
+    await db.query(`UPDATE audience_contacts SET marketing_consent='unsubscribed' WHERE workspace_id=$1`,[workspaceId]);
+    await db.query(`UPDATE "${table}" SET name='After',updated_at=now() WHERE source_id='one'`);
+    await queueCrmSync(runtime,true);await audienceSyncJobs['audience.crm']!(runtime,{}, {id:'fixture',attempts:1,workspaceId,environment:'live'});
+    const next=(await db.query('SELECT * FROM audience_contacts WHERE workspace_id=$1',[workspaceId])).rows[0];assert.equal(next.name,'After');assert.equal(next.marketing_consent,'unsubscribed');
+    await db.query(`UPDATE "${table}" SET deleted=true,updated_at=now() WHERE source_id='one'`);await queueCrmSync(runtime,true);await audienceSyncJobs['audience.crm']!(runtime,{}, {id:'fixture',attempts:1,workspaceId,environment:'live'});
+    assert.equal((await db.query('SELECT count(*)::int n FROM audience_list_members WHERE workspace_id=$1',[workspaceId])).rows[0].n,0);assert.equal((await db.query(`SELECT marketing_consent FROM audience_contacts WHERE workspace_id=$1`,[workspaceId])).rows[0].marketing_consent,'unsubscribed');
+  });
+  test('250,000-recipient preparation benchmark with bounded dispatch sample', {skip:process.env.OPENSEND_SCALE_BENCHMARK!=='1'?'Enable only through the isolated acceptance runner.':false}, async t => {
+    assert.equal(process.env.OPENSEND_ISOLATED_ACCEPTANCE,'1');
+    const key=await keyFixture(t),db=await fixtureDatabase(t),list=await resource(t,key.secret,'/v1/lists',{name:unique('scale')}),prefix=unique('scale');
+    await db.query('SET statement_timeout=120000');
+    await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,properties,marketing_consent) SELECT $1||n,'default','test',$1||n||'@example.com','{}','subscribed' FROM generate_series(1,250000) n`,[prefix]);
+    await db.query(`INSERT INTO audience_list_members(workspace_id,environment,list_id,contact_id) SELECT 'default','test',$1,id FROM audience_contacts WHERE id LIKE $2`,[list.id,`${prefix}%`]);
+    const campaign=await campaignFixture(t,key.secret,{listId:list.id});const start=Date.now();
+    const run=ok(await http('POST',`/v1/campaigns/${campaign.id}/prepare`,key.secret,{revision:1}),202);
+    let preparation:Json={};const deadline=Date.now()+600000;
+    do{preparation=ok(await http('GET',`/v1/campaigns/${campaign.id}/preparation`,key.secret));assert.notEqual(preparation.status,'failed',JSON.stringify(preparation));if(preparation.status==='ready')break;await new Promise(r=>setTimeout(r,1000));}while(Date.now()<deadline);
+    assert.equal(preparation.status,'ready');assert.equal(preparation.eligible,250000);const preparationSeconds=(Date.now()-start)/1000;
+    const dispatchStart=Date.now();ok(await http('POST',`/v1/campaigns/${campaign.id}/send`,key.secret,{reviewId:run.id,revision:1}),202);
+    let progress:Json={};let maxLatencyMs=0;
+    do{const at=Date.now();progress=ok(await http('GET',`/v1/campaigns/${campaign.id}/progress`,key.secret));maxLatencyMs=Math.max(maxLatencyMs,Date.now()-at);if((progress.statuses.simulated??0)>=1000)break;await new Promise(r=>setTimeout(r,500));}while(Date.now()-dispatchStart<90000);
+    const seconds=(Date.now()-dispatchStart)/1000,rate=(progress.statuses.simulated??0)/seconds;
+    ok(await http('POST',`/v1/campaigns/${campaign.id}/cancel`,key.secret),200);
+    const bytes=(await db.query(`SELECT pg_total_relation_size('campaign_recipients')::text bytes`)).rows[0].bytes;
+    console.log(JSON.stringify({benchmark:'250000 audience / 1000 dispatch sample',preparationSeconds,simulated:progress.statuses.simulated,dispatchSeconds:seconds,perSecond:rate,projectedDispatchHours:250000/rate/3600,maxProgressLatencyMs:maxLatencyMs,recipientTableBytes:Number(bytes)}));
+    assert.ok((progress.statuses.simulated??0)>=1000);assert.ok(rate>=18,'Synthetic throughput must exceed 18 recipients/second.');assert.ok(maxLatencyMs<2000,'Progress reads must stay responsive.');
   });
 });
 

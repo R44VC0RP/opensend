@@ -48,7 +48,7 @@ Workflow tools compose API operations behind an explicit `action`, `mode`, or `i
 
 Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` returns both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
 
-The template tools cover private version inspection, draft saves, scoped authoring, and explicit SES publication. Existing hosted integrations must refresh their tool catalog after upgrading.
+The template tools cover private version inspection, draft saves, scoped authoring, and explicit SES publication. Campaign progress/preparation, checkpoint recovery, recurring CRM sync, and bulk imports use the same public API contract. Existing hosted integrations must refresh their tool catalog after upgrading.
 
 ### Temporary script tokens
 
@@ -79,3 +79,5 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
 The existing `mcp/src/server.ts` stdio launcher remains available for older local integrations with its original per-operation tools and nested `path`/`query` arguments. It uses a scoped API key, `OPENSEND_API_URL`, and `OPENSEND_MCP_ALLOW_WRITES`; it is not required for hosted OAuth connections.
+
+For large audiences, use `prepareLargeCampaign`, poll `getCampaignProgress` with `action: "preparation"`, then send/schedule the returned review through `deliverCampaign`. Keep `reviewCampaign` for existing small-audience workflows.

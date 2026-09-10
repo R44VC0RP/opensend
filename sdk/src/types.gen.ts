@@ -924,6 +924,70 @@ export type TemplateImage = {
     size: number;
 };
 
+export type CampaignPreparation = {
+    id: string;
+    campaignId: string;
+    revision: number;
+    status: string;
+    matched: number;
+    eligible: number;
+    suppressed: number;
+    unsubscribed: number;
+    prepared: number;
+    expanded: number;
+    errorCode: string | null;
+    contentHash: string;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type CampaignProgress = {
+    campaignId: string;
+    status: string;
+    preparation: CampaignPreparation & ({
+        [key: string]: unknown;
+    } | null);
+    total: number;
+    statuses: {
+        [key: string]: number;
+    };
+    outcomes: {
+        [key: string]: number;
+    };
+    daily: Array<{
+        day: string;
+        outcome: string;
+        count: number;
+    }>;
+    remaining: number;
+    perSecond: number | null;
+    estimatedSeconds: number | null;
+    updatedAt: string;
+};
+
+export type BulkContactImport = {
+    id: string;
+    name: string;
+    status: string;
+    nextChunk: number;
+    received: number;
+    valid: number;
+    errors: number;
+    imported: number;
+    errorCode: string | null;
+};
+
+export type CrmSyncStatus = {
+    configured: boolean;
+    status: string;
+    scanned: number;
+    imported: number;
+    errors: number;
+    errorCode: string | null;
+    lastSuccessAt: string | null;
+    nextAt: string | null;
+};
+
 export type GetCurrentIdentityData = {
     body?: never;
     path?: never;
@@ -7032,3 +7096,931 @@ export type UploadTemplateImageResponses = {
 };
 
 export type UploadTemplateImageResponse = UploadTemplateImageResponses[keyof UploadTemplateImageResponses];
+
+export type PrepareCampaignData = {
+    body: {
+        revision: number;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/prepare';
+};
+
+export type PrepareCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PrepareCampaignError = PrepareCampaignErrors[keyof PrepareCampaignErrors];
+
+export type PrepareCampaignResponses = {
+    /**
+     * Success
+     */
+    202: CampaignPreparation;
+};
+
+export type PrepareCampaignResponse = PrepareCampaignResponses[keyof PrepareCampaignResponses];
+
+export type GetCampaignPreparationData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/preparation';
+};
+
+export type GetCampaignPreparationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignPreparationError = GetCampaignPreparationErrors[keyof GetCampaignPreparationErrors];
+
+export type GetCampaignPreparationResponses = {
+    /**
+     * Success
+     */
+    200: CampaignPreparation & ({
+        [key: string]: unknown;
+    } | null);
+};
+
+export type GetCampaignPreparationResponse = GetCampaignPreparationResponses[keyof GetCampaignPreparationResponses];
+
+export type ResumeCampaignExpansionData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/resume-expansion';
+};
+
+export type ResumeCampaignExpansionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ResumeCampaignExpansionError = ResumeCampaignExpansionErrors[keyof ResumeCampaignExpansionErrors];
+
+export type ResumeCampaignExpansionResponses = {
+    /**
+     * Success
+     */
+    202: CampaignPreparation;
+};
+
+export type ResumeCampaignExpansionResponse = ResumeCampaignExpansionResponses[keyof ResumeCampaignExpansionResponses];
+
+export type GetCampaignProgressData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/progress';
+};
+
+export type GetCampaignProgressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignProgressError = GetCampaignProgressErrors[keyof GetCampaignProgressErrors];
+
+export type GetCampaignProgressResponses = {
+    /**
+     * Success
+     */
+    200: CampaignProgress;
+};
+
+export type GetCampaignProgressResponse = GetCampaignProgressResponses[keyof GetCampaignProgressResponses];
+
+export type GetCampaignRecipientsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+        status?: string;
+    };
+    url: '/v1/campaigns/{id}/recipients';
+};
+
+export type GetCampaignRecipientsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignRecipientsError = GetCampaignRecipientsErrors[keyof GetCampaignRecipientsErrors];
+
+export type GetCampaignRecipientsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            contactId: string;
+            email: string;
+            name: string | null;
+            eligible: boolean;
+            exclusion: string | null;
+            emailId: string | null;
+            status: string | null;
+            errorCode: string | null;
+        }>;
+        nextCursor: string | null;
+    };
+};
+
+export type GetCampaignRecipientsResponse = GetCampaignRecipientsResponses[keyof GetCampaignRecipientsResponses];
+
+export type CreateBulkContactImportData = {
+    body: {
+        listId: string;
+        name: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/bulk-contact-imports';
+};
+
+export type CreateBulkContactImportErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateBulkContactImportError = CreateBulkContactImportErrors[keyof CreateBulkContactImportErrors];
+
+export type CreateBulkContactImportResponses = {
+    /**
+     * Success
+     */
+    201: BulkContactImport;
+};
+
+export type CreateBulkContactImportResponse = CreateBulkContactImportResponses[keyof CreateBulkContactImportResponses];
+
+export type GetBulkContactImportData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/bulk-contact-imports/{id}';
+};
+
+export type GetBulkContactImportErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetBulkContactImportError = GetBulkContactImportErrors[keyof GetBulkContactImportErrors];
+
+export type GetBulkContactImportResponses = {
+    /**
+     * Success
+     */
+    200: BulkContactImport;
+};
+
+export type GetBulkContactImportResponse = GetBulkContactImportResponses[keyof GetBulkContactImportResponses];
+
+export type UploadContactImportChunkData = {
+    body: {
+        chunk: number;
+        rows: Array<{
+            email: string;
+            name?: string;
+            properties?: {
+                [key: string]: string | number | boolean | null;
+            };
+        }>;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/bulk-contact-imports/{id}/chunks';
+};
+
+export type UploadContactImportChunkErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UploadContactImportChunkError = UploadContactImportChunkErrors[keyof UploadContactImportChunkErrors];
+
+export type UploadContactImportChunkResponses = {
+    /**
+     * Success
+     */
+    200: BulkContactImport;
+};
+
+export type UploadContactImportChunkResponse = UploadContactImportChunkResponses[keyof UploadContactImportChunkResponses];
+
+export type FinalizeBulkContactImportData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/bulk-contact-imports/{id}/finalize';
+};
+
+export type FinalizeBulkContactImportErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type FinalizeBulkContactImportError = FinalizeBulkContactImportErrors[keyof FinalizeBulkContactImportErrors];
+
+export type FinalizeBulkContactImportResponses = {
+    /**
+     * Success
+     */
+    202: BulkContactImport;
+};
+
+export type FinalizeBulkContactImportResponse = FinalizeBulkContactImportResponses[keyof FinalizeBulkContactImportResponses];
+
+export type CommitBulkContactImportData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/bulk-contact-imports/{id}/commit';
+};
+
+export type CommitBulkContactImportErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CommitBulkContactImportError = CommitBulkContactImportErrors[keyof CommitBulkContactImportErrors];
+
+export type CommitBulkContactImportResponses = {
+    /**
+     * Success
+     */
+    202: BulkContactImport;
+};
+
+export type CommitBulkContactImportResponse = CommitBulkContactImportResponses[keyof CommitBulkContactImportResponses];
+
+export type GetBulkContactImportRowsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+        errorsOnly?: 'true' | 'false';
+    };
+    url: '/v1/bulk-contact-imports/{id}/rows';
+};
+
+export type GetBulkContactImportRowsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetBulkContactImportRowsError = GetBulkContactImportRowsErrors[keyof GetBulkContactImportRowsErrors];
+
+export type GetBulkContactImportRowsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            row: number;
+            email: string | null;
+            name: string | null;
+            error: string | null;
+        }>;
+        nextCursor: string | null;
+    };
+};
+
+export type GetBulkContactImportRowsResponse = GetBulkContactImportRowsResponses[keyof GetBulkContactImportRowsResponses];
+
+export type GetAudienceSyncData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/audience-sync';
+};
+
+export type GetAudienceSyncErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetAudienceSyncError = GetAudienceSyncErrors[keyof GetAudienceSyncErrors];
+
+export type GetAudienceSyncResponses = {
+    /**
+     * Success
+     */
+    200: CrmSyncStatus;
+};
+
+export type GetAudienceSyncResponse = GetAudienceSyncResponses[keyof GetAudienceSyncResponses];
+
+export type RefreshAudienceSyncData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/audience-sync';
+};
+
+export type RefreshAudienceSyncErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RefreshAudienceSyncError = RefreshAudienceSyncErrors[keyof RefreshAudienceSyncErrors];
+
+export type RefreshAudienceSyncResponses = {
+    /**
+     * Success
+     */
+    202: CrmSyncStatus;
+};
+
+export type RefreshAudienceSyncResponse = RefreshAudienceSyncResponses[keyof RefreshAudienceSyncResponses];
+
+export type GetAudienceSyncErrorsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/audience-sync/errors';
+};
+
+export type GetAudienceSyncErrorsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetAudienceSyncErrorsError = GetAudienceSyncErrorsErrors[keyof GetAudienceSyncErrorsErrors];
+
+export type GetAudienceSyncErrorsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            id: string;
+            sourceId: string | null;
+            code: string;
+        }>;
+        nextCursor: string | null;
+    };
+};
+
+export type GetAudienceSyncErrorsResponse = GetAudienceSyncErrorsResponses[keyof GetAudienceSyncErrorsResponses];

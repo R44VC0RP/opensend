@@ -91,7 +91,7 @@ async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[
   return rows;
 }
 export interface AudienceResult { contacts: Array<{ id: string; email: string; name?: string; properties: Record<string, unknown> }>; matched: number; eligible: number; suppressed: number; unsubscribed: number; }
-export async function getAudience(runtime: Runtime, identity: Actor, spec: z.infer<typeof AudienceSpec>, limit = 1000, db: DbExecutor = runtime.db): Promise<AudienceResult> {
+export async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>) {
   const parsed = AudienceSpec.safeParse(spec);
   if (!parsed.success) throw new ApiError(422, 'INVALID_AUDIENCE', 'The audience specification is invalid.');
   spec = parsed.data;
@@ -100,6 +100,10 @@ export async function getAudience(runtime: Runtime, identity: Actor, spec: z.inf
   if (spec.segmentId) conditions.push(compileRule((await findSegment(db, identity, spec.segmentId)).rule));
   for (const listId of spec.excludeListIds ?? []) { await findList(db, identity, listId); conditions.push(sql`NOT (${inList(identity, listId)})`); }
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule((await findSegment(db, identity, segmentId)).rule)})`);
+  return conditions;
+}
+export async function getAudience(runtime: Runtime, identity: Actor, spec: z.infer<typeof AudienceSpec>, limit = 1000, db: DbExecutor = runtime.db): Promise<AudienceResult> {
+  const conditions = await audienceConditions(db, identity, spec);
   const rows = await boundedContacts(db, identity, conditions, limit);
   return { ...counts(rows), contacts: rows.filter(c => !c.suppressed && c.marketingConsent === 'subscribed').map(c => ({ id: c.id, email: c.email, ...(c.name ? { name: c.name } : {}), properties: c.properties })) };
 }

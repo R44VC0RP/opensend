@@ -7,7 +7,7 @@ export interface McpStepResult { status: number; requestId: string | null; respo
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
-const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
+const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign', 'resumeCampaignExpansion']);
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -307,6 +307,14 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   add(actionTool('authorTemplate', 'Submit instructions to the configured OpenCode author or interrupt it. The scoped author can save drafts only.', {prompt:need('promptTemplateAuthor',raw),interrupt:need('interruptTemplateAuthor',raw)}));
   direct('publishTemplate', 'Explicitly publish a selected version to SES in its region. Confirm any legacy SES-name replacement with the operator. Publication does not send mail.', 'publishTemplateVersion');
 
+  direct('prepareLargeCampaign', 'Freeze and validate up to 250,000 recipients asynchronously. Poll getCampaignProgress with action=preparation until ready, then deliverCampaign with this review ID and revision after send confirmation.', 'prepareCampaign');
+  add(actionTool('getCampaignProgress', 'Read campaign progress, asynchronous preparation, or paginated recipient details. Dispatch completion is separate from delivery; opens/clicks are observations.', {progress:need('getCampaignProgress',raw),preparation:need('getCampaignPreparation',raw),recipients:need('getCampaignRecipients',raw)}));
+  direct('resumeCampaignExpansion', `Resume a failed campaign from its frozen checkpoint without replaying existing email records. ${EMAIL_SEND_CONFIRMATION}`, 'resumeCampaignExpansion');
+  add(actionTool('getAudienceSync', 'Read the configured CRM sync status or paginated source-row errors.', {status:need('getAudienceSync',raw),errors:need('getAudienceSyncErrors',raw)}));
+  direct('refreshAudienceSync', 'Refresh the configured read-only CRM view into OpenSend. Never writes to CRM or clears local opt-outs.', 'refreshAudienceSync');
+  add(actionTool('getBulkImport', 'Inspect a resumable bulk import or page through its row validation results.', {get:need('getBulkContactImport',raw),rows:need('getBulkContactImportRows',raw)}));
+  add(actionTool('bulkImportContacts', 'Create, upload ordered chunks to, finalize or commit a resumable contact import of up to 250,000 rows. Profiles do not imply consent.', {create:need('createBulkContactImport',raw),upload:need('uploadContactImportChunk',raw),finalize:need('finalizeBulkContactImport',raw),commit:need('commitBulkContactImport',raw)}));
+
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
 
@@ -358,7 +366,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 35) invalid(`Curated catalog must contain exactly 35 tools, got ${result.size}.`);
+  if (result.size !== 42) invalid(`Curated catalog must contain exactly 42 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

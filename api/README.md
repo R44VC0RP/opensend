@@ -242,6 +242,6 @@ Useful checks, from their respective packages:
 
 Live acceptance is opt-in with `LIVE_SES_TEST=1`, `SES_TEST_RECIPIENT`, and `SES_TEST_FROM` for explicitly authorized real sending. The commands above describe checks, not a claim that they have passed on your installation. Docker/Workers builds, local simulation, Google mocks, and source review do not replace the [external release gates](#ses-and-production-release-gates).
 
-## Template authoring
+## Templates and campaign integration
 
-See [React Email authoring](../authoring/README.md) for the OpenCode connection, private source storage, immutable SES publication and legacy template migration.
+See [React Email authoring](../authoring/README.md) for the OpenCode connection, private source storage, immutable SES publication and legacy template migration. See [campaigns and audience sync](../docs/campaign-integration.md) for asynchronous preparation, progress metrics, large CSV imports, read-only CRM mapping and isolated benchmarks.

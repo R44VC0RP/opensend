@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateLibraryTemplateData, CreateLibraryTemplateErrors, CreateLibraryTemplateResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetLibraryTemplateData, GetLibraryTemplateErrors, GetLibraryTemplateResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateArtifactData, GetTemplateArtifactErrors, GetTemplateArtifactResponses, GetTemplateAuthoringData, GetTemplateAuthoringErrors, GetTemplateAuthoringResponses, GetTemplateAuthorMessagesData, GetTemplateAuthorMessagesErrors, GetTemplateAuthorMessagesResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, InterruptTemplateAuthorData, InterruptTemplateAuthorErrors, InterruptTemplateAuthorResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListLibraryTemplatesData, ListLibraryTemplatesErrors, ListLibraryTemplatesResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListTemplateVersionsData, ListTemplateVersionsErrors, ListTemplateVersionsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, PromptTemplateAuthorData, PromptTemplateAuthorErrors, PromptTemplateAuthorResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishTemplateVersionData, PublishTemplateVersionErrors, PublishTemplateVersionResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, SaveTemplateVersionData, SaveTemplateVersionErrors, SaveTemplateVersionResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateImageData, UploadTemplateImageErrors, UploadTemplateImageResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitBulkContactImportData, CommitBulkContactImportErrors, CommitBulkContactImportResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateBulkContactImportData, CreateBulkContactImportErrors, CreateBulkContactImportResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateLibraryTemplateData, CreateLibraryTemplateErrors, CreateLibraryTemplateResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, FinalizeBulkContactImportData, FinalizeBulkContactImportErrors, FinalizeBulkContactImportResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetAudienceSyncData, GetAudienceSyncErrors, GetAudienceSyncErrorsData, GetAudienceSyncErrorsErrors, GetAudienceSyncErrorsResponses, GetAudienceSyncResponses, GetBulkContactImportData, GetBulkContactImportErrors, GetBulkContactImportResponses, GetBulkContactImportRowsData, GetBulkContactImportRowsErrors, GetBulkContactImportRowsResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignPreparationData, GetCampaignPreparationErrors, GetCampaignPreparationResponses, GetCampaignProgressData, GetCampaignProgressErrors, GetCampaignProgressResponses, GetCampaignRecipientsData, GetCampaignRecipientsErrors, GetCampaignRecipientsResponses, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetLibraryTemplateData, GetLibraryTemplateErrors, GetLibraryTemplateResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateArtifactData, GetTemplateArtifactErrors, GetTemplateArtifactResponses, GetTemplateAuthoringData, GetTemplateAuthoringErrors, GetTemplateAuthoringResponses, GetTemplateAuthorMessagesData, GetTemplateAuthorMessagesErrors, GetTemplateAuthorMessagesResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, InterruptTemplateAuthorData, InterruptTemplateAuthorErrors, InterruptTemplateAuthorResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListLibraryTemplatesData, ListLibraryTemplatesErrors, ListLibraryTemplatesResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListTemplateVersionsData, ListTemplateVersionsErrors, ListTemplateVersionsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PrepareCampaignData, PrepareCampaignErrors, PrepareCampaignResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, PromptTemplateAuthorData, PromptTemplateAuthorErrors, PromptTemplateAuthorResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishTemplateVersionData, PublishTemplateVersionErrors, PublishTemplateVersionResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RefreshAudienceSyncData, RefreshAudienceSyncErrors, RefreshAudienceSyncResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, ResumeCampaignExpansionData, ResumeCampaignExpansionErrors, ResumeCampaignExpansionResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, SaveTemplateVersionData, SaveTemplateVersionErrors, SaveTemplateVersionResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadContactImportChunkData, UploadContactImportChunkErrors, UploadContactImportChunkResponses, UploadTemplateImageData, UploadTemplateImageErrors, UploadTemplateImageResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -1881,4 +1881,283 @@ export const uploadTemplateImage = <ThrowOnError extends boolean = false>(option
         'Content-Type': 'application/json',
         ...options.headers
     }
+});
+
+/**
+ * Asynchronously freeze and validate up to 250,000 matching contacts. Poll getCampaignPreparation until ready. Send/schedule with the resulting review ID and revision.
+ */
+export const prepareCampaign = <ThrowOnError extends boolean = false>(options: Options<PrepareCampaignData, ThrowOnError>): RequestResult<PrepareCampaignResponses, PrepareCampaignErrors, ThrowOnError> => (options.client ?? client).post<PrepareCampaignResponses, PrepareCampaignErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/campaigns/{id}/prepare',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getCampaignPreparation = <ThrowOnError extends boolean = false>(options: Options<GetCampaignPreparationData, ThrowOnError>): RequestResult<GetCampaignPreparationResponses, GetCampaignPreparationErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignPreparationResponses, GetCampaignPreparationErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/campaigns/{id}/preparation',
+    ...options
+});
+
+/**
+ * Resume a failed expansion from its frozen review. Only recipients without an email record are queued; existing sends are never replayed.
+ */
+export const resumeCampaignExpansion = <ThrowOnError extends boolean = false>(options: Options<ResumeCampaignExpansionData, ThrowOnError>): RequestResult<ResumeCampaignExpansionResponses, ResumeCampaignExpansionErrors, ThrowOnError> => (options.client ?? client).post<ResumeCampaignExpansionResponses, ResumeCampaignExpansionErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/campaigns/{id}/resume-expansion',
+    ...options
+});
+
+/**
+ * Durable campaign progress and distinct-message outcomes. Dispatch completion is separate from delivery. Open/click observations are not verified human activity.
+ */
+export const getCampaignProgress = <ThrowOnError extends boolean = false>(options: Options<GetCampaignProgressData, ThrowOnError>): RequestResult<GetCampaignProgressResponses, GetCampaignProgressErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignProgressResponses, GetCampaignProgressErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/campaigns/{id}/progress',
+    ...options
+});
+
+export const getCampaignRecipients = <ThrowOnError extends boolean = false>(options: Options<GetCampaignRecipientsData, ThrowOnError>): RequestResult<GetCampaignRecipientsResponses, GetCampaignRecipientsErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignRecipientsResponses, GetCampaignRecipientsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/campaigns/{id}/recipients',
+    ...options
+});
+
+/**
+ * Create a resumable contact import. Upload explicitly mapped rows in ordered chunks, finalize the preview, then commit. Imports do not establish consent.
+ */
+export const createBulkContactImport = <ThrowOnError extends boolean = false>(options: Options<CreateBulkContactImportData, ThrowOnError>): RequestResult<CreateBulkContactImportResponses, CreateBulkContactImportErrors, ThrowOnError> => (options.client ?? client).post<CreateBulkContactImportResponses, CreateBulkContactImportErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getBulkContactImport = <ThrowOnError extends boolean = false>(options: Options<GetBulkContactImportData, ThrowOnError>): RequestResult<GetBulkContactImportResponses, GetBulkContactImportErrors, ThrowOnError> => (options.client ?? client).get<GetBulkContactImportResponses, GetBulkContactImportErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports/{id}',
+    ...options
+});
+
+export const uploadContactImportChunk = <ThrowOnError extends boolean = false>(options: Options<UploadContactImportChunkData, ThrowOnError>): RequestResult<UploadContactImportChunkResponses, UploadContactImportChunkErrors, ThrowOnError> => (options.client ?? client).post<UploadContactImportChunkResponses, UploadContactImportChunkErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports/{id}/chunks',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const finalizeBulkContactImport = <ThrowOnError extends boolean = false>(options: Options<FinalizeBulkContactImportData, ThrowOnError>): RequestResult<FinalizeBulkContactImportResponses, FinalizeBulkContactImportErrors, ThrowOnError> => (options.client ?? client).post<FinalizeBulkContactImportResponses, FinalizeBulkContactImportErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports/{id}/finalize',
+    ...options
+});
+
+export const commitBulkContactImport = <ThrowOnError extends boolean = false>(options: Options<CommitBulkContactImportData, ThrowOnError>): RequestResult<CommitBulkContactImportResponses, CommitBulkContactImportErrors, ThrowOnError> => (options.client ?? client).post<CommitBulkContactImportResponses, CommitBulkContactImportErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports/{id}/commit',
+    ...options
+});
+
+export const getBulkContactImportRows = <ThrowOnError extends boolean = false>(options: Options<GetBulkContactImportRowsData, ThrowOnError>): RequestResult<GetBulkContactImportRowsResponses, GetBulkContactImportRowsErrors, ThrowOnError> => (options.client ?? client).get<GetBulkContactImportRowsResponses, GetBulkContactImportRowsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/bulk-contact-imports/{id}/rows',
+    ...options
+});
+
+export const getAudienceSync = <ThrowOnError extends boolean = false>(options?: Options<GetAudienceSyncData, ThrowOnError>): RequestResult<GetAudienceSyncResponses, GetAudienceSyncErrors, ThrowOnError> => (options?.client ?? client).get<GetAudienceSyncResponses, GetAudienceSyncErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/audience-sync',
+    ...options
+});
+
+/**
+ * Read the configured CRM view and merge profiles/consent into OpenSend. Never writes to the CRM or clears an OpenSend opt-out.
+ */
+export const refreshAudienceSync = <ThrowOnError extends boolean = false>(options?: Options<RefreshAudienceSyncData, ThrowOnError>): RequestResult<RefreshAudienceSyncResponses, RefreshAudienceSyncErrors, ThrowOnError> => (options?.client ?? client).post<RefreshAudienceSyncResponses, RefreshAudienceSyncErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/audience-sync',
+    ...options
+});
+
+export const getAudienceSyncErrors = <ThrowOnError extends boolean = false>(options?: Options<GetAudienceSyncErrorsData, ThrowOnError>): RequestResult<GetAudienceSyncErrorsResponses, GetAudienceSyncErrorsErrors, ThrowOnError> => (options?.client ?? client).get<GetAudienceSyncErrorsResponses, GetAudienceSyncErrorsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/audience-sync/errors',
+    ...options
 });

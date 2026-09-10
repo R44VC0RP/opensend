@@ -139,7 +139,17 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       },
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
-    review: async (id, revision) => ({ ...(await call(`/campaigns/${idPath(id)}/review`, 'POST', {revision})), contacts: [] } as any),
+    review: async (id, revision) => {
+      await call(`/campaigns/${idPath(id)}/prepare`, 'POST', {revision})
+      for (let attempt = 0; attempt < 900; attempt++) {
+        const result = await call<import('./campaign-progress').CampaignPreparation | null>(`/campaigns/${idPath(id)}/preparation`)
+        if (!result || result.revision !== revision) throw new ApiError('The campaign changed during preparation.', 'STALE_CAMPAIGN_REVISION')
+        if (result.status === 'ready') return {...result, contacts: []}
+        if (['failed','canceled'].includes(result.status)) throw new ApiError(`Campaign preparation stopped: ${result.errorCode ?? result.status}`, result.errorCode ?? 'PREPARATION_FAILED')
+        await new Promise(resolve => setTimeout(resolve, 2000))
+      }
+      throw new ApiError('Preparation is still running. Reopen the review to check progress.', 'PREPARATION_PENDING')
+    },
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),
       content: (id, signal) => call<any>(`/attachments/${idPath(id)}/content`, 'GET', undefined, signal),

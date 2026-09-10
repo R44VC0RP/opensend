@@ -14,6 +14,8 @@ import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.j
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, regionalLimits, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { unsubscribeTokens } from './db/operations.js';
+import { launchPreparedCampaign, hydrateCampaignSnapshot } from './campaign-runs.js';
 import { getTemplateVersion } from './templates.js';
 import { assertTemplateFields, type TemplateArtifact } from './template-content.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
@@ -178,7 +180,8 @@ function campaignUrl(runtime: Runtime, row: { id: string; environment: Mode; sta
 }
 async function campaignViews<T extends { id: string; environment: Mode; status: string; draft: { region: string } }>(runtime: Runtime, a: Actor, rows: T[]) {
   if (!rows.length) return [];
-  const grouped = await runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  const statistics = await runtime.db.execute<{campaign_id:string;statuses:Record<string,number>}>(sql`SELECT campaign_id,statuses FROM campaign_statistics WHERE campaign_id IN (${sql.join(rows.map(row=>sql`${row.id}`),sql`,`)})`);
+  const grouped = statistics.rows.flatMap(row=>Object.entries(row.statuses).map(([status,count])=>({campaignId:row.campaign_id,status:status as EmailStatus,count})));
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
@@ -441,6 +444,11 @@ export function appendMarketingFooter(snapshot: EmailSnapshot, url: string) {
 export async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, campaignId?: string, availableAt?: string, requestId?: string, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   const emailId = id('email');
   await db.insert(emails).values({ id: emailId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, region: snapshot.region, campaignId: campaignId ?? null, from: snapshot.from, to: snapshot.to, cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, snapshot, simulated: a.environment === 'test', scheduledAt: availableAt ?? null });
+  if (campaignId) {
+    const url = snapshot.headers.find(h => h.Name === 'List-Unsubscribe')?.Value.slice(1,-1);
+    const token = url ? new URL(url).pathname.split('/').at(-1) : undefined;
+    if (token) await db.update(unsubscribeTokens).set({campaignId,emailId}).where(eq(unsubscribeTokens.tokenHash,await digest(token)));
+  }
   await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
   await enqueue(db, { type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { emailId, version: 0, ...(requestId ? { requestId } : {}) }, availableAt });
   return { id: emailId, status: 'queued' as const, environment: a.environment, simulated: a.environment === 'test' };
@@ -555,7 +563,7 @@ export function registerSending(app: App) {
     return c.json(emailView(row ?? notFound('Email')), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
-    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id); const s = row.snapshot;
+    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id); const s = await hydrateCampaignSnapshot(c.env, a, row.snapshot);
     const manage = a.permissions.includes('manage');
     // App-owned capabilities only, not a general sanitizer for transactional bearer links.
     // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
@@ -731,6 +739,8 @@ export function registerSending(app: App) {
 
 async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { reviewId: string; revision: number; scheduledAt?: string }, requestId?: string) {
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
+  const prepared = await launchPreparedCampaign(runtime, db, a, campaignId, input);
+  if (prepared) return prepared;
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   if (row.reviewId !== input.reviewId || row.status !== 'reviewed') throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'Review the current campaign revision before sending.');
   const [review] = await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, input.reviewId), eq(campaignReviews.campaignId, campaignId), eq(campaignReviews.revision, row.revision)));
@@ -770,7 +780,7 @@ export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: s
 }
 async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | null) {
   if (!campaignId) return;
-  await runtime.db.transaction(async db => { const row = await findCampaign(db, a, campaignId, true); if (!['scheduled', 'sending'].includes(row.status)) return; const pending = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['queued', 'attempting']))).limit(1); if (!pending.length) await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaignId)); });
+  await runtime.db.transaction(async db => { const row = await findCampaign(db, a, campaignId, true); if (!['scheduled', 'sending'].includes(row.status)) return; const expansion = await db.execute<{pending:boolean}>(sql`SELECT true AS pending FROM campaign_runs WHERE campaign_id=${campaignId} AND expanded < eligible AND status IN ('sending','scheduled','failed') LIMIT 1`); if (expansion.rows.length) return; const pending = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['queued', 'attempting']))).limit(1); if (!pending.length) { await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaignId)); } });
 }
 async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, recipients: number, ses: SESv2Client): Promise<string | null> {
   return runtime.db.transaction(async db => {
@@ -834,7 +844,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   const authorized = await runtime.db.transaction(async db => { if (await originAllowed(runtime, db, mail)) return true; await cancelRevokedOrigin(db, a, mail); return false; });
   if (!authorized) { await finishCampaign(runtime, a, mail.campaignId); return; }
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
-  const s = mail.snapshot;
+  const s = await hydrateCampaignSnapshot(runtime, a, mail.snapshot);
   if (a.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, s.region, s.kind, true);
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];

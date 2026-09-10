@@ -11,6 +11,7 @@ import {
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
+import { CampaignProgress } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
@@ -419,6 +420,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       {error && <Alert tone="danger">{error}</Alert>}
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={Boolean(readinessError) || audience.isPending || audience.isError || !audience.data?.eligible} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
+    <CampaignProgress id={campaign.id} />
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients now. This action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>

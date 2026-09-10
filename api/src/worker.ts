@@ -3,15 +3,16 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
+import { queueCrmSync } from './audience-sync.js';
 import { drain } from './dispatch.js';
 import { cleanup } from './maintenance.js';
 import { admissionDenied, ApiError, digest, log } from './core.js';
 import type { Runtime } from './core.js';
 
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, background = false): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
-  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2 });
+  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: background ? Math.min(config.workerConcurrency ?? 8, 8) : 2 });
   try {
     return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async () => { await env.WAKE_QUEUE.send({ kind: 'wake' }); } });
   } finally { await client.end(); }
@@ -45,16 +46,17 @@ export default {
   },
   async queue(batch, env) {
     await withRuntime(env, async runtime => {
-      const count = await drain(runtime);
-      if (count === 1) await runtime.wake?.();
-    });
+      const counts = await Promise.all(Array.from({length:runtime.config.workerConcurrency ?? 8},()=>drain(runtime)));
+      if (counts.some(count=>count > 0)) await runtime.wake?.();
+    }, true);
     batch.ackAll();
   },
   async scheduled(controller, env) {
     await withRuntime(env, async runtime => {
+      await queueCrmSync(runtime);
       if (controller.cron === '7 * * * *') await cleanup(runtime);
-      const count = await drain(runtime);
-      if (count === 1) await runtime.wake?.();
-    });
+      const counts = await Promise.all(Array.from({length:runtime.config.workerConcurrency ?? 8},()=>drain(runtime)));
+      if (counts.some(count=>count > 0)) await runtime.wake?.();
+    }, true);
   },
 } satisfies ExportedHandler<Env>;
