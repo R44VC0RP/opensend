@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Plus, X } from 'lucide-react'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
@@ -6,15 +6,18 @@ import type { SegmentInput, SegmentRule } from '../../data/types'
 import { Alert, Button, ControlSkeleton, DataTable, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText } from '../../components/ui'
 import { AudienceRouteSkeleton, AudienceSummarySkeleton, segmentColumns } from './skeletons'
 import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions, useAudienceLists } from './shared'
+import { useAdaptivePageSize } from '../../lib/pagination'
 
 function DemoSegmentsPage() {
+  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const navigate = useNavigate()
-  const params = { search, page, pageSize }
+  useEffect(() => setPage(1), [adaptivePageSize])
+  const params = { search, page, pageSize: adaptivePageSize }
   const query = useApiQuery(['segments', params], (api, signal) => api.segments.list(params, signal))
   return <div className="audience-page"><PageHeader title="Segments" actions={<Button variant="primary" onClick={() => navigate('/segments/new')}><Plus size={16} />Create segment</Button>} /><div className="data-toolbar"><Input className="audience-search" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /><span className="muted audience-count">{query.isPending ? <SkeletonText width={100} /> : query.data?.total !== undefined && `${number(query.data.total)} segments`}</span></div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable rows={query.data?.items || []} loading={query.isPending} skeletonRows={5} minRows={5} rowKey={row => row.id} columns={[{ ...segmentColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/segments/${row.id}`}>{row.name}</Link> }, { ...segmentColumns[1], render: row => `${row.rules.length} · match ${row.match}` }, { ...segmentColumns[2], render: row => number(row.matched) }, { ...segmentColumns[3], render: row => number(row.eligible) }, { ...segmentColumns[4], render: row => date(row.updatedAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} columns={[{ ...segmentColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/segments/${row.id}`}>{row.name}</Link> }, { ...segmentColumns[1], render: row => `${row.rules.length} · match ${row.match}` }, { ...segmentColumns[2], render: row => number(row.matched) }, { ...segmentColumns[3], render: row => number(row.eligible) }, { ...segmentColumns[4], render: row => date(row.updatedAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={adaptivePageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
   </div>
 }
 function DemoSegmentEditorPage() {
@@ -67,10 +70,12 @@ export function SegmentsPage() {
   return api.mode === 'demo' ? <DemoSegmentsPage /> : <LiveSegmentsPage />
 }
 function LiveSegmentsPage() {
+  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
-  const query = useApiQuery(['segments', {page, search}], (api, signal) => api.segments.list({page, search, pageSize}, signal))
-  return <div className="audience-page"><PageHeader title="Segments" actions={<Link className="ui-button ui-button--primary" to="/segments/new">Create segment</Link>} /><div className="data-toolbar"><Input aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => {setSearch(event.target.value); setPage(1)}} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable rows={query.data?.items ?? []} loading={query.isPending} rowKey={row => row.id} minRows={5} columns={[{key: 'name', label: 'Name', render: row => <Link to={`/segments/${row.id}`}>{row.name}</Link>}, {key: 'rule', label: 'Rule', render: row => <code>{JSON.stringify(row.rule)}</code>}, {key: 'updatedAt', label: 'Updated', render: row => date(row.updatedAt)}]} />{query.data && <Pagination page={query.data.page} pageSize={pageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
+  useEffect(() => setPage(1), [adaptivePageSize])
+  const query = useApiQuery(['segments', {page, search, pageSize: adaptivePageSize}], (api, signal) => api.segments.list({page, search, pageSize: adaptivePageSize}, signal))
+  return <div className="audience-page"><PageHeader title="Segments" actions={<Link className="ui-button ui-button--primary" to="/segments/new">Create segment</Link>} /><div className="data-toolbar"><Input aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => {setSearch(event.target.value); setPage(1)}} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} columns={[{key: 'name', label: 'Name', render: row => <Link to={`/segments/${row.id}`}>{row.name}</Link>}, {key: 'rule', label: 'Rule', render: row => <code>{JSON.stringify(row.rule)}</code>}, {key: 'updatedAt', label: 'Updated', render: row => date(row.updatedAt)}]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
 }
 export function SegmentEditorPage() {
   const api = useApi(), {id} = useParams()

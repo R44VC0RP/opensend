@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { Plus } from 'lucide-react'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
@@ -7,9 +7,10 @@ import { Alert, Button, Checkbox, ConfirmDialog, ControlSkeleton, DataTable, Dia
 import { activityColumns, AudienceRouteSkeleton } from './skeletons'
 import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
-import { useCursorPagination } from '../../lib/pagination'
+import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
 
 export function ContactsPage() {
+  const { pageSize, tableRef } = useAdaptivePageSize()
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [listId, setListId] = useState('')
@@ -18,6 +19,7 @@ export function ContactsPage() {
   const [importing, setImporting] = useState(false)
   const [listSearch, setListSearch] = useState('')
   const [listCursor, setListCursor] = useState<string | undefined>()
+  useEffect(() => setPage(1), [pageSize])
   const lists = useAudienceLists(listSearch, listCursor)
   const params = { page, pageSize, search, status, listId }
   const query = useApiQuery(['contacts', params], (api, signal) => api.contacts.list(params, signal))
@@ -27,7 +29,7 @@ export function ContactsPage() {
     <div className="data-toolbar"><div className="cluster"><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /><Input aria-label="Find list filter" placeholder="Find list by name" value={listSearch} onChange={event => {setListSearch(event.target.value); setListCursor(undefined)}} />{lists.isPending ? <LoadingRegion label="Loading list filter"><ControlSkeleton width={170} /></LoadingRegion> : <Select className="audience-list-filter" aria-label="Filter by list" value={listId} onValueChange={value => { setListId(value); setPage(1) }} options={[{ value: '', label: 'All lists' }, ...(listId && !(lists.data ?? []).some(list => list.id === listId) ? [{value: listId, label: listId}] : []), ...(lists.data || []).map(list => ({ value: list.id, label: `${list.name} · ${list.id}` }))]} />}</div><span className="muted audience-count">{query.isPending ? <SkeletonText width={100} /> : query.data?.total !== undefined && `${number(query.data.total)} contacts`}</span></div>
     {(listCursor || lists.data?.nextCursor) && <div className="cluster"><Button disabled={lists.isFetching || !listCursor} onClick={() => setListCursor(undefined)}>First matching lists</Button><Button disabled={lists.isFetching || !lists.data?.nextCursor} onClick={() => setListCursor(lists.data?.nextCursor ?? undefined)}>Next matching lists</Button></div>}
     {lists.isError && <ErrorState error={lists.error} onRetry={() => lists.refetch()} />}
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable contacts={query.data?.items || []} lists={lists.data} listsLoading={lists.isPending} loading={query.isPending} minRows={pageSize} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} lists={lists.data} listsLoading={lists.isPending} loading={query.isPending} minRows={pageSize} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
     {add && <ContactEditor onClose={() => setAdd(false)} />}
     {importing && <ImportContactsDialog onClose={() => setImporting(false)} />}
   </div>

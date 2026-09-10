@@ -1,21 +1,24 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Plus } from 'lucide-react'
 import { useApiMutation, useApiQuery } from '../../data/context'
 import { Button, ControlSkeleton, DataTable, Dialog, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
 import { listColumns, ListDetailBodySkeleton } from './skeletons'
-import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions } from './shared'
+import { ContactTable, date, fieldError, MutationError, number, statusOptions } from './shared'
 import { ImportContactsDialog } from './import'
+import { useAdaptivePageSize } from '../../lib/pagination'
 
 export function ListsPage() {
+  const { pageSize, tableRef } = useAdaptivePageSize()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [create, setCreate] = useState(false)
+  useEffect(() => setPage(1), [pageSize])
   const params = { page, pageSize, search }
   const query = useApiQuery(['lists', params], (api, signal) => api.lists.list(params, signal))
   return <div className="audience-page"><PageHeader title="Lists" actions={<Button variant="primary" onClick={() => setCreate(true)}><Plus size={16} />Create list</Button>} />
     <div className="data-toolbar"><Input className="audience-search" aria-label="Search lists" placeholder="Search lists" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /><span className="muted audience-count">{query.isPending ? <SkeletonText width={100} /> : query.data?.total !== undefined && `${number(query.data.total)} lists`}</span></div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable rows={query.data?.items || []} loading={query.isPending} skeletonRows={5} minRows={5} rowKey={row => row.id} columns={[{ ...listColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/lists/${row.id}`}>{row.name}</Link> }, { ...listColumns[1], render: row => number(row.subscribed) }, { ...listColumns[2], render: row => number(row.suppressed) }, { ...listColumns[3], render: row => number(row.unsubscribed) }, { ...listColumns[4], render: row => number(row.unknown) }, { ...listColumns[5], render: row => number(row.total) }, { ...listColumns[6], render: row => date(row.createdAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rowKey={row => row.id} columns={[{ ...listColumns[0], render: row => <Link className="audience-cell-text" title={row.name} to={`/lists/${row.id}`}>{row.name}</Link> }, { ...listColumns[1], render: row => number(row.subscribed) }, { ...listColumns[2], render: row => number(row.suppressed) }, { ...listColumns[3], render: row => number(row.unsubscribed) }, { ...listColumns[4], render: row => number(row.unknown) }, { ...listColumns[5], render: row => number(row.total) }, { ...listColumns[6], render: row => date(row.createdAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
     {create && <CreateListDialog onClose={() => setCreate(false)} />}
   </div>
 }
@@ -36,10 +39,12 @@ export function ListDetailPage() {
   </div>
 }
 function ListMembers({ listId }: { listId: string }) {
+  const { pageSize, tableRef } = useAdaptivePageSize()
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
+  useEffect(() => setPage(1), [pageSize])
   const params = { listId, search, status, page, pageSize }
   const query = useApiQuery(['contacts', params], (api, signal) => api.contacts.list(params, signal))
-  return <><Tabs value={status} onValueChange={value => { setStatus(value); setPage(1) }} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><Input className="audience-search" aria-label="Search members" placeholder="Search members" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable contacts={query.data?.items || []} members loading={query.isPending} minRows={pageSize} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</>
+  return <><Tabs value={status} onValueChange={value => { setStatus(value); setPage(1) }} items={[{ value: '', label: 'All members' }, ...statusOptions]} /><div className="data-toolbar"><Input className="audience-search" aria-label="Search members" placeholder="Search members" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} members loading={query.isPending} minRows={pageSize} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</>
 }

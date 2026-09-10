@@ -17,9 +17,9 @@ export function useAudienceLists(search = '', cursor?: string) {
     return Object.assign(page.items, {nextCursor: page.nextCursor ?? null})
   })
 }
-export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean }) {
+export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void }) {
   const columns = members ? memberColumns : contactColumns
-  return <DataTable rows={contacts} loading={loading} skeletonRows={pageSize} minRows={minRows} rowKey={row => row.id} columns={columns.map(column => ({ ...column, render: (row: Contact) => {
+  return <DataTable tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} columns={columns.map(column => ({ ...column, render: (row: Contact) => {
     if (column.key === 'email') return <Link className="audience-cell-text" title={row.email} to={`/contacts/${row.id}`}>{row.email}</Link>
     if (column.key === 'status') return <StatusBadge status={row.status} />
     if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || 'None'}>{row.suppressionReason || 'None'}</span>
