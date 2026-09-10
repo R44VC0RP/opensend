@@ -12,6 +12,7 @@
     "test": "node --env-file-if-exists=.env --import tsx --test api.acceptance.test.ts",
     "openapi": "tsx src/export-openapi.ts",
     "sdk": "npm run openapi && openapi-ts && tsc -p ../sdk/tsconfig.json",
+    "docs:check": "npm run sdk && node scripts/check-doc-examples.mjs",
     "cf:dev": "wrangler dev",
     "cf:check": "wrangler deploy --dry-run",
     "build": "tsc -p tsconfig.build.json"

@@ -9,6 +9,7 @@ const loadTemplates = () => import('./features/templates')
 const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
 const loadDeveloper = () => import('./features/developer')
+const loadDocs = () => import('./features/docs')
 const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
 const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
@@ -30,6 +31,7 @@ const SettingsPage = lazy(() => loadSettings().then(m => ({ default: m.SettingsP
 const WebhooksPage = lazy(() => loadSettings().then(m => ({ default: m.WebhooksPage })))
 const WebhookDetailPage = lazy(() => loadSettings().then(m => ({ default: m.WebhookDetailPage })))
 const DeveloperPage = lazy(() => loadDeveloper().then(m => ({ default: m.DeveloperPage })))
+const DocsPage = lazy(() => loadDocs().then(m => ({ default: m.DocsPage })))
 
 const initialPath = window.location.pathname
 if (initialPath === '/') void loadOverview()
@@ -39,6 +41,7 @@ else if (initialPath.startsWith('/templates')) void loadTemplates()
 else if (['/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) void loadAudience()
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) void loadSettings()
 else if (initialPath.startsWith('/developer')) void loadDeveloper()
+else if (initialPath.startsWith('/docs')) void loadDocs()
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
@@ -47,7 +50,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
   render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
 }
 export function App() {
-  return <AppErrorBoundary><Routes><Route element={<AppShell />}>
+  return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />

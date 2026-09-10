@@ -28,6 +28,8 @@ jobs:
         working-directory: api
       - run: npm run check
         working-directory: api
+      - run: npm run docs:check
+        working-directory: api
       - run: npm run build
         working-directory: app
       - run: npx wrangler deploy

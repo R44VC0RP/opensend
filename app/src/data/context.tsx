@@ -9,13 +9,14 @@ const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<{ identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void> } | null>(null)
 export const useSession = () => useContext(SessionContext)
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
+  const publicRoute = window.location.pathname === '/docs'
   const [environment] = useState<'live' | 'test'>(() => new URLSearchParams(window.location.search).get('environment') === 'test' ? 'test' : 'live')
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment])
   const cache = useQueryClient()
   const [authError, setAuthError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const identity = useQuery({ queryKey: ['identity', environment], enabled: client.mode !== 'demo', retry: false, queryFn: async ({signal}) => {
+  const identity = useQuery({ queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute, retry: false, queryFn: async ({signal}) => {
     const started = performance.now()
     const result = await request<Identity>('/v1/me', {signal, environment})
     console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
@@ -51,7 +52,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }
   const error = authError ?? identity.error
   const unconfigured = error instanceof ApiError && error.code === 'AUTH_NOT_CONFIGURED'
-  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>{client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}><h2>Sign in with Google</h2>{unconfigured ? <Alert tone="warning">Google sign-in is not configured. The deployment operator must configure the Google OAuth client, auth secret, public URL, and approved identities.</Alert> : error && !(error instanceof ApiError && error.status === 401) ? <Alert tone="danger">{error instanceof Error ? error.message : 'Sign-in is unavailable.'}</Alert> : null}{new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>}<Button variant="primary" disabled={unconfigured} loading={busy} onClick={login}>Continue with Google</Button><Button onClick={() => identity.refetch()}>Check session again</Button></div></main>}</SessionContext.Provider></ApiContext.Provider>
+  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>{publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}><h2>Sign in with Google</h2>{unconfigured ? <Alert tone="warning">Google sign-in is not configured. The deployment operator must configure the Google OAuth client, auth secret, public URL, and approved identities.</Alert> : error && !(error instanceof ApiError && error.status === 401) ? <Alert tone="danger">{error instanceof Error ? error.message : 'Sign-in is unavailable.'}</Alert> : null}{new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>}<Button variant="primary" disabled={unconfigured} loading={busy} onClick={login}>Continue with Google</Button><Button onClick={() => identity.refetch()}>Check session again</Button></div></main>}</SessionContext.Provider></ApiContext.Provider>
 }
 export function useApi() {
   const api = useContext(ApiContext)
