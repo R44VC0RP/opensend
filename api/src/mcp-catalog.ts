@@ -287,6 +287,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   const add = (operation: McpOperation) => { if (result.has(operation.tool.name)) invalid(`Duplicate curated tool ${operation.tool.name}.`); result.set(operation.tool.name, operation); };
   const direct = (name: string, description: string, source: string) => add(alias(need(source), name, description));
 
+  direct('getContext', 'Return the active OpenSend environment, canonical instance origin and host, workspace, granted permissions, and domain restrictions.', 'getCurrentIdentity');
   const campaignList = need('listCampaigns', raw), campaignDetail = need('getCampaign', raw);
   const campaignFindSchema = findSchema(campaignList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
   campaignFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(campaignList.queryParameters.map(parameter => [parameter, false])) } };
@@ -352,7 +353,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 31) invalid(`Curated catalog must contain exactly 31 tools, got ${result.size}.`);
+  if (result.size !== 32) invalid(`Curated catalog must contain exactly 32 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

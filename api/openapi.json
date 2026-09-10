@@ -4560,6 +4560,9 @@
                     "id": {
                       "type": "string"
                     },
+                    "workspaceId": {
+                      "type": "string"
+                    },
                     "email": {
                       "type": [
                         "string",
@@ -4589,14 +4592,31 @@
                           "manage"
                         ]
                       }
+                    },
+                    "domains": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "origin": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "host": {
+                      "type": "string"
                     }
                   },
                   "required": [
                     "id",
+                    "workspaceId",
                     "email",
                     "name",
                     "environment",
-                    "permissions"
+                    "permissions",
+                    "domains",
+                    "origin",
+                    "host"
                   ]
                 }
               }

@@ -196,10 +196,11 @@ export function registerGoogleAuth(app: App) {
     }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/me', operationId: 'getCurrentIdentity', tags: ['Auth'], security,
-    responses: { 200: response(z.object({ id: z.string(), email: z.string().nullable(), name: z.string().nullable(), environment: z.enum(['live', 'test']), permissions: z.array(z.enum(['read', 'send', 'manage'])) })), ...errors },
+    responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), email: z.string().nullable(), name: z.string().nullable(), environment: z.enum(['live', 'test']), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string() })), ...errors },
   }), async c => {
     const identity = c.get('actor');
     const userId = identity.keyId.startsWith('user_') ? identity.keyId.slice(5) : null;
-    return c.json({ id: userId ?? identity.keyId, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions }, 200);
+    const origin = new URL(c.env.config.publicUrl).origin;
+    return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host }, 200);
   });
 }

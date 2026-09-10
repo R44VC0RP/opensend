@@ -1084,10 +1084,14 @@ export type GetCurrentIdentityResponses = {
      */
     200: {
         id: string;
+        workspaceId: string;
         email: string | null;
         name: string | null;
         environment: 'live' | 'test';
         permissions: Array<'read' | 'send' | 'manage'>;
+        domains: Array<string>;
+        origin: string;
+        host: string;
     };
 };
 
