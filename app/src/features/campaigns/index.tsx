@@ -19,7 +19,8 @@ import { CampaignSenderInput } from './CampaignSenderInput'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
-const EmailComposer = lazy(() => import('./EmailComposer').then(module => ({ default: module.EmailComposer })))
+const loadEmailComposer = () => import('./EmailComposer').then(module => ({ default: module.EmailComposer }))
+const EmailComposer = lazy(loadEmailComposer)
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -38,7 +39,7 @@ const campaignInput = (campaign: Campaign): CampaignInput => ({
 export function CampaignEditorPage() {
   const { id } = useParams()
   const { regionId } = useRegion()
-  const regions = useRegionCatalog()
+  const regions = useRegionCatalog({ enabled: !id })
   const fallbackRegion = regionId || regions.data?.defaultRegion || ''
   const scope = useRef({ id, key: id ?? 'new', createdId: null as string | null })
   if (scope.current.id !== id) {
@@ -53,6 +54,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   const api = useApi()
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
   const opened = useRef<Campaign | null | undefined>(undefined)
+  useEffect(() => { void loadEmailComposer() }, [])
   useEffect(() => {
     if (query.data) console.info('[OpenSend timing] campaign content ready', { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
   }, [query.data])

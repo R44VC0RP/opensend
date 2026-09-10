@@ -31,21 +31,26 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains });
     await c.env.db.update(apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, key.id), or(isNull(apiKeys.lastUsedAt), sql`${apiKeys.lastUsedAt} < now() - interval '1 minute'`)));
   } else {
-    const dashboard = await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work));
+    const dashboard = await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work), headers => {
+      const cookie = headers.get('set-cookie');
+      if (cookie) c.header('set-cookie', cookie, { append: true });
+    });
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
     c.set('actor', dashboard);
   }
   const identity = c.get('actor');
-  const maxRequests = identity.keyId.startsWith('user_') ? 2400 : identity.environment === 'test' ? 600 : 1200;
-  const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-    VALUES (${identity.workspaceId}, ${identity.keyId}, date_trunc('minute', now()), 1)
-    ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-      used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
-       window_start = excluded.window_start RETURNING used`));
-  if (budget.rows[0]!.used > maxRequests) {
-    c.header('Retry-After', '60');
-    throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
+  if (!identity.keyId.startsWith('user_')) {
+    const maxRequests = identity.environment === 'test' ? 600 : 1200;
+    const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+      VALUES (${identity.workspaceId}, ${identity.keyId}, date_trunc('minute', now()), 1)
+      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
+        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
+        window_start = excluded.window_start RETURNING used`));
+    if (budget.rows[0]!.used > maxRequests) {
+      c.header('Retry-After', '60');
+      throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
+    }
   }
   await next();
 };

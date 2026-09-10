@@ -17,7 +17,6 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   const [busy, setBusy] = useState(false)
   const identity = useQuery({ queryKey: ['identity', environment], enabled: client.mode !== 'demo', retry: false, queryFn: async ({signal}) => {
     const started = performance.now()
-    await request('/api/auth/get-session', {signal})
     const result = await request<Identity>('/v1/me', {signal, environment})
     console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
     return result

@@ -11,16 +11,16 @@ const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/campaigns', 'Campai
 export function AppShell() {
   const api = useApi()
   const { regionId, setRegionId } = useRegion()
+  const location = useLocation()
+  const needsRegion = location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path))
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
-  const discovery = useRegionDiscovery(current)
+  const discovery = useRegionDiscovery(needsRegion ? current : undefined)
   const quota = discovery.data?.account?.quota
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
-  const location = useLocation()
   const navigate = useNavigate()
-  const needsRegion = location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path))
   const content = useRef<HTMLElement>(null)
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -63,6 +63,6 @@ export function AppShell() {
       </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
       </div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} /> : regions.isPending || (!current && enabled.length > 0) ? <RouteSkeleton /> : needsRegion && !enabled.length ? <EmptyState title="No enabled regions" action={<Link to="/settings">Set up SES</Link>} /> : <Outlet />}</Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} /> : needsRegion && (regions.isPending || (!current && enabled.length > 0)) ? <RouteSkeleton /> : needsRegion && !enabled.length ? <EmptyState title="No enabled regions" action={<Link to="/settings">Set up SES</Link>} /> : <Outlet />}</Suspense></main>
   </div>
 }

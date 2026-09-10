@@ -16,11 +16,12 @@ export function useRegionAccess() {
   return { canManage, canDiscover, autoDiscover: canDiscover && (api.mode === 'demo' || api.environment === 'live') }
 }
 
-export function useRegionCatalog() {
+export function useRegionCatalog(options: { enabled?: boolean } = {}) {
   const api = useApi()
   return useQuery({
     queryKey: regionCatalogKey(api),
     queryFn: ({ signal }) => api.regions.list(signal),
+    enabled: options.enabled,
     staleTime: 30_000,
     retry: false,
     refetchInterval: query => query.state.data?.data.some(regionJobActive) ? 2500 : false,

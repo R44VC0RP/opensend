@@ -71,7 +71,7 @@ export function createAuth(runtime: Runtime) {
       },
     },
     user: {
-      additionalFields: { googleHostedDomain: { type: 'string', required: false, input: false, returned: false } },
+      additionalFields: { googleHostedDomain: { type: 'string', required: false, input: false } },
       changeEmail: { enabled: false }, deleteUser: { enabled: false },
       validateUserInfo: ({ user, source }, context) => {
         const profile = source.oauth?.profile;
@@ -84,7 +84,7 @@ export function createAuth(runtime: Runtime) {
         profiles.set(context, { email: profile.email.toLowerCase(), subject: profile.sub, hostedDomain: typeof profile.hd === 'string' ? profile.hd.toLowerCase() : null });
       },
     },
-    session: { expiresIn: 8 * 60 * 60, disableSessionRefresh: true, cookieCache: { enabled: false } },
+    session: { expiresIn: 8 * 60 * 60, disableSessionRefresh: true, cookieCache: { enabled: true, maxAge: 60 } },
     account: {
       accountLinking: { enabled: false, disableImplicitLinking: true }, encryptOAuthTokens: true,
       storeAccountCookie: false, storeStateStrategy: 'database', skipStateCookieCheck: false,
@@ -138,14 +138,16 @@ export function requireDashboardOrigin(runtime: Runtime, headers: Headers) {
     throw new ApiError(403, 'CSRF_ORIGIN_INVALID', 'This request must originate from the dashboard.');
   }
 }
-export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work()): Promise<Actor | null> {
+export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders: (headers: Headers) => void = () => {}): Promise<Actor | null> {
   requireConfigured(runtime);
   try {
-    const session = await measure('session-db', () => createAuth(runtime).api.getSession({ headers }));
-    if (!session || !await measure('approval-db', () => isApprovedUser(runtime, session.user.id))) return null;
+    const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, returnHeaders: true }));
+    applyHeaders(result.headers);
+    const session = result.response;
+    if (!session || !approved(runtime, session.user.email, session.user.emailVerified, session.user.googleHostedDomain)) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
-    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [] };
+    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], email: session.user.email, name: session.user.name };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     log('warn', { operation: 'dashboard-session', code: 'AUTH_UNAVAILABLE' });
@@ -198,7 +200,6 @@ export function registerGoogleAuth(app: App) {
   }), async c => {
     const identity = c.get('actor');
     const userId = identity.keyId.startsWith('user_') ? identity.keyId.slice(5) : null;
-    const [user] = userId ? await c.env.db.select({ email: authUser.email, name: authUser.name }).from(authUser).where(eq(authUser.id, userId)).limit(1) : [];
-    return c.json({ id: userId ?? identity.keyId, email: user?.email ?? null, name: user?.name ?? null, environment: identity.environment, permissions: identity.permissions }, 200);
+    return c.json({ id: userId ?? identity.keyId, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions }, 200);
   });
 }
