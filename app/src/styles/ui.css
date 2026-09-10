@@ -79,8 +79,6 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-table td[data-skeleton-align='right'] .ui-skeleton-line { justify-content: flex-end; }
 .ui-table-spacer td { padding: 0; border: 0; }
 .ui-table-empty { display: grid; place-items: center; }
-.ui-table th:first-child, .ui-table td:first-child { padding-left: 0; }
-.ui-table th:last-child, .ui-table td:last-child { padding-right: 0; }
 .ui-table tbody tr:last-child td { border-bottom: 0; }
 .ui-table__clickable { cursor: pointer; transition: background var(--motion-duration); }
 .ui-table__clickable:hover { background: var(--color-canvas); }
