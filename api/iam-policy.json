@@ -8,9 +8,13 @@
       "Resource": "*"
     },
     {
-      "Sid": "ReadAndVerifySenderIdentities",
+      "Sid": "ManageSenderIdentities",
       "Effect": "Allow",
-      "Action": ["ses:GetEmailIdentity", "ses:CreateEmailIdentity"],
+      "Action": [
+        "ses:GetEmailIdentity",
+        "ses:CreateEmailIdentity",
+        "ses:PutEmailIdentityMailFromAttributes"
+      ],
       "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*"
     },
     {

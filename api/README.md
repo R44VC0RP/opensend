@@ -165,7 +165,7 @@ The managed destinations enable `SEND`, `DELIVERY`, `BOUNCE`, `COMPLAINT`, `REJE
 
 ### Copyable IAM policy
 
-Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, stored-template reads/rendering, and sending; it grants no IAM administration, resource deletion, or attachment-storage access.
+Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, custom MAIL FROM configuration, stored-template reads/rendering, and sending; it grants no IAM administration, resource deletion, or attachment-storage access.
 
 The separate `ses:ApplyTrackingConfigurationOverrides` permission is needed for per-message open/click tracking settings, including `tracking: false`. SES can report a healthy account and completed setup while rejecting sends without this permission. This statement grants only that action on `*`; `ses:SendEmail` remains limited by the account-scoped identity/configuration-set/template statement. The subscription statement permits HTTPS callbacks at `/v1/events/ses`; you can replace its host wildcard with your exact public callback URL. Validate sending with an authorized recipient after applying the policy—read-only discovery cannot prove send authorization.
 
