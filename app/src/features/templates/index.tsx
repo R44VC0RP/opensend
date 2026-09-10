@@ -137,7 +137,15 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></Suspense>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
-    <Dialog open={previewOpen} onOpenChange={setPreviewOpen} title="Template preview" className="template-preview-dialog"><EmailPreview html={draft.html ?? ''} attachmentIds={draft.attachments} attachmentApi={api.templateAssets} respectStyles /></Dialog>
+    {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); navigate('/templates') }} />
   </div>
+}
+
+function TemplatePreviewDialog({ template, onOpenChange }: {template: CampaignTemplate; onOpenChange: (open: boolean) => void}) {
+  const api = useApi()
+  const preview = useApiQuery(['template-preview', template.id, template.revision], (client, signal) => client.templates.preview(template.id, false, signal))
+  return <Dialog open onOpenChange={onOpenChange} title="Template preview" className="template-preview-dialog">
+    {preview.isError ? <ErrorState error={preview.error} onRetry={() => preview.refetch()} /> : preview.isPending ? <div className="stack"><ComposerSkeleton /></div> : <EmailPreview html={preview.data.html} attachmentIds={template.draft.attachments} attachmentApi={api.templateAssets} respectStyles />}
+  </Dialog>
 }

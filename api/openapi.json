@@ -1403,7 +1403,7 @@
           "html": {
             "type": "string",
             "maxLength": 524288,
-            "description": "Concrete OpenSend block HTML shared with the campaign editor. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing."
+            "description": "Concrete OpenSend block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing."
           },
           "attachments": {
             "type": "array",
@@ -2639,7 +2639,7 @@
           "html": {
             "type": "string",
             "maxLength": 524288,
-            "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples."
+            "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples."
           },
           "templateId": {
             "type": "string",
@@ -3154,7 +3154,7 @@
               "html": {
                 "type": "string",
                 "maxLength": 524288,
-                "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples."
+                "description": "Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples."
               }
             },
             "required": [

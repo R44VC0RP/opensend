@@ -6,9 +6,9 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export function browserImageRenderer(binding: BrowserRun) {
   return async (html: string): Promise<RenderedImage> => {
     const response = await binding.quickAction('screenshot', {
-      html, viewport: { width: WIDTH, height: 900, deviceScaleFactor: 1 }, scrollPage: true,
+      html, viewport: { width: WIDTH, height: 900, deviceScaleFactor: 1 }, scrollPage: true, selector: 'body > table',
       setJavaScriptEnabled: false, cacheTTL: 0, actionTimeout: 20_000,
-      screenshotOptions: { type: 'png', encoding: 'binary', fullPage: true, captureBeyondViewport: true },
+      screenshotOptions: { type: 'png', encoding: 'binary', captureBeyondViewport: true },
     });
     if (!response.ok) throw new Error(`Browser Rendering returned HTTP ${response.status}.`);
     const data = new Uint8Array(await response.arrayBuffer());

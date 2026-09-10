@@ -4,6 +4,7 @@
 // (and a plain-text alternative) at review/test/send time. Styling lives in the
 // renderer, never in the stored content.
 import { parseFragment, type DefaultTreeAdapterMap } from 'parse5';
+import { sanitizeBlockStyle } from './block-style.js';
 
 type Node = DefaultTreeAdapterMap['node'];
 type Element = DefaultTreeAdapterMap['element'];
@@ -40,6 +41,7 @@ this vocabulary with a 422 that names the offending tag or attribute.
 | Linked image | \`<a href="https://…"><img …></a>\` | — |
 | Button | \`<a data-button href="https://…">Label</a>\` | \`align\` (default left). \`href="#"\` is accepted as a draft placeholder but blocks review. |
 | Columns | \`<div data-columns="2"><div data-column>…</div><div data-column>…</div></div>\` | \`data-columns\` is 2, 3 or 4 and must match the number of \`data-column\` children. Columns hold blocks but not nested columns. |
+| Styled section | \`<section style="…">…</section>\` | Holds blocks and provides an email-safe background, border, radius, spacing and typography surface. Sections cannot nest or sit inside columns. |
 
 List items hold inline content and may contain a nested \`<ul>\`/\`<ol>\`; \`<li><p>…</p></li>\` is also accepted.
 
@@ -51,6 +53,18 @@ the template draft's \`attachments\` and use its returned \`cid:…\` value as t
 \`previewTemplate\`. Direct HTTPS image URLs remain valid email content, but the dashboard
 does not load remote images because they can track the viewer; do not use Browser Control to
 work around that privacy boundary.
+
+## Email-safe styles
+
+The composer’s Design panel and MCP use the same constrained inline \`style\` contract. Styles
+round-trip between the visual editor, block HTML, dashboard preview, MCP PNG preview and delivered
+email. Supported properties are \`color\`, \`background-color\`, \`font-size\` (12–48 px),
+\`font-weight\` (400–700), \`line-height\`, \`letter-spacing\`, \`text-decoration\`, padding
+sides/shorthands (up to 64 px), border color/style/width (up to 4 px), corner radii (up to
+24 px), and width/height. Use styles on headings, paragraphs, lists/items, quotes, code blocks,
+dividers, images, buttons, column cells and styled sections. OpenSend canonicalizes these values
+and rejects positioning, display changes, CSS variables, calculations, URLs, expressions,
+\`!important\`, selectors and any other CSS.
 
 ## Inline formatting (inside headings, paragraphs, list items, quotes, buttons)
 
@@ -72,9 +86,9 @@ personalization only when the specific campaign needs it.
 
 ## Not allowed
 
-Any other element (\`div\` without \`data-columns\`/\`data-column\`, \`table\`, \`section\`,
+Any other element (\`div\` without \`data-columns\`/\`data-column\`, \`table\`,
 \`span\` without the uppercase style, \`img\` with \`http://\` or \`data:\` sources, \`script\`,
-\`style\`, \`iframe\`, forms), \`class\`, \`id\`, \`style\` (other than the uppercase span), event
+\`style\`, \`iframe\`, forms), \`class\`, \`id\`, unsupported inline style properties, event
 handlers, comments, and document wrappers (\`<!doctype>\`, \`<html>\`, \`<head>\`, \`<body>\`).
 
 ## Example
@@ -119,6 +133,8 @@ function allowAttributes(element: Element, allowed: Record<string, (value: strin
 const alignment = (value: string) => ALIGNMENTS.has(value);
 const href = (value: string) => HREF.test(value.trim());
 const anything = () => true;
+const safeStyle = (value: string) => sanitizeBlockStyle(value) !== null;
+const customStyle = (element: Element) => sanitizeBlockStyle(attribute(element, 'style')) ?? '';
 
 function checkInline(parent: Element, node: Node, inButton: boolean) {
   if (isText(node)) return;
@@ -127,10 +143,10 @@ function checkInline(parent: Element, node: Node, inButton: boolean) {
   if (!INLINE_TAGS.has(tag)) fail(`Unsupported ${describe(node)} inside ${describe(parent)}.`);
   if (tag === 'a') {
     if (inButton) fail('Buttons cannot contain links.');
-    allowAttributes(node, { href, target: value => value === '_blank' || value === '_self', rel: anything });
+    allowAttributes(node, { href, target: value => value === '_blank' || value === '_self', rel: anything, style: safeStyle });
     if (!attribute(node, 'href')) fail('Links require an href.');
   } else if (tag === 'span') {
-    allowAttributes(node, { style: value => /^\s*text-transform\s*:\s*uppercase\s*;?\s*$/i.test(value) });
+    allowAttributes(node, { style: value => /^\s*text-transform\s*:\s*uppercase\s*;?\s*$/i.test(value) || safeStyle(value) });
     if (!attribute(node, 'style')) fail('<span> is only supported with style="text-transform:uppercase".');
   } else allowAttributes(node, {});
   for (const child of node.childNodes) checkInline(node, child, inButton || tag === 'a');
@@ -138,19 +154,19 @@ function checkInline(parent: Element, node: Node, inButton: boolean) {
 function checkInlineChildren(element: Element, inButton = false) { for (const child of element.childNodes) checkInline(element, child, inButton); }
 
 function checkImage(element: Element) {
-  allowAttributes(element, { src: value => IMAGE_SRC.test(value.trim()), alt: anything, width: value => DIMENSION.test(value.trim()), height: value => DIMENSION.test(value.trim()), align: alignment });
+  allowAttributes(element, { src: value => IMAGE_SRC.test(value.trim()), alt: anything, width: value => DIMENSION.test(value.trim()), height: value => DIMENSION.test(value.trim()), align: alignment, style: safeStyle });
   if (!attribute(element, 'src')) fail('Images require a src.');
   if (element.childNodes.some(child => !(isText(child) && !child.value.trim()))) fail('Images cannot contain content.');
 }
 function checkList(element: Element, depth: number) {
-  allowAttributes(element, element.tagName === 'ol' ? { start: value => /^[0-9]{1,6}$/.test(value) } : {});
+  allowAttributes(element, { ...(element.tagName === 'ol' ? { start: (value: string) => /^[0-9]{1,6}$/.test(value) } : {}), style: safeStyle });
   for (const child of element.childNodes) {
     if (isText(child) && !child.value.trim()) continue;
     if (!isElement(child) || child.tagName !== 'li') fail(`${describe(element)} may only contain <li> items.`);
-    allowAttributes(child, {});
+    allowAttributes(child, { style: safeStyle });
     for (const item of child.childNodes) {
       if (isElement(item) && (item.tagName === 'ul' || item.tagName === 'ol')) { if (depth >= 3) fail('Lists nest at most three levels.'); checkList(item, depth + 1); }
-      else if (isElement(item) && item.tagName === 'p') { allowAttributes(item, { align: alignment }); checkInlineChildren(item); }
+      else if (isElement(item) && item.tagName === 'p') { allowAttributes(item, { align: alignment, style: safeStyle }); checkInlineChildren(item); }
       else checkInline(child, item, false);
     }
   }
@@ -160,35 +176,35 @@ function checkBlock(node: Node, inColumn: boolean) {
   if (node.nodeName === '#comment') fail('Comments are not supported.');
   if (!isElement(node) || node.namespaceURI !== 'http://www.w3.org/1999/xhtml') fail('Unsupported markup in campaign content.');
   const tag = node.tagName;
-  if (HEADINGS.has(tag) || tag === 'p') { allowAttributes(node, { align: alignment }); checkInlineChildren(node); return; }
+  if (HEADINGS.has(tag) || tag === 'p') { allowAttributes(node, { align: alignment, style: safeStyle }); checkInlineChildren(node); return; }
   if (tag === 'ul' || tag === 'ol') { checkList(node, 1); return; }
   if (tag === 'blockquote') {
-    allowAttributes(node, {});
+    allowAttributes(node, { style: safeStyle });
     for (const child of node.childNodes) {
-      if (isElement(child) && child.tagName === 'p') { allowAttributes(child, { align: alignment }); checkInlineChildren(child); }
+      if (isElement(child) && child.tagName === 'p') { allowAttributes(child, { align: alignment, style: safeStyle }); checkInlineChildren(child); }
       else checkInline(node, child, false);
     }
     return;
   }
   if (tag === 'pre') {
-    allowAttributes(node, {});
+    allowAttributes(node, { style: safeStyle });
     const children = node.childNodes.filter(child => !(isText(child) && !child.value.trim()));
     const code = children.length === 1 && isElement(children[0]!) && children[0]!.tagName === 'code' ? children[0] as Element : undefined;
     if (!code || code.childNodes.some(child => !isText(child))) fail('Code blocks are <pre><code> with text only.');
     allowAttributes(code, {});
     return;
   }
-  if (tag === 'hr') { allowAttributes(node, {}); return; }
+  if (tag === 'hr') { allowAttributes(node, { style: safeStyle }); return; }
   if (tag === 'img') { checkImage(node); return; }
   if (tag === 'a') {
     const button = node.attrs.some(a => a.name === 'data-button');
     if (button) {
-      allowAttributes(node, { 'data-button': anything, href, align: alignment });
+      allowAttributes(node, { 'data-button': anything, href, align: alignment, style: safeStyle });
       if (!attribute(node, 'href')) fail('Buttons require an href.');
       checkInlineChildren(node, true);
       return;
     }
-    allowAttributes(node, { href, target: value => value === '_blank' || value === '_self', rel: anything });
+    allowAttributes(node, { href, target: value => value === '_blank' || value === '_self', rel: anything, style: safeStyle });
     const children = node.childNodes.filter(child => !(isText(child) && !child.value.trim()));
     if (children.length === 1 && isElement(children[0]!) && children[0]!.tagName === 'img') { checkImage(children[0] as Element); return; }
     fail('A top-level <a> must be a button (<a data-button href>) or wrap a single <img>.');
@@ -200,7 +216,13 @@ function checkBlock(node: Node, inColumn: boolean) {
     allowAttributes(node, { 'data-columns': value => ['2', '3', '4'].includes(value) });
     const columns = node.childNodes.filter(child => !(isText(child) && !child.value.trim()));
     if (columns.length !== Number(count) || columns.some(column => !isElement(column) || column.tagName !== 'div' || attribute(column, 'data-column') === undefined)) fail(`data-columns="${count}" requires exactly ${count} <div data-column> children.`);
-    for (const column of columns as Element[]) { allowAttributes(column, { 'data-column': anything }); for (const child of column.childNodes) checkBlock(child, true); }
+    for (const column of columns as Element[]) { allowAttributes(column, { 'data-column': anything, style: safeStyle }); for (const child of column.childNodes) checkBlock(child, true); }
+    return;
+  }
+  if (tag === 'section') {
+    if (inColumn) fail('Styled sections cannot be nested inside columns.');
+    allowAttributes(node, { style: safeStyle });
+    for (const child of node.childNodes) { if (isElement(child) && child.tagName === 'section') fail('Styled sections cannot be nested.'); checkBlock(child, false); }
     return;
   }
   fail(`Unsupported ${describe(node)} in campaign content.`);
@@ -251,22 +273,23 @@ function renderInline(node: Node): string {
     case 'sup': return `<sup>${inner}</sup>`;
     case 'code': return `<code style="${styles.code}">${inner}</code>`;
     case 'br': return '<br>';
-    case 'span': return `<span style="text-transform:uppercase">${inner}</span>`;
+    case 'span': { const style = attribute(node, 'style') ?? ''; return `<span style="${/text-transform\s*:\s*uppercase/i.test(style) ? 'text-transform:uppercase' : customStyle(node)}">${inner}</span>`; }
     case 'a': {
       const target = attribute(node, 'target');
-      return `<a href="${escape(attribute(node, 'href') ?? '')}"${target ? ` target="${escape(target)}" rel="noopener noreferrer"` : ''} style="${styles.link}">${inner}</a>`;
+      return `<a href="${escape(attribute(node, 'href') ?? '')}"${target ? ` target="${escape(target)}" rel="noopener noreferrer"` : ''} style="${styles.link}${customStyle(node)}">${inner}</a>`;
     }
     default: return inner;
   }
 }
 const inlineChildren = (element: Element) => element.childNodes.map(renderInline).join('');
 const alignStyle = (element: Element) => { const value = attribute(element, 'align'); return value && value !== 'left' ? `text-align:${value};` : ''; };
+function legacyColor(value: string) { const rgb = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/.exec(value); return rgb ? `#${rgb.slice(1).map(channel => Number(channel).toString(16).padStart(2, '0')).join('')}` : /^#[0-9a-f]{3,8}$/i.test(value) ? value : BUTTON; }
 
 function renderImage(element: Element, link?: Element): string {
   const width = attribute(element, 'width')?.trim(), height = attribute(element, 'height')?.trim(), align = attribute(element, 'align') ?? 'left';
   const size = width ? `width:${/%$/.test(width) ? width : `${width}px`};` : '';
   const margin = align === 'center' ? 'margin:0 auto 16px;' : align === 'right' ? 'margin:0 0 16px auto;' : '';
-  const image = `<img src="${escape(attribute(element, 'src') ?? '')}" alt="${escape(attribute(element, 'alt') ?? '')}"${width && !/%$/.test(width) ? ` width="${width}"` : ''}${height && !/%$/.test(height) ? ` height="${height}"` : ''} style="${styles.img}${size}${margin}">`;
+  const image = `<img src="${escape(attribute(element, 'src') ?? '')}" alt="${escape(attribute(element, 'alt') ?? '')}"${width && !/%$/.test(width) ? ` width="${width}"` : ''}${height && !/%$/.test(height) ? ` height="${height}"` : ''} style="${styles.img}${size}${margin}${customStyle(element)}">`;
   return link ? `<a href="${escape(attribute(link, 'href') ?? '')}" style="display:block;text-decoration:none">${image}</a>` : image;
 }
 function renderList(element: Element): string {
@@ -276,37 +299,39 @@ function renderList(element: Element): string {
       if (isElement(child) && child.tagName === 'p') return inlineChildren(child);
       return renderInline(child);
     });
-    return `<li style="${styles.li}">${parts.join('')}</li>`;
+    return `<li style="${styles.li}${customStyle(item)}">${parts.join('')}</li>`;
   });
   const start = attribute(element, 'start');
-  return `<${element.tagName}${start ? ` start="${escape(start)}"` : ''} style="${styles.list}">${items.join('')}</${element.tagName}>`;
+  return `<${element.tagName}${start ? ` start="${escape(start)}"` : ''} style="${styles.list}${customStyle(element)}">${items.join('')}</${element.tagName}>`;
 }
 function renderBlock(node: Node): string {
   if (!isElement(node)) return '';
   const tag = node.tagName;
-  if (HEADINGS.has(tag) || tag === 'p') return `<${tag} style="${styles[tag]}${alignStyle(node)}">${inlineChildren(node) || '<br>'}</${tag}>`;
+  if (HEADINGS.has(tag) || tag === 'p') return `<${tag} style="${styles[tag]}${alignStyle(node)}${customStyle(node)}">${inlineChildren(node) || '<br>'}</${tag}>`;
   if (tag === 'ul' || tag === 'ol') return renderList(node);
   if (tag === 'blockquote') {
-    const inner = node.childNodes.map(child => isElement(child) && child.tagName === 'p' ? `<p style="${styles.p}margin:0 0 8px;color:inherit;${alignStyle(child)}">${inlineChildren(child)}</p>` : renderInline(child)).join('');
-    return `<blockquote style="${styles.blockquote}">${inner}</blockquote>`;
+    const inner = node.childNodes.map(child => isElement(child) && child.tagName === 'p' ? `<p style="${styles.p}margin:0 0 8px;color:inherit;${alignStyle(child)}${customStyle(child)}">${inlineChildren(child)}</p>` : renderInline(child)).join('');
+    return `<blockquote style="${styles.blockquote}${customStyle(node)}">${inner}</blockquote>`;
   }
-  if (tag === 'pre') { const code = node.childNodes.find((child): child is Element => isElement(child) && child.tagName === 'code'); return `<pre style="${styles.pre}">${code ? code.childNodes.map(renderInline).join('') : ''}</pre>`; }
-  if (tag === 'hr') return `<hr style="${styles.hr}">`;
+  if (tag === 'pre') { const code = node.childNodes.find((child): child is Element => isElement(child) && child.tagName === 'code'); return `<pre style="${styles.pre}${customStyle(node)}">${code ? code.childNodes.map(renderInline).join('') : ''}</pre>`; }
+  if (tag === 'hr') return `<hr style="${styles.hr}${customStyle(node)}">`;
   if (tag === 'img') return renderImage(node);
   if (tag === 'a') {
     if (node.attrs.some(a => a.name === 'data-button')) {
       const align = attribute(node, 'align') ?? 'left';
-      return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${align}" style="margin:0 0 16px;${align === 'center' ? 'margin-left:auto;margin-right:auto;' : align === 'right' ? 'margin-left:auto;' : ''}"><tr><td style="border-radius:4px;background-color:${BUTTON}"><a href="${escape(attribute(node, 'href') ?? '')}" style="${styles.button}">${inlineChildren(node)}</a></td></tr></table>`;
+      const custom = customStyle(node), background = /(?:^|;)background-color:([^;]+)/.exec(custom)?.[1] ?? BUTTON, radius = /(?:^|;)border-radius:([^;]+)/.exec(custom)?.[1] ?? '4px';
+      return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="${align}" style="margin:0 0 16px;${align === 'center' ? 'margin-left:auto;margin-right:auto;' : align === 'right' ? 'margin-left:auto;' : ''}"><tr><td bgcolor="${escape(legacyColor(background))}" style="border-radius:${escape(radius)};background-color:${escape(background)}"><a href="${escape(attribute(node, 'href') ?? '')}" style="${styles.button}${custom}">${inlineChildren(node)}</a></td></tr></table>`;
     }
     const image = node.childNodes.find((child): child is Element => isElement(child) && child.tagName === 'img');
     return image ? renderImage(image, node) : '';
   }
   if (tag === 'div') {
     const columns = node.childNodes.filter((child): child is Element => isElement(child) && child.tagName === 'div');
-    const width = `${Math.floor(100 / columns.length)}%`;
-    const cells = columns.map((column, index) => `<td width="${width}" valign="top" style="width:${width};vertical-align:top;padding:0 ${index === columns.length - 1 ? 0 : 12}px 0 ${index === 0 ? 0 : 12}px">${column.childNodes.map(renderBlock).join('')}</td>`).join('');
+    const width = `${(100 - 4 * (columns.length - 1)) / columns.length}%`;
+    const cells = columns.map(column => `<td width="${width}" valign="top" style="width:${width};vertical-align:top;${customStyle(column)}">${column.childNodes.map(renderBlock).join('')}</td>`).join('<td width="4%" style="width:4%;font-size:0;line-height:0">&nbsp;</td>');
     return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;margin:0 0 16px"><tr>${cells}</tr></table>`;
   }
+  if (tag === 'section') return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;margin:0 0 16px"><tr><td style="${customStyle(node)}">${node.childNodes.map(renderBlock).join('')}</td></tr></table>`;
   return '';
 }
 
@@ -350,6 +375,7 @@ function textBlock(node: Node, indent = ''): string {
     return `${indent}${node.childNodes.map(textInline).join('').trim()}: ${url}\n\n`;
   }
   if (tag === 'div') return node.childNodes.filter((child): child is Element => isElement(child) && child.tagName === 'div').map(column => column.childNodes.map(child => textBlock(child, indent)).join('')).join('');
+  if (tag === 'section') return node.childNodes.map(child => textBlock(child, indent)).join('');
   return '';
 }
 

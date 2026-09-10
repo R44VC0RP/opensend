@@ -1628,12 +1628,14 @@ describe('Dashboard API capabilities', () => {
   });
 
   test('campaign content is block HTML: the guide, validation errors, preview rendering and text alternative are observable', async t => {
+    const [{ sanitizeBlockStyle: serverStyle }, { sanitizeBlockStyle: composerStyle }] = await Promise.all([import('./src/block-style.js'), import('../app/src/features/campaigns/block-style.js')]);
+    for (const value of ['color:#3156c7; padding:24px; border-radius:8px', 'font-size:32px;line-height:1.2;', 'position:absolute', 'background-image:url(https://example.com/x.png)', 'padding:200px']) assert.equal(composerStyle(value), serverStyle(value), `Composer and renderer style sanitizers disagree for ${value}`);
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('block-content') });
     const guide = ok(await http('GET', '/v1/campaign-content-guide', key.secret));
     assert.equal(guide.format, 'markdown');
     assert.ok(guide.markdown.includes('data-button') && guide.markdown.includes('data-columns'), 'The guide documents the block vocabulary.');
-    const blocks = '<h1>Hello {{name}}</h1><p align="center">Read <a href="https://example.com/{{email}}">this</a>.</p><ul><li>One</li><li><p>Two</p></li></ul><img src="https://cdn.example.com/a.png" alt="Art" width="560"><a data-button href="https://example.com/go" align="center">Go</a><hr><div data-columns="2"><div data-column><p>Left</p></div><div data-column><p>Right</p></div></div>';
+    const blocks = '<section style="background-color:#f4f4f4;padding:24px;border-radius:8px;"><h1 style="font-size:32px;line-height:1.2;">Hello {{name}}</h1><p align="center" style="color:#3156c7;">Read <a href="https://example.com/{{email}}">this</a>.</p></section><ul><li>One</li><li><p>Two</p></li></ul><img src="https://cdn.example.com/a.png" alt="Art" width="560" style="border-radius:8px;"><a data-button href="https://example.com/go" align="center" style="background-color:#3156c7;border-radius:8px;">Go</a><hr><div data-columns="2"><div data-column style="background-color:#f4f4f4;padding:16px;"><p>Left</p></div><div data-column><p>Right</p></div></div>';
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: blocks });
     const path = `/v1/campaigns/${campaign.id}`;
     assert.equal(campaign.draft.html, blocks, 'Block HTML is stored verbatim.');
@@ -1647,9 +1649,12 @@ describe('Dashboard API capabilities', () => {
       ['<img src="data:image/png;base64,AAAA">', 'src'],
       ['<div data-columns="3"><div data-column><p>a</p></div></div>', 'data-columns'],
       ['<p onclick="x()">Handler</p>', 'onclick'],
+      ['<p style="position:absolute">Positioned</p>', 'style'],
+      ['<section style="background-image:url(https://example.com/x.png)"><p>Tracked</p></section>', 'style'],
+      ['<div data-columns="2" style="padding:16px"><div data-column><p>A</p></div><div data-column><p>B</p></div></div>', 'style'],
     ] as const) {
       const rejected = error(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html } }), 422, 'CAMPAIGN_CONTENT_INVALID');
-      assert.ok(rejected.message.includes(fragment) && rejected.message.includes('getCampaignContentGuide'), `Rejection for ${html} names ${fragment}: ${rejected.message}`);
+      assert.ok(rejected.message.includes(fragment) && rejected.message.includes('getContentGuide'), `Rejection for ${html} names ${fragment}: ${rejected.message}`);
     }
     error(await http('PATCH', path, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, editor: { format: 'react-email', version: 1, document: {} } } }), 422, 'VALIDATION_FAILED');
     assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Rejected content never changes the draft.');
@@ -1658,7 +1663,8 @@ describe('Dashboard API capabilities', () => {
     assert.ok(preview.html.startsWith('<!DOCTYPE html>') && preview.html.includes('max-width:600px'), 'Preview renders a complete styled document.');
     assert.ok(preview.html.includes('Hello {{name}}') && preview.html.includes('href="https://example.com/{{email}}"'), 'Preview keeps placeholders visible.');
     assert.ok(preview.html.includes('role="presentation"') && preview.html.includes('>Go</a>'), 'Buttons and columns render as presentation tables.');
-    assert.ok(!preview.html.includes('data-button') && !preview.html.includes('data-columns'), 'Rendered output contains no block markers.');
+    assert.ok(!preview.html.includes('data-button') && !preview.html.includes('data-columns') && !preview.html.includes('<section'), 'Rendered output contains no block markers.');
+    assert.ok(preview.html.includes('font-size:32px') && preview.html.includes('background-color:#3156c7') && preview.html.includes('border-radius:8px'), 'Email-safe advanced styles survive rendering.');
     assert.ok(!preview.html.includes('Unsubscribe'), 'Preview omits the unsubscribe footer.');
     assert.equal(preview.text, 'Hello {{name}}\n\nRead this (https://example.com/{{email}}).\n\n- One\n- Two\n\n[Art] https://cdn.example.com/a.png\n\nGo: https://example.com/go\n\n----------\n\nLeft\n\nRight');
 

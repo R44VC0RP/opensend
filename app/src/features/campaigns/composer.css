@@ -13,8 +13,7 @@
 .composer-document { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
 /* The editor theme converts its px sizes to em against a 14px root; keep that root so a 16px paragraph edits at 16px. */
 .composer-document .tiptap { flex: 1 0 auto; min-height: 260px; width: 100%; max-width: 600px; margin: 0 auto; color: var(--color-email-text); font-family: var(--font-email); font-size: 14px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
-/* The sheet owns editor spacing; keep the export theme's container padding unchanged. */
-.composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { padding: 0; }
+.composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { box-sizing: border-box; padding: 24px; }
 .composer-document .tiptap * { font-family: var(--font-email); }
 .composer-document .tiptap:focus-visible { outline: none; }
 :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
@@ -25,14 +24,34 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap.ProseMirror h2.node-h2.node-paragraph { font-size: 22px; line-height: 1.3; margin: 24px 0 12px; }
 .composer-document .tiptap.ProseMirror h3.node-h3.node-paragraph { font-size: 18px; line-height: 1.4; margin: 20px 0 12px; }
 .composer-document .tiptap p.is-empty::before { color: var(--color-email-text); opacity: .6; }
-.composer-document .tiptap img { max-width: 100%; height: auto; }
+.composer-document .tiptap img { display: block; max-width: 100%; height: auto; margin: 0 0 16px; }
+.composer-document .tiptap img[alignment='center'] { margin-inline: auto; }
+.composer-document .tiptap img[alignment='right'] { margin-inline-start: auto; margin-inline-end: 0; }
+.composer-document .tiptap :is(.align-left, .align-center, .align-right) { margin: 0 0 16px; }
+.composer-document .tiptap .align-left { text-align: left; }
+.composer-document .tiptap .align-center { text-align: center; }
+.composer-document .tiptap .align-right { text-align: right; }
+.composer-document .tiptap :is(ul, ol) { margin: 0 0 16px; padding-inline-start: 24px; }
+.composer-document .tiptap li { margin: 0 0 6px; font-size: 16px; line-height: 1.6; }
+.composer-document .tiptap blockquote { margin: 0 0 16px; padding: 4px 0 4px 16px; border-inline-start: 3px solid #e2e2e2; color: #595959; }
+.composer-document .tiptap pre { margin: 0 0 16px; padding: 14px 16px; border-radius: 4px; background: #f4f4f4; color: #181818; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.composer-document .tiptap :not(pre) > code { padding: 1px 4px; border-radius: 3px; background: #f4f4f4; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+.composer-document .tiptap hr { margin: 24px 0; border: 0; border-top: 1px solid #e2e2e2; }
 .composer-document .tiptap .ProseMirror-selectednode { outline: 1px solid var(--color-muted); outline-offset: 3px; }
-.composer-document .tiptap .node-column { min-width: 0; min-height: 64px; padding: 8px; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); }
+.composer-document .tiptap .node-column { min-width: 0; min-height: 64px; padding: 0; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); outline-offset: 4px; }
 .composer-document .tiptap .node-column:focus-within { outline-color: var(--color-muted); }
-.composer-document .tiptap .node-columns { gap: 16px; }
+.composer-document .tiptap .node-columns { gap: 4%; margin-bottom: 16px; }
+.composer-document .tiptap .node-section { min-height: 64px; margin: 0 0 16px; outline: 1px dashed color-mix(in srgb, var(--color-email-text) 18%, var(--color-email-surface)); outline-offset: 3px; }
+.composer-document .tiptap .node-section > p:last-child:has(> br.ProseMirror-trailingBreak:only-child) { min-height: 1px; height: 1px; margin: 0; line-height: 1px; }
 .composer-document .tiptap a { cursor: text; }
 .composer-document .tiptap table { max-width: 100%; }
 .email-composer > .ui-alert { margin-bottom: var(--space-16); }
+.composer-inspector { position: fixed; z-index: 60; inset-block: 96px 24px; inset-inline-end: 24px; width: 300px; overflow: auto; padding: 16px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-popover); color-scheme: light dark; }
+.composer-inspector[hidden] { display: none; }
+.composer-inspector-header { position: sticky; z-index: 1; top: -16px; display: flex; align-items: center; justify-content: space-between; margin: -16px -16px 12px; padding: 12px 16px; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.composer-inspector :is(input, select, textarea) { max-width: 100%; }
+.composer-inspector-hint { margin: 12px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.5; }
+@media (max-width: 700px) { .composer-inspector { inset: 72px 8px 8px; width: auto; } }
 :root {
   --re-bg: var(--color-surface);
   --re-text: var(--color-text);

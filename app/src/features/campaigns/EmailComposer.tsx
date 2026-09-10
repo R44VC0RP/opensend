@@ -1,8 +1,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
-import { defaultSlashCommands } from '@react-email/editor/ui'
-import { Bold, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, Type, Undo2 } from 'lucide-react'
+import { defaultSlashCommands, Inspector } from '@react-email/editor/ui'
+import { AlignCenter, AlignLeft, AlignRight, Bold, Box, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, Minus, MousePointer2, Paperclip, Plus, Redo2, SlidersHorizontal, Type, Undo2, X } from 'lucide-react'
 import { Alert, Button, DropdownMenu, IconButton, SkeletonText } from '../../components/ui'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
@@ -28,10 +28,6 @@ if (!defaultSlashCommands.some(item => item.title === 'Image')) {
     command: ({ editor: value, range }) => { value.chain().focus().deleteRange(range).run(); pickImage?.() },
   })
 }
-// Sections are not part of the block vocabulary; keep the slash menu to blocks that save.
-const section = defaultSlashCommands.findIndex(item => item.title === 'Section')
-if (section >= 0) defaultSlashCommands.splice(section, 1)
-
 export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailComposer({ attachmentIds = [], attachmentApi: providedAttachmentApi, initialHtml, disabled = false, onReady, onDirty, onAttach, onBusy }, ref) {
   const api = useApi()
   const attachmentApi = providedAttachmentApi ?? api.attachments
@@ -41,14 +37,17 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const cidBySource = useRef(new Map<string, string>())
   // Uploads must survive a failed prepare/save before their IDs reach attachmentIds.
   const uploadedInline = useRef(new Map<string, Attachment>())
-  const [hydrating, setHydrating] = useState(cidImageSources(initialHtml).size > 0)
-  const [content, setContent] = useState<EditorNode>(() => blockHtmlToDocument(initialHtml))
+  const needsHydration = useRef(cidImageSources(initialHtml).size > 0).current
+  const [hydrating, setHydrating] = useState(needsHydration)
+  const [content, setContent] = useState<EditorNode>(() => blockHtmlToDocument(needsHydration ? '' : initialHtml))
   const [generation, setGeneration] = useState(0)
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState(false)
   const busyListener = useRef(onBusy)
   busyListener.current = onBusy
   const [error, setError] = useState('')
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const inspector = useRef<HTMLElement>(null)
   const editor = useRef<EmailEditorRef>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const changed = useRef(false)
@@ -71,6 +70,11 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       button: { fontFamily, letterSpacing, fontSize: '15px', backgroundColor: '#181818', color: '#ffffff', padding: '12px 20px', borderRadius: '4px' },
       link: { color: '#3156c7', textDecoration: 'underline' },
       image: { maxWidth: '100%', height: 'auto' },
+      blockquote: { margin: '0 0 16px', padding: '4px 0 4px 16px', borderLeft: '3px solid #e2e2e2', color: '#595959' },
+      codeBlock: { margin: '0 0 16px', padding: '14px 16px', backgroundColor: '#f4f4f4', borderRadius: '4px', fontSize: '13px', lineHeight: '1.5' },
+      inlineCode: { backgroundColor: '#f4f4f4', borderRadius: '3px' },
+      list: { margin: '0 0 16px', paddingLeft: '24px' },
+      listItem: { fontSize: '16px', lineHeight: '1.6', margin: '0 0 6px' },
     } }
   })
 
@@ -96,6 +100,47 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   }
   // Run after child option reconciliation so the name and paste boundary remain installed.
   useEffect(() => { if (editor.current) synchronizeEditor(editor.current) })
+  useEffect(() => {
+    if (!inspectorOpen || !inspector.current) return
+    const label = () => {
+      inspector.current?.querySelectorAll<HTMLInputElement>('input, select, textarea').forEach(control => {
+        if (control.getAttribute('aria-label')) return
+        const row = control.closest<HTMLElement>('[data-re-inspector-prop-row]')
+        const text = row?.innerText?.split('\n').map(value => value.trim()).find(value => value && !/^(?:px|%|[0-9.]+)$/.test(value))
+        const section = control.closest<HTMLElement>('[data-re-inspector-section]')?.innerText?.split('\n').map(value => value.trim()).find(Boolean)
+        if (text) {
+          const siblings = [...(row?.querySelectorAll<HTMLInputElement>('input[type=text]') ?? [])], index = siblings.indexOf(control)
+          const side = siblings.length === 4 && index >= 0 ? ` ${['top', 'right', 'bottom', 'left'][index]}` : ''
+          control.setAttribute('aria-label', `${section && section !== text ? `${section} ` : ''}${text}${side}${control.type === 'color' ? ' picker' : ''}`)
+          return
+        }
+        let group = control.parentElement
+        while (group && group !== inspector.current && group.querySelectorAll('input, select').length !== 4) group = group.parentElement
+        if (!group || group === inspector.current) return
+        const controls = [...group.querySelectorAll<HTMLInputElement>('input, select')], controlIndex = controls.indexOf(control)
+        const containsSelect = controls.some(item => item.tagName === 'SELECT'), sides = ['top', 'right', 'bottom', 'left']
+        if (containsSelect) {
+          const sideGroups = [...(group.parentElement?.children ?? [])].filter(item => item.querySelectorAll('input, select').length === 4), side = sides[Math.max(0, sideGroups.indexOf(group))]
+          control.setAttribute('aria-label', `Border ${side} ${['width', 'color picker', 'color', 'style'][controlIndex]}`)
+        } else {
+          let holder = group.parentElement
+          while (holder && holder !== inspector.current && !/^(?:Padding|Rounded)\b/.test(holder.innerText.trim())) holder = holder.parentElement
+          const property = holder?.innerText.trim().split('\n')[0] ?? section ?? 'Style'
+          control.setAttribute('aria-label', `${property} ${sides[controlIndex]}`)
+        }
+      })
+      inspector.current?.querySelectorAll<HTMLButtonElement>('button').forEach(button => {
+        if (button.getAttribute('aria-label') || button.innerText.trim() || button.title) return
+        const group = button.closest<HTMLElement>('[role=group]'), buttons = [...(group?.querySelectorAll<HTMLButtonElement>('button') ?? [])], index = buttons.indexOf(button)
+        const section = button.closest<HTMLElement>('[data-re-inspector-section]')?.innerText?.split('\n').map(value => value.trim()).find(Boolean) ?? 'Style'
+        button.setAttribute('aria-label', `${index === 0 ? 'Use uniform' : 'Use individual'} ${section.toLowerCase()} values`)
+      })
+    }
+    label()
+    const observer = new MutationObserver(label)
+    observer.observe(inspector.current, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [inspectorOpen])
   useEffect(() => {
     pickImage = () => { if (!locked) { onDirty(); fileInput.current?.click() } }
     return () => { pickImage = null }
@@ -218,6 +263,18 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     }
     run(instance)
   }
+  function align(alignment: 'left' | 'center' | 'right') {
+    command(instance => {
+      const { state } = instance, selection = state.selection, selected = selection.toJSON().type === 'node' ? state.doc.nodeAt(selection.from) : null
+      const allowed = new Set(['heading', 'paragraph', 'image', 'blockquote', 'codeBlock', 'bulletList', 'orderedList', 'listItem', 'button', 'columnsColumn'])
+      if (selected && allowed.has(selected.type.name)) { instance.view.dispatch(state.tr.setNodeMarkup(selection.from, undefined, { ...selected.attrs, alignment })); instance.view.focus(); return }
+      for (let depth = selection.$from.depth; depth >= 1; depth--) {
+        const node = selection.$from.node(depth)
+        if (!allowed.has(node.type.name)) continue
+        instance.view.dispatch(state.tr.setNodeMarkup(selection.$from.before(depth), undefined, { ...node.attrs, alignment })); instance.view.focus(); return
+      }
+    }, false, true)
+  }
   const inactive = locked || !ready
   return <div className="email-composer" data-inactive={locked || undefined} onClickCapture={event => { if (locked) { event.preventDefault(); event.stopPropagation() } }} onKeyDownCapture={event => {
     if (event.key === 'Escape' && (event.target as Element).closest(linkForms)) {
@@ -239,10 +296,13 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
           { label: 'Attachment', icon: <Paperclip size={16} />, disabled: !onAttach, onSelect: () => onAttach?.() },
           { label: 'Bullet list', icon: <List size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().toggleBulletList().run()) },
           { label: 'Divider', icon: <Minus size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().setHorizontalRule().run()) },
+          { label: 'Styled section', icon: <Box size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertSection().run()) },
           { label: 'Two columns', icon: <Columns2 size={16} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
         ]} />
         <div className="cluster"><IconButton size="sm" label="Bold" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Bold size={16} /></IconButton><IconButton size="sm" label="Italic" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Italic size={16} /></IconButton></div>
+        <div className="cluster"><IconButton size="sm" label="Align left" disabled={inactive} onClick={() => align('left')}><AlignLeft size={16} /></IconButton><IconButton size="sm" label="Align center" disabled={inactive} onClick={() => align('center')}><AlignCenter size={16} /></IconButton><IconButton size="sm" label="Align right" disabled={inactive} onClick={() => align('right')}><AlignRight size={16} /></IconButton></div>
         {busy && <span className="muted" role="status">Preparing…</span>}
+        <Button size="sm" variant="ghost" disabled={inactive} aria-pressed={inspectorOpen} onClick={() => setInspectorOpen(value => !value)}><SlidersHorizontal size={16} />Design</Button>
         <div className="cluster composer-history"><IconButton size="sm" label="Undo" disabled={inactive} onClick={() => command(e => e.chain().focus().undo().run())}><Undo2 size={16} /></IconButton><IconButton size="sm" label="Redo" disabled={inactive} onClick={() => command(e => e.chain().focus().redo().run())}><Redo2 size={16} /></IconButton></div>
         <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
       </div>
@@ -251,7 +311,15 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><span className="sr-only">Loading visual composer</span></div>}
-        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info('[OpenSend timing] campaign editor ready', { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }} />
+        <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write your email, or type / to insert a block…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info('[OpenSend timing] campaign editor ready', { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
+          <Inspector.Root ref={inspector} className="composer-inspector" hidden={!inspectorOpen}>
+            <div className="composer-inspector-header"><strong>Design</strong><IconButton size="sm" label="Close design panel" onClick={() => setInspectorOpen(false)}><X size={16} /></IconButton></div>
+            <Inspector.Breadcrumb />
+            <Inspector.Document>{() => <p className="composer-inspector-hint">Select an image, button, section, column, heading, or paragraph to edit its design.</p>}</Inspector.Document>
+            <Inspector.Node />
+            <Inspector.Text>{() => <p className="composer-inspector-hint">Choose the block name above to style the whole block. Use the formatting toolbar for selected text.</p>}</Inspector.Text>
+          </Inspector.Root>
+        </EmailEditor>
       </div>
     </div>
   </div>

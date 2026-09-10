@@ -267,7 +267,7 @@ export type CampaignTemplateDraft = {
     fromName?: string;
     replyTo?: Array<string>;
     /**
-     * Concrete OpenSend block HTML shared with the campaign editor. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
+     * Concrete OpenSend block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
      */
     html?: string;
     attachments?: Array<string>;
@@ -547,7 +547,7 @@ export type CreateCampaignInput = {
         [key: string]: string | number | boolean | null;
     };
     /**
-     * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
+     * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
      */
     html?: string;
     /**
@@ -679,7 +679,7 @@ export type CampaignUpdateInput = {
             [key: string]: string | number | boolean | null;
         };
         /**
-         * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
+         * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.
          */
         html?: string;
     };
