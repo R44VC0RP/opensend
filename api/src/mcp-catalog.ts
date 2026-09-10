@@ -3,7 +3,9 @@ import type { Tool } from '@modelcontextprotocol/server';
 import type { App } from './core.js';
 
 type ObjectValue = Record<string, any>;
-export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; }
+export interface McpStepResult { status: number; requestId: string | null; response: any; }
+export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
+export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
@@ -117,7 +119,7 @@ function localSchema(spec: ObjectValue, root: Tool['inputSchema']): Tool['inputS
   const schema: Tool['inputSchema'] = copy(root);
   if (Object.keys(defs).length) schema.$defs = defs;
   if (bytes(schema) > 512 * 1024) invalid('Tool schema exceeds its byte limit.');
-  return schema;
+  return schema as unknown as Tool['inputSchema'];
 }
 function validator(schema: Tool['inputSchema'] | NonNullable<Tool['outputSchema']>): (value: unknown) => boolean {
   const copy = structuredClone(schema) as Schema;
@@ -195,6 +197,138 @@ function combineReads(operations: Map<string, McpOperation>, spec: ObjectValue):
     operations.delete(listName); operations.delete(detailName); operations.set(name, combined);
   }
 }
+const genericOutput: NonNullable<Tool['outputSchema']> = {
+  type: 'object', anyOf: [
+    { type: 'object', properties: { status: { type: 'integer' }, requestId: { type: ['string', 'null'] }, response: {} }, required: ['status', 'requestId', 'response'], additionalProperties: false },
+    { type: 'object', properties: { status: { type: ['integer', 'null'] }, requestId: { type: ['string', 'null'] }, response: {}, error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } }, required: ['code', 'message'], additionalProperties: true } }, required: ['status', 'requestId', 'error'], additionalProperties: false },
+  ],
+};
+function alias(source: McpOperation, name: string, description: string): McpOperation {
+  const tool: Tool = { ...source.tool, name, description };
+  const operation = { ...source, tool };
+  freeze(tool); Object.freeze(operation); return operation;
+}
+function actionSchema(actions: Record<string, McpOperation>, field = 'action', requireConfirmation = false): Tool['inputSchema'] {
+  const defs: ObjectValue = {};
+  const branches = Object.entries(actions).map(([action, operation]) => {
+    const schema = structuredClone(operation.tool.inputSchema) as ObjectValue;
+    for (const [name, definition] of Object.entries(schema.$defs ?? {})) {
+      if (defs[name] && JSON.stringify(defs[name]) !== JSON.stringify(definition)) invalid(`Conflicting schema definition ${name}.`);
+      defs[name] = definition;
+    }
+    delete schema.$defs;
+    schema.properties = { [field]: { type: 'string', const: action }, ...(schema.properties ?? {}), ...(requireConfirmation && !operation.write ? { confirm: { type: 'boolean', const: true, description: 'Explicit authorization to perform this workflow action.' } } : {}) };
+    schema.required = [...new Set([field, ...(schema.required ?? []), ...(requireConfirmation && !operation.write ? ['confirm'] : [])])];
+    return schema;
+  });
+  return { type: 'object', properties: { [field]: { type: 'string', enum: Object.keys(actions) } }, required: [field], oneOf: branches, ...(Object.keys(defs).length ? { $defs: defs } : {}) };
+}
+function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: (args: ObjectValue) => McpPlan, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput): McpOperation {
+  const output = structuredClone(outputSchema);
+  const tool: Tool = { name, description, inputSchema: input, outputSchema: output, annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } };
+  const operation: McpOperation = { tool, method: 'custom', path: '/v1/custom', queryParameters: [], write, validate: validator(input), validateOutput: validator(output), plan };
+  freeze(tool); Object.freeze(operation); return operation;
+}
+function actionOutputSchema(actions: Record<string, McpOperation>): NonNullable<Tool['outputSchema']> {
+  const defs: ObjectValue = {}, variants: unknown[] = [];
+  for (const operation of Object.values(actions)) {
+    const schema = structuredClone(operation.tool.outputSchema) as ObjectValue;
+    for (const [name, definition] of Object.entries(schema.$defs ?? {})) {
+      if (defs[name] && JSON.stringify(defs[name]) !== JSON.stringify(definition)) invalid(`Conflicting output schema definition ${name}.`);
+      defs[name] = definition;
+    }
+    if (!Array.isArray(schema.anyOf)) invalid('Action source output must use anyOf.');
+    variants.push(...schema.anyOf);
+  }
+  return { type: 'object', anyOf: variants as any[], ...(Object.keys(defs).length ? { $defs: defs } : {}) };
+}
+function actionTool(name: string, description: string, actions: Record<string, McpOperation>, field = 'action') {
+  const write = Object.values(actions).some(operation => operation.write);
+  return custom(name, description, actionSchema(actions, field, write), write, args => {
+    const action = args[field]; const operation = actions[action];
+    if (!operation) invalid(`Unknown ${field} for ${name}.`);
+    const next = { ...args }; delete next[field];
+    if (!operation.write) { delete next.confirm; delete next.idempotencyKey; }
+    return { steps: [{ operation, args: next }] };
+  }, actionOutputSchema(actions));
+}
+function findSchema(source: McpOperation, extra: ObjectValue = {}): Tool['inputSchema'] {
+  const schema = structuredClone(source.tool.inputSchema) as ObjectValue;
+  schema.properties = { ...(schema.properties ?? {}), ...extra };
+  return schema as unknown as Tool['inputSchema'];
+}
+function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperation>): ReadonlyMap<string, McpOperation> {
+  const need = (name: string, source = combined) => source.get(name) ?? invalid(`Missing source operation ${name}.`);
+  const result = new Map<string, McpOperation>();
+  const add = (operation: McpOperation) => { if (result.has(operation.tool.name)) invalid(`Duplicate curated tool ${operation.tool.name}.`); result.set(operation.tool.name, operation); };
+  const direct = (name: string, description: string, source: string) => add(alias(need(source), name, description));
+
+  const campaignList = need('listCampaigns', raw), campaignDetail = need('getCampaign', raw);
+  const campaignFindSchema = findSchema(campaignList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
+  campaignFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(campaignList.queryParameters.map(parameter => [parameter, false])) } };
+  add(custom('findCampaigns', 'List and filter campaign summaries, or supply id alone to retrieve one complete campaign draft.', campaignFindSchema as Tool['inputSchema'], false, args => {
+    if (typeof args.id === 'string') return { steps: [{ operation: campaignDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) };
+    return { steps: [{ operation: campaignList, args }] };
+  }));
+  add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
+  const previewCampaign = need('previewCampaign', raw), reviewCampaign = need('reviewCampaign', raw);
+  add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. ${EMAIL_SEND_CONFIRMATION}`, reviewCampaign.tool.inputSchema, true, args => ({
+    steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args }],
+    combine: ([preview, review]) => ({ ...review, response: { ...review.response, preview: preview.response } }),
+  })));
+  add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: need('sendCampaign', raw), schedule: need('scheduleCampaign', raw), cancel: need('cancelCampaign', raw) }, 'mode'));
+  direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
+  direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
+
+  direct('findContacts', 'List and filter contacts, or supply id alone to retrieve one contact with its list memberships.', 'getContacts');
+  add(actionTool('saveContact', 'Create or update a contact profile, or record explicit consent evidence. Profile metadata never implies consent.', { create: need('createContact', raw), update: need('updateContact', raw), consent: need('updateContactConsent', raw) }));
+  direct('deleteContact', 'Remove a contact profile and memberships while retaining required consent and suppression safeguards.', 'deleteContact');
+  add(actionTool('importContacts', 'Preview, inspect, list or commit CSV contact imports, including mapped contact metadata.', { preview: need('previewContactImport', raw), get: need('getContactImport', raw), list: need('listContactImports', raw), commit: need('commitContactImport', raw) }));
+
+  const lists = need('getContactLists');
+  add(custom('findLists', 'List and search contact lists, or supply id alone to retrieve one list and its members.', findSchema(lists, { includeMembers: { type: 'boolean', default: true } }), false, args => {
+    if (typeof args.id !== 'string') { const next = { ...args }; delete next.includeMembers; return { steps: [{ operation: lists, args: next }] }; }
+    const detail = need('getContactList', raw), members = need('listListMembers', raw);
+    const steps: Array<{ operation: McpOperation; args: ObjectValue }> = [{ operation: detail, args: { id: args.id } }];
+    if (args.includeMembers !== false) steps.push({ operation: members, args: { id: args.id, limit: 100 } });
+    return { steps, parallel: true, combine: values => ({ ...values[0]!, response: { data: [{ ...values[0]!.response, ...(values[1] ? { members: values[1].response.data, membersNextCursor: values[1].response.nextCursor } : {}) }], nextCursor: null } }) };
+  }));
+  add(actionTool('saveList', 'Create or update a contact list.', { create: need('createContactList', raw), update: need('updateContactList', raw) }));
+  add(actionTool('setListMembers', 'Add contacts to a list or remove one contact from it.', { add: need('addListMembers', raw), remove: need('removeListMember', raw) }));
+  direct('deleteList', 'Delete a contact list.', 'deleteContactList');
+
+  direct('findSegments', 'List and search dynamic segments, or supply id alone to retrieve one segment and its rules.', 'getSegments');
+  add(actionTool('saveSegment', 'Create or update a dynamic segment, or preview its current matching and eligible contacts.', { create: need('createSegment', raw), update: need('updateSegment', raw), preview: need('previewSegment', raw) }));
+  direct('deleteSegment', 'Delete a dynamic segment.', 'deleteSegment');
+
+  const emails = need('getEmails'), emailDetail = need('getEmail', raw), emailContent = need('getEmailContent', raw), emailEvents = need('listEmailEvents', raw);
+  add(custom('findEmails', 'List and filter email records, or supply id alone to retrieve one email with its content and delivery events.', emails.tool.inputSchema, false, args => {
+    if (typeof args.id !== 'string') return { steps: [{ operation: emails, args }] };
+    return { steps: [{ operation: emailDetail, args: { id: args.id } }, { operation: emailContent, args: { id: args.id } }, { operation: emailEvents, args: { id: args.id, limit: 100 } }], parallel: true,
+      combine: ([detail, content, events]) => ({ ...detail, response: { data: [{ ...detail.response, content: content.response, events: events.response.data, eventsNextCursor: events.response.nextCursor }], nextCursor: null } }) };
+  }));
+  add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
+
+  add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
+  direct('uploadAttachment', 'Upload a private regular or inline attachment.', 'uploadAttachment');
+  direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
+
+  const webhooks = need('getWebhooks');
+  add(custom('findWebhooks', 'List webhook endpoints, or supply id alone to retrieve one endpoint with recent deliveries.', webhooks.tool.inputSchema, false, args => {
+    if (typeof args.id !== 'string') return { steps: [{ operation: webhooks, args }] };
+    return { steps: [{ operation: need('getWebhook', raw), args: { id: args.id } }, { operation: need('listWebhookDeliveries', raw), args: { id: args.id, limit: 100 } }], parallel: true,
+      combine: ([detail, deliveries]) => ({ ...detail, response: { data: [{ ...detail.response, deliveries: deliveries.response.data, deliveriesNextCursor: deliveries.response.nextCursor }], nextCursor: null } }) };
+  }));
+  add(actionTool('saveWebhook', 'Create or update a webhook endpoint and its event filters.', { create: need('createWebhook', raw), update: need('updateWebhook', raw) }));
+  direct('deleteWebhook', 'Delete a webhook endpoint.', 'deleteWebhook');
+  direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
+  direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
+  direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
+  direct('createAgentToken', 'Create a nonrefreshable API token lasting 5 minutes to 24 hours for temporary uncommitted scripts. Supports read or read-plus-send access and optional sender-domain restrictions.', 'createAgentToken');
+
+  if (result.size !== 29) invalid(`Curated catalog must contain exactly 29 tools, got ${result.size}.`);
+  return result;
+}
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
   const spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0' } });
   if (bytes(spec) > 2 * 1024 * 1024 || !object(spec.paths)) invalid('OpenAPI document exceeds its byte limit or has no paths.');
@@ -224,7 +358,9 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       operations.set(name, op);
     }
   }
+  const raw = new Map(operations);
   combineReads(operations, spec);
-  if (!operations.size || bytes([...operations.values()].map(o => o.tool)) > 4 * 1024 * 1024) invalid('Tool catalog is empty or exceeds its byte limit.');
-  return operations;
+  const curated = curate(operations, raw);
+  if (bytes([...curated.values()].map(o => o.tool)) > 4 * 1024 * 1024) invalid('Tool catalog exceeds its byte limit.');
+  return curated;
 }

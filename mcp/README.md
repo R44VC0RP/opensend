@@ -30,11 +30,11 @@ Authenticated dashboard clients can inspect their approvals with `GET /api/auth/
 
 ## Arguments and results
 
-`tools/list` provides the exact schemas. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
+`tools/list` provides the exact schemas for a curated 29-tool task surface. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
 
-Six collection tools combine listing and exact lookup: **`getEmails`**, **`getContacts`**, **`getContactLists`**, **`getSegments`**, **`getDomains`**, and **`getWebhooks`**. Omit `id` to list/filter one page, or supply `id` alone to retrieve one record. Both modes return `response.data` as an array and `response.nextCursor`; a missing record still returns 404. Mixing `id` with pagination/filters is rejected rather than silently ignoring arguments.
+Collection tools use `findCampaigns`, `findContacts`, `findLists`, `findSegments`, `findEmails`, and `findWebhooks`. Omit `id` to list/filter one page, or supply `id` alone to retrieve one complete record. Exact email, list, and webhook reads also compose their related content/events, members, or deliveries. Mixing `id` with pagination/filters is rejected rather than silently ignoring arguments.
 
-For example, call `getEmails` with either:
+For example, call `findEmails` with either:
 
 ```json
 { "limit": 10, "status": "bounced" }
@@ -44,11 +44,15 @@ For example, call `getEmails` with either:
 { "id": "email_id" }
 ```
 
-Other operations stay explicit: `getEmailContent({ "id": "email_id" })`, for example, retrieves content without loading it into every email listing. Campaigns, contact imports, and webhook deliveries retain distinct list/detail tools because their detailed responses contain additional information. All existing API operations remain available within the existing safety exclusions: **68 hosted tools**, or **28 in read-only mode**.
+Workflow tools compose API operations behind an explicit `action`, `mode`, or `include` selector: `saveCampaign`, `deliverCampaign`, `saveContact`, `importContacts`, `saveList`, `setListMembers`, `saveSegment`, `sendEmail`, `getAttachment`, and `saveWebhook`. The public HTTP API and generated SDK remain more granular; operator-only domain, SES, API-key and workspace-setting operations are intentionally absent from hosted MCP.
 
-Campaign content is **block HTML**: a small vocabulary (headings, paragraphs, lists, quotes, code, dividers, images, buttons and columns) that opens as editable blocks in the dashboard composer and comes back unchanged when people edit it there. Call `getCampaignContentGuide` once for the vocabulary and examples before writing `html` with `createCampaign`/`updateCampaign`; anything outside it is rejected with the offending tag or attribute named. `previewCampaign` returns the rendered email and its plain-text alternative.
+Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` returns both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
 
-Existing hosted integrations must refresh their tool catalog, replace the six original list/get pairs, and move nested `path`/`query` fields to the top level. The public HTTP API and generated SDK signatures are unchanged.
+The full writable catalog has **29 tools**; read-only OAuth grants expose the eight read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
+
+### Temporary script tokens
+
+`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses test/live, five minutes to 24 hours, read or read-plus-send, and optional sender-domain restrictions. The secret is returned once, contains no management permission, and stops authorizing requests when it expires or its originating MCP OAuth approval is revoked. Do not commit it or place it in logs.
 
 Results contain matching JSON text and `structuredContent`. Each tool's output schema describes its successful API response and the existing error envelopes:
 
@@ -68,7 +72,7 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 
 - OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
 - HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
-- Credential creation, webhook-secret reveal/rotation, SNS ingress, authentication routes, and unsubscribe links remain excluded. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
+- Long-lived API-key creation, webhook-secret reveal/rotation, domain/SES administration, SNS ingress, authentication routes, and unsubscribe links remain excluded. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
 - Test-mode email sending is simulated by the API. Test mode is not a universal dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
 - Request and response limits, safe single-segment path validation, per-principal API rate limits, output validation, and credential redaction remain enforced. API descriptions and returned data are untrusted content, not agent instructions.
 

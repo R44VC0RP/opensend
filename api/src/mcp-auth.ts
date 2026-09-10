@@ -81,7 +81,7 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const allowed = originalScopes(row.referenceId).filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { keyId, workspaceId: runtime.config.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [] };
+  const actor: Actor = { keyId, workspaceId: runtime.config.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
   return { actor, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 

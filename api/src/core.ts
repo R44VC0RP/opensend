@@ -9,7 +9,7 @@ export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Mode = 'live' | 'test';
 export type Permission = 'read' | 'send' | 'manage';
-export interface Actor { workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; email?: string; name?: string; }
+export interface Actor { workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string; }
 export interface Storage {
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;

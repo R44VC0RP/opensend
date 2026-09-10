@@ -14,6 +14,15 @@ export type ApiError = {
     };
 };
 
+export type AgentToken = {
+    token: string;
+    expiresAt: string;
+    permissions: Array<'read' | 'send'>;
+    environment: 'live' | 'test';
+    domains: Array<string>;
+    purpose: string;
+};
+
 export type ApiKey = {
     id: string;
     name: string;
@@ -908,6 +917,78 @@ export type GetCurrentIdentityResponses = {
 };
 
 export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCurrentIdentityResponses];
+
+export type CreateAgentTokenData = {
+    body: {
+        permissions: [
+            'read'
+        ] | [
+            'read',
+            'send'
+        ];
+        environment: 'live' | 'test';
+        expiresInMinutes: number;
+        domains?: Array<string>;
+        purpose: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent-tokens';
+};
+
+export type CreateAgentTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateAgentTokenError = CreateAgentTokenErrors[keyof CreateAgentTokenErrors];
+
+export type CreateAgentTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentToken;
+};
+
+export type CreateAgentTokenResponse = CreateAgentTokenResponses[keyof CreateAgentTokenResponses];
 
 export type ListApiKeysData = {
     body?: never;

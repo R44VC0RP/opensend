@@ -697,107 +697,67 @@ describe('Hosted MCP OAuth and tools', () => {
     }
   });
 
-  test('hosted MCP publishes flat schemas and preserves collection, exact-ID, content and summary/detail contracts', async t => {
+  test('hosted MCP publishes the curated task catalog and composes campaign, contact, email and temporary-token workflows', async t => {
     const db = await fixtureDatabase(t);
-    const { token } = await oauthGrant(t, db);
+    const { token, consentId } = await oauthGrant(t, db);
     const initialized = await rpc(token, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } });
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 68);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 28);
+    assert.equal(catalog.tools.length, 29);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 8);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
+    assert.deepEqual([...tools.keys()].sort(), [
+      'archiveCampaign', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
+      'deliverCampaign', 'findCampaigns', 'findContacts', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getMetrics',
+      'importContacts', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveWebhook',
+      'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
+    ].sort());
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
       assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
     }
-    for (const [name, oldList, oldDetail] of [
-      ['getEmails', 'listEmails', 'getEmail'], ['getContacts', 'listContacts', 'getContact'],
-      ['getContactLists', 'listContactLists', 'getContactList'], ['getSegments', 'listSegments', 'getSegment'],
-      ['getDomains', 'listDomains', 'getDomain'], ['getWebhooks', 'listWebhooks', 'getWebhook'],
-    ]) {
-      const tool = tools.get(name);
-      assert.ok(tool, name);
-      assert.equal(tool.inputSchema.properties.id.type, 'string', name);
-      assert.ok(!tool.inputSchema.required?.includes('id'), name);
-      assert.ok(!tools.has(oldList) && !tools.has(oldDetail), name);
-      const missing = await rpc(token, 'tools/call', { name, arguments: { id: unique('missing') } });
-      assert.equal(missing.isError, true, redact(missing));
-      // Domain routes reject test-mode access before looking up live SES identities.
-      assert.equal(missing.structuredContent.status, name === 'getDomains' ? 403 : 404, redact(missing));
-      assert.equal(missing.structuredContent.error.code, name === 'getDomains' ? 'TEST_EXTERNAL_OPERATION' : 'NOT_FOUND', redact(missing));
-      assert.equal(missing.structuredContent.response.data, undefined, 'A missing exact ID must not become an empty successful page.');
-    }
-    for (const name of ['listCampaigns', 'getCampaign', 'listContactImports', 'getContactImport', 'listWebhookDeliveries', 'getWebhookDelivery']) assert.ok(tools.has(name), name);
-    assert.deepEqual(tools.get('getEmailContent')!.inputSchema.required, ['id']);
-    assert.equal(tools.get('createContact')!.inputSchema.properties.confirm.const, true);
-    assert.equal(tools.get('createContact')!.inputSchema.properties.idempotencyKey.type, 'string');
-    const archiveTool = tools.get('setCampaignArchived');
-    assert.ok(archiveTool);
-    assert.equal(archiveTool.annotations.readOnlyHint, false);
-    assert.equal(archiveTool.inputSchema.properties.id.type, 'string');
-    assert.equal(archiveTool.inputSchema.properties.confirm.const, true);
-    assert.deepEqual([...archiveTool.inputSchema.required].sort(), ['body', 'confirm', 'id']);
-    assert.equal(archiveTool.inputSchema.$defs.CampaignArchiveInput.properties.archived.type, 'boolean');
-    assert.deepEqual(archiveTool.inputSchema.$defs.CampaignArchiveInput.required, ['archived']);
-    assert.equal(archiveTool.outputSchema.anyOf[0].properties.response.$ref, '#/$defs/Campaign');
-    assert.ok(archiveTool.outputSchema.$defs.Campaign.required.includes('archivedAt'));
-    assert.deepEqual(tools.get('listCampaigns')!.inputSchema.properties.archived.enum, ['true', 'false']);
-    const stateTool = tools.get('getCampaignState');
-    assert.ok(stateTool);
-    assert.equal(stateTool.annotations.readOnlyHint, true);
-    assert.deepEqual(stateTool.inputSchema.required, ['id']);
-    assert.equal(stateTool.inputSchema.properties.id.type, 'string');
-    assert.equal(stateTool.inputSchema.properties.confirm, undefined);
-    assert.equal(stateTool.outputSchema.anyOf[0].properties.response.$ref, '#/$defs/CampaignState');
-    const stateSchema = stateTool.outputSchema.$defs.CampaignState;
-    const stateFields = ['id', 'environment', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
-    assert.deepEqual(Object.keys(stateSchema.properties).sort(), [...stateFields].sort());
-    assert.deepEqual([...stateSchema.required].sort(), [...stateFields].sort());
-    assert.equal(stateSchema.properties.revision.type, 'integer');
-    assert.equal(stateSchema.properties.updatedAt.type, 'string');
-    assert.deepEqual(stateSchema.properties.status.enum, ['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
+    for (const removed of ['getDomains', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
 
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
     for (let index = 0; index < 2; index++) {
-      const created = await callTool(token, 'createContact', { body: { email: address(), name: label }, confirm: true, idempotencyKey: unique('mcp-contact') }, 201);
+      const created = await callTool(token, 'saveContact', { action: 'create', body: { email: address(), name: label }, confirm: true, idempotencyKey: unique('mcp-contact') }, 201);
       cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${created.id}`, MANAGER), [200, 404]); });
       contacts.push(created);
     }
-    const first = await callTool(token, 'getContacts', { search: label, limit: 1 });
+    const first = await callTool(token, 'findContacts', { search: label, limit: 1 });
     assert.deepEqual(first, ok(await http('GET', `/v1/contacts?search=${encodeURIComponent(label)}&limit=1`, MANAGER)));
     assert.equal(first.data.length, 1);
     assert.equal(typeof first.nextCursor, 'string');
-    const second = await callTool(token, 'getContacts', { search: label, limit: 1, cursor: first.nextCursor });
+    const second = await callTool(token, 'findContacts', { search: label, limit: 1, cursor: first.nextCursor });
     assert.equal(second.nextCursor, null);
     assert.deepEqual([...first.data, ...second.data].map((row: Json) => row.id).sort(), contacts.map(row => row.id).sort());
-    const exact = await callTool(token, 'getContacts', { id: contacts[0].id });
+    const exact = await callTool(token, 'findContacts', { id: contacts[0].id });
     assert.deepEqual(exact, { data: [ok(await http('GET', `/v1/contacts/${contacts[0].id}`, MANAGER))], nextCursor: null });
     for (const args of [{ id: contacts[0].id, search: label }, { id: contacts[0].id, limit: 1 }, { path: { id: contacts[0].id } }, { query: { search: label } }]) {
-      const invalid = await rpc(token, 'tools/call', { name: 'getContacts', arguments: args });
+      const invalid = await rpc(token, 'tools/call', { name: 'findContacts', arguments: args });
       assert.equal(invalid.isError, true, redact(invalid));
       assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENTS', redact(invalid));
       assert.equal(invalid.structuredContent.status, null, 'Invalid input must be rejected before API dispatch.');
     }
-    const noConfirmation = await rpc(token, 'tools/call', { name: 'updateContact', arguments: { id: contacts[0].id, body: { name: 'not authorized' } } });
+    const noConfirmation = await rpc(token, 'tools/call', { name: 'saveContact', arguments: { action: 'update', id: contacts[0].id, body: { name: 'not authorized' } } });
     assert.equal(noConfirmation.structuredContent.error.code, 'CONFIRMATION_REQUIRED', redact(noConfirmation));
-    const updated = await callTool(token, 'updateContact', { id: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
+    const updated = await callTool(token, 'saveContact', { action: 'update', id: contacts[0].id, body: { name: `${label}-updated` }, confirm: true });
     assert.equal(updated.name, `${label}-updated`);
 
     // The dashboard fixture is explicitly test-mode; no worker or SES delivery is needed for content reads.
     const message = mail({ text: 'Synthetic hosted MCP content snapshot.' });
     const sent = ok(await http('POST', '/v1/emails/send', MANAGER, message), 202);
-    const content = await callTool(token, 'getEmailContent', { id: sent.id });
-    assert.equal(content.text, message.text);
-    assert.equal(content.simulated, true);
-    const email = await callTool(token, 'getEmails', { id: sent.id });
+    const email = await callTool(token, 'findEmails', { id: sent.id });
     assert.equal(email.data[0].id, sent.id);
-    assert.equal(email.nextCursor, null);
+    assert.equal(email.data[0].content.text, message.text);
+    assert.equal(email.data[0].content.simulated, true);
+    assert.ok(Array.isArray(email.data[0].events));
     const draftName = unique('mcp-name-only');
-    const draftArgs = { body: { name: draftName }, confirm: true, idempotencyKey: unique('mcp-draft') };
-    const unfinished = await callTool(token, 'createCampaign', draftArgs, 201);
+    const draftArgs = { action: 'create', body: { name: draftName }, confirm: true, idempotencyKey: unique('mcp-draft') };
+    const unfinished = await callTool(token, 'saveCampaign', draftArgs, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/campaigns/${unfinished.id}`, MANAGER)); });
     assert.equal(unfinished.draft.name, draftName);
     assert.equal(unfinished.draft.region, ok(await http('GET', '/v1/regions', MANAGER)).defaultRegion);
@@ -810,10 +770,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(editorUrl.pathname, `/campaigns/${unfinished.id}/edit`);
     assert.equal(editorUrl.searchParams.get('environment'), 'test');
     assert.equal(editorUrl.searchParams.get('region'), null);
-    assert.equal((await callTool(token, 'createCampaign', draftArgs, 201)).id, unfinished.id);
-    assert.equal((await callTool(token, 'getCampaign', { id: unfinished.id })).url, unfinished.url);
-    assert.equal((await callTool(token, 'listCampaigns', { search: draftName })).data[0].id, unfinished.id);
-    const savedDraft = await callTool(token, 'updateCampaign', { id: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
+    assert.equal((await callTool(token, 'saveCampaign', draftArgs, 201)).id, unfinished.id);
+    assert.equal((await callTool(token, 'findCampaigns', { id: unfinished.id })).data[0].url, unfinished.url);
+    assert.equal((await callTool(token, 'findCampaigns', { search: draftName })).data[0].id, unfinished.id);
+    const savedDraft = await callTool(token, 'saveCampaign', { action: 'update', id: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
     assert.equal(savedDraft.draft.region, unfinished.draft.region);
     assert.equal(savedDraft.revision, 2);
     error(await http('POST', `/v1/campaigns/${unfinished.id}/review`, MANAGER, { revision: 2 }), 422, 'CAMPAIGN_INCOMPLETE');
@@ -822,49 +782,52 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2, reviewId: 'missing-review' }), 409, 'STALE_CAMPAIGN_REVIEW');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: '   ' }), 422, 'VALIDATION_FAILED');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: draftName, from: 'invalid' }), 422, 'VALIDATION_FAILED');
-    await callTool(token, 'setCampaignArchived', { id: unfinished.id, body: { archived: true }, confirm: true });
-    await callTool(token, 'setCampaignArchived', { id: unfinished.id, body: { archived: false }, confirm: true });
+    await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: true }, confirm: true });
+    await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: false }, confirm: true });
 
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-audience') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id }, { name: unique('mcp-campaign') });
-    const summaries = await callTool(token, 'listCampaigns', { search: campaign.draft.name });
+    const summaries = await callTool(token, 'findCampaigns', { search: campaign.draft.name });
     const summary = summaries.data.find((row: Json) => row.id === campaign.id);
     assert.ok(summary);
     assert.equal(summary.draft.html, undefined);
-    const detail = await callTool(token, 'getCampaign', { id: campaign.id });
+    const detail = (await callTool(token, 'findCampaigns', { id: campaign.id })).data[0];
     assert.equal(detail.draft.html, campaign.draft.html);
     assert.equal(detail.archivedAt, null);
-    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), Object.fromEntries(stateFields.map(field => [field, detail[field]])));
-    const missingState = await rpc(token, 'tools/call', { name: 'getCampaignState', arguments: { id: unique('missing') } });
-    assert.equal(missingState.isError, true, redact(missingState));
-    assert.equal(missingState.structuredContent.status, 404);
-    assert.equal(missingState.structuredContent.error.code, 'NOT_FOUND');
     cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
-    const archived = await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: true }, confirm: true });
+    const archived = await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: true }, confirm: true });
     assert.equal(typeof archived.archivedAt, 'string');
     assert.deepEqual(archived.draft, detail.draft);
-    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), Object.fromEntries(stateFields.map(field => [field, archived[field]])));
-    assert.deepEqual((await callTool(token, 'listCampaigns', { search: campaign.draft.name })).data, []);
-    assert.equal((await callTool(token, 'listCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
-    assert.equal((await callTool(token, 'setCampaignArchived', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
+    assert.deepEqual((await callTool(token, 'findCampaigns', { search: campaign.draft.name })).data, []);
+    assert.equal((await callTool(token, 'findCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
+    assert.equal((await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
+
+    const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], environment: 'test', expiresInMinutes: 5, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
+    secrets.add(temporary.token);
+    assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, 'test');
+    error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], environment: 'test', expiresInMinutes: 5, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
+    const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
+    error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
+    ok(await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId }));
+    error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
   });
 
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 28);
+    assert.equal(catalog.tools.length, 8);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
-    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getContacts'));
-    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCampaignState'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
+    assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
-    assert.deepEqual(await callTool(token, 'getCampaignState', { id: campaign.id }), ok(await http('GET', `/v1/campaigns/${campaign.id}/state`, MANAGER)));
-    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'setCampaignArchived'));
-    const archiveDenied = await rpc(token, 'tools/call', { name: 'setCampaignArchived', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
+    assert.equal((await callTool(token, 'findCampaigns', { id: campaign.id })).data[0].id, campaign.id);
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'archiveCampaign'));
+    const archiveDenied = await rpc(token, 'tools/call', { name: 'archiveCampaign', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
     assert.equal(archiveDenied.isError, true, redact(archiveDenied));
     assert.equal(archiveDenied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(archiveDenied));
-    const denied = await rpc(token, 'tools/call', { name: 'createContact', arguments: { confirm: true, body: { email: address() } } });
+    const denied = await rpc(token, 'tools/call', { name: 'saveContact', arguments: { action: 'create', confirm: true, body: { email: address() } } });
     assert.equal(denied.isError, true, redact(denied));
     assert.equal(denied.structuredContent.error.code, 'TOOL_UNAVAILABLE', redact(denied));
     const deletion = await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId });

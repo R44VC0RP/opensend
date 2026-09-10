@@ -147,7 +147,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     if (!session || !approved(runtime, session.user.email, session.user.emailVerified, session.user.googleHostedDomain)) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
-    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], email: session.user.email, name: session.user.name };
+    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: session.user.email, name: session.user.name };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     log('warn', { operation: 'dashboard-session', code: 'AUTH_UNAVAILABLE' });

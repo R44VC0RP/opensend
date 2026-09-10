@@ -5,6 +5,8 @@ import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, r
 import type { Actor, App, AppEnv, Runtime } from './core.js';
 import { apiKeys } from './db/core.js';
 import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
+import { createAgentToken, verifyAgentToken } from './agent-token.js';
+import { getMcpGrantActor } from './mcp-auth.js';
 
 // A private symbol carries server-authorized identity through request-cloning middleware.
 // HTTP headers/cookies cannot supply it, and every internal dispatch gets a fresh runtime.
@@ -22,14 +24,22 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (delegated) {
     c.set('actor', delegated);
   } else if (authorization !== undefined) {
-    const token = authorization.match(/^Bearer (os_(?:test|live)_[0-9a-f]{64})$/i)?.[1];
-    if (!token) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-    const hash = await digest(token);
-    const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), eq(apiKeys.workspaceId, c.env.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);
-    if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-    // API-key credentials always define the environment, regardless of cookies or headers.
-    c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains });
-    await c.env.db.update(apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, key.id), or(isNull(apiKeys.lastUsedAt), sql`${apiKeys.lastUsedAt} < now() - interval '1 minute'`)));
+    const token = authorization.match(/^Bearer (.+)$/i)?.[1];
+    if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
+    if (token.startsWith('os_agent_')) {
+      const temporary = await verifyAgentToken(c.env.config, token);
+      const grant = temporary ? await getMcpGrantActor(c.env, temporary.grant) : null;
+      if (!temporary || !grant || (temporary.environment === 'live' && grant.environment !== 'live') || temporary.permissions.some(permission => !grant.permissions.includes(permission))) throw new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
+      c.set('actor', { ...grant, environment: temporary.environment, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
+    } else {
+      if (!/^os_(?:test|live)_[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+      const hash = await digest(token);
+      const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), eq(apiKeys.workspaceId, c.env.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);
+      if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+      // API-key credentials always define the environment, regardless of cookies or headers.
+      c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
+      await c.env.db.update(apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, key.id), or(isNull(apiKeys.lastUsedAt), sql`${apiKeys.lastUsedAt} < now() - interval '1 minute'`)));
+    }
   } else {
     const dashboard = await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work), headers => {
       const cookie = headers.get('set-cookie');
@@ -63,6 +73,19 @@ function manageKeys(c: Parameters<typeof actor>[0]) {
 }
 const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, workspaceId: _workspace, ...view } = key; return view; };
 export function registerAuth(app: App) {
+  app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal; never grants manage permission.', request: { body: json(z.object({
+    permissions: z.union([z.tuple([z.literal('read')]), z.tuple([z.literal('read'), z.literal('send')])]), environment: z.enum(['live', 'test']),
+    expiresInMinutes: z.number().int().min(5).max(1440), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]),
+    purpose: z.string().trim().min(1).max(200),
+  }).strict()) }, responses: { 201: response(z.object({ token: z.string(), expiresAt: z.string(), permissions: z.array(z.enum(['read', 'send'])), environment: z.enum(['live', 'test']), domains: z.array(z.string()), purpose: z.string() }).openapi('AgentToken')), ...errors } }), async c => {
+    const input = c.req.valid('json'); const identity = actor(c, input.permissions.length === 2 ? 'send' : 'read');
+    if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.');
+    if (input.environment === 'live' && identity.environment !== 'live') throw new ApiError(403, 'LIVE_SCOPE_REQUIRED', 'The MCP approval does not permit live access.');
+    if (input.permissions.some(permission => !identity.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', 'The MCP approval does not include every requested permission.');
+    const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
+    const token = await createAgentToken(c.env.config, { grant: identity.keyId, environment: input.environment, permissions: input.permissions, domains: input.domains, expiresAt });
+    return c.json({ token, expiresAt, permissions: input.permissions, environment: input.environment, domains: input.domains, purpose: input.purpose }, 201);
+  });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json');
     const secret = randomSecret(`os_${input.environment}_`);
