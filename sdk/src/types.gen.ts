@@ -17,7 +17,7 @@ export type ApiError = {
 export type AgentToken = {
     token: string;
     expiresAt: string;
-    permissions: Array<'read' | 'send'>;
+    permissions: Array<'read' | 'send' | 'manage'>;
     environment: 'live' | 'test';
     domains: Array<string>;
     purpose: string;
@@ -938,7 +938,7 @@ export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCu
 
 export type CreateAgentTokenData = {
     body: {
-        permissions: Array<'read' | 'send'>;
+        permissions: Array<'read' | 'send' | 'manage'>;
         environment: 'live' | 'test';
         expiresInSeconds: number;
         domains?: Array<string>;

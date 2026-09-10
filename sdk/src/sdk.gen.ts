@@ -37,7 +37,7 @@ export const getCurrentIdentity = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal; never grants manage permission.
+ * Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.
  */
 export const createAgentToken = <ThrowOnError extends boolean = false>(options: Options<CreateAgentTokenData, ThrowOnError>): RequestResult<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError> => (options.client ?? client).post<CreateAgentTokenResponses, CreateAgentTokenErrors, ThrowOnError>({
     security: [

@@ -348,7 +348,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
   direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
-  direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read or read-plus-send access and optional sender-domain restrictions.', 'createAgentToken');
+  direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read, send or manage delegation within the originating MCP approval and optional sender-domain restrictions. Cannot manage credentials.', 'createAgentToken');
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 

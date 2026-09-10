@@ -4,7 +4,7 @@ import type { Config, Mode, Permission } from './core.js';
 
 const Payload = z.object({
   v: z.literal(1), grant: z.string().regex(/^mcp_[A-Za-z0-9_-]{1,200}$/), environment: z.enum(['live', 'test']),
-  permissions: z.array(z.enum(['read', 'send'])).min(1).max(2), domains: z.array(z.string()).max(50),
+  permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3), domains: z.array(z.string()).max(50),
   exp: z.number().int().positive(), nonce: z.string().regex(/^[0-9a-f]{32}$/),
 }).strict();
 export type AgentTokenPayload = z.infer<typeof Payload>;

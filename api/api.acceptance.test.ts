@@ -817,10 +817,17 @@ describe('Hosted MCP OAuth and tools', () => {
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, 'test');
     error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
+    const managed = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Synthetic managed acceptance script' }, confirm: true }, 201);
+    secrets.add(managed.token);
+    const managedList = ok(await http('POST', '/v1/lists', managed.token, { name: unique('agent-managed-list') }), 201);
+    ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
+    error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', environment: 'live', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     ok(await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId }));
     error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
+    error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
   });
 
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {

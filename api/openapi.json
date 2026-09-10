@@ -74,7 +74,8 @@
               "type": "string",
               "enum": [
                 "read",
-                "send"
+                "send",
+                "manage"
               ]
             }
           },
@@ -4279,7 +4280,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal; never grants manage permission.",
+        "description": "Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4293,11 +4294,12 @@
                       "type": "string",
                       "enum": [
                         "read",
-                        "send"
+                        "send",
+                        "manage"
                       ]
                     },
                     "minItems": 1,
-                    "maxItems": 2
+                    "maxItems": 3
                   },
                   "environment": {
                     "type": "string",
