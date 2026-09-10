@@ -1,0 +1,48 @@
+name: Publish SDK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-opensend-js
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@latest
+      - run: npm ci
+        working-directory: sdk
+      - run: npm run build
+        working-directory: sdk
+      - id: version
+        name: Check published version
+        working-directory: sdk
+        shell: bash
+        run: |
+          package=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          published=$(npm view "$package@$version" version 2>/dev/null || true)
+          if [ "$published" = "$version" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "$package@$version is already published"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "$package@$version will be published"
+          fi
+      - if: steps.version.outputs.publish == 'true'
+        run: npm publish --access public --provenance
+        working-directory: sdk
