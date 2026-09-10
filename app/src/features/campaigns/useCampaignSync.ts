@@ -99,7 +99,7 @@ export function useCampaignSync(campaign: Campaign | null, onUpdate: (next: Camp
     window.addEventListener('pageshow', requestCheck)
     window.addEventListener('focus', requestCheck)
     window.addEventListener('online', requestCheck)
-    requestCheck()
+    timer = setTimeout(requestCheck, 2000)
     return () => {
       stopped = true
       clearTimer()
