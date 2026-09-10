@@ -5,7 +5,7 @@ import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
@@ -876,8 +876,16 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   let providerId: string | undefined;
   try { const result = await ses.send(new SendEmailCommand(request)); providerId = result.MessageId; }
   catch (error) {
-    const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+    const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
+    // Provider errors can contain addresses/content: retain only bounded authorization fields.
+    const denial = failure.name === 'AccessDeniedException' && typeof failure.message === 'string' ? failure.message.slice(0, 8192) : '';
+    const deniedAction = denial.match(/not authorized to perform:\s*([a-z0-9-]+:[A-Za-z0-9]+)\b/)?.[1];
+    const deniedResource = denial.match(/on resource:\s*(arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[A-Za-z0-9_+=,.@/*:-]{1,512}|\*)(?=\s|$)/)?.[1]
+      ?.replace(/[A-Za-z0-9_+=,.%-]+@/g, '[redacted]@');
+    const awsRequestId = typeof failure.$metadata?.requestId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(failure.$metadata.requestId) ? failure.$metadata.requestId : undefined;
+    const diagnostics = { ...(awsRequestId ? { awsRequestId } : {}), ...(deniedAction ? { deniedAction } : {}), ...(deniedResource ? { deniedResource } : {}) };
+    if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, jobId: job.id, region: s.region, ...diagnostics });
     const providerRetries = typeof payload.providerRetries === 'number' ? payload.providerRetries : 0;
     if (status === 429 && providerRetries < 5) {
       await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'provider_throttled', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_THROTTLED', retryable: true, attempt: providerRetries + 1 } });
@@ -887,7 +895,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     const definitive = status !== undefined && status >= 400 && status < 500;
     const next: EmailStatus = definitive ? 'rejected' : 'acceptance_unknown';
     await runtime.db.update(emails).set({ status: next, errorCode: definitive ? (failure.name ?? 'SES_REJECTED') : 'SES_ACCEPTANCE_UNKNOWN', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'attempting')));
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: definitive ? 'reject' : 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: definitive ? failure.name ?? 'SES_REJECTED' : 'SES_ACCEPTANCE_UNKNOWN', retryable: false } });
+    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: definitive ? 'reject' : 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: definitive ? failure.name ?? 'SES_REJECTED' : 'SES_ACCEPTANCE_UNKNOWN', retryable: false, ...diagnostics } });
     await finishCampaign(runtime, a, mail.campaignId); return;
   }
   if (!providerId) {
