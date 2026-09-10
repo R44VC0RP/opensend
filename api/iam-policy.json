@@ -42,6 +42,12 @@
       ]
     },
     {
+      "Sid": "ApplyPerMessageTracking",
+      "Effect": "Allow",
+      "Action": "ses:ApplyTrackingConfigurationOverrides",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadAndRenderStoredTemplates",
       "Effect": "Allow",
       "Action": ["ses:GetEmailTemplate", "ses:TestRenderEmailTemplate"],

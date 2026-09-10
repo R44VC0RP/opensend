@@ -878,13 +878,20 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   catch (error) {
     const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
-    // Provider errors can contain addresses/content: retain only bounded authorization fields.
+    // Only access-denial text is retained; redact addresses, credentials and URL query strings.
     const denial = failure.name === 'AccessDeniedException' && typeof failure.message === 'string' ? failure.message.slice(0, 8192) : '';
-    const deniedAction = denial.match(/not authorized to perform:\s*([a-z0-9-]+:[A-Za-z0-9]+)\b/)?.[1];
+    const deniedAction = denial.match(/not authorized to perform(?::\s*|\s+['"])([a-z0-9-]+:[A-Za-z0-9]+)\b/)?.[1];
     const deniedResource = denial.match(/on resource:\s*(arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[A-Za-z0-9_+=,.@/*:-]{1,512}|\*)(?=\s|$)/)?.[1]
       ?.replace(/[A-Za-z0-9_+=,.%-]+@/g, '[redacted]@');
     const awsRequestId = typeof failure.$metadata?.requestId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(failure.$metadata.requestId) ? failure.$metadata.requestId : undefined;
-    const diagnostics = { ...(awsRequestId ? { awsRequestId } : {}), ...(deniedAction ? { deniedAction } : {}), ...(deniedResource ? { deniedResource } : {}) };
+    const denialMessage = [runtime.config.aws?.accessKeyId, runtime.config.aws?.secretAccessKey, runtime.config.aws?.sessionToken]
+      .reduce<string>((text, secret) => secret ? text.replaceAll(secret, '[redacted credential]') : text, denial)
+      .replace(/https?:\/\/[^\s]+/gi, '[redacted URL]')
+      .replace(/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9.-]+/g, '[redacted email]')
+      .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[redacted access key]')
+      .replace(/\b(?:Bearer\s+\S+|(?:token|secret|password|credential|signature|authorization)\s*[:=]\s*\S+)/gi, '[redacted credential]')
+      .replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').slice(0, 2048);
+    const diagnostics = { ...(awsRequestId ? { awsRequestId } : {}), ...(deniedAction ? { deniedAction } : {}), ...(deniedResource ? { deniedResource } : {}), ...(denialMessage ? { denialMessage } : {}) };
     if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, jobId: job.id, region: s.region, ...diagnostics });
     const providerRetries = typeof payload.providerRetries === 'number' ? payload.providerRetries : 0;
     if (status === 429 && providerRetries < 5) {
