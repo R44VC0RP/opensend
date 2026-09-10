@@ -221,7 +221,16 @@ function actionSchema(actions: Record<string, McpOperation>, field = 'action', r
     schema.required = [...new Set([field, ...(schema.required ?? []), ...(requireConfirmation && !operation.write ? ['confirm'] : [])])];
     return schema;
   });
-  return { type: 'object', properties: { [field]: { type: 'string', enum: Object.keys(actions) } }, required: [field], oneOf: branches, ...(Object.keys(defs).length ? { $defs: defs } : {}) };
+  const properties: ObjectValue = { [field]: { type: 'string', enum: Object.keys(actions) } };
+  for (const branch of branches) for (const [name, schema] of Object.entries(branch.properties ?? {})) {
+    if (name === field) continue;
+    if (!properties[name]) properties[name] = schema;
+    else if (JSON.stringify(properties[name]) !== JSON.stringify(schema)) {
+      const options = properties[name].anyOf ?? [properties[name]];
+      if (!options.some((candidate: unknown) => JSON.stringify(candidate) === JSON.stringify(schema))) properties[name] = { anyOf: [...options, schema] };
+    }
+  }
+  return { type: 'object', properties, required: [field], oneOf: branches, ...(Object.keys(defs).length ? { $defs: defs } : {}) };
 }
 function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: (args: ObjectValue) => McpPlan, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput): McpOperation {
   const output = structuredClone(outputSchema);
