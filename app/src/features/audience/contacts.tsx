@@ -7,6 +7,7 @@ import { Alert, Button, Checkbox, ConfirmDialog, ControlSkeleton, DataTable, Dia
 import { activityColumns, AudienceRouteSkeleton } from './skeletons'
 import { ContactTable, date, fieldError, MutationError, number, pageSize, statusOptions, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
+import { useCursorPagination } from '../../lib/pagination'
 
 export function ContactsPage() {
   const [search, setSearch] = useState('')
@@ -99,8 +100,8 @@ function ContactActivity({ email }: { email: string }) {
 }
 
 function ConsentHistory({id}: {id: string}) {
-  const api = useApi(), [cursor, setCursor] = useState<string | undefined>()
+  const api = useApi(), pagination = useCursorPagination(), cursor = pagination.cursor
   const query = useApiQuery(['consent-history', id, cursor], async api => api.consentHistory ? api.consentHistory(id, cursor) : null)
   if (!api.consentHistory) return null
-  return <section className="section"><SectionHeader title="Consent evidence history" />{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable loading={query.isPending} rows={query.data?.items ?? []} rowKey={row => row.id} columns={[{key: 'status', label: 'Status', render: row => row.status}, {key: 'source', label: 'Source', render: row => row.source}, {key: 'evidence', label: 'Evidence', render: row => row.evidence}, {key: 'policy', label: 'Policy version', render: row => row.policyVersion}, {key: 'at', label: 'Occurred at', render: row => date(row.occurredAt)}]} /><div className="cluster"><Button disabled={!cursor} onClick={() => setCursor(undefined)}>First page</Button><Button disabled={!query.data?.nextCursor} onClick={() => setCursor(query.data?.nextCursor ?? undefined)}>Next page</Button></div></>}</section>
+  return <section className="section"><SectionHeader title="Consent evidence history" />{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable loading={query.isPending} rows={query.data?.items ?? []} rowKey={row => row.id} columns={[{key: 'status', label: 'Status', render: row => row.status}, {key: 'source', label: 'Source', render: row => row.source}, {key: 'evidence', label: 'Evidence', render: row => row.evidence}, {key: 'policy', label: 'Policy version', render: row => row.policyVersion}, {key: 'at', label: 'Occurred at', render: row => date(row.occurredAt)}]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={query.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, query.data?.nextCursor)} />}</>}</section>
 }

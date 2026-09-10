@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
+import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog, SettingsTabs } from './shared'
 import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './skeletons'
 
@@ -34,8 +35,8 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
 
 export function WebhooksPage() {
   const navigate = useNavigate()
-  const api = useApi()
-  const [cursor, setCursor] = useState<string | undefined>()
+  const pagination = useCursorPagination()
+  const cursor = pagination.cursor
   const webhooks = useApiQuery(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor))
   return <div className="stack">
     <PageHeader title="Settings" actions={<Button variant="primary" onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
@@ -48,7 +49,7 @@ export function WebhooksPage() {
       { ...settingsColumns.webhooks[3], render: webhook => <StatusBadge status={label(webhook.status)} /> },
       { ...settingsColumns.webhooks[4], label: 'History', render: webhook => <Link to={`/settings/webhooks/${webhook.id}`}>View deliveries</Link> },
     ]} />}
-    {api.mode !== 'demo' && <div className="cluster"><Button disabled={!cursor} onClick={() => setCursor(undefined)}>First page</Button><Button disabled={!webhooks.data?.nextCursor} onClick={() => setCursor(webhooks.data?.nextCursor ?? undefined)}>Next page</Button></div>}
+    {webhooks.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data?.nextCursor)} />}
   </div>
 }
 
@@ -90,6 +91,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const [action, setAction] = useState<'pause' | 'resume' | 'rotate' | 'delete' | null>(null)
   const [secret, setSecret] = useState<string | null>(null)
   const api = useApi()
+  const historyPagination = useCursorPagination()
   const [history, setHistory] = useState<{items: WebhookDelivery[]; nextCursor?: string | null} | null>(null)
   const [historyError, setHistoryError] = useState<unknown>(null)
   const [historyBusy, setHistoryBusy] = useState(false)
@@ -101,6 +103,16 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const test = useApiMutation((api, id: string) => api.webhooks.test(id), 'Test delivery created')
   const retry = useApiMutation((api, value: { id: string; deliveryId: string }) => api.webhooks.retry(value.id, value.deliveryId), 'Delivery retry queued')
   const pending = save.isPending || status.isPending || rotate.isPending || remove.isPending || test.isPending || retry.isPending
+  const currentHistoryCursor = history ? history.nextCursor : webhook.nextCursor
+  async function changeHistoryPage(nextPage: number) {
+    if (!api.webhookDeliveries) return
+    const cursor = historyPagination.cursorForPage(nextPage, currentHistoryCursor)
+    if (nextPage === 1) { historyPagination.onPageChange(nextPage, currentHistoryCursor); setHistory(null); return }
+    setHistoryBusy(true); setHistoryError(null)
+    try { setHistory(await api.webhookDeliveries(webhook.id, cursor)); historyPagination.onPageChange(nextPage, currentHistoryCursor) }
+    catch (error) { setHistoryError(error) }
+    finally { setHistoryBusy(false) }
+  }
   async function submit(event: FormEvent) {
     event.preventDefault()
     const nextErrors = validate(input)
@@ -109,7 +121,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim() }) } catch { /* Shown inline. */ }
   }
   async function confirm() {
-    if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null)}
+    if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
     if (action === 'rotate') { const result = await rotate.mutateAsync(webhook.id); setSecret(result.secret); rotate.reset() }
     if (action === 'delete') { await remove.mutateAsync(webhook.id); navigate('/settings/webhooks') }
   }
@@ -126,9 +138,9 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
         { ...settingsColumns.deliveries[2], render: delivery => label(delivery.event) },
         { ...settingsColumns.deliveries[3], render: delivery => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
         { ...settingsColumns.deliveries[4], render: delivery => number(delivery.attempts) },
-        { ...settingsColumns.deliveries[5], render: delivery => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null) } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
+        { ...settingsColumns.deliveries[5], render: delivery => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
       ]} />
-      <MutationError error={historyError} />{api.webhookDeliveries && <div className="cluster"><Button onClick={() => setHistory(null)}>First page</Button><Button loading={historyBusy} disabled={!(history ? history.nextCursor : webhook.nextCursor)} onClick={async () => {setHistoryBusy(true); setHistoryError(null); try {setHistory(await api.webhookDeliveries!(webhook.id, (history ? history.nextCursor : webhook.nextCursor) ?? undefined))} catch (error) {setHistoryError(error)} finally {setHistoryBusy(false)}}}>Next page</Button></div>}
+      <MutationError error={historyError} />{api.webhookDeliveries && (historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />)}
     </section>
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete endpoint</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete endpoint' : action === 'pause' ? 'Pause endpoint' : 'Resume endpoint'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />

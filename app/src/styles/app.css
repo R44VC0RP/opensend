@@ -23,7 +23,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .quota-meter::-webkit-meter-bar { background: var(--color-border); border: 0; border-radius: 0; height: 3px; }
 .quota-meter::-webkit-meter-optimum-value { background: var(--color-accent); }
 .quota-meter::-moz-meter-bar { background: var(--color-accent); }
-.page-surface { margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-28) var(--space-40); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.page-surface { display: flex; flex-direction: column; margin: var(--page-inset) var(--page-inset) var(--page-inset) var(--sidebar-width); padding: var(--space-28) var(--space-40); height: calc(100dvh - 2 * var(--page-inset)); min-height: 0; background: var(--color-surface); border-radius: var(--radius-lg); min-width: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
 .page-surface:focus { outline: none; }

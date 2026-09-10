@@ -86,7 +86,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 .ui-table__clickable:hover { background: var(--color-canvas); }
 .ui-table tr[data-selected='true'] { background: var(--color-active-bg); }
 .ui-table tr:focus-visible { outline-offset: -3px; }
-.ui-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); min-height: var(--row-height-lg); padding: var(--space-16) var(--space-24); border-top: 1px solid var(--color-border); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.ui-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; flex-shrink: 0; gap: var(--space-12); min-height: var(--row-height-lg); margin-top: auto; padding: var(--space-16) var(--space-24); border-top: 1px solid var(--color-border); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .ui-page-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-16); min-height: var(--control-height); margin-bottom: var(--page-gap); }
 .stack > .ui-page-header, .stack > .ui-section-header { margin-bottom: 0; }
 .ui-page-header h1 { font-size: var(--text-lg); line-height: var(--leading-lg); }

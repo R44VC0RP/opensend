@@ -1,16 +1,18 @@
 import { useState, type FormEvent } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Select } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select } from '../../components/ui'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
 import type { ApiKey, ApiKeyInput, PageRequest } from '../../data/types'
 import { date } from '../../lib/format'
+import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
 import { settingsColumns } from './skeletons'
 
 export function ApiKeysPage() {
   const api = useApi()
-  const [cursor, setCursor] = useState<string | undefined>()
   const [showRevoked, setShowRevoked] = useState(false)
+  const pagination = useCursorPagination()
+  const cursor = pagination.cursor
   const keys = useApiQuery(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked))
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
   const revoke = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
@@ -55,7 +57,7 @@ export function ApiKeysPage() {
     } catch { /* The mutation error is shown in the form. */ }
   }
   return <div className="stack">
-    <PageHeader title="API keys" actions={<div className="cluster"><Checkbox label="Show revoked" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); setCursor(undefined)}} /><Button variant="primary" onClick={openCreate}>Create key</Button></div>} />
+    <PageHeader title="API keys" actions={<div className="cluster"><Checkbox label="Show revoked" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); pagination.reset()}} /><Button variant="primary" onClick={openCreate}>Create key</Button></div>} />
     {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
       { ...settingsColumns.keys[0], render: row => <>{row.name}<div className="muted">{row.environment ?? 'Demo'}</div></> },
       { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
@@ -63,7 +65,7 @@ export function ApiKeysPage() {
       { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
       { ...settingsColumns.keys[4], render: row => row.revokedAt ? 'Revoked' : <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
     ]} />}
-    {api.mode !== 'demo' && <div className="cluster"><Button disabled={!cursor} onClick={() => setCursor(undefined)}>First page</Button><Button disabled={!keys.data?.nextCursor} onClick={() => setCursor(keys.data?.nextCursor ?? undefined)}>Next page</Button></div>}
+    {keys.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Create API key" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-api-key">Create key</Button></>}>
       <form id="create-api-key" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
