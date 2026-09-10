@@ -27,7 +27,10 @@
     "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3, "max_concurrency": 2 }]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
-  "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } }],
+  "ratelimits": [
+    { "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } },
+    { "name": "PUBLIC_FAILURES", "namespace_id": "8793002", "simple": { "limit": 40, "period": 60 } }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

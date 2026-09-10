@@ -233,9 +233,20 @@ async function poll(path: string, key: string, predicate: (body: Json) => boolea
 // a scenario are sequential; no shared ordering dependency exists between scenarios.
 describe('Public contract and authentication', () => {
   test('health and OpenAPI are public, protected routes reject missing and invalid credentials', async () => {
-    const health = ok(await http('GET', '/health'));
+    const healthReply = await http('GET', '/health');
+    const health = ok(healthReply);
     assert.equal(health.status, 'ok');
     assert.equal(health.service, 'opensend');
+    assert.match(healthReply.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+    assert.equal(healthReply.headers.get('x-frame-options'), 'DENY');
+    assert.equal(healthReply.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(healthReply.headers.get('referrer-policy'), 'no-referrer');
+    assert.match(healthReply.headers.get('permissions-policy') ?? '', /camera=\(\)/);
+    const { publicFailureBucket } = await import('./src/core.js');
+    assert.equal(publicFailureBucket('/v1/me', 401), 'auth');
+    assert.equal(publicFailureBucket('/v1/me', 200), null);
+    assert.equal(publicFailureBucket('/unsubscribe/invalid', 404), 'unsubscribe');
+    assert.equal(publicFailureBucket('/v1/events/ses', 403), 'ses');
     const document = ok(await http('GET', '/openapi.json'));
     assert.match(document.openapi, /^3\./);
     assert.ok(document.info?.title);

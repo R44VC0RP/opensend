@@ -3,7 +3,7 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { fileURLToPath } from 'node:url';
 import { app } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
-import { admissionDenied, ApiError, log } from './core.js';
+import { admissionDenied, ApiError, log, publicFailureBucket, publicFailureDenied } from './core.js';
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
@@ -19,17 +19,25 @@ try {
     });
   });
   // Coarse per-process admission guard; trusted proxy/WAF controls remain necessary for distributed abuse.
-  const peers = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
-  const server = serve({ fetch: (request, connection) => {
+  const peers = new Map<string, number>(); const publicFailures = new Map<string, number>(); let minute = Math.floor(Date.now() / 60000);
+  const server = serve({ fetch: async (request, connection) => {
     const current = Math.floor(Date.now() / 60000);
-    if (current !== minute) { peers.clear(); minute = current; }
+    if (current !== minute) { peers.clear(); publicFailures.clear(); minute = current; }
     const address = connection.incoming.socket.remoteAddress ?? 'unknown';
     const key = peers.has(address) || peers.size < 1024 ? address : 'overflow';
     const count = (peers.get(key) ?? 0) + 1; peers.set(key, count);
     if (count > 6000) return admissionDenied();
     const headers = new Headers(request.headers);
     headers.set('x-opensend-client-ip', address);
-    return app.fetch(new Request(request, { headers }), runtime);
+    const response = await app.fetch(new Request(request, { headers }), runtime);
+    const bucket = publicFailureBucket(new URL(request.url).pathname, response.status);
+    if (bucket) {
+      const failureKey = `${bucket}:${key}`;
+      const failures = (publicFailures.get(failureKey) ?? 0) + 1;
+      publicFailures.set(failureKey, failures);
+      if (failures > 40) return publicFailureDenied();
+    }
+    return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
   });

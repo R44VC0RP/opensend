@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { ApiError, log, timed } from './core.js';
+import { ApiError, log, SECURITY_HEADERS, timed } from './core.js';
 import type { AppEnv } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
@@ -22,10 +22,12 @@ export function createApp() {
   app.use('*', async (c, next) => {
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
     const start = Date.now();
     await next();
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
     c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });

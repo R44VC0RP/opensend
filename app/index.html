@@ -4,17 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <script>
-      (() => {
-        let saved = null;
-        try { saved = localStorage.getItem('opensend.theme'); } catch {}
-        const theme = saved === 'light' || saved === 'dark'
-          ? saved
-          : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        document.documentElement.dataset.theme = theme;
-        document.documentElement.style.colorScheme = theme;
-      })();
-    </script>
+    <script src="/theme.js"></script>
     <title>opensend</title>
   </head>
   <body>

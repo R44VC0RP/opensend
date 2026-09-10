@@ -71,6 +71,26 @@ export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unk
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.
   console[level](JSON.stringify({ level, timestamp: new Date().toISOString(), ...fields }));
 }
+export const SECURITY_HEADERS = {
+  'Content-Security-Policy': "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'",
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+} as const;
+export function applySecurityHeaders(headers: Headers): Headers {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  return headers;
+}
+export function secureResponse(response: Response): Response {
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers: applySecurityHeaders(new Headers(response.headers)) });
+}
+export function publicFailureBucket(path: string, status: number): 'auth' | 'unsubscribe' | 'ses' | null {
+  if (status < 400 || status >= 500) return null;
+  if (path === '/v1/events/ses') return 'ses';
+  if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
+  return status === 401 && /^\/v1(?:\/|$)/.test(path) ? 'auth' : null;
+}
 export async function timed<T>(c: Ctx, name: string, work: () => Promise<T>): Promise<T> {
   const start = performance.now();
   try { return await work(); }
@@ -97,5 +117,10 @@ export function redactCapabilityData(value: Record<string, unknown>): Record<str
 export function admissionDenied(): Response {
   const requestId = id('req');
   log('warn', { requestId, code: 'ADMISSION_RATE_LIMITED', operation: 'admission' });
-  return Response.json({ error: { code: 'ADMISSION_RATE_LIMITED', message: 'Too many requests from this connection. Retry after one minute.', requestId, retryable: true } }, { status: 429, headers: { 'x-request-id': requestId, 'retry-after': '60', 'cache-control': 'no-store' } });
+  return secureResponse(Response.json({ error: { code: 'ADMISSION_RATE_LIMITED', message: 'Too many requests from this connection. Retry after one minute.', requestId, retryable: true } }, { status: 429, headers: { 'x-request-id': requestId, 'retry-after': '60', 'cache-control': 'no-store' } }));
+}
+export function publicFailureDenied(): Response {
+  const requestId = id('req');
+  log('warn', { requestId, code: 'PUBLIC_RATE_LIMITED', operation: 'public-failure' });
+  return secureResponse(Response.json({ error: { code: 'PUBLIC_RATE_LIMITED', message: 'Too many failed public requests from this connection. Retry after one minute.', requestId, retryable: true } }, { status: 429, headers: { 'x-request-id': requestId, 'retry-after': '60', 'cache-control': 'no-store' } }));
 }
