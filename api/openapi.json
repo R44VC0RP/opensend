@@ -4177,36 +4177,16 @@
                 "type": "object",
                 "properties": {
                   "permissions": {
-                    "anyOf": [
-                      {
-                        "type": "array",
-                        "prefixItems": [
-                          {
-                            "type": "string",
-                            "enum": [
-                              "read"
-                            ]
-                          }
-                        ]
-                      },
-                      {
-                        "type": "array",
-                        "prefixItems": [
-                          {
-                            "type": "string",
-                            "enum": [
-                              "read"
-                            ]
-                          },
-                          {
-                            "type": "string",
-                            "enum": [
-                              "send"
-                            ]
-                          }
-                        ]
-                      }
-                    ]
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "read",
+                        "send"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
                   },
                   "environment": {
                     "type": "string",

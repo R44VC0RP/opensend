@@ -203,6 +203,21 @@ const genericOutput: NonNullable<Tool['outputSchema']> = {
     { type: 'object', properties: { status: { type: ['integer', 'null'] }, requestId: { type: ['string', 'null'] }, response: {}, error: { type: 'object', properties: { code: { type: 'string' }, message: { type: 'string' } }, required: ['code', 'message'], additionalProperties: true } }, required: ['status', 'requestId', 'error'], additionalProperties: false },
   ],
 };
+function pageOutput(): NonNullable<Tool['outputSchema']> {
+  const schema = structuredClone(genericOutput) as ObjectValue;
+  schema.anyOf[0].properties.response = { type: 'object', properties: { data: { type: 'array', items: {} }, nextCursor: { type: ['string', 'null'] } }, required: ['data', 'nextCursor'], additionalProperties: false };
+  return schema as NonNullable<Tool['outputSchema']>;
+}
+const campaignReviewOutput: NonNullable<Tool['outputSchema']> = {
+  type: 'object', anyOf: [
+    { type: 'object', properties: { status: { type: 'integer' }, requestId: { type: ['string', 'null'] }, response: { type: 'object', properties: {
+      id: { type: 'string' }, campaignId: { type: 'string' }, revision: { type: 'integer' }, contentHash: { type: 'string' }, createdAt: { type: 'string' },
+      matched: { type: 'integer' }, eligible: { type: 'integer' }, suppressed: { type: 'integer' }, unsubscribed: { type: 'integer' },
+      preview: { type: 'object', properties: { html: { type: 'string' }, text: { type: 'string' } }, required: ['html', 'text'], additionalProperties: false },
+    }, required: ['id', 'campaignId', 'revision', 'contentHash', 'createdAt', 'matched', 'eligible', 'suppressed', 'unsubscribed', 'preview'], additionalProperties: false } }, required: ['status', 'requestId', 'response'], additionalProperties: false },
+    structuredClone((genericOutput as ObjectValue).anyOf[1]),
+  ],
+};
 function alias(source: McpOperation, name: string, description: string): McpOperation {
   const tool: Tool = { ...source.tool, name, description };
   const operation = { ...source, tool };
@@ -247,7 +262,7 @@ function actionOutputSchema(actions: Record<string, McpOperation>): NonNullable<
       defs[name] = definition;
     }
     if (!Array.isArray(schema.anyOf)) invalid('Action source output must use anyOf.');
-    variants.push(...schema.anyOf);
+    for (const variant of schema.anyOf) if (!variants.some(candidate => JSON.stringify(candidate) === JSON.stringify(variant))) variants.push(variant);
   }
   return { type: 'object', anyOf: variants as any[], ...(Object.keys(defs).length ? { $defs: defs } : {}) };
 }
@@ -278,13 +293,13 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   add(custom('findCampaigns', 'List and filter campaign summaries, or supply id alone to retrieve one complete campaign draft.', campaignFindSchema as Tool['inputSchema'], false, args => {
     if (typeof args.id === 'string') return { steps: [{ operation: campaignDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) };
     return { steps: [{ operation: campaignList, args }] };
-  }));
+  }, pageOutput()));
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
   const previewCampaign = need('previewCampaign', raw), reviewCampaign = need('reviewCampaign', raw);
   add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. ${EMAIL_SEND_CONFIRMATION}`, reviewCampaign.tool.inputSchema, true, args => ({
     steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args }],
     combine: ([preview, review]) => ({ ...review, response: { ...review.response, preview: preview.response } }),
-  })));
+  }), campaignReviewOutput));
   add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: need('sendCampaign', raw), schedule: need('scheduleCampaign', raw), cancel: need('cancelCampaign', raw) }, 'mode'));
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
@@ -301,7 +316,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     const steps: Array<{ operation: McpOperation; args: ObjectValue }> = [{ operation: detail, args: { id: args.id } }];
     if (args.includeMembers !== false) steps.push({ operation: members, args: { id: args.id, limit: 100 } });
     return { steps, parallel: true, combine: values => ({ ...values[0]!, response: { data: [{ ...values[0]!.response, ...(values[1] ? { members: values[1].response.data, membersNextCursor: values[1].response.nextCursor } : {}) }], nextCursor: null } }) };
-  }));
+  }, pageOutput()));
   add(actionTool('saveList', 'Create or update a contact list.', { create: need('createContactList', raw), update: need('updateContactList', raw) }));
   add(actionTool('setListMembers', 'Add contacts to a list or remove one contact from it.', { add: need('addListMembers', raw), remove: need('removeListMember', raw) }));
   direct('deleteList', 'Delete a contact list.', 'deleteContactList');
@@ -315,7 +330,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     if (typeof args.id !== 'string') return { steps: [{ operation: emails, args }] };
     return { steps: [{ operation: emailDetail, args: { id: args.id } }, { operation: emailContent, args: { id: args.id } }, { operation: emailEvents, args: { id: args.id, limit: 100 } }], parallel: true,
       combine: ([detail, content, events]) => ({ ...detail, response: { data: [{ ...detail.response, content: content.response, events: events.response.data, eventsNextCursor: events.response.nextCursor }], nextCursor: null } }) };
-  }));
+  }, pageOutput()));
   add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
@@ -327,7 +342,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     if (typeof args.id !== 'string') return { steps: [{ operation: webhooks, args }] };
     return { steps: [{ operation: need('getWebhook', raw), args: { id: args.id } }, { operation: need('listWebhookDeliveries', raw), args: { id: args.id, limit: 100 } }], parallel: true,
       combine: ([detail, deliveries]) => ({ ...detail, response: { data: [{ ...detail.response, deliveries: deliveries.response.data, deliveriesNextCursor: deliveries.response.nextCursor }], nextCursor: null } }) };
-  }));
+  }, pageOutput()));
   add(actionTool('saveWebhook', 'Create or update a webhook endpoint and its event filters.', { create: need('createWebhook', raw), update: need('updateWebhook', raw) }));
   direct('deleteWebhook', 'Delete a webhook endpoint.', 'deleteWebhook');
   direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');

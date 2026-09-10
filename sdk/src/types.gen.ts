@@ -920,12 +920,7 @@ export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCu
 
 export type CreateAgentTokenData = {
     body: {
-        permissions: [
-            'read'
-        ] | [
-            'read',
-            'send'
-        ];
+        permissions: Array<'read' | 'send'>;
         environment: 'live' | 'test';
         expiresInMinutes: number;
         domains?: Array<string>;
