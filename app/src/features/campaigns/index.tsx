@@ -123,7 +123,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const [optionCursors, setOptionCursors] = useState<{lists?: string; domains?: string}>({})
   const options = useApiQuery(['campaign-options', { pageSize: 100, ...optionCursors }], async (api, signal) => {
     const [listPage, domainPage] = await Promise.all([
-      api.lists.list({ pageSize: 100, cursor: optionCursors.lists }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({pageSize: 100, cursor: optionCursors.domains}, signal),
+      api.lists.list({ pageSize: 100, cursor: optionCursors.lists }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({pageSize: 100, cursor: optionCursors.domains, refresh: false}, signal),
     ])
     const lists = listPage.items, domains = domainPage.items
     return { lists, domains: domains.filter(domain => domain.status === 'verified'), next: {lists: listPage.nextCursor, domains: domainPage.nextCursor} }

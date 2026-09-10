@@ -4581,6 +4581,7 @@ export type ListDomainsData = {
         cursor?: string;
         limit?: number;
         region?: string;
+        refresh?: 'true' | 'false';
     };
     url: '/v1/domains';
 };

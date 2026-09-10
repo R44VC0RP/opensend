@@ -9,6 +9,7 @@ import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
+import { sesRegions } from './db/ses-regions.js';
 import { recordEmailEvent } from './sending.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
@@ -167,9 +168,18 @@ export function registerOperations(app: App) {
     return c.json({ name, environment: a.environment }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Default page size is 5; use individual domain detail for a single refresh. Concurrent clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional() }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
     const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), a.domains.length ? inArray(domains.name, a.domains) : undefined, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
+    if (q.refresh === 'false') {
+      const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
+      const data = rows.slice(0, q.limit).map(row => {
+        const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
+        const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true;
+        return { id: row.id, name: row.name, region: row.region, verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified: cached?.sendingEnabled === true, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
+      });
+      return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    }
     const data: z.infer<typeof domainSchema>[] = [];
     for (const row of rows.slice(0, q.limit)) { if (data.length) await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
