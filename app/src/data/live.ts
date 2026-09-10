@@ -179,6 +179,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       create: async (input, signal) => { const result = await keyCall('/api-keys', 'POST', {name: input.name, environment: input.environment ?? 'test', permissions: [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key, secret} as any },
       revoke: async (id, signal) => { await keyCall(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },
+    credentials: {
+      agentTokens: async (includeInactive = false, signal) => (await keyCall(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
+      revokeAgentToken: async (id, signal) => { await keyCall(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
+      mcpConnections: async signal => (await keyCall('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
+      revokeMcpConnection: async (id, signal) => { await keyCall(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
+    },
     domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)) },
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},

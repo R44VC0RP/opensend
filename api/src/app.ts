@@ -27,7 +27,7 @@ export function createApp() {
     await next();
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
     c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
-    for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });

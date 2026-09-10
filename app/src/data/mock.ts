@@ -695,6 +695,17 @@ export function createMockApi(): OpenSendApi {
       }),
       revoke: (keyId, signal) => run(signal, true, s => { const key = find(s.keys, keyId, 'API key'); key.revokedAt ??= now() }),
     },
+    credentials: {
+      agentTokens: (includeInactive = false, signal) => run(signal, false, s => (s.agentTokens ??= []).filter(token => includeInactive || !token.revokedAt && Date.parse(token.expiresAt) > Date.now())),
+      revokeAgentToken: (tokenId, signal) => run(signal, true, s => { const token = find(s.agentTokens ??= [], tokenId, 'Agent token'); token.revokedAt ??= now() }),
+      mcpConnections: signal => run(signal, false, s => s.mcpConnections ??= []),
+      revokeMcpConnection: (connectionId, signal) => run(signal, true, s => {
+        const connection = find(s.mcpConnections ??= [], connectionId, 'MCP connection')
+        s.mcpConnections.splice(s.mcpConnections.indexOf(connection), 1)
+        const tokens = s.agentTokens ??= []
+        tokens.forEach(token => { if (token.grantId === connectionId) token.revokedAt ??= now() })
+      }),
+    },
     domains: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.domains.filter(domain => (!input.regionId || domain.regionId === input.regionId) && (!input.status || domain.status === input.status)), input, domain => domain.name) }),
       get: (domainId, signal) => run(signal, false, s => find(s.domains, domainId, 'Domain')),

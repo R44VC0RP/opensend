@@ -823,11 +823,19 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', environment: 'live', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-opensend-environment': 'live' }));
+    assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
+    assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
+    ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-opensend-environment': 'live' }));
+    error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
+    const connections = page(await http('GET', '/v1/mcp-connections', MANAGER));
+    assert.ok(connections.some(row => row.id === `mcp_${consentId}`));
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
-    ok(await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId }));
-    error(await http('GET', '/v1/me', temporary.token), 401, 'AUTH_INVALID');
+    ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
+    const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
+    assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
   });
 
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {

@@ -1,4 +1,4 @@
-import type { ApiKey, AudienceList, Campaign, Contact, Domain, Email, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, Contact, Domain, Email, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -18,6 +18,8 @@ export interface DemoState {
   attachments?: DemoAttachment[]
   domains: Domain[]
   keys: ApiKey[]
+  agentTokens?: AgentTokenSummary[]
+  mcpConnections?: McpConnection[]
   webhooks: Webhook[]
 }
 
@@ -75,10 +77,12 @@ export function createSeed(now = Date.now()): DemoState {
     { id: 'key_production', name: 'Production application', prefix: 'demo_prod_', permission: 'send', domains: ['acme.com'], createdAt: ago(30 * 24), lastUsedAt: ago(1) },
     { id: 'key_analytics', name: 'Analytics dashboard', prefix: 'demo_read_', permission: 'read', domains: [], createdAt: ago(14 * 24), lastUsedAt: ago(3) },
   ]
+  const agentTokens: AgentTokenSummary[] = [{ id: 'agt_demo_import', grantId: 'mcp_demo_opencode', environment: 'test', permissions: ['read', 'manage'], domains: [], purpose: 'Import customer contacts', expiresAt: new Date(now + 3_600_000).toISOString(), createdAt: ago(0.25), lastUsedAt: ago(0.1), revokedAt: null }]
+  const mcpConnections: McpConnection[] = [{ id: 'mcp_demo_opencode', clientId: 'demo-opencode', name: 'OpenCode', userEmail: 'ryan@example.com', scopes: ['opensend:read', 'opensend:send', 'opensend:manage', 'offline_access'], createdAt: ago(14 * 24), updatedAt: ago(2) }]
   const webhooks: Webhook[] = [
     { id: 'wh_pipeline', name: 'Event pipeline', url: 'https://api.example.com/webhooks/email', regionIds: 'all', events: ['send', 'delivered', 'bounced', 'complaint', 'rejected', 'delivery_delayed'], status: 'active', secretHint: 'demo_wh_…pipeline', deliveries: [{ id: 'del_pipeline_success', at: ago(0.5), regionId: 'us-east-1', event: 'delivered', response: 200, attempts: 1, status: 'delivered', payload: { demo: true, event: 'delivered', emailId: 'em_activity_01' } }, { id: 'del_pipeline_pending', at: ago(2), regionId: 'eu-west-1', event: 'bounced', response: 503, attempts: 1, status: 'retry_pending', payload: { demo: true, event: 'bounced', emailId: 'em_activity_23' } }] },
     { id: 'wh_bounces', name: 'Bounce monitoring', url: 'https://monitor.example.com/events', regionIds: ['us-east-1'], events: ['bounced', 'complaint'], status: 'active', secretHint: 'demo_wh_…bounces', deliveries: [] },
     { id: 'wh_warehouse', name: 'Data warehouse', url: 'https://data.example.com/email-events', regionIds: ['eu-west-1'], events: ['delivered'], status: 'paused', secretHint: 'demo_wh_…warehouse', deliveries: [] },
   ]
-  return { version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, domains, keys, webhooks }
+  return { version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, domains, keys, agentTokens, mcpConnections, webhooks }
 }

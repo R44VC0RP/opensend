@@ -4,6 +4,16 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type McpConnection = {
+    id: string;
+    clientId: string;
+    name: string | null;
+    userEmail: string;
+    scopes: Array<string>;
+    createdAt: string;
+    updatedAt: string;
+};
+
 export type ApiError = {
     error: {
         code: string;
@@ -15,12 +25,26 @@ export type ApiError = {
 };
 
 export type AgentToken = {
+    id: string;
     token: string;
     expiresAt: string;
     permissions: Array<'read' | 'send' | 'manage'>;
     environment: 'live' | 'test';
     domains: Array<string>;
     purpose: string;
+};
+
+export type AgentTokenRecord = {
+    id: string;
+    grantId: string;
+    environment: 'live' | 'test';
+    permissions: Array<'read' | 'send' | 'manage'>;
+    domains: Array<string>;
+    purpose: string;
+    expiresAt: string;
+    createdAt: string;
+    lastUsedAt: string | null;
+    revokedAt: string | null;
 };
 
 export type ApiKey = {
@@ -869,6 +893,139 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type ListMcpConnectionsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/mcp-connections';
+};
+
+export type ListMcpConnectionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListMcpConnectionsError = ListMcpConnectionsErrors[keyof ListMcpConnectionsErrors];
+
+export type ListMcpConnectionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<McpConnection>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListMcpConnectionsResponse = ListMcpConnectionsResponses[keyof ListMcpConnectionsResponses];
+
+export type RevokeMcpConnectionData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/mcp-connections/{id}/revoke';
+};
+
+export type RevokeMcpConnectionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RevokeMcpConnectionError = RevokeMcpConnectionErrors[keyof RevokeMcpConnectionErrors];
+
+export type RevokeMcpConnectionResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        revoked: true;
+    };
+};
+
+export type RevokeMcpConnectionResponse = RevokeMcpConnectionResponses[keyof RevokeMcpConnectionResponses];
+
 export type GetCurrentIdentityData = {
     body?: never;
     path?: never;
@@ -936,6 +1093,74 @@ export type GetCurrentIdentityResponses = {
 
 export type GetCurrentIdentityResponse = GetCurrentIdentityResponses[keyof GetCurrentIdentityResponses];
 
+export type ListAgentTokensData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        includeInactive?: 'true' | 'false';
+    };
+    url: '/v1/agent-tokens';
+};
+
+export type ListAgentTokensErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListAgentTokensError = ListAgentTokensErrors[keyof ListAgentTokensErrors];
+
+export type ListAgentTokensResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<AgentTokenRecord>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListAgentTokensResponse = ListAgentTokensResponses[keyof ListAgentTokensResponses];
+
 export type CreateAgentTokenData = {
     body: {
         permissions: Array<'read' | 'send' | 'manage'>;
@@ -1002,6 +1227,72 @@ export type CreateAgentTokenResponses = {
 };
 
 export type CreateAgentTokenResponse = CreateAgentTokenResponses[keyof CreateAgentTokenResponses];
+
+export type RevokeAgentTokenData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/agent-tokens/{id}/revoke';
+};
+
+export type RevokeAgentTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RevokeAgentTokenError = RevokeAgentTokenErrors[keyof RevokeAgentTokenErrors];
+
+export type RevokeAgentTokenResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        revoked: true;
+    };
+};
+
+export type RevokeAgentTokenResponse = RevokeAgentTokenResponses[keyof RevokeAgentTokenResponses];
 
 export type ListApiKeysData = {
     body?: never;

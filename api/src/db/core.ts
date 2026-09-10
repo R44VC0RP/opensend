@@ -14,6 +14,12 @@ export const requestBudgets = pgTable('api_request_budgets', {
   windowStart: timestamp('window_start', { withTimezone: true, mode: 'string' }).notNull(),
   used: integer('used').notNull(),
 }, t => [primaryKey({ columns: [t.workspaceId, t.keyId] }), index('api_request_budgets_expiry').on(t.windowStart)]);
+export const agentTokens = pgTable('agent_tokens', {
+  id: text('id').primaryKey(), workspaceId: text('workspace_id').notNull(), grantId: text('grant_id').notNull(),
+  environment: text('environment').$type<Mode>().notNull(), permissions: jsonb('permissions').$type<Permission[]>().notNull(), domains: jsonb('domains').$type<string[]>().notNull(), purpose: text('purpose').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(), revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'string' }),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).defaultNow().notNull(), lastUsedAt: timestamp('last_used_at', { withTimezone: true, mode: 'string' }),
+}, t => [index('agent_tokens_workspace_page').on(t.workspaceId, t.id), index('agent_tokens_grant').on(t.workspaceId, t.grantId), index('agent_tokens_expiry').on(t.expiresAt)]);
 export const jobSchedule = pgTable('job_schedule', {
   workspaceId: text('workspace_id').primaryKey(), turn: integer('turn').notNull().default(0),
 });

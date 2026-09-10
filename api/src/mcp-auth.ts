@@ -2,11 +2,14 @@ import { mcp } from '@better-auth/mcp';
 import { createResourceServerChallenge } from '@better-auth/oauth-provider';
 import { APIError } from 'better-auth/api';
 import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
-import { and, eq } from 'drizzle-orm';
-import { ApiError, log } from './core.js';
+import { createRoute, z } from '@hono/zod-openapi';
+import { and, eq, gt, like } from 'drizzle-orm';
+import { actor, ApiError, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
 import { createAuth, isApprovedUser, requireDashboardOrigin } from './google-auth.js';
-import { oauthClient, oauthClientResource, oauthConsent, oauthResource } from './db/mcp-auth.js';
+import { agentTokens } from './db/core.js';
+import { authUser } from './db/google-auth.js';
+import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
 
 const scopes = ['opensend:read', 'opensend:send', 'opensend:manage', 'opensend:live', 'offline_access'];
 const permissions: Permission[] = ['read', 'send', 'manage'];
@@ -249,6 +252,12 @@ const scopeLabels: Record<string, string> = {
   'opensend:manage': 'Full account access, including sending and managing credentials',
   'offline_access': 'Stay connected for up to 30 days without signing in again',
 };
+const McpConnection = z.object({ id: z.string(), clientId: z.string(), name: z.string().nullable(), userEmail: z.string(), scopes: z.array(z.string()), createdAt: z.string(), updatedAt: z.string() }).openapi('McpConnection');
+function dashboardOwner(c: Parameters<typeof actor>[0]) {
+  const identity = actor(c, 'manage');
+  if (identity.credential !== 'dashboard' || !identity.keyId.startsWith('user_')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'MCP connections can only be managed from an approved dashboard session.');
+  return identity;
+}
 async function consentPage(runtime: Runtime, request: Request) {
   try {
     if (request.method === 'POST') requireDashboardOrigin(runtime, request.headers);
@@ -304,6 +313,30 @@ async function redirectResult(result: Response) {
   return new Response(null, { status: 303, headers });
 }
 export function registerMcpAuth(app: App): void {
+  app.openapi(createRoute({ method: 'get', path: '/v1/mcp-connections', operationId: 'listMcpConnections', tags: ['Auth'], security, request: { query: PageQuery }, responses: { 200: response(pageSchema(McpConnection)), ...errors } }), async c => {
+    dashboardOwner(c); const query = c.req.valid('query');
+    const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
+      .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
+      .where(and(like(oauthConsent.referenceId, 'mcp\_%'), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
+    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
+    const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
+    const revoked = await c.env.db.transaction(async tx => {
+      const [connection] = await tx.select().from(oauthConsent).where(and(eq(oauthConsent.id, consentId), like(oauthConsent.referenceId, 'mcp\_%'))).limit(1).for('update');
+      if (!connection?.userId) return false;
+      const revokedAt = new Date().toISOString();
+      if (connection.referenceId) {
+        await tx.update(oauthAccessToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthAccessToken.clientId, connection.clientId), eq(oauthAccessToken.userId, connection.userId), eq(oauthAccessToken.referenceId, connection.referenceId)));
+        await tx.update(oauthRefreshToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthRefreshToken.clientId, connection.clientId), eq(oauthRefreshToken.userId, connection.userId), eq(oauthRefreshToken.referenceId, connection.referenceId)));
+      }
+      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.grantId, connectionId)));
+      await tx.delete(oauthConsent).where(eq(oauthConsent.id, consentId));
+      return true;
+    });
+    if (!revoked) throw new ApiError(404, 'NOT_FOUND', 'MCP connection was not found.');
+    return c.json({ id: connectionId, revoked: true as const }, 200);
+  });
   for (const path of ['/jwks', '/oauth2/authorize', ...machineEndpoints, ...sessionReads, ...sessionWrites]) {
     app.on(['GET', 'POST', 'OPTIONS'], `/api/auth${path}`, c => protocolRequest(c.env, c.req.raw));
   }
