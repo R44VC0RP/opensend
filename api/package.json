@@ -7,6 +7,7 @@
     "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
     "worker": "node --env-file-if-exists=.env --import tsx src/runner.ts",
     "migrate": "node --env-file-if-exists=.env --import tsx src/migrate.ts",
+    "iam-policy:personal": "node scripts/create-iam-policy.mjs",
     "check": "tsc --noEmit",
     "test": "node --env-file-if-exists=.env --import tsx --test api.acceptance.test.ts",
     "openapi": "tsx src/export-openapi.ts",

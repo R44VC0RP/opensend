@@ -6,3 +6,4 @@ dist/
 .dev.vars*
 *.log
 openapi-ts-error-*
+iam-policy-personal.json
