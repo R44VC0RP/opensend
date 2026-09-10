@@ -46,10 +46,15 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap a { cursor: text; }
 .composer-document .tiptap table { max-width: 100%; }
 .email-composer > .ui-alert { margin-bottom: var(--space-16); }
-.composer-inspector { position: fixed; z-index: 60; inset-block: 96px 24px; inset-inline-end: 24px; width: 300px; overflow: auto; padding: 16px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-popover); color-scheme: light dark; }
+.composer-inspector { --re-bg: #fff; --re-text: #181818; --re-text-muted: #707070; --re-border: #d8d8d8; --re-hover: #f4f4f4; --re-active: #e8e8e8; --re-pressed: #e8e8e8; --re-bg-active: #f4f4f4; --re-separator: #e2e2e2; position: fixed; z-index: 60; inset-block: 96px 24px; inset-inline-end: 24px; width: 300px; overflow: auto; padding: 16px; border: 1px solid #d8d8d8; border-radius: var(--radius-sm); background: #fff; color: #181818; box-shadow: var(--shadow-popover); color-scheme: light; }
 .composer-inspector[hidden] { display: none; }
 .composer-inspector-header { position: sticky; z-index: 1; top: -16px; display: flex; align-items: center; justify-content: space-between; margin: -16px -16px 12px; padding: 12px 16px; border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
 .composer-inspector :is(input, select, textarea) { max-width: 100%; }
+.composer-inspector :is([data-re-inspector-input], select, textarea) { border-color: #a8a8a8; background: #fff; color: #181818; }
+.composer-inspector [data-re-inspector-breadcrumb-button] { color: #181818; }
+.composer-inspector [data-re-inspector-breadcrumb-button][data-clickable] { color: #707070; }
+.composer-inspector [data-re-inspector-toggle-item] { border-color: #a8a8a8; background: #fff; color: #181818; }
+.composer-inspector [data-re-inspector-toggle-item][data-active] { background: #181818; color: #fff; }
 .composer-inspector-hint { margin: 12px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.5; }
 @media (max-width: 700px) { .composer-inspector { inset: 72px 8px 8px; width: auto; } }
 :root {
