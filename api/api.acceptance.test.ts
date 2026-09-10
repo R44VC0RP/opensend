@@ -896,6 +896,14 @@ describe('DB region catalog and explicit SES setup', () => {
           assert.ok(expectedSets.includes(input.ConfigurationSetName));
           assert.ok(!sets.has(input.ConfigurationSetName), 'Repeated runs must not recreate an existing set.');
           sets.set(input.ConfigurationSetName, { Tags: input.Tags, SendingOptions: input.SendingOptions, destinations: [] }); return {};
+        case 'PutConfigurationSetSuppressionOptionsCommand': {
+          assert.ok(expectedSets.includes(input.ConfigurationSetName));
+          assert.deepEqual(input.SuppressedReasons, ['BOUNCE', 'COMPLAINT']);
+          assert.equal(input.SuppressionScope, 'ACCOUNT');
+          const set = sets.get(input.ConfigurationSetName)!;
+          set.SuppressionOptions = { SuppressionScope: input.SuppressionScope, SuppressedReasons: input.SuppressedReasons, ValidationOptions: input.ValidationOptions };
+          return {};
+        }
         case 'CreateTopicCommand':
           assert.equal(`arn:aws:sns:${REGION}:${accountId}:${input.Name}`, expectedTopic);
           assert.equal(topic, undefined, 'Repeated runs must not recreate an existing topic.');
@@ -1037,6 +1045,8 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [queued.jobId])).rows[0].status, 'completed');
         const pending = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
         assert.equal(pending.resources.topic.subscription, 'pending');
+        assert.equal(pending.resources.transactional.autoValidation, 'off');
+        assert.equal(pending.resources.marketing.autoValidation, 'managed');
         assert.equal(pending.provisioned, false);
         assert.notEqual(pending.status, 'ready', 'Creating resources cannot claim readiness before SNS confirmation.');
         assert.ok(pending.blockers.some((blocker: Json) => blocker.code === 'SNS_CONFIRMATION_PENDING'));
@@ -1053,6 +1063,13 @@ describe('DB region catalog and explicit SES setup', () => {
           assert.ok(set.Tags.some((tag: Json) => tag.Key === 'opensend:installation-id' && tag.Value));
           assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['SEND', 'DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
         }
+        const validationPath = `/v1/regions/${REGION}/auto-validation`;
+        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, testKey), 403);
+        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, reader), 403);
+        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, scoped), 403);
+        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: false }, admin), 422);
+        assert.deepEqual(ok(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, admin)), { stream: 'transactional', mode: 'high' });
+        assert.equal(sets.get(expectedSets[0]!)!.SuppressionOptions.ValidationOptions.ConditionThreshold.OverallConfidenceThreshold.ConfidenceVerdictThreshold, 'HIGH');
         // A foreign destination must survive retries, while managed resources and
         // pending subscriptions remain singleton resources rather than duplicates.
         const unrelated = { Name: 'customer-tracking', Enabled: true, MatchingEventTypes: ['OPEN'], SnsDestination: { TopicArn: 'arn:aws:sns:us-east-1:444455556666:unrelated' } };
@@ -1062,6 +1079,7 @@ describe('DB region catalog and explicit SES setup', () => {
         await drain(runtime, 10);
         assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [repeated.jobId])).rows[0].status, 'completed');
         assert.equal(writes().filter(call => call.name === 'CreateConfigurationSetCommand').length, 2);
+        assert.equal(writes().filter(call => call.name === 'PutConfigurationSetSuppressionOptionsCommand').length, 3, 'Reprovisioning must preserve explicit validation settings.');
         assert.equal(writes().filter(call => call.name === 'CreateTopicCommand').length, 1);
         assert.equal(writes().filter(call => call.name === 'SubscribeCommand').length, 1);
         assert.deepEqual(sets.get(expectedSets[0]!)!.destinations.find((destination: Json) => destination.Name === unrelated.Name), unrelated);
@@ -2283,6 +2301,46 @@ describe('Operational configuration and public event boundaries', () => {
     assert.ok(catalog.data.some((entry: Json) => entry.region === catalog.defaultRegion && entry.enabled && entry.isDefault));
     error(await http('GET', '/v1/domains', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
     error(await http('POST', '/v1/domains', key.secret, { name: `${unique('acceptance')}.example.com`, region: REGION }), 403, 'TEST_EXTERNAL_OPERATION');
+  });
+
+  test('SES Auto Validation feedback records its subtype and suppresses the contact distinctly from a hard bounce', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+    const [{ nodeRuntime }, { operationJobs }] = await Promise.all([import('./src/adapters/node.js'), import('./src/operations.js')]);
+    const db = await fixtureDatabase(t);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+      GOOGLE_CLIENT_ID: 'synthetic-validation-client', GOOGLE_CLIENT_SECRET: 'synthetic-validation-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
+      S3_BUCKET: 'synthetic-validation-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    const runtime = instance.runtime;
+    runtime.config.workspaceId = unique('validation-workspace');
+    runtime.config.awsAccountId = '111122223333';
+    const emailId = unique('validation-email'), contactId = unique('validation-contact'), providerId = unique('ses-message'), messageId = unique('sns-message');
+    const recipient = address(), topicArn = `arn:aws:sns:${REGION}:${runtime.config.awsAccountId}:synthetic-validation`;
+    const snapshot = { from: 'sender@example.com', to: [recipient], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic validation', text: 'Synthetic only', attachments: [], tracking: false, headers: [] };
+    await db.query('BEGIN');
+    try {
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,marketing_consent) VALUES($1,$2,'live',$3,'subscribed')`, [contactId, runtime.config.workspaceId, recipient]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
+        VALUES($1,$2,'live',$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [emailId, runtime.config.workspaceId, REGION, JSON.stringify([recipient]), providerId, JSON.stringify(snapshot)]);
+      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment) VALUES($1,$2,$3,'live')`, [topicArn, messageId, runtime.config.workspaceId]);
+      await db.query('COMMIT');
+    } catch (cause) { await db.query('ROLLBACK'); throw cause; }
+    cleanup(t, async () => {
+      await db.query('DELETE FROM operation_events WHERE workspace_id=$1', [runtime.config.workspaceId]);
+      await db.query('DELETE FROM operation_sns_receipts WHERE workspace_id=$1', [runtime.config.workspaceId]);
+      await db.query('DELETE FROM sending_email_events WHERE workspace_id=$1', [runtime.config.workspaceId]);
+      await db.query('DELETE FROM sending_emails WHERE workspace_id=$1', [runtime.config.workspaceId]);
+      await db.query('DELETE FROM audience_contacts WHERE workspace_id=$1', [runtime.config.workspaceId]);
+    });
+    await operationJobs['operation.ses']!(runtime, { topicArn, messageId, region: REGION, message: {
+      eventType: 'Bounce', mail: { messageId: providerId, sendingAccountId: runtime.config.awsAccountId },
+      bounce: { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed', bouncedRecipients: [{ emailAddress: recipient }], timestamp: new Date().toISOString() },
+    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' });
+    const contact = (await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE id=$1', [contactId])).rows[0];
+    assert.deepEqual(contact, { suppressed: true, suppression_reason: 'email_validation' });
+    const event = (await db.query("SELECT data FROM sending_email_events WHERE email_id=$1 AND type='bounce'", [emailId])).rows[0];
+    assert.equal(event.data.bounceType, 'Permanent');
+    assert.equal(event.data.bounceSubType, 'EmailValidationSuppressed');
   });
 
   test('webhook configuration rejects SSRF targets, defaults to seven events, and protects rotatable signing secrets without making deliveries', async t => {

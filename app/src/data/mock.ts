@@ -27,7 +27,7 @@ const now = () => new Date().toISOString()
 const DISCOVERY_TTL = 15 * 60 * 1000
 function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean, subscription: SesDiscovery['resources']['topic']['subscription'] = resourcesReady ? 'confirmed' : 'missing'): SesDiscovery {
   const profile = find(state.regions, region, 'Region')
-  const set = (kind: string) => ({ name: `opensend-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady })
+  const set = (kind: 'transactional' | 'marketing') => ({ name: `opensend-demo-${kind}`, exists: resourcesReady, owned: resourcesReady, sendingEnabled: resourcesReady, eventDestinationExists: resourcesReady, eventWired: resourcesReady, autoValidation: resourcesReady ? kind === 'marketing' ? 'managed' as const : 'off' as const : null })
   const blockers: SesDiscovery['blockers'] = []
   if (profile.access === 'sandbox') blockers.push({ code: 'SES_SANDBOX', message: 'Demo SES production access is not enabled in this region. Provisioning cannot grant production approval.' })
   if (!profile.sendingEnabled) blockers.push({ code: 'SES_SENDING_DISABLED', message: 'Demo SES account sending is disabled.' })
@@ -476,6 +476,14 @@ export function createMockApi(): OpenSendApi {
         if (row.provisionJobId && (row.provisionStatus === 'pending' || row.provisionStatus === 'running')) return { jobId: row.provisionJobId, status: row.provisionStatus }
         row.provisionJobId = id('demo_job'); row.provisionStatus = 'pending'; row.provisionError = null
         return { jobId: row.provisionJobId, status: 'pending' as const }
+      }),
+      updateAutoValidation: (region, stream, mode, signal) => run(signal, true, s => {
+        enabledRegion(s, region)
+        const report = regionSetup(s).reports[region]
+        if (!report?.resources[stream].owned) throw new ApiError('Provision this region before configuring Auto Validation.', 'RESOURCE_OWNERSHIP_CONFLICT')
+        report.resources[stream].autoValidation = mode
+        report.checkedAt = now()
+        return {stream, mode}
       }),
     },
     workspace: {

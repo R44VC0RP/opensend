@@ -93,6 +93,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       configure: async (region, input, signal) => regionCatalog(await keyCall(`/regions/${idPath(region)}`, 'PUT', input, signal)),
       discover: (region, options, signal) => keyCall<SesDiscovery>(`/regions/${idPath(region)}/discovery${options?.refresh === true ? '?refresh=true' : ''}`, 'GET', undefined, signal),
       provision: (region, signal) => keyCall<RegionProvisionReceipt>(`/regions/${idPath(region)}/provision`, 'POST', { confirm: true }, signal),
+      updateAutoValidation: (region, stream, mode, signal) => keyCall(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
     },
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
     overview: { get: async (input, signal) => {

@@ -812,6 +812,7 @@ export type SesDiscovery = {
             sendingEnabled: boolean | null;
             eventDestinationExists: boolean | null;
             eventWired: boolean | null;
+            autoValidation: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
         };
         marketing: {
             name: string;
@@ -820,6 +821,7 @@ export type SesDiscovery = {
             sendingEnabled: boolean | null;
             eventDestinationExists: boolean | null;
             eventWired: boolean | null;
+            autoValidation: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
         };
         eventDestinationName: string;
         topic: {
@@ -853,6 +855,17 @@ export type RegionProvisionReceipt = {
 };
 
 export type ProvisionRegion = {
+    confirm: true;
+};
+
+export type SesAutoValidationSettings = {
+    stream: 'transactional' | 'marketing';
+    mode: 'off' | 'managed' | 'medium' | 'high';
+};
+
+export type ConfigureSesAutoValidation = {
+    stream: 'transactional' | 'marketing';
+    mode: 'off' | 'managed' | 'medium' | 'high';
     confirm: true;
 };
 
@@ -6172,3 +6185,66 @@ export type ProvisionRegionResponses = {
 };
 
 export type ProvisionRegionResponse = ProvisionRegionResponses[keyof ProvisionRegionResponses];
+
+export type ConfigureRegionAutoValidationData = {
+    body: ConfigureSesAutoValidation;
+    path: {
+        region: string;
+    };
+    query?: never;
+    url: '/v1/regions/{region}/auto-validation';
+};
+
+export type ConfigureRegionAutoValidationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ConfigureRegionAutoValidationError = ConfigureRegionAutoValidationErrors[keyof ConfigureRegionAutoValidationErrors];
+
+export type ConfigureRegionAutoValidationResponses = {
+    /**
+     * Success
+     */
+    200: SesAutoValidationSettings;
+};
+
+export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];

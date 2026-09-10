@@ -7,7 +7,7 @@ import { sesRegions } from './db/ses-regions.js';
 import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
-import { assertProvisionable, discoverSes, provisionSes, SesDiscoverySchema, type SesDiscovery } from './ses-setup.js';
+import { assertProvisionable, AutoValidationModeSchema, discoverSes, provisionSes, SesDiscoverySchema, setAutoValidation, type SesDiscovery } from './ses-setup.js';
 import { assertRegionEnabled, configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
 export { ensureRegionSettings, resolveRegionRuntime } from './ses-region-state.js';
 
@@ -19,6 +19,7 @@ const Catalog = z.object({ defaultRegion: z.string(), data: z.array(z.object({
   provisionStatus: z.enum(['pending', 'running', 'completed', 'failed']).nullable(), provisionError: z.string().nullable(),
 })) }).openapi('RegionCatalog');
 const Receipt = z.object({ jobId: z.string(), status: z.enum(['pending', 'running']) }).openapi('RegionProvisionReceipt');
+const ValidationSettings = z.object({ stream: z.enum(['transactional', 'marketing']), mode: AutoValidationModeSchema.exclude(['inherit', 'unknown']) }).openapi('SesAutoValidationSettings');
 function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   const value = actor(c, mutate ? 'manage' : 'read');
   if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Region configuration requires unrestricted workspace access.');
@@ -79,6 +80,22 @@ export function registerSesRegions(app: App) {
       return { jobId, status: 'pending' as const };
     });
     return c.json(receipt, 202);
+  });
+  app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}/auto-validation', operationId: 'configureRegionAutoValidation', tags: ['Regions'], security,
+    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.',
+    request: { params: Params, body: json(ValidationSettings.extend({ confirm: z.literal(true) }).strict().openapi('ConfigureSesAutoValidation')) }, responses: { 200: response(ValidationSettings), ...errors },
+  }), async c => {
+    const value = access(c, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');
+    const settings = await getRegionSettings(c.env.db, value.workspaceId);
+    if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before configuring Auto Validation.', 'region');
+    await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
+    const [row] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
+    if (row?.report) {
+      const report = SesDiscoverySchema.parse(row.report);
+      report.resources[input.stream].autoValidation = input.mode;
+      await saveDiscovery(c.env, { ...report, checkedAt: new Date().toISOString() });
+    }
+    return c.json(ValidationSettings.parse(input), 200);
   });
 }
 async function approvedOrigin(runtime: Runtime, keyId: string) {

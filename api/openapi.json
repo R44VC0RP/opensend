@@ -3761,6 +3761,21 @@
                       "boolean",
                       "null"
                     ]
+                  },
+                  "autoValidation": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "inherit",
+                      "off",
+                      "managed",
+                      "medium",
+                      "high",
+                      "unknown",
+                      null
+                    ]
                   }
                 },
                 "required": [
@@ -3769,7 +3784,8 @@
                   "owned",
                   "sendingEnabled",
                   "eventDestinationExists",
-                  "eventWired"
+                  "eventWired",
+                  "autoValidation"
                 ]
               },
               "marketing": {
@@ -3807,6 +3823,21 @@
                       "boolean",
                       "null"
                     ]
+                  },
+                  "autoValidation": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "inherit",
+                      "off",
+                      "managed",
+                      "medium",
+                      "high",
+                      "unknown",
+                      null
+                    ]
                   }
                 },
                 "required": [
@@ -3815,7 +3846,8 @@
                   "owned",
                   "sendingEnabled",
                   "eventDestinationExists",
-                  "eventWired"
+                  "eventWired",
+                  "autoValidation"
                 ]
               },
               "eventDestinationName": {
@@ -3991,6 +4023,64 @@
           }
         },
         "required": [
+          "confirm"
+        ],
+        "additionalProperties": false
+      },
+      "SesAutoValidationSettings": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "type": "string",
+            "enum": [
+              "transactional",
+              "marketing"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "managed",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "mode"
+        ]
+      },
+      "ConfigureSesAutoValidation": {
+        "type": "object",
+        "properties": {
+          "stream": {
+            "type": "string",
+            "enum": [
+              "transactional",
+              "marketing"
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "managed",
+              "medium",
+              "high"
+            ]
+          },
+          "confirm": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        },
+        "required": [
+          "stream",
+          "mode",
           "confirm"
         ],
         "additionalProperties": false
@@ -16884,6 +16974,160 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RegionProvisionReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/regions/{region}/auto-validation": {
+      "put": {
+        "operationId": "configureRegionAutoValidation",
+        "tags": [
+          "Regions"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 32,
+              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+            },
+            "required": true,
+            "name": "region",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigureSesAutoValidation"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SesAutoValidationSettings"
                 }
               }
             }

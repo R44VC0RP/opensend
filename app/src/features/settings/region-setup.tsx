@@ -5,7 +5,7 @@ import { useLocation } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApi, useRegion } from '../../data/context'
 import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog, useRegionDiscovery } from '../../data/regions'
-import type { RegionCatalog, RegionCatalogEntry, SesDiscovery } from '../../data/types'
+import type { AutoValidationMode, RegionCatalog, RegionCatalogEntry, SesDiscovery, Stream } from '../../data/types'
 import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
@@ -138,6 +138,7 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>
+    {resources.transactional.owned && resources.marketing.owned && <EmailValidation report={report} />}
     <details className="settings-aws-details">
       <summary>AWS details</summary>
       <div className="stack">
@@ -150,4 +151,34 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
       </div>
     </details>
   </>
+}
+
+const validationOptions = [
+  {value: 'off', label: 'Off'},
+  {value: 'managed', label: 'SES managed'},
+  {value: 'medium', label: 'Medium or higher'},
+  {value: 'high', label: 'High only'},
+]
+function EmailValidation({report}: {report: SesDiscovery}) {
+  const api = useApi()
+  const client = useQueryClient()
+  const {canManage} = useRegionAccess()
+  const [pending, setPending] = useState<{stream: Stream; mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>} | null>(null)
+  const update = useMutation({
+    mutationFn: (input: NonNullable<typeof pending>) => api.regions.updateAutoValidation(report.region, input.stream, input.mode),
+    onSuccess: result => {
+      client.setQueryData<SesDiscovery>(regionDiscoveryKey(api, report.region), old => old ? {...old, resources: {...old.resources, [result.stream]: {...old.resources[result.stream], autoValidation: result.mode}}} : old)
+      setPending(null)
+    },
+  })
+  return <div className="stack settings-discovery-section">
+    <h3>Email validation</h3>
+    <div className="form-grid">
+      {(['marketing', 'transactional'] as const).map(stream => <Field key={stream} label={stream === 'marketing' ? 'Marketing' : 'Transactional'} htmlFor={`validation-${stream}`}>
+        <Select id={`validation-${stream}`} disabled={!canManage || update.isPending} value={report.resources[stream].autoValidation ?? 'unknown'} onValueChange={value => setPending({stream, mode: value as Exclude<AutoValidationMode, 'inherit' | 'unknown'>})} options={report.resources[stream].autoValidation === 'inherit' ? [{value: 'inherit', label: 'AWS account default', disabled: true}, ...validationOptions] : report.resources[stream].autoValidation === 'unknown' || report.resources[stream].autoValidation === null ? [{value: 'unknown', label: 'Unknown', disabled: true}, ...validationOptions] : validationOptions} />
+      </Field>)}
+    </div>
+    {!pending && <MutationError error={update.error} />}
+    <ConfirmDialog open={pending !== null} onOpenChange={open => {if (!open && !update.isPending) setPending(null)}} title={`Change ${pending?.stream ?? 'email'} validation?`} description={`Sets ${pending?.stream ?? 'email'} Auto Validation to ${validationOptions.find(option => option.value === pending?.mode)?.label ?? ''} in ${report.region}. Suppressed attempts still count toward SES quota and AWS charges.`} confirmLabel="Change validation" pending={update.isPending} onConfirm={() => pending ? update.mutateAsync(pending) : Promise.resolve()} />
+  </div>
 }

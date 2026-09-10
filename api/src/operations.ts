@@ -439,7 +439,7 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
   const eventDetail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
   const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
   const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;
-  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, environment: job.environment, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
+  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, environment: job.environment, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
   await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: mapped.rawType, externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime });
   await runtime.db.transaction(async tx => {
     const candidates = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
@@ -447,7 +447,8 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
     for (const address of recipients) {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (kind === 'Complaint' || (kind === 'Bounce' && eventDetail.bounceType === 'Permanent')) {
-        await tx.insert(contacts).values({ id: id('con'), workspaceId: job.workspaceId, environment: job.environment, email: address, suppressed: true, suppressionReason: kind === 'Complaint' ? 'complaint' : 'hard_bounce' }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { suppressed: true, suppressionReason: kind === 'Complaint' ? 'complaint' : 'hard_bounce', updatedAt: now() } });
+        const suppressionReason = kind === 'Complaint' ? 'complaint' : eventDetail.bounceSubType === 'EmailValidationSuppressed' ? 'email_validation' : 'hard_bounce';
+        await tx.insert(contacts).values({ id: id('con'), workspaceId: job.workspaceId, environment: job.environment, email: address, suppressed: true, suppressionReason }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { suppressed: true, suppressionReason, updatedAt: now() } });
       } else if ((kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely') {
         const column = kind === 'Open' ? contacts.lastOpenAt : contacts.lastClickAt;
         const observed = kind === 'Open' ? contacts.openObservedSince : contacts.clickObservedSince;

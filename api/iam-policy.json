@@ -26,6 +26,7 @@
         "ses:GetConfigurationSetEventDestinations",
         "ses:CreateConfigurationSetEventDestination",
         "ses:UpdateConfigurationSetEventDestination",
+        "ses:PutConfigurationSetSuppressionOptions",
         "ses:TagResource"
       ],
       "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*"

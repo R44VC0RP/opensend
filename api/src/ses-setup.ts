@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
-import { SESv2Client, GetAccountCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand } from '@aws-sdk/client-sesv2';
+import { SESv2Client, GetAccountCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
@@ -12,7 +12,9 @@ import type { Config, Runtime } from './core.js';
 
 const flag = z.boolean().nullable();
 const issue = z.object({ code: z.string(), message: z.string() });
-const setSchema = z.object({ name: z.string(), exists: flag, owned: flag, sendingEnabled: flag, eventDestinationExists: flag, eventWired: flag });
+export const AutoValidationModeSchema = z.enum(['inherit', 'off', 'managed', 'medium', 'high', 'unknown']);
+export type AutoValidationMode = z.infer<typeof AutoValidationModeSchema>;
+const setSchema = z.object({ name: z.string(), exists: flag, owned: flag, sendingEnabled: flag, eventDestinationExists: flag, eventWired: flag, autoValidation: AutoValidationModeSchema.nullable() });
 export const SesDiscoverySchema = z.object({
   region: z.string(), checkedAt: z.string(),
   account: z.object({ id: z.string(), productionAccess: flag, sendingEnabled: flag, enforcementStatus: z.string().nullable(), quota: z.object({ max24HourSend: z.number().nullable(), maxSendRate: z.number().nullable(), sentLast24Hours: z.number().nullable() }) }).nullable(),
@@ -36,6 +38,19 @@ const OWNER_TAG = 'opensend:installation-id';
 const PURPOSE_TAG = 'opensend:purpose';
 const PURPOSE = 'ses-feedback';
 const LIMIT = 1000;
+const DEFAULT_AUTO_VALIDATION = { transactional: 'off', marketing: 'managed' } as const;
+
+function autoValidationMode(options: { ValidationOptions?: { ConditionThreshold?: { ConditionThresholdEnabled?: string; OverallConfidenceThreshold?: { ConfidenceVerdictThreshold?: string } } } } | undefined): AutoValidationMode {
+  const condition = options?.ValidationOptions?.ConditionThreshold;
+  if (!condition) return 'inherit';
+  if (condition.ConditionThresholdEnabled === 'DISABLED') return 'off';
+  const threshold = condition.OverallConfidenceThreshold?.ConfidenceVerdictThreshold?.toLowerCase();
+  return condition.ConditionThresholdEnabled === 'ENABLED' && ['managed', 'medium', 'high'].includes(threshold ?? '') ? threshold as AutoValidationMode : 'unknown';
+}
+
+function validationInput(name: string, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>) {
+  return new PutConfigurationSetSuppressionOptionsCommand({ ConfigurationSetName: name, SuppressionScope: 'ACCOUNT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'], ValidationOptions: { ConditionThreshold: mode === 'off' ? { ConditionThresholdEnabled: 'DISABLED' } : { ConditionThresholdEnabled: 'ENABLED', OverallConfidenceThreshold: { ConfidenceVerdictThreshold: mode.toUpperCase() as 'MANAGED' | 'MEDIUM' | 'HIGH' } } } });
+}
 
 export function setupResources(installationId: string): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
@@ -182,7 +197,7 @@ function subscriptionArn(subscription: Subscription, topicArn: string): string |
 async function inspect(runtime: Runtime, options: SesSetupOptions, context: SetupContext = setupContext()): Promise<{ report: SesDiscovery; subscriptions: Subscription[] }> {
   const deadlineSignal = context.signal;
   const names = setupResources(options.installationId);
-  const blankSet = (name: string) => ({ name, exists: null, owned: null, sendingEnabled: null, eventDestinationExists: null, eventWired: null });
+  const blankSet = (name: string) => ({ name, exists: null, owned: null, sendingEnabled: null, eventDestinationExists: null, eventWired: null, autoValidation: null });
   const report: SesDiscovery = {
     region: options.region, checkedAt: new Date().toISOString(), account: null, domains: [], identitiesTruncated: false,
     resources: { transactional: blankSet(names.transactional), marketing: blankSet(names.marketing), eventDestinationName: names.eventDestinationName, topic: { name: names.topicName, arn: null, exists: null, owned: null, policyReady: null, subscription: 'unknown', rawMessageDelivery: null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
@@ -233,7 +248,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         let existing;
         try { existing = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: set.name }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!missing(error)) throw error; set.exists = false; set.owned = false; set.eventDestinationExists = false; set.eventWired = false; return; }
-        set.exists = true; set.owned = owned(existing.Tags, options.installationId); set.sendingEnabled = existing.SendingOptions?.SendingEnabled ?? null;
+        set.exists = true; set.owned = owned(existing.Tags, options.installationId); set.sendingEnabled = existing.SendingOptions?.SendingEnabled ?? null; set.autoValidation = autoValidationMode(existing.SuppressionOptions);
         if (!set.owned) { add(report, 'RESOURCE_OWNERSHIP_CONFLICT', 'An expected SES configuration-set name belongs to another installation or has no ownership tags.'); return; }
         if (set.sendingEnabled === null) add(report, 'AWS_STATE_UNKNOWN', 'SES did not return the configuration set sending state.');
         if (set.sendingEnabled === false) add(report, 'SES_CONFIGURATION_SET_DISABLED', 'An installation configuration set has sending disabled; setup will not override that control.');
@@ -315,6 +330,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   const assertSetOwned = async (name: string) => {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: deadlineSignal });
     if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
+    return set;
   };
   const assertTopicOwned = async () => {
     const attrs = (await c.sns.send(new GetTopicAttributesCommand({ TopicArn: expected.topic }), { abortSignal: deadlineSignal })).Attributes;
@@ -327,7 +343,8 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
         try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options.installationId), SendingOptions: { SendingEnabled: true } }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!collision(error)) throw error; }
       }
-      await assertSetOwned(names[kind]); // Recheck after create/AlreadyExists races; never adopt by name.
+      const set = await assertSetOwned(names[kind]); // Recheck after create/AlreadyExists races; never adopt by name.
+      if (!set.SuppressionOptions?.ValidationOptions) await c.ses.send(validationInput(names[kind], DEFAULT_AUTO_VALIDATION[kind]), { abortSignal: deadlineSignal });
     }
     if (report.resources.topic.exists === false) {
       // SNS CreateTopic is idempotent, so its success alone is not ownership evidence.
@@ -367,4 +384,16 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   } catch (error) { throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); }
   return (await inspect(runtime, options, context)).report;
+}
+
+export async function setAutoValidation(runtime: Runtime, options: SesSetupOptions, stream: 'transactional' | 'marketing', mode: 'off' | 'managed' | 'medium' | 'high'): Promise<void> {
+  const context = setupContext();
+  const c = clients(runtime, options.region, context);
+  const name = setupResources(options.installationId)[stream];
+  try {
+    const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: context.signal });
+    if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
+    await c.ses.send(validationInput(name, mode), { abortSignal: context.signal });
+  } catch (error) { throw awsError(error); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); }
 }
