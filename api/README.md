@@ -196,7 +196,7 @@ Use the route schemas in [`src/ses-regions.ts`](src/ses-regions.ts) for the exac
 | Retries / rate | Shared regional quota reservations. Six bounded transient attempts, delayed 15s, 1m, 4m, 16m, and 1h; ambiguous provider acceptance is not automatically replayed. Failed jobs remain inspectable. |
 | Webhooks | Ten event types, seven operational defaults, signed deliveries, encrypted per-endpoint secrets, pause/resume, and manual retries. Exact administrator-managed host allowlist. Paused local fixtures do not prove public delivery. |
 | Unsubscribe | Immediate hosted GET and provider one-click POST; persistent opaque capabilities opt out of all installation marketing. Repeated clicks are idempotent. Link scanners can trigger footer opt-outs intentionally; HEAD returns 405 without changing consent. No preference-center UI. |
-| Domain readiness | SES-returned DKIM zone is authoritative. Missing DNS is explicit; lists are capped at ten with paced control-plane reads. OpenSend neither creates AWS connections nor replaces DNS records. |
+| Domain readiness | SES-returned DKIM zone is authoritative. Missing DNS is explicit; lists are capped at ten with paced control-plane reads. Domain detail can configure a custom MAIL FROM subdomain with SES default-value fallback and then shows its MX/SPF records. OpenSend neither creates AWS connections nor replaces DNS records. |
 
 ### Errors, logs, and retention
 

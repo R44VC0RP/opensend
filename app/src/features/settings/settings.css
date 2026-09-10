@@ -22,7 +22,7 @@
   overflow-wrap: anywhere;
   white-space: normal;
 }
-.ui-table .settings-copy-cell code { min-width: 0; overflow-x: auto; white-space: nowrap; }
+.ui-table .settings-copy-cell code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-copy-cell > .cluster,
 .settings-secret > .cluster {
   flex-shrink: 0;

@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, lt, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
+import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
@@ -23,7 +23,8 @@ const webhookPatch = webhookInput.partial().extend({ description: z.string().max
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
 const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
-const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional() })) }).openapi('DomainReadiness');
+const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional() })) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const settingsSchema = z.object({ name: z.string(), environment: z.enum(['live', 'test']) }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
@@ -152,7 +153,7 @@ async function domainReadiness(runtime: Runtime, row: typeof domains.$inferSelec
       dns.push({ name: mailFrom.MailFromDomain, type: 'TXT', value: 'v=spf1 include:amazonses.com ~all' });
     } else dnsUnavailableReason = 'MAIL FROM DNS instructions are supported only for commercial AWS regions.';
   }
-  return { id: row.id, name: row.name, region: row.region, verificationStatus: value.VerificationStatus ?? 'NOT_STARTED', verified: value.VerifiedForSendingStatus === true, dkimStatus: value.DkimAttributes?.Status ?? 'NOT_STARTED', ready: value.VerifiedForSendingStatus === true && value.DkimAttributes?.Status === 'SUCCESS' && value.DkimAttributes.SigningEnabled === true && (!mailFrom?.MailFromDomain || mailFrom.MailFromDomainStatus === 'SUCCESS'), mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
+  return { id: row.id, name: row.name, region: row.region, verificationStatus: value.VerificationStatus ?? 'NOT_STARTED', verified: value.VerifiedForSendingStatus === true, dkimStatus: value.DkimAttributes?.Status ?? 'NOT_STARTED', ready: value.VerifiedForSendingStatus === true && value.DkimAttributes?.Status === 'SUCCESS' && value.DkimAttributes.SigningEnabled === true && (!mailFrom?.MailFromDomain || mailFrom.MailFromDomainStatus === 'SUCCESS'), mailFromDomain: mailFrom?.MailFromDomain ?? null, mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
 }
 async function account(runtime: Runtime, selectedRegion: string) { const a = await sesCall(() => getSes(runtime, selectedRegion).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
@@ -176,7 +177,7 @@ export function registerOperations(app: App) {
       const data = rows.slice(0, q.limit).map(row => {
         const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
         const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true;
-        return { id: row.id, name: row.name, region: row.region, verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified: cached?.sendingEnabled === true, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
+        return { id: row.id, name: row.name, region: row.region, verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified: cached?.sendingEnabled === true, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready, mailFromDomain: null, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
       });
       return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
     }
@@ -184,7 +185,7 @@ export function registerOperations(app: App) {
     for (const row of rows.slice(0, q.limit)) { if (data.length) await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/), region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
@@ -197,6 +198,14 @@ export function registerOperations(app: App) {
     // Existing SES identities are adopted without changing verification or DKIM configuration.
     const [row] = await c.env.db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
     return c.json(await domainReadiness(c.env, row!, identity), 201);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, 'manage'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
+    if (!row) return notFound('Domain'); allowedDomain(a, row.name);
+    const { mailFromDomain } = c.req.valid('json');
+    if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
+    await sesCall(() => getSes(c.env, row.region).send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
+    return c.json(await domainReadiness(c.env, row), 200);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);

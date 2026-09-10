@@ -345,7 +345,7 @@ function validSnapshot(value: unknown): value is DemoState {
   if (!rows('segments').every(row => strings(row, ['name']) && ['all', 'any'].includes(String(row.match)) && date(row.updatedAt) && numbers(row, ['matched', 'eligible']) && records(row.rules) && row.rules.length > 0 && row.rules.every(rule => strings(rule, ['id', 'field', 'operator', 'value']) && ['status', 'country', 'listId', 'lastOpenedAt'].includes(String(rule.field)) && ['is', 'is_not', 'within_days'].includes(String(rule.operator)) && (rule.field !== 'listId' || references('lists', rule.value))))) return false
   if (!rows('emails').every(row => strings(row, ['to', 'from', 'subject', 'html']) && references('regions', row.regionId) && ['transactional', 'marketing'].includes(String(row.stream)) && ['delivered', 'bounced', 'complaint', 'deferred', 'rejected'].includes(String(row.status)) && date(row.sentAt) && attachmentIds(row.attachments) && records(row.events) && row.events.every(event => strings(event, ['id', 'type', 'description']) && date(event.at)))) return false
   if (!rows('campaigns').every(row => strings(row, ['name', 'subject', 'previewText', 'fromName', 'fromEmail', 'html', 'timezone']) && references('regions', row.regionId) && (row.listId === '' || references('lists', row.listId)) && (row.segmentId === null || references('segments', row.segmentId)) && ['draft', 'scheduled', 'sent'].includes(String(row.status)) && date(row.createdAt) && date(row.updatedAt) && (row.scheduledAt === null || date(row.scheduledAt)) && (row.archivedAt === undefined || row.archivedAt === null || date(row.archivedAt)) && numbers(row, ['recipients', 'delivered', 'bounced', 'complaints']) && (row.revision === undefined || (typeof row.revision === 'number' && Number.isInteger(row.revision) && row.revision > 0)) && attachmentIds(row.attachments) && draft(row.draft))) return false
-  if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending'].includes(String(row.mailFromStatus)) && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
+  if (!rows('domains').every(row => strings(row, ['name']) && references('regions', row.regionId) && ['verified', 'pending', 'issue'].includes(String(row.status)) && ['verified', 'pending', 'not_configured', 'failed'].includes(String(row.mailFromStatus)) && (row.mailFromDomain == null || typeof row.mailFromDomain === 'string') && date(row.createdAt) && records(row.records) && row.records.every(record => strings(record, ['id', 'name', 'value']) && ['TXT', 'CNAME', 'MX'].includes(String(record.type)) && ['verified', 'pending'].includes(String(record.status))))) return false
   if (!rows('keys').every(row => strings(row, ['name', 'prefix']) && String(row.prefix).startsWith('demo_') && ['send', 'read'].includes(String(row.permission)) && stringArray(row.domains) && row.domains.every(name => rows('domains').some(domain => domain.name === name)) && date(row.createdAt) && (row.lastUsedAt === null || date(row.lastUsedAt)))) return false
   return rows('webhooks').every(row => strings(row, ['name', 'url', 'secretHint']) && String(row.secretHint).startsWith('demo_') && ['active', 'paused'].includes(String(row.status)) && (row.regionIds === 'all' || (stringArray(row.regionIds) && row.regionIds.length > 0 && row.regionIds.every(ref => references('regions', ref)))) && stringArray(row.events) && row.events.length > 0 && row.events.every(event => EVENTS.includes(event as WebhookEvent)) && records(row.deliveries) && row.deliveries.every(delivery => strings(delivery, ['id']) && date(delivery.at) && references('regions', delivery.regionId) && EVENTS.includes(delivery.event as WebhookEvent) && numbers(delivery, ['response', 'attempts']) && ['delivered', 'retry_pending'].includes(String(delivery.status)) && isRecord(delivery.payload)))
 }
@@ -690,14 +690,22 @@ export function createMockApi(): OpenSendApi {
         const name = domainName(input.name)
         if (s.domains.some(domain => domain.regionId === input.regionId && domain.name === name)) throw new ApiError('This domain already exists in this region.', 'conflict', { name: 'This domain is already connected.' })
         const domainId = id('dom')
-        const domain: Domain = { id: domainId, name, regionId: input.regionId, status: 'pending', mailFromStatus: 'pending', createdAt: now(), records: [{ id: `${domainId}_dkim`, type: 'CNAME', name: `demo_key._domainkey.${name}`, value: 'demo_key.dkim.example.invalid', status: 'pending' }, { id: `${domainId}_spf`, type: 'TXT', name: `send.${name}`, value: 'v=spf1 -all', status: 'pending' }, { id: `${domainId}_mx`, type: 'MX', name: `send.${name}`, value: '10 demo-feedback.example.invalid', status: 'pending' }] }
+        const domain: Domain = { id: domainId, name, regionId: input.regionId, status: 'pending', mailFromDomain: null, mailFromStatus: 'not_configured', createdAt: now(), records: [{ id: `${domainId}_dkim`, type: 'CNAME', name: `demo_key._domainkey.${name}`, value: 'demo_key.dkim.example.invalid', status: 'pending' }] }
         s.domains.push(domain)
+        return domain
+      }),
+      configureMailFrom: (domainId, mailFromDomain, signal) => run(signal, true, s => {
+        const domain = find(s.domains, domainId, 'Domain')
+        if (mailFromDomain === domain.name || !mailFromDomain.endsWith(`.${domain.name}`)) throw new ApiError(`Use a subdomain of ${domain.name}.`, 'MAIL_FROM_DOMAIN_INVALID', {mailFromDomain: `Use a subdomain of ${domain.name}.`})
+        domain.mailFromDomain = mailFromDomain
+        domain.mailFromStatus = 'pending'
+        domain.records = [...domain.records.filter(record => !['MX', 'TXT'].includes(record.type)), {id: `${domainId}_mailfrom_mx`, type: 'MX', name: mailFromDomain, value: `10 feedback-smtp.${domain.regionId}.amazonses.com`, status: 'pending'}, {id: `${domainId}_mailfrom_spf`, type: 'TXT', name: mailFromDomain, value: 'v=spf1 include:amazonses.com ~all', status: 'pending'}]
         return domain
       }),
       verify: (domainId, signal) => run(signal, true, s => {
         const domain = find(s.domains, domainId, 'Domain')
         // Deterministic simulation only: no DNS lookup, AWS call, or external mutation.
-        domain.status = 'verified'; domain.mailFromStatus = 'verified'
+        domain.status = 'verified'; domain.mailFromStatus = domain.mailFromDomain ? 'verified' : 'not_configured'
         domain.records.forEach(record => { record.status = 'verified' })
         return domain
       }),

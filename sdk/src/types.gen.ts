@@ -605,6 +605,7 @@ export type DomainReadiness = {
     verified: boolean;
     dkimStatus: string;
     ready: boolean;
+    mailFromDomain: string | null;
     mailFromStatus: string | null;
     dnsStatus: 'available' | 'unavailable';
     dnsUnavailableReason: string | null;
@@ -619,6 +620,10 @@ export type DomainReadiness = {
 export type CreateDomain = {
     name: string;
     region: string;
+};
+
+export type ConfigureDomainMailFrom = {
+    mailFromDomain: string;
 };
 
 export type WebhookPage = {
@@ -4776,6 +4781,69 @@ export type CreateDomainResponses = {
 };
 
 export type CreateDomainResponse = CreateDomainResponses[keyof CreateDomainResponses];
+
+export type ConfigureDomainMailFromData = {
+    body: ConfigureDomainMailFrom;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}/mail-from';
+};
+
+export type ConfigureDomainMailFromErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ConfigureDomainMailFromError = ConfigureDomainMailFromErrors[keyof ConfigureDomainMailFromErrors];
+
+export type ConfigureDomainMailFromResponses = {
+    /**
+     * Success
+     */
+    200: DomainReadiness;
+};
+
+export type ConfigureDomainMailFromResponse = ConfigureDomainMailFromResponses[keyof ConfigureDomainMailFromResponses];
 
 export type GetDomainData = {
     body?: never;

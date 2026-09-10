@@ -865,6 +865,7 @@ describe('DB region catalog and explicit SES setup', () => {
     const sets = new Map<string, Json>();
     let topic: Json | undefined;
     let subscriptions: Json[] = [];
+    const mailFrom = new Map<string, string>();
     let deny = false;
     let wrongOwner = false;
     let expectedSets: string[] = [];
@@ -881,7 +882,10 @@ describe('DB region catalog and explicit SES setup', () => {
         case 'ListEmailIdentitiesCommand': return { EmailIdentities: [{ IdentityType: 'DOMAIN', IdentityName: 'example.com', VerificationStatus: 'SUCCESS', SendingEnabled: true }] };
         case 'GetEmailIdentityCommand':
           assert.notEqual(input.EmailIdentity, 'disabled.example.com', 'Default domain listing must not refresh disabled regions.');
-          return { VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningHostedZone: 'dkim.amazonses.com', Tokens: ['synthetic'] } };
+          return { VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningHostedZone: 'dkim.amazonses.com', Tokens: ['synthetic'] }, ...(mailFrom.has(input.EmailIdentity) ? { MailFromAttributes: { MailFromDomain: mailFrom.get(input.EmailIdentity), MailFromDomainStatus: 'PENDING', BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' } } : {}) };
+        case 'PutEmailIdentityMailFromAttributesCommand':
+          assert.equal(input.BehaviorOnMxFailure, 'USE_DEFAULT_VALUE');
+          mailFrom.set(input.EmailIdentity, input.MailFromDomain); return {};
         case 'GetConfigurationSetCommand': return sets.get(input.ConfigurationSetName) ?? missing();
         case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: sets.get(input.ConfigurationSetName)?.destinations ?? [] };
         case 'GetTopicAttributesCommand': return topic ? { Attributes: { ...topic.attributes, ...(wrongOwner ? { Owner: '999999999999' } : {}) } } : missing();
@@ -1073,6 +1077,15 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.ok((await regional.resolveRegionRuntime(runtime)).config.snsTopicArns.includes(expectedTopic), 'Feedback trust follows the registered account and topic independently of API credential rotation.');
         runtime.config.aws.accessKeyId = connectedKey;
         assert.ok((await regional.resolveRegionRuntime(runtime)).config.snsTopicArns.includes(expectedTopic));
+        const configuredDomain = enabledDomains.data.find((domain: Json) => domain.name === 'example.com');
+        assert.ok(configuredDomain);
+        error(await local('POST', `/v1/domains/${configuredDomain.id}/mail-from`, { mailFromDomain: 'other.invalid' }, admin), 422, 'MAIL_FROM_DOMAIN_INVALID');
+        error(await local('POST', `/v1/domains/${configuredDomain.id}/mail-from`, { mailFromDomain: 'email.example.com' }, reader), 403, 'PERMISSION_DENIED');
+        const configuredMailFrom = ok(await local('POST', `/v1/domains/${configuredDomain.id}/mail-from`, { mailFromDomain: 'email.example.com' }, admin));
+        assert.equal(configuredMailFrom.mailFromDomain, 'email.example.com');
+        assert.equal(configuredMailFrom.mailFromStatus, 'PENDING');
+        assert.ok(configuredMailFrom.dns.some((record: Json) => record.type === 'MX' && record.name === 'email.example.com' && record.priority === 10));
+        assert.ok(configuredMailFrom.dns.some((record: Json) => record.type === 'TXT' && record.value === 'v=spf1 include:amazonses.com ~all'));
         const beforeWrongOwner = writes().length;
         wrongOwner = true;
         const conflict = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));

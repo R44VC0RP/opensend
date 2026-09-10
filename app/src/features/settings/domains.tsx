@@ -55,6 +55,18 @@ function LiveDomainDetailPage() {
   const { regionId, setRegionId } = useRegion()
   const domain = useApiQuery(['domain', id], (api, signal) => api.domains.get(id, signal))
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Domain readiness refreshed', true)
+  const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true)
+  const [mailFromOpen, setMailFromOpen] = useState(false)
+  const [mailFromDomain, setMailFromDomain] = useState('')
+  const [mailFromInvalid, setMailFromInvalid] = useState('')
+  function openMailFrom() { configureMailFrom.reset(); setMailFromDomain(domain.data?.mailFromDomain ?? `email.${domain.data?.name ?? ''}`); setMailFromInvalid(''); setMailFromOpen(true) }
+  async function submitMailFrom(event: FormEvent) {
+    event.preventDefault()
+    const current = domain.data, value = mailFromDomain.trim().toLowerCase()
+    if (!current || !domainPattern.test(value) || value === current.name || !value.endsWith(`.${current.name}`)) { setMailFromInvalid(`Use an unused subdomain of ${current?.name ?? 'this domain'}.`); return }
+    setMailFromInvalid('')
+    try { await configureMailFrom.mutateAsync({id, mailFromDomain: value}); setMailFromOpen(false) } catch { /* Shown inline. */ }
+  }
   if (domain.isPending) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
@@ -62,19 +74,26 @@ function LiveDomainDetailPage() {
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button>} />
     <MutationError error={verify.error} />
-    <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom mail from · <StatusBadge status={label(current.mailFromStatus)} /></span></div>
+    <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom MAIL FROM · {current.mailFromDomain && <>{current.mailFromDomain} · </>}<StatusBadge status={label(current.mailFromStatus)} /></span><Button variant="ghost" size="sm" onClick={openMailFrom}>{current.mailFromDomain ? 'Change MAIL FROM' : 'Add custom MAIL FROM'}</Button></div>
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <section className="section stack">
       <SectionHeader title="DNS records" />
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
       <DataTable minRows={3} rows={current.records} rowKey={record => record.id} columns={[
         { ...settingsColumns.dns[0], render: record => record.type },
-        { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
-        { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
+        { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code title={record.name}>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
+        { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
         { ...settingsColumns.dns[3], render: record => <StatusBadge status={label(record.status)} /> },
       ]} />
       {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`} children={null} /> : <Alert tone="info">Individual DNS records are not independently verified.</Alert>}
     </section>
+    <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
+      <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
+        <MutationError error={configureMailFrom.error} />
+        <Field label="MAIL FROM domain" htmlFor="mail-from-domain" error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
+        <p className="muted">Use an unused subdomain of {current.name}. OpenSend will show its MX and SPF records here.</p>
+      </form>
+    </Dialog>
   </div>
 }
 
