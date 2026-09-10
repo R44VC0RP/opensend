@@ -36,7 +36,8 @@ export interface Config {
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
   configurationSets: { transactional: string; marketing: string };
 }
-export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; }
+export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
+export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; renderHtmlImage?: (html: string) => Promise<RenderedImage>; }
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;

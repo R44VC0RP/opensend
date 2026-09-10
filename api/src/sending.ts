@@ -138,6 +138,7 @@ const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: 
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
 const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
 const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
+const CampaignPreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png') }).openapi('CampaignPreviewImage');
 const CampaignSend = z.object({ reviewId: z.string().min(1), revision: z.number().int().positive() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
@@ -631,6 +632,25 @@ export function registerSending(app: App) {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     const rendered = renderCampaignContent(c.env, row.draft, false);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
+    const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
+    const rendered = renderCampaignContent(c.env, row.draft, false);
+    let html = rendered.html ?? '';
+    const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId);
+    for (const item of inline) {
+      const asset = await c.env.storage.get(item.storageKey);
+      if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
+      html = html.replaceAll(`cid:${item.contentId}`, `data:${item.contentType};base64,${Buffer.from(asset.body).toString('base64')}`);
+    }
+    try {
+      const image = await c.env.renderHtmlImage(html);
+      return c.json(CampaignPreviewImage.parse({ ...image, data: Buffer.from(image.data).toString('base64') }), 200);
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(503, 'PREVIEW_RENDERING_FAILED', 'The visual campaign preview could not be rendered. Try again.', undefined, true);
+    }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
     const [row] = await c.env.db.select(campaignStateColumns).from(campaigns).where(campaignWhere(actor(c), c.req.valid('param').id)).limit(1);

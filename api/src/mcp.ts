@@ -71,9 +71,9 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
       return rpcError(error instanceof Failure && error.code === 'SIZE_LIMIT_EXCEEDED' ? 413 : 400, error instanceof SyntaxError ? -32700 : -32602, error instanceof SyntaxError ? 'Request body is not valid JSON.' : 'Request exceeds byte or structural limits.', requestId);
     }
   }
-  function result(payload: ObjectValue, isError = false): CallToolResult {
+  function result(payload: ObjectValue, isError = false, image?: { data: string; mimeType: string }): CallToolResult {
     const text = redact(JSON.stringify(payload));
-    const output: CallToolResult = { isError, content: [{ type: 'text', text }], structuredContent: JSON.parse(text) };
+    const output: CallToolResult = { isError, content: [{ type: 'text', text }, ...(image ? [{ type: 'image' as const, data: image.data, mimeType: image.mimeType }] : [])], structuredContent: JSON.parse(text) };
     if (byteLength(JSON.stringify(output)) > RESPONSE_LIMIT) fail('RESPONSE_TOO_LARGE', 'Tool response exceeds 16 MiB. The operation may already have completed; request a smaller page and reconcile before retrying.');
     return output;
   }
@@ -131,7 +131,8 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
       if (byteLength(JSON.stringify(args)) > INPUT_LIMIT) fail('INVALID_ARGUMENTS', 'Arguments exceed the 12 MiB limit.');
       const value = await invoke(op, args);
       status = value.status; apiRequestId = value.requestId;
-      const output = result(value);
+       const { image, ...payload } = value;
+       const output = result(payload, false, image);
       if (!op.validateOutput(output.structuredContent)) fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
       return output;
     } catch (error) {

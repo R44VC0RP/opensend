@@ -611,6 +611,14 @@ export type CampaignPreview = {
     text: string;
 };
 
+export type CampaignPreviewImage = {
+    /**
+     * Canonical base64 PNG screenshot.
+     */
+    data: string;
+    mimeType: 'image/png';
+};
+
 /**
  * Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.
  */
@@ -5362,6 +5370,69 @@ export type PreviewCampaignResponses = {
 };
 
 export type PreviewCampaignResponse = PreviewCampaignResponses[keyof PreviewCampaignResponses];
+
+export type RenderCampaignPreviewImageData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/preview-image';
+};
+
+export type RenderCampaignPreviewImageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RenderCampaignPreviewImageError = RenderCampaignPreviewImageErrors[keyof RenderCampaignPreviewImageErrors];
+
+export type RenderCampaignPreviewImageResponses = {
+    /**
+     * Success
+     */
+    200: CampaignPreviewImage;
+};
+
+export type RenderCampaignPreviewImageResponse = RenderCampaignPreviewImageResponses[keyof RenderCampaignPreviewImageResponses];
 
 export type GetCampaignStateData = {
     body?: never;

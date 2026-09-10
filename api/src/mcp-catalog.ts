@@ -3,7 +3,7 @@ import type { Tool } from '@modelcontextprotocol/server';
 import type { App } from './core.js';
 
 type ObjectValue = Record<string, any>;
-export interface McpStepResult { status: number; requestId: string | null; response: any; }
+export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
@@ -214,6 +214,7 @@ const campaignReviewOutput: NonNullable<Tool['outputSchema']> = {
       id: { type: 'string' }, campaignId: { type: 'string' }, revision: { type: 'integer' }, contentHash: { type: 'string' }, createdAt: { type: 'string' },
       matched: { type: 'integer' }, eligible: { type: 'integer' }, suppressed: { type: 'integer' }, unsubscribed: { type: 'integer' },
       preview: { type: 'object', properties: { html: { type: 'string' }, text: { type: 'string' } }, required: ['html', 'text'], additionalProperties: false },
+      visualPreview: { type: 'object', properties: { mimeType: { type: 'string', const: 'image/png' } }, required: ['mimeType'], additionalProperties: false },
     }, required: ['id', 'campaignId', 'revision', 'contentHash', 'createdAt', 'matched', 'eligible', 'suppressed', 'unsubscribed', 'preview'], additionalProperties: false } }, required: ['status', 'requestId', 'response'], additionalProperties: false },
     structuredClone((genericOutput as ObjectValue).anyOf[1]),
   ],
@@ -303,11 +304,16 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
-  const previewCampaign = need('previewCampaign', raw), reviewCampaign = need('reviewCampaign', raw);
-  add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. ${EMAIL_SEND_CONFIRMATION}`, reviewCampaign.tool.inputSchema, true, args => ({
-    steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args }],
-    combine: ([preview, review]) => ({ ...review, response: { ...review.response, preview: preview.response } }),
-  }), campaignReviewOutput));
+  const previewCampaign = need('previewCampaign', raw), previewImage = need('renderCampaignPreviewImage', raw), reviewCampaign = need('reviewCampaign', raw);
+  const reviewInput = structuredClone(reviewCampaign.tool.inputSchema) as ObjectValue;
+  reviewInput.properties = { ...(reviewInput.properties ?? {}), visualPreview: { type: 'boolean', default: false, description: 'Also return a rendered PNG image of the saved campaign draft.' } };
+  add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. Set visualPreview=true to also receive a PNG image of the email. ${EMAIL_SEND_CONFIRMATION}`, reviewInput as Tool['inputSchema'], true, args => {
+    const reviewArgs = { ...args }; delete reviewArgs.visualPreview;
+    return {
+      steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args: reviewArgs }, ...(args.visualPreview === true ? [{ operation: previewImage, args: { id: args.id } }] : [])],
+      combine: ([preview, review, visual]) => ({ ...review, response: { ...review.response, preview: preview.response, ...(visual ? { visualPreview: { mimeType: visual.response.mimeType } } : {}) }, ...(visual ? { image: { data: visual.response.data, mimeType: visual.response.mimeType } } : {}) }),
+    };
+  }, campaignReviewOutput));
   add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: need('sendCampaign', raw), schedule: need('scheduleCampaign', raw), cancel: need('cancelCampaign', raw) }, 'mode'));
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');

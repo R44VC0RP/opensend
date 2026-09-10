@@ -21,6 +21,7 @@
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
+  "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
     "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],
