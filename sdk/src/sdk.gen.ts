@@ -1175,7 +1175,7 @@ export const getSesSettings = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Refreshes at most 10 identities, sequentially with one second between SES reads. Default page size is 5; use individual domain detail for a single refresh. Concurrent clients may still encounter account-level throttling.
+ * Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.
  */
 export const listDomains = <ThrowOnError extends boolean = false>(options?: Options<ListDomainsData, ThrowOnError>): RequestResult<ListDomainsResponses, ListDomainsErrors, ThrowOnError> => (options?.client ?? client).get<ListDomainsResponses, ListDomainsErrors, ThrowOnError>({
     security: [
