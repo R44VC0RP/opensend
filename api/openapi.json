@@ -3775,7 +3775,8 @@
                       "high",
                       "unknown",
                       null
-                    ]
+                    ],
+                    "default": null
                   }
                 },
                 "required": [
@@ -3784,8 +3785,7 @@
                   "owned",
                   "sendingEnabled",
                   "eventDestinationExists",
-                  "eventWired",
-                  "autoValidation"
+                  "eventWired"
                 ]
               },
               "marketing": {
@@ -3837,7 +3837,8 @@
                       "high",
                       "unknown",
                       null
-                    ]
+                    ],
+                    "default": null
                   }
                 },
                 "required": [
@@ -3846,8 +3847,7 @@
                   "owned",
                   "sendingEnabled",
                   "eventDestinationExists",
-                  "eventWired",
-                  "autoValidation"
+                  "eventWired"
                 ]
               },
               "eventDestinationName": {

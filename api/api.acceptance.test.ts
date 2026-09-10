@@ -1021,6 +1021,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(missing.resources.topic.exists, false);
         assert.equal(missing.resources.transactional.exists, false);
         assert.equal(writes().length, 0, 'Discovering missing resources must not create, update, or subscribe anything.');
+        await db.query(`UPDATE ses_regions SET report = report #- '{resources,transactional,autoValidation}' #- '{resources,marketing,autoValidation}' WHERE workspace_id = $1 AND region = $2`, [runtime.config.workspaceId, REGION]);
         const cachedCalls = observed.length;
         Object.assign(runtime.config.aws, { $source: { CREDENTIALS_CODE: 'e' } });
         assert.deepEqual(ok(await local('GET', discoveryPath, undefined, reader)), missing);

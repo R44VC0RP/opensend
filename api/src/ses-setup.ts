@@ -14,7 +14,7 @@ const flag = z.boolean().nullable();
 const issue = z.object({ code: z.string(), message: z.string() });
 export const AutoValidationModeSchema = z.enum(['inherit', 'off', 'managed', 'medium', 'high', 'unknown']);
 export type AutoValidationMode = z.infer<typeof AutoValidationModeSchema>;
-const setSchema = z.object({ name: z.string(), exists: flag, owned: flag, sendingEnabled: flag, eventDestinationExists: flag, eventWired: flag, autoValidation: AutoValidationModeSchema.nullable() });
+const setSchema = z.object({ name: z.string(), exists: flag, owned: flag, sendingEnabled: flag, eventDestinationExists: flag, eventWired: flag, autoValidation: AutoValidationModeSchema.nullable().default(null) });
 export const SesDiscoverySchema = z.object({
   region: z.string(), checkedAt: z.string(),
   account: z.object({ id: z.string(), productionAccess: flag, sendingEnabled: flag, enforcementStatus: z.string().nullable(), quota: z.object({ max24HourSend: z.number().nullable(), maxSendRate: z.number().nullable(), sentLast24Hours: z.number().nullable() }) }).nullable(),

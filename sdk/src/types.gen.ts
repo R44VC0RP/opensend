@@ -812,7 +812,7 @@ export type SesDiscovery = {
             sendingEnabled: boolean | null;
             eventDestinationExists: boolean | null;
             eventWired: boolean | null;
-            autoValidation: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
+            autoValidation?: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
         };
         marketing: {
             name: string;
@@ -821,7 +821,7 @@ export type SesDiscovery = {
             sendingEnabled: boolean | null;
             eventDestinationExists: boolean | null;
             eventWired: boolean | null;
-            autoValidation: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
+            autoValidation?: 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown' | null;
         };
         eventDestinationName: string;
         topic: {
