@@ -662,6 +662,11 @@ export function createMockApi(): OpenSendApi {
         s.lists.push(list)
         return list
       }),
+      remove: (listId, signal) => run(signal, true, s => {
+        const list = find(s.lists, listId, 'List')
+        s.lists.splice(s.lists.indexOf(list), 1)
+        s.contacts.forEach(contact => { contact.listIds = contact.listIds.filter(id => id !== listId) })
+      }),
     },
     segments: {
       list: (input = {}, signal) => run(signal, false, s => page(s.segments.map(segment => segmentTotals(s, segment)), input, segment => segment.name)),

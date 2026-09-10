@@ -168,7 +168,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
     imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: id => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST') },
-    lists: { list: (input = {}, signal) => page('/lists', input, mapList, {search: input.search}, signal), get: async (id, signal) => mapList(await call(`/lists/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapList(await call('/lists', 'POST', input, signal)) },
+    lists: { list: (input = {}, signal) => page('/lists', input, mapList, {search: input.search}, signal), get: async (id, signal) => mapList(await call(`/lists/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapList(await call('/lists', 'POST', input, signal)), remove: async (id, signal) => { await call(`/lists/${idPath(id)}`, 'DELETE', undefined, signal) } },
     segments: {
       list: (input = {}, signal) => page('/segments', input, mapSegment, {search: input.search}, signal), get: async (id, signal) => mapSegment(await call(`/segments/${idPath(id)}`, 'GET', undefined, signal)),
       save: async (input, signal) => { if (!input.rule) throw new ApiError('Enter a valid public segment rule.', 'RULE_REQUIRED'); return mapSegment(await call(input.id ? `/segments/${idPath(input.id)}` : '/segments', input.id ? 'PATCH' : 'POST', {name: input.name, rule: input.rule}, signal)) },

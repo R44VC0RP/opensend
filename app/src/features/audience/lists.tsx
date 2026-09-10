@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Plus } from 'lucide-react'
 import { useApiMutation, useApiQuery } from '../../data/context'
-import { Button, ControlSkeleton, DataTable, Dialog, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
+import { Button, ConfirmDialog, ControlSkeleton, DataTable, Dialog, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SkeletonText, Tabs } from '../../components/ui'
 import { listColumns, ListDetailBodySkeleton } from './skeletons'
 import { ContactTable, date, fieldError, MutationError, number, statusOptions } from './shared'
 import { ImportContactsDialog } from './import'
@@ -31,11 +31,16 @@ function CreateListDialog({ onClose }: { onClose: () => void }) {
 }
 export function ListDetailPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const query = useApiQuery(['lists', id], (api, signal) => api.lists.get(id, signal))
   const [importing, setImporting] = useState(false)
-  return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={180} lineHeight={24} /> : query.data?.name || 'List'} backTo="/lists" actions={query.isPending ? <ControlSkeleton width={132} /> : query.data && <Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button>} />
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const remove = useApiMutation((api, listId: string) => api.lists.remove(listId), 'List deleted')
+  async function deleteList() { await remove.mutateAsync(id); navigate('/lists') }
+  return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={180} lineHeight={24} /> : query.data?.name || 'List'} backTo="/lists" actions={query.isPending ? <ControlSkeleton width={132} /> : query.data && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
     {query.isPending ? <ListDetailBodySkeleton /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><div className="audience-summary cluster"><span>{number(query.data.total)} contacts</span><span>{number(query.data.subscribed)} subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span><span className="muted">{number(query.data.unsubscribed)} unsubscribed</span>{query.data.unknown !== undefined && <span className="muted">{number(query.data.unknown)} unknown consent</span>}</div><ListMembers key={id} listId={id} /></>}
     {importing && <ImportContactsDialog listId={id} onClose={() => setImporting(false)} />}
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${query.data?.name ?? 'list'}?`} description="Removes this list and its memberships. Contacts, consent, suppression, campaigns, and email history are preserved." confirmLabel="Delete list" danger pending={remove.isPending} onConfirm={deleteList} />
   </div>
 }
 function ListMembers({ listId }: { listId: string }) {
