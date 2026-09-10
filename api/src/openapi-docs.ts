@@ -109,3 +109,52 @@ export function createOpenApiDocument(app: App) {
   }
   return document;
 }
+
+function title(value: string) { return value.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').map((word, index) => /^mcp$/i.test(word) ? 'MCP' : index === 0 ? word[0].toUpperCase() + word.slice(1).toLowerCase() : word.toLowerCase()).join(' '); }
+function markdownText(value: unknown) { return String(value ?? '').replaceAll('|', '\\|').replace(/\s+/g, ' ').trim(); }
+function schemaType(document: Json, input: Json): string {
+  const schema = resolve(document, input);
+  if (schema.oneOf || schema.anyOf) return (schema.oneOf ?? schema.anyOf).map((value: Json) => schemaType(document, value)).join(' or ');
+  if (Array.isArray(schema.type)) return schema.type.join(' or ');
+  if (schema.type === 'array') return `${schemaType(document, schema.items)}[]`;
+  return schema.type ?? (schema.properties ? 'object' : 'value');
+}
+function schemaMarkdown(document: Json, input: Json | undefined, heading: string): string {
+  if (!input) return '';
+  const schema = resolve(document, input);
+  const properties = Object.entries<Json>(schema.properties ?? {});
+  const description = schema.description ? `\n${schema.description}\n` : '';
+  if (!properties.length) return `### ${heading}\n${description}\nType: \`${schemaType(document, schema)}\`\n`;
+  const required = new Set(schema.required ?? []);
+  const rows = properties.map(([name, property]) => `| \`${name}\` | ${schemaType(document, property)} | ${required.has(name) ? 'yes' : 'no'} | ${markdownText(resolve(document, property).description)} |`).join('\n');
+  return `### ${heading}\n${description}\n| Field | Type | Required | Description |\n| --- | --- | --- | --- |\n${rows}\n`;
+}
+function operationEntries(document: Json) {
+  const result: Array<{ path: string; method: string; pathItem: Json; operation: Json }> = [];
+  for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) if (pathItem[method]?.operationId) result.push({ path, method, pathItem, operation: pathItem[method] });
+  return result;
+}
+function operationMarkdown(document: Json, entry: ReturnType<typeof operationEntries>[number]) {
+  const { path, method, pathItem, operation } = entry;
+  const params = [...(pathItem.parameters ?? []), ...(operation.parameters ?? [])].map((parameter: Json) => resolve(document, parameter));
+  const parameterRows = params.length ? `### Parameters\n\n| Name | In | Type | Required | Description |\n| --- | --- | --- | --- | --- |\n${params.map((parameter: Json) => `| \`${parameter.name}\` | ${parameter.in} | ${schemaType(document, parameter.schema)} | ${parameter.required ? 'yes' : 'no'} | ${markdownText(parameter.description)} |`).join('\n')}\n` : '';
+  const body = operation.requestBody?.content?.['application/json']?.schema;
+  const responseRows = Object.entries<Json>(operation.responses ?? {}).map(([status, response]) => `| \`${status}\` | ${markdownText(response.description)} | ${response.content?.['application/json']?.schema ? schemaType(document, response.content['application/json'].schema) : '—'} |`).join('\n');
+  const samples = Object.fromEntries((operation['x-codeSamples'] ?? []).map((item: Json) => [item.lang, item.source]));
+  return `## ${title(operation.operationId)}\n\n\`${method.toUpperCase()} ${path}\`\n\n${operation.description ?? ''}\n\nOperation ID: \`${operation.operationId}\`\n\n${parameterRows}\n${schemaMarkdown(document, body, 'Request body')}\n### TypeScript SDK\n\n\`\`\`ts\n${samples.TypeScript ?? ''}\n\`\`\`\n\n### cURL\n\n\`\`\`sh\n${samples.Shell ?? ''}\n\`\`\`\n\n### Responses\n\n| Status | Description | Schema |\n| --- | --- | --- |\n${responseRows}\n`;
+}
+
+export function createMarkdownDocs(document: Json, operationId?: string): string | null {
+  const entries = operationEntries(document);
+  const selected = operationId ? entries.filter(entry => entry.operation.operationId === operationId) : entries;
+  if (operationId && !selected.length) return null;
+  const intro = `# OpenSend API\n\n${document.info?.description ?? ''}\n\n- [Interactive documentation](/docs)\n- [OpenAPI 3.1 JSON](/openapi.json)\n- [Agent index](/llms.txt)\n- TypeScript package: \`opensend-js\`\n\n`;
+  if (operationId) return `${intro}[All operations](/docs.md)\n\n${operationMarkdown(document, selected[0])}`;
+  const index = [...new Set(entries.map(entry => entry.operation.tags?.[0] ?? 'API'))].map(tag => `## ${tag}\n\n${entries.filter(entry => (entry.operation.tags?.[0] ?? 'API') === tag).map(entry => `- [${title(entry.operation.operationId)}](/docs/operations/${entry.operation.operationId}.md) — \`${entry.method.toUpperCase()} ${entry.path}\``).join('\n')}`).join('\n\n');
+  return `${intro}${index}\n\n${entries.map(entry => operationMarkdown(document, entry)).join('\n---\n\n')}`;
+}
+
+export function createLlmsText(document: Json): string {
+  const entries = operationEntries(document);
+  return `# OpenSend\n\nOpenSend is a self-hosted transactional and marketing email API on Amazon SES.\n\n## Canonical documentation\n\n- Full Markdown API reference: /docs.md\n- Interactive API reference: /docs\n- OpenAPI 3.1 definition: /openapi.json\n- TypeScript SDK: https://www.npmjs.com/package/opensend-js\n- MCP endpoint: /mcp\n\n## Focused operation documentation\n\n${entries.map(entry => `- ${title(entry.operation.operationId)}: /docs/operations/${entry.operation.operationId}.md`).join('\n')}\n`;
+}

@@ -12,7 +12,7 @@ try {
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });
   app.use('*', async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
-    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:v1|api|mcp|\.well-known|unsubscribe)(?:\/|$)/.test(c.req.path) || ['/health', '/openapi.json'].includes(c.req.path)) return next();
+    if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:v1|api|mcp|\.well-known|unsubscribe|docs\/operations)(?:\/|$)/.test(c.req.path) || ['/health', '/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     return assets(c, async () => {
       const response = await dashboard(c, next);
       if (response) c.res = response;

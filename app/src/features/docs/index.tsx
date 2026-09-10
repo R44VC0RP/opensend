@@ -86,7 +86,7 @@ export function DocsPage() {
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
   return <div className="docs-page">
-    <header className="docs-header"><Link className="docs-brand" to="/"><strong>OpenSend</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/opensend-js">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
+    <header className="docs-header"><Link className="docs-brand" to="/"><strong>OpenSend</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/opensend-js">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
     <div className="docs-layout">
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
         <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>

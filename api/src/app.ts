@@ -2,7 +2,7 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ApiError, log, SECURITY_HEADERS, timed } from './core.js';
-import type { AppEnv } from './core.js';
+import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
 import { registerAudience } from './audience.js';
@@ -13,7 +13,7 @@ import { registerOperations } from './operations.js';
 import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
 import { registerMcp } from './mcp.js';
 import { registerMcpAuth } from './mcp-auth.js';
-import { createOpenApiDocument } from './openapi-docs.js';
+import { createLlmsText, createMarkdownDocs, createOpenApiDocument } from './openapi-docs.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -63,6 +63,10 @@ export function createApp() {
   registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;
   app.get('/openapi.json', c => { openApiDocument ??= createOpenApiDocument(app); c.header('cache-control', 'public, max-age=300'); return c.json(openApiDocument); });
+  const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
+  app.get('/llms.txt', c => { openApiDocument ??= createOpenApiDocument(app); return markdown(c, createLlmsText(openApiDocument)); });
+  app.get('/docs.md', c => { openApiDocument ??= createOpenApiDocument(app); return markdown(c, createMarkdownDocs(openApiDocument)!); });
+  app.get('/docs/operations/*', c => { openApiDocument ??= createOpenApiDocument(app); const file = c.req.path.slice('/docs/operations/'.length); const operation = /^[A-Za-z][A-Za-z0-9_]{0,63}\.md$/.test(file) ? file.slice(0, -3) : ''; const value = operation ? createMarkdownDocs(openApiDocument, operation) : null; return value ? markdown(c, value) : c.json({ error: { code: 'NOT_FOUND', message: 'Documented operation not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
   return app;
 }
 export const app = createApp();
