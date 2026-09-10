@@ -4195,10 +4195,10 @@
                       "test"
                     ]
                   },
-                  "expiresInMinutes": {
+                  "expiresInSeconds": {
                     "type": "integer",
-                    "minimum": 5,
-                    "maximum": 1440
+                    "minimum": 30,
+                    "maximum": 86400
                   },
                   "domains": {
                     "type": "array",
@@ -4218,7 +4218,7 @@
                 "required": [
                   "permissions",
                   "environment",
-                  "expiresInMinutes",
+                  "expiresInSeconds",
                   "purpose"
                 ],
                 "additionalProperties": false

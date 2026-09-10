@@ -45,6 +45,35 @@ const message = await getEmail({
 
 The auth callback supplies the API key only to the bearer scheme; dashboard cookie authentication is not needed for SDK calls. Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
+## Upload local and generated attachments
+
+Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:
+
+```sh
+npx --yes opensend-js upload ./invite.ics \
+  --api https://mail.example.com \
+  --token 'os_agent_…' \
+  --content-type 'text/calendar; method=REQUEST; charset=utf-8'
+```
+
+Add `--inline --content-id logo` for PNG, JPEG, GIF or WebP images referenced as `cid:logo`. Other supported files are regular attachments. The command prints attachment metadata as JSON and never prints the token.
+
+Generated per-recipient content can use the same raw upload path without writing a temporary file:
+
+```ts
+import { uploadAttachmentBytes } from 'opensend-js/upload';
+
+const attachment = await uploadAttachmentBytes({
+  apiUrl: 'https://mail.example.com',
+  token: temporaryAgentToken,
+  filename: 'invite.ics',
+  contentType: 'text/calendar; method=REQUEST; charset=utf-8',
+  bytes: new TextEncoder().encode(calendarText),
+});
+```
+
+The API verifies extension, MIME declaration and file signature/content, stores the object privately, and retains the 8 MiB attachment limit. Batch scripts can upload personalized files, reference each returned attachment ID, and submit emails in groups of 100.
+
 The generated exports include contacts, lists, segments, campaigns, attachments, keys, webhooks, settings and message logs. Cursor responses use `nextCursor`. Error bodies include a stable `error.code` and `error.requestId`. Read-level responses redact app unsubscribe capabilities from content/events/delivery payloads and withhold raw MIME; management access is required for unredacted content. A key revoked before dispatch no longer authorizes its queued sends. Request/resource limits return explicit 429/413 errors; do not retry permanent configuration errors blindly.
 
 Stored-template data follows SES rendering semantics: nested JSON is supported, but SES does not escape HTML substitutions. Escape untrusted data for its HTML context before submission. Test keys never invoke the real SES renderer.

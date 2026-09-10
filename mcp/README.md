@@ -52,7 +52,7 @@ The full writable catalog has **29 tools**; read-only OAuth grants expose the ei
 
 ### Temporary script tokens
 
-`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses test/live, five minutes to 24 hours, read or read-plus-send, and optional sender-domain restrictions. The secret is returned once, contains no management permission, and stops authorizing requests when it expires or its originating MCP OAuth approval is revoked. Do not commit it or place it in logs.
+`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses test/live, 30 seconds to 24 hours, read or read-plus-send, and optional sender-domain restrictions. The secret is returned once, contains no management permission, and stops authorizing requests when it expires or its originating MCP OAuth approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx opensend-js upload <file> --api <origin> --token <token>` so raw bytes stream directly to OpenSend instead of passing through MCP or model context.
 
 Results contain matching JSON text and `structuredContent`. Each tool's output schema describes its successful API response and the existing error envelopes:
 

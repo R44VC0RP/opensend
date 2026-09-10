@@ -73,6 +73,44 @@ const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), 
 const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string(), environment: z.enum(['live', 'test']) }).openapi('Attachment');
 const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
+const AttachmentMetadata = z.object({ filename: AttachmentInput.shape.filename, contentType: z.string().min(1).max(100), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: AttachmentInput.shape.contentId }).strict();
+const attachmentTypes: Record<string, string> = {
+  pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+const starts = (bytes: Uint8Array, prefix: number[]) => prefix.every((value, index) => bytes[index] === value);
+function textAttachment(bytes: Uint8Array) {
+  try { const value = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (value.includes('\0')) throw new Error(); return value; }
+  catch { throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', 'Text attachments must contain valid UTF-8 without null bytes.'); }
+}
+function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
+  const extension = metadata.filename.split('.').pop()?.toLowerCase();
+  const expected = extension ? attachmentTypes[extension] : undefined;
+  if (!extension || !expected) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', 'Attachments allow PDF, UTF-8 text, CSV, JSON, raster images, ICS, and modern Office documents.');
+  const baseType = metadata.contentType.split(';')[0]!.trim().toLowerCase();
+  if (baseType !== 'application/octet-stream' && baseType !== expected) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_MISMATCH', `The declared content type does not match .${extension}.`);
+  if (metadata.contentType.includes(';') && expected !== 'text/calendar' && !/^text\/(?:plain|csv);\s*charset=utf-8$/i.test(metadata.contentType)) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_INVALID', 'Only UTF-8 text charset and calendar method parameters are supported.');
+  if (expected === 'text/calendar' && !/^text\/calendar(?:;\s*(?:method=(?:REQUEST|PUBLISH|CANCEL)|charset=utf-8))*$/i.test(metadata.contentType)) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_INVALID', 'Calendar content type supports UTF-8 and REQUEST, PUBLISH, or CANCEL methods.');
+  const image = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension);
+  if (metadata.disposition === 'inline' && (!image || !metadata.contentId)) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Only PNG, JPEG, GIF, and WebP images with a content ID may be inline.');
+  if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'ATTACHMENT_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
+  let valid = true;
+  if (extension === 'png') valid = starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  else if (extension === 'jpg' || extension === 'jpeg') valid = starts(bytes, [0xff, 0xd8, 0xff]);
+  else if (extension === 'gif') valid = new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF87a' || new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF89a';
+  else if (extension === 'webp') valid = new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP';
+  else if (extension === 'pdf') valid = new TextDecoder().decode(bytes.slice(0, 5)) === '%PDF-';
+  else if (extension === 'txt' || extension === 'csv') textAttachment(bytes);
+  else if (extension === 'json') { try { JSON.parse(textAttachment(bytes)); } catch { valid = false; } }
+  else if (extension === 'ics') { const text = textAttachment(bytes).replaceAll('\r\n', '\n').trim(); valid = text.startsWith('BEGIN:VCALENDAR\n') && text.endsWith('END:VCALENDAR'); }
+  else {
+    const content = new TextDecoder('latin1').decode(bytes);
+    const marker = extension === 'docx' ? 'word/' : extension === 'xlsx' ? 'xl/' : 'ppt/';
+    valid = starts(bytes, [0x50, 0x4b]) && content.includes('[Content_Types].xml') && content.includes(marker);
+  }
+  if (!valid) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
+  return { ...metadata, contentType: baseType === 'application/octet-stream' ? expected : metadata.contentType };
+}
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.');
@@ -403,6 +441,21 @@ async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, cam
   return { id: emailId, status: 'queued' as const, environment: a.environment, simulated: a.environment === 'test' };
 }
 function wake(runtime: Runtime) { void runtime.wake?.().catch(() => undefined); }
+async function saveAttachment(c: Ctx, a: Actor, metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
+  if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
+  const input = validateAttachment(metadata, bytes);
+  const checksum = await bytesDigest(bytes);
+  return idempotent(c, a, { ...input, size: bytes.length, checksum }, async db => {
+    const [usage] = await db.select({ bytes: sql<string>`coalesce(sum(${attachments.size}), 0)` }).from(attachments).where(scope(attachments, a));
+    if (Number(usage!.bytes) + bytes.length > SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413, 'STORED_ATTACHMENT_LIMIT_EXCEEDED', `Stored attachments exceed the ${SENDING_LIMITS[a.environment].storedAttachmentBytes / 1024 / 1024} MiB ${a.environment} limit. Delete unused attachments before uploading more.`);
+    const attachmentId = id('attachment'); const storageKey = `${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
+    await c.env.storage.put(storageKey, bytes, input.contentType);
+    try {
+      const [row] = await db.insert(attachments).values({ id: attachmentId, workspaceId: a.workspaceId, environment: a.environment, ...input, size: bytes.length, contentId: input.contentId ?? null, storageKey, checksum }).returning();
+      return AttachmentInfo.parse(row);
+    } catch (error) { await c.env.storage.delete(storageKey).catch(() => undefined); throw error; }
+  });
+}
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
   if (revision !== undefined && row.revision !== revision) throw new ApiError(409, 'STALE_CAMPAIGN_REVISION', 'The campaign has changed; fetch it and review again.');
@@ -495,25 +548,26 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { body: json(AttachmentInput) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    // Conservative application allowlist, deliberately narrower than SES's prohibited-extension list.
-    const extension = input.filename.split('.').pop()?.toLowerCase();
-    if (!extension || !['pdf', 'txt', 'csv', 'json', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ics', 'docx', 'xlsx', 'pptx'].includes(extension)) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', 'This initial release allows PDF, text, CSV, JSON, common raster images, ICS, and modern Office documents.');
     if (input.content.length > Math.ceil(MAX_ATTACHMENTS / 3) * 4) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB decoded.');
     // Flat character validation avoids stack exhaustion from repeated regex groups on large uploads.
     if (input.content.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.content)) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be standard padded base64.');
     const bytes = Buffer.from(input.content, 'base64');
     if (bytes.toString('base64') !== input.content) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be canonical padded base64.');
-    if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
-    const result = await idempotent(c, a, { ...input, content: await digest(input.content) }, async db => {
-      const [usage] = await db.select({ bytes: sql<string>`coalesce(sum(${attachments.size}), 0)` }).from(attachments).where(scope(attachments, a));
-      if (Number(usage!.bytes) + bytes.length > SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413, 'STORED_ATTACHMENT_LIMIT_EXCEEDED', `Stored attachments exceed the ${SENDING_LIMITS[a.environment].storedAttachmentBytes / 1024 / 1024} MiB ${a.environment} limit. Delete unused attachments before uploading more.`);
-      const attachmentId = id('attachment'); const storageKey = `${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
-      await c.env.storage.put(storageKey, bytes, input.contentType);
-      try {
-        const [row] = await db.insert(attachments).values({ id: attachmentId, workspaceId: a.workspaceId, environment: a.environment, filename: input.filename, contentType: input.contentType, size: bytes.length, disposition: input.disposition, contentId: input.contentId, storageKey, checksum: await bytesDigest(bytes) }).returning();
-        return AttachmentInfo.parse(row);
-      } catch (error) { await c.env.storage.delete(storageKey).catch(() => undefined); throw error; }
-    });
+    const { content: _content, ...metadata } = input;
+    const result = await saveAttachment(c, a, metadata, bytes);
+    return c.json(AttachmentInfo.parse(result), 201);
+  });
+  app.post('/v1/attachments/upload', async c => {
+    const a = actor(c, 'send');
+    const encodedFilename = c.req.header('x-opensend-filename');
+    let filename = '';
+    try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', 'X-OpenSend-Filename must be URI-encoded UTF-8.'); }
+    const contentLength = Number(c.req.header('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB.');
+    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: c.req.header('x-opensend-disposition') ?? 'attachment', contentId: c.req.header('x-opensend-content-id') });
+    if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    const result = await saveAttachment(c, a, parsed.data, bytes);
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {

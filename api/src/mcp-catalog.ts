@@ -334,7 +334,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
-  direct('uploadAttachment', 'Upload a private regular or inline attachment.', 'uploadAttachment');
+  direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx opensend-js upload so file bytes bypass model context.', 'uploadAttachment');
   direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
 
   const webhooks = need('getWebhooks');
@@ -348,7 +348,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
   direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
-  direct('createAgentToken', 'Create a nonrefreshable API token lasting 5 minutes to 24 hours for temporary uncommitted scripts. Supports read or read-plus-send access and optional sender-domain restrictions.', 'createAgentToken');
+  direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read or read-plus-send access and optional sender-domain restrictions.', 'createAgentToken');
 
   if (result.size !== 29) invalid(`Curated catalog must contain exactly 29 tools, got ${result.size}.`);
   return result;

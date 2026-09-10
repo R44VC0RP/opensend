@@ -922,7 +922,7 @@ export type CreateAgentTokenData = {
     body: {
         permissions: Array<'read' | 'send'>;
         environment: 'live' | 'test';
-        expiresInMinutes: number;
+        expiresInSeconds: number;
         domains?: Array<string>;
         purpose: string;
     };

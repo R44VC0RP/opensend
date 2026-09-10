@@ -75,14 +75,14 @@ const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, wor
 export function registerAuth(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal; never grants manage permission.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send'])).min(1).max(2).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Use [read] or [read, send].'), environment: z.enum(['live', 'test']),
-    expiresInMinutes: z.number().int().min(5).max(1440), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]),
+    expiresInSeconds: z.number().int().min(30).max(86400), domains: z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50).default([]),
     purpose: z.string().trim().min(1).max(200),
   }).strict()) }, responses: { 201: response(z.object({ token: z.string(), expiresAt: z.string(), permissions: z.array(z.enum(['read', 'send'])), environment: z.enum(['live', 'test']), domains: z.array(z.string()), purpose: z.string() }).openapi('AgentToken')), ...errors } }), async c => {
     const input = c.req.valid('json'); const identity = actor(c, input.permissions.includes('send') ? 'send' : 'read');
     if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.');
     if (input.environment === 'live' && identity.environment !== 'live') throw new ApiError(403, 'LIVE_SCOPE_REQUIRED', 'The MCP approval does not permit live access.');
     if (input.permissions.some(permission => !identity.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', 'The MCP approval does not include every requested permission.');
-    const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString();
+    const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();
     const token = await createAgentToken(c.env.config, { grant: identity.keyId, environment: input.environment, permissions: input.permissions, domains: input.domains, expiresAt });
     return c.json({ token, expiresAt, permissions: input.permissions, environment: input.environment, domains: input.domains, purpose: input.purpose }, 201);
   });

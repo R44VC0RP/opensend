@@ -802,10 +802,10 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await callTool(token, 'findCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
     assert.equal((await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
 
-    const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], environment: 'test', expiresInMinutes: 5, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
+    const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, 'test');
-    error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], environment: 'test', expiresInMinutes: 5, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
+    error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     ok(await http('POST', '/api/auth/oauth2/delete-consent', MANAGER, { id: consentId }));
@@ -1370,6 +1370,17 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'unsafe.exe', content: bytes.toString('base64') }), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content: '!!!!' }), 422, 'INVALID_BASE64');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'inline.png', content: bytes.toString('base64'), disposition: 'inline' }), 422);
+    const calendar = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n');
+    const upload = async (filename: string, contentType: string, content: Buffer, extra: Record<string, string> = {}) => {
+      const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-opensend-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
+      return { status: response.status, body: await response.json(), headers: response.headers } satisfies Reply;
+    };
+    const raw = ok(await upload('invite.ics', 'text/calendar; method=REQUEST; charset=utf-8', calendar), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${raw.id}`, key.secret), [200, 404]); });
+    assert.equal(raw.contentType, 'text/calendar; method=REQUEST; charset=utf-8');
+    assert.equal(ok(await http('GET', `/v1/attachments/${raw.id}/content`, key.secret)).content, calendar.toString('base64'));
+    error(await upload('fake.png', 'image/png', bytes), 422, 'ATTACHMENT_CONTENT_INVALID');
+    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-opensend-disposition': 'inline', 'x-opensend-content-id': 'not-an-image' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
     assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
