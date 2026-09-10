@@ -5747,7 +5747,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Explicit consent evidence only. Does not lift delivery suppression. Imports/profile edits cannot establish consent.",
+        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; OpenSend records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.",
         "parameters": [
           {
             "schema": {
@@ -5799,11 +5799,7 @@
                   }
                 },
                 "required": [
-                  "status",
-                  "source",
-                  "policyVersion",
-                  "evidence",
-                  "occurredAt"
+                  "status"
                 ],
                 "additionalProperties": false
               }

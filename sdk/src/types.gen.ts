@@ -1607,10 +1607,10 @@ export type ListContactConsentEventsResponse = ListContactConsentEventsResponses
 export type UpdateContactConsentData = {
     body: {
         status: 'subscribed' | 'unsubscribed';
-        source: string;
-        policyVersion: string;
-        evidence: string;
-        occurredAt: string;
+        source?: string;
+        policyVersion?: string;
+        evidence?: string;
+        occurredAt?: string;
         confirmResubscribe?: boolean;
     };
     path: {

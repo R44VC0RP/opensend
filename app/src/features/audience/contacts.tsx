@@ -69,18 +69,13 @@ function ContactDetails({ contact }: { contact: Contact }) {
   const [edit, setEdit] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const lists = useAudienceLists()
-  const [consentInput, setConsentInput] = useState<ConsentInput>({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', source: '', evidence: '', policyVersion: '', occurredAt: '', confirmResubscribe: false})
+  const [consentInput, setConsentInput] = useState<ConsentInput>({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false})
   const status = useApiMutation(async (api, input: ConsentInput) => api.consent ? api.consent(contact.id, input) : api.contacts.save({...contact, status: input.status}), 'Consent recorded')
-  const [consentError, setConsentError] = useState('')
-  const nextStatus = consentInput.status
   async function changeStatus() {
-    setConsentError('')
-    const occurred = new Date(consentInput.occurredAt)
-    if (!Number.isFinite(occurred.getTime())) {setConsentError('Enter a valid consent date and time.'); return}
-    try { await status.mutateAsync({...consentInput, occurredAt: occurred.toISOString()}); setConfirm(false) } catch { /* Shown in the consent dialog. */ }
+    try { await status.mutateAsync(consentInput); setConfirm(false) } catch { /* Shown in the consent dialog. */ }
   }
   return <div className="audience-page">
-    <PageHeader title={contact.name || contact.email} backTo="/contacts" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} onClick={() => {status.reset(); setConsentError(''); setConsentInput({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', source: '', evidence: '', policyVersion: '', occurredAt: '', confirmResubscribe: false}); setConfirm(true)}}>{contact.status === 'subscribed' ? 'Unsubscribe' : 'Resubscribe'}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
+    <PageHeader title={contact.name || contact.email} backTo="/contacts" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} onClick={() => {status.reset(); setConsentInput({status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false}); setConfirm(true)}}>{contact.status === 'subscribed' ? 'Unsubscribe' : contact.status === 'unsubscribed' ? 'Resubscribe' : 'Subscribe'}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
     <div className="audience-summary cluster"><span>{contact.email}</span><StatusBadge status={contact.status} /></div>
     <MutationError error={status.error} />
     {contact.status === 'suppressed' && <Alert tone="warning">{contact.suppressionReason || 'Delivery suppressed'}. Resubscription unavailable.</Alert>}
@@ -89,7 +84,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
     <ConsentHistory id={contact.id} />
     <ContactActivity key={`${contact.email}:${regionId}`} email={contact.email} />
     {edit && <ContactEditor contact={contact} onClose={() => setEdit(false)} />}
-    <Dialog open={confirm} onOpenChange={setConfirm} title="Record marketing consent" footer={<><Button onClick={() => setConfirm(false)} disabled={status.isPending}>Cancel</Button><Button variant="primary" type="submit" form="contact-consent" loading={status.isPending}>Record consent</Button></>}><form id="contact-consent" className="stack" onSubmit={event => {event.preventDefault(); void changeStatus()}}><MutationError error={consentError || status.error} /><Field label="Status" htmlFor="consent-status"><Select id="consent-status" value={consentInput.status} onValueChange={value => setConsentInput({...consentInput, status: value as ConsentInput['status']})} options={[{value: 'subscribed', label: 'Subscribed'}, {value: 'unsubscribed', label: 'Unsubscribed'}]} /></Field>{(['source', 'policyVersion', 'evidence'] as const).map(key => <Field key={key} label={key === 'policyVersion' ? 'Policy version' : key === 'source' ? 'Source' : 'Evidence'} htmlFor={`consent-${key}`}><Input id={`consent-${key}`} required maxLength={key === 'evidence' ? 2000 : key === 'source' ? 200 : 120} value={consentInput[key]} onChange={event => setConsentInput({...consentInput, [key]: event.target.value})} /></Field>)}<Field label="Consent occurred at (local time)" htmlFor="consent-at"><Input id="consent-at" type="datetime-local" required value={consentInput.occurredAt} onChange={event => setConsentInput({...consentInput, occurredAt: event.target.value})} /></Field>{consentInput.status === 'subscribed' && <Checkbox checked={consentInput.confirmResubscribe} onCheckedChange={checked => setConsentInput({...consentInput, confirmResubscribe: checked})} label="This evidence explicitly authorizes resubscription if previously unsubscribed." />}</form></Dialog>
+    <Dialog open={confirm} onOpenChange={setConfirm} title="Update marketing consent" footer={<><Button onClick={() => setConfirm(false)} disabled={status.isPending}>Cancel</Button><Button variant="primary" type="submit" form="contact-consent" loading={status.isPending}>Save status</Button></>}><form id="contact-consent" className="stack" onSubmit={event => {event.preventDefault(); void changeStatus()}}><MutationError error={status.error} /><Field label="Status" htmlFor="consent-status"><Select id="consent-status" value={consentInput.status} onValueChange={value => setConsentInput({...consentInput, status: value as ConsentInput['status']})} options={[{value: 'subscribed', label: 'Subscribed'}, {value: 'unsubscribed', label: 'Unsubscribed'}]} /></Field>{contact.status === 'unsubscribed' && consentInput.status === 'subscribed' && <Checkbox checked={consentInput.confirmResubscribe ?? false} onCheckedChange={checked => setConsentInput({...consentInput, confirmResubscribe: checked})} label="Confirm this contact opted in again." />}</form></Dialog>
 
   </div>
 }

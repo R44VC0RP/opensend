@@ -242,7 +242,7 @@ export const listContactConsentEvents = <ThrowOnError extends boolean = false>(o
 });
 
 /**
- * Explicit consent evidence only. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
+ * Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; OpenSend records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.
  */
 export const updateContactConsent = <ThrowOnError extends boolean = false>(options: Options<UpdateContactConsentData, ThrowOnError>): RequestResult<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError> => (options.client ?? client).post<UpdateContactConsentResponses, UpdateContactConsentErrors, ThrowOnError>({
     security: [

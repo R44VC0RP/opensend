@@ -65,7 +65,7 @@ export class ApiError extends Error {
 // Dates cross the boundary as ISO-8601 strings; rates are ratios, not formatted percentages.
 export type CursorItems<T> = T[] & { nextCursor?: string | null }
 export interface OpenSendApi {
-  consentHistory?: (id: string, cursor?: string) => Promise<{items: (ConsentInput & {id: string})[]; nextCursor: string | null}>
+  consentHistory?: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   readonly environment?: 'live' | 'test'
   review?: (id: string, revision: number) => Promise<CampaignReview>
@@ -90,7 +90,8 @@ export interface OpenSendApi {
 export interface Identity { id: string; name: string | null; email: string | null; environment: "live" | "test"; permissions: string[] }
 export interface CampaignReview extends AudiencePreview { id: string; revision: number }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
-export interface ConsentInput { status: "subscribed" | "unsubscribed"; source: string; evidence: string; policyVersion: string; occurredAt: string; confirmResubscribe: boolean }
+export interface ConsentInput { status: "subscribed" | "unsubscribed"; source?: string; evidence?: string; policyVersion?: string; occurredAt?: string; confirmResubscribe?: boolean }
+export interface ConsentEvent { id: string; status: "subscribed" | "unsubscribed"; source: string; evidence: string | null; policyVersion: string | null; occurredAt: string }
 export interface ImportPreview { id: string; status: "preview" | "committed"; imported: number; rows: {row: number; email: string; name?: string}[]; errors: {row: number; field: string; message: string}[] }
 
 export interface CampaignSendReceipt { id: string; status: "scheduled" | "sending"; queued: number; scheduledAt: string | null; simulated: boolean }

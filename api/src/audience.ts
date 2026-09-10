@@ -31,6 +31,7 @@ export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segme
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
 const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), occurredAt: z.string(), createdAt: z.string() });
+const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), ...Dates }).openapi('AudienceImport');
@@ -199,18 +200,20 @@ export function registerAudience(app: App) {
     });
     return c.json({ id: contactId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Explicit consent evidence only. Does not lift delivery suppression. Imports/profile edits cannot establish consent.', request: { params: IdParams, body: json(z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200), policyVersion: z.string().trim().min(1).max(120), evidence: z.string().trim().min(1).max(2000), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.'), confirmResubscribe: z.boolean().default(false) }).strict()) }, responses: { 200: response(Contact), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; OpenSend records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.', request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'manage'), contactId = c.req.valid('param').id, input = c.req.valid('json');
+    const occurredAt = input.occurredAt ?? new Date().toISOString();
+    const source = input.source ?? (identity.credential === 'dashboard' ? 'dashboard' : identity.credential === 'mcp' ? 'mcp' : identity.credential === 'agentToken' ? 'agent-token' : 'api');
     const contact = await c.env.db.transaction(async tx => {
       const [existing] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1).for('update');
       if (!existing) return notFound('Contact');
       if (existing.marketingConsent === 'unsubscribed' && input.status === 'subscribed' && !input.confirmResubscribe) throw new ApiError(409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED', 'Explicitly confirm renewed verifiable consent to replace a prior opt-out.', 'confirmResubscribe');
       if (input.status === 'subscribed') {
         const [latest] = await tx.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId))).orderBy(sql`${consentAudit.occurredAt} DESC`).limit(1);
-        if (latest && Date.parse(input.occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent evidence must be newer than the prior consent decision.');
+        if (latest && Date.parse(occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent must be newer than the prior consent decision.');
       }
       const auditId = id('cns');
-      await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId, email: existing.email, status: input.status, source: input.source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt: input.occurredAt, actorKeyId: identity.keyId });
+      await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId, email: existing.email, status: input.status, source, policyVersion: input.policyVersion ?? null, evidence: input.evidence ?? null, occurredAt, actorKeyId: identity.keyId });
       if (existing.marketingConsent !== input.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId, status: input.status } } } });
       const [updated] = await tx.update(contacts).set({ marketingConsent: input.status, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId))).returning();
       return updated!;
