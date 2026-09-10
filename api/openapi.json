@@ -1426,11 +1426,13 @@
                 }
               ]
             },
-            "default": {}
+            "default": {},
+            "description": "Fallback values for simple {{name}} placeholders. OpenSend HTML-escapes substituted values. Call getContentGuide in MCP before writing personalized content."
           },
           "html": {
             "type": "string",
-            "maxLength": 524288
+            "maxLength": 524288,
+            "description": "OpenSend block HTML shared with the campaign editor. Call getContentGuide in MCP before writing: arbitrary document HTML, CSS, tables and scripts are rejected."
           },
           "attachments": {
             "type": "array",
@@ -16137,7 +16139,7 @@
     "/v1/campaign-content-guide": {
       "get": {
         "operationId": "getCampaignContentGuide",
-        "description": "The complete campaign content vocabulary (block HTML) with examples, as Markdown. Read it once before writing or editing campaign html.",
+        "description": "The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.",
         "tags": [
           "Campaigns"
         ],

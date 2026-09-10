@@ -1313,7 +1313,7 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * The complete campaign content vocabulary (block HTML) with examples, as Markdown. Read it once before writing or editing campaign html.
+ * The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.
  */
 export const getCampaignContentGuide = <ThrowOnError extends boolean = false>(options?: Options<GetCampaignContentGuideData, ThrowOnError>): RequestResult<GetCampaignContentGuideResponses, GetCampaignContentGuideErrors, ThrowOnError> => (options?.client ?? client).get<GetCampaignContentGuideResponses, GetCampaignContentGuideErrors, ThrowOnError>({
     security: [

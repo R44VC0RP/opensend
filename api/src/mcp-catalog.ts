@@ -289,6 +289,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   const direct = (name: string, description: string, source: string) => add(alias(need(source), name, description));
 
   direct('getContext', 'Return the active OpenSend environment, canonical instance origin and host, workspace, granted permissions, and domain restrictions.', 'getCurrentIdentity');
+  direct('getContentGuide', 'Return the complete supported block HTML, personalization syntax, restrictions and examples for campaign and template content. Call this before writing html; external documentation research is unnecessary.', 'getCampaignContentGuide');
   const campaignList = need('listCampaigns', raw), campaignDetail = need('getCampaign', raw);
   const campaignFindSchema = findSchema(campaignList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
   campaignFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(campaignList.queryParameters.map(parameter => [parameter, false])) } };
@@ -300,7 +301,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   const templateFindSchema = findSchema(templateList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
   templateFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(templateList.queryParameters.map(parameter => [parameter, false])) } };
   add(custom('findTemplates', 'List and filter global campaign templates, or supply id alone to retrieve the complete draft and published revision with asset IDs.', templateFindSchema as Tool['inputSchema'], false, args => typeof args.id === 'string' ? { steps: [{ operation: templateDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) } : { steps: [{ operation: templateList, args }] }, pageOutput()));
-  add(actionTool('saveTemplate', 'Create or update a global campaign template, or archive/restore it.', { create: need('createCampaignTemplate', raw), update: need('updateCampaignTemplate', raw), archive: need('setCampaignTemplateArchived', raw) }));
+  add(actionTool('saveTemplate', 'Create or update a global campaign template, or archive/restore it. Call getContentGuide before writing draft.html.', { create: need('createCampaignTemplate', raw), update: need('updateCampaignTemplate', raw), archive: need('setCampaignTemplateArchived', raw) }));
   direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
@@ -383,7 +384,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 37) invalid(`Curated catalog must contain exactly 37 tools, got ${result.size}.`);
+  if (result.size !== 38) invalid(`Curated catalog must contain exactly 38 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

@@ -8,9 +8,9 @@ import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml 
 
 const MAX_ASSET_BYTES = 8 * 1024 * 1024;
 const Scalar = z.union([z.string().max(65536), z.number().finite(), z.boolean(), z.null()]);
-const Data = z.record(z.string().max(120), Scalar).default({});
+const Data = z.record(z.string().max(120), Scalar).default({}).describe('Fallback values for simple {{name}} placeholders. OpenSend HTML-escapes substituted values. Call getContentGuide in MCP before writing personalized content.');
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/);
-const BlockHtml = z.string().max(512 * 1024).optional();
+const BlockHtml = z.string().max(512 * 1024).describe('OpenSend block HTML shared with the campaign editor. Call getContentGuide in MCP before writing: arbitrary document HTML, CSS, tables and scripts are rejected.').optional();
 const AssetIds = z.array(z.string().regex(/^tasset_[0-9a-f]{32}$/)).max(20).default([]);
 const DraftFields = { name: z.string().trim().min(1).max(200), description: z.string().trim().max(500).default(''), subject: z.string().max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.').default(''), previewText: z.string().max(200).optional(), fromName: z.string().max(200).optional(), replyTo: z.array(Address).max(10).default([]), tracking: z.boolean().default(true), defaults: Data, html: BlockHtml, attachments: AssetIds };
 const TemplateDraftSchema = z.object(DraftFields).strict().openapi('CampaignTemplateDraft');

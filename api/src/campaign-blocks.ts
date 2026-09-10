@@ -16,9 +16,9 @@ const HREF = /^(?:https?:\/\/|mailto:|tel:|\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\}\}|
 const IMAGE_SRC = /^(?:https:\/\/[^\s"'<>]+|cid:[a-zA-Z0-9_.@-]{1,120})$/;
 const DIMENSION = /^(?:[1-9][0-9]{0,3}|[1-9][0-9]?%|100%)$/;
 
-export const CAMPAIGN_CONTENT_GUIDE = `# OpenSend campaign content
+export const CAMPAIGN_CONTENT_GUIDE = `# OpenSend campaign and template content
 
-Campaign \`html\` is **block HTML**: a small HTML vocabulary that maps exactly onto the
+Campaign and template \`html\` is **block HTML**: a small HTML vocabulary that maps exactly onto the
 dashboard composer's blocks. Anything written through the API opens as editable blocks
 for people, and anything people compose comes back to you in the same form. OpenSend
 applies the email design (fonts, spacing, colours, button and layout styling) when it
@@ -80,14 +80,14 @@ handlers, comments, and document wrappers (\`<!doctype>\`, \`<html>\`, \`<head>\
 
 ## Working with people
 
-Fetch the campaign with getCampaign to read the current block HTML, including edits made
-in the dashboard composer. Send the complete replacement \`html\` with updateCampaign at
-the current revision; the dashboard reflects it live. Preview the rendered email with
-previewCampaign before a test send.`;
+Fetch a campaign with findCampaigns or a template with findTemplates to read the current
+block HTML, including edits made in the dashboard composer. Send the complete replacement
+\`html\` with saveCampaign or saveTemplate at the current revision; the dashboard reflects it
+live. Preview campaigns through reviewCampaign and templates through the template preview.`;
 
 export class BlockContentError extends Error {}
 
-function fail(message: string): never { throw new BlockContentError(`${message} Campaign content is block HTML; call getCampaignContentGuide (GET /v1/campaign-content-guide) for the vocabulary.`); }
+function fail(message: string): never { throw new BlockContentError(`${message} Email content is block HTML; call getContentGuide in MCP or GET /v1/campaign-content-guide for the vocabulary.`); }
 const describe = (element: Element) => `<${element.tagName}>`;
 const isElement = (node: Node): node is Element => 'tagName' in node;
 const isText = (node: Node): node is DefaultTreeAdapterMap['textNode'] => node.nodeName === '#text';
