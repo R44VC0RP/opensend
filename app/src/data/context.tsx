@@ -21,6 +21,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
     return result
   } })
+  useEffect(() => {
+    if (!identity.data || client.mode === 'demo') return
+    const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
+    if (!match) return
+    let id: string
+    try { id = decodeURIComponent(match[1]) } catch { return }
+    void cache.prefetchQuery({ queryKey: ['opensend', client.mode, client.environment, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
+  }, [cache, client, identity.data])
   useEffect(() => { const denied = () => { cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {

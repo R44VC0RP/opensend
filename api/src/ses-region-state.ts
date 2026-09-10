@@ -45,10 +45,11 @@ export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, re
   }
 }
 export async function resolveRegionRuntime(runtime: Runtime): Promise<Runtime> {
-  const settings = await getRegionSettings(runtime.db, runtime.config.workspaceId);
+  const [settings, trusted] = await Promise.all([
+    getRegionSettings(runtime.db, runtime.config.workspaceId),
+    runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
+  ]);
   const resources = setupResources(settings.installationId);
-  const trusted = await runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions)
-    .where(eq(sesRegions.workspaceId, runtime.config.workspaceId));
   const valid = trusted.filter(row => row.account && /^\d{12}$/.test(row.account) && row.arn === `arn:aws:sns:${row.region}:${row.account}:${resources.topicName}`);
   const accounts = new Set(valid.map(row => row.account!));
   return { ...runtime, config: { ...runtime.config,
@@ -60,14 +61,16 @@ export async function resolveRegionRuntime(runtime: Runtime): Promise<Runtime> {
   } };
 }
 export async function regionCatalog(runtime: Runtime) {
-  const settings = await getRegionSettings(runtime.db, runtime.config.workspaceId);
   const fingerprint = await credentialFingerprint(runtime.config);
-  const rows = await runtime.db.select({ region: sesRegions.region, status: sql<string | null>`${sesRegions.report}->>'status'`,
-    lastDiscoveredAt: sesRegions.lastDiscoveredAt, fingerprint: sesRegions.credentialsFingerprint, publicUrl: sesRegions.publicUrl,
-    provisionJobId: sesRegions.provisionJobId, provisionStatus: jobs.status, provisionError: jobs.lastError,
-  }).from(sesRegions).leftJoin(jobs, and(eq(jobs.id, sesRegions.provisionJobId), eq(jobs.workspaceId, sesRegions.workspaceId)))
-    .where(eq(sesRegions.workspaceId, runtime.config.workspaceId));
-  const active = await runtime.db.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running'])));
+  const [settings, rows, active] = await Promise.all([
+    getRegionSettings(runtime.db, runtime.config.workspaceId),
+    runtime.db.select({ region: sesRegions.region, status: sql<string | null>`${sesRegions.report}->>'status'`,
+      lastDiscoveredAt: sesRegions.lastDiscoveredAt, fingerprint: sesRegions.credentialsFingerprint, publicUrl: sesRegions.publicUrl,
+      provisionJobId: sesRegions.provisionJobId, provisionStatus: jobs.status, provisionError: jobs.lastError,
+    }).from(sesRegions).leftJoin(jobs, and(eq(jobs.id, sesRegions.provisionJobId), eq(jobs.workspaceId, sesRegions.workspaceId)))
+      .where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
+    runtime.db.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running']))),
+  ]);
   const regions = [...new Set([...settings.enabledRegions, ...rows.map(row => row.region)])].sort();
   return { defaultRegion: settings.defaultRegion, data: regions.map(region => {
     const row = rows.find(value => value.region === region);

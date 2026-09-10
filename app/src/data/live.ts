@@ -99,9 +99,11 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
       const params = new URLSearchParams({ region: input.regionId, from: start.toISOString(), to: end.toISOString() })
       if (input.stream) params.set('stream', input.stream)
-      const [metrics, campaigns] = await Promise.all([call(`/metrics?${params}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal)])
       const previousParams = new URLSearchParams(params); previousParams.set('to', start.toISOString()); previousParams.set('from', new Date(start.getTime() - (end.getTime() - start.getTime())).toISOString())
-      const [previous, transactional, marketing] = await Promise.all([call(`/metrics?${previousParams}`, 'GET', undefined, signal), ...(['transactional', 'marketing'] as const).map(stream => {const q = new URLSearchParams(params); q.set('stream', stream); return call(`/metrics?${q}`, 'GET', undefined, signal)})])
+      const [metrics, campaigns, previous, transactional, marketing] = await Promise.all([
+        call(`/metrics?${params}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal),
+        call(`/metrics?${previousParams}`, 'GET', undefined, signal), ...(['transactional', 'marketing'] as const).map(stream => {const q = new URLSearchParams(params); q.set('stream', stream); return call(`/metrics?${q}`, 'GET', undefined, signal)}),
+      ])
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
       const daily = new Map<string, Json>(metrics.daily.map((row: Json) => [String(row.date).slice(0, 10), row]))
