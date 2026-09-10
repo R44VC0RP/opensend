@@ -5,7 +5,7 @@ import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
 import { drain } from './dispatch.js';
 import { cleanup } from './maintenance.js';
-import { admissionDenied, ApiError, digest, log, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
+import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
@@ -28,12 +28,11 @@ export default {
       const headers = new Headers(request.headers);
       headers.set('x-opensend-client-ip', address);
       const runtimeStarted = performance.now();
-      const response = await withRuntime(env, async runtime => app.fetch(new Request(request, { headers }), runtime));
-      const failureBucket = publicFailureBucket(new URL(request.url).pathname, response.status);
-      if (failureBucket) {
-        const failureGate = await env.PUBLIC_FAILURES.limit({ key: `opensend:${failureBucket}:${peer}` });
-        if (!failureGate.success) return publicFailureDenied();
-      }
+      const response = await withRuntime(env, async runtime => {
+        const result = await app.fetch(new Request(request, { headers }), runtime);
+        const failureBucket = publicFailureBucket(new URL(request.url).pathname, result.status);
+        return failureBucket && !await publicFailureAllowed(runtime, failureBucket, peer) ? publicFailureDenied() : result;
+      });
       const runtimeMs = performance.now() - runtimeStarted;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');

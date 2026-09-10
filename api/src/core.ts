@@ -4,6 +4,7 @@ import type { Context } from 'hono';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
+import { sql } from 'drizzle-orm';
 
 export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
@@ -90,6 +91,15 @@ export function publicFailureBucket(path: string, status: number): 'auth' | 'uns
   if (path === '/v1/events/ses') return 'ses';
   if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
   return status === 401 && /^\/v1(?:\/|$)/.test(path) ? 'auth' : null;
+}
+export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe' | 'ses', peer: string): Promise<boolean> {
+  const keyId = `public:${bucket}:${peer}`;
+  const budget = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+    VALUES (${runtime.config.workspaceId}, ${keyId}, date_trunc('minute', now()), 1)
+    ON CONFLICT (workspace_id, key_id) DO UPDATE SET
+      used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, 41) ELSE 1 END,
+      window_start = excluded.window_start RETURNING used`);
+  return budget.rows[0]!.used <= 40;
 }
 export async function timed<T>(c: Ctx, name: string, work: () => Promise<T>): Promise<T> {
   const start = performance.now();
