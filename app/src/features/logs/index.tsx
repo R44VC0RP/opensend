@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight, Download, Search } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
@@ -8,6 +8,7 @@ import { EmailPreview, htmlToText } from '../../components/EmailPreview'
 import { date, label, number, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton, logColumns } from './skeletons'
+import { useAdaptivePageSize } from '../../lib/pagination'
 
 export function LogsPage() {
   const { regionId } = useRegion()
@@ -18,8 +19,10 @@ function RegionalLogs({ regionId }: { regionId: string }) {
   const [status, setStatus] = useState('all')
   const [stream, setStream] = useState('all')
   const [page, setPage] = useState(1)
+  const {pageSize, tableRef} = useAdaptivePageSize(5, 100)
+  useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
-  const params = { regionId, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize: 10 }
+  const params = { regionId, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal))
   return <><PageHeader title="Logs" actions={<span className="muted">{regionId}</span>} />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search emails" placeholder="Search recipient, subject or ID" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
@@ -29,7 +32,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <div className="table-summary"><span>{query.data ? `${query.data.total === undefined ? `${query.data.items.length} on this page` : `${number(query.data.total)} emails`}` : <SkeletonText width={100} />}</span><span>Times in UTC</span></div>
-      <DataTable<Email> loading={query.isPending} skeletonRows={10} minRows={10} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
+      <DataTable<Email> tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
         { ...logColumns[0], render: row => <StatusBadge status={row.status} /> },
         { ...logColumns[1], render: row => row.to },
         { ...logColumns[2], render: row => row.subject },
