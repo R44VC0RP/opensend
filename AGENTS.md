@@ -32,4 +32,5 @@ Docker, Cloudflare, and local development have separate setup instructions in `a
 - Do not hand-edit `api/openapi.json` or generated `sdk/src/` files. Change the API schemas, then regenerate from `api/` with `npm run sdk`.
 - Reuse shared dashboard components and tokens. Preserve OpenTUI Mono, the shared 53px table-row sizing, and concise, installation-neutral copy.
 - Keep tests in `api/api.acceptance.test.ts`; do not add separate test files. Run acceptance tests only with an isolated synthetic database/configuration, never production credentials or data.
+- After deploying a hosted MCP catalog change, refresh OpenCode with `opencode2 api post /api/mcp/opensend/disconnect` followed by `opencode2 api post /api/mcp/opensend/connect`.
 - Use the operator's own deployment resources. Keep credentials, private configuration, database dumps, and real mail out of Git. Ask before provisioning infrastructure, deploying, migrating a live database, or sending real email.
