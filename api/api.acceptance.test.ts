@@ -704,21 +704,21 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 29);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 8);
+    assert.equal(catalog.tools.length, 31);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 9);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
-      'deliverCampaign', 'findCampaigns', 'findContacts', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getMetrics',
+      'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getMetrics',
       'importContacts', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveWebhook',
-      'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
+      'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
       assert.equal(tool.outputSchema?.type, 'object', tool.name);
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
       assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
     }
-    for (const removed of ['getDomains', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
+    for (const removed of ['getDomains', 'createDomain', 'configureDomainMailFrom', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
 
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
@@ -816,7 +816,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 8);
+    assert.equal(catalog.tools.length, 9);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));

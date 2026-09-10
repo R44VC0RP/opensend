@@ -349,8 +349,10 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
   direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read or read-plus-send access and optional sender-domain restrictions.', 'createAgentToken');
+  direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
+  add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 29) invalid(`Curated catalog must contain exactly 29 tools, got ${result.size}.`);
+  if (result.size !== 31) invalid(`Curated catalog must contain exactly 31 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
