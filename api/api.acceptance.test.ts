@@ -704,13 +704,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 31);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 9);
+    assert.equal(catalog.tools.length, 35);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 10);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findWebhooks', 'getAttachment', 'getMetrics',
       'importContacts', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveWebhook',
+      'getTemplateLibrary', 'saveTemplate', 'authorTemplate', 'publishTemplate',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -719,6 +720,12 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
     }
     for (const removed of ['getDomains', 'createDomain', 'configureDomainMailFrom', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
+
+    const libraryTemplate=await callTool(token,'saveTemplate',{action:'create',body:{name:unique('mcp-template')},confirm:true},201);
+    const templateVersion=await callTool(token,'saveTemplate',{action:'save',id:libraryTemplate.id,body:{revision:0,artifact:{subject:'Synthetic MCP template',html:'<p>Hello</p>',text:'Hello',source:{'email.tsx':'export default function Email(){return <p>Hello</p>}'},dependencies:{react:'19.2.7'}}},confirm:true},201);
+    const restored=await callTool(token,'getTemplateLibrary',{action:'artifact',id:libraryTemplate.id,versionId:templateVersion.id});
+    assert.equal(restored.artifact.subject,'Synthetic MCP template');
+    assert.equal(restored.version.id,templateVersion.id);
 
     const label = unique('acceptance-mcp-contact');
     const contacts: Json[] = [];
@@ -816,7 +823,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 9);
+    assert.equal(catalog.tools.length, 10);
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
@@ -2427,6 +2434,61 @@ describe('Operational configuration and public event boundaries', () => {
 // Live sending remains opt-in, separately from the remote database-fixture skips.
 // Enabling this authorizes one real SES email, not a campaign or webhook delivery.
 // Missing explicit recipient/from is a failure.
+describe('Versioned templates and durable campaign preparation', () => {
+  const artifact = (subject = 'A synthetic template') => ({subject, previewText:'A synthetic preview', html:'<!doctype html><html><body><table><tbody><tr><td style="color:#333">Hello {{firstName}} <a href="{{unsubscribeUrl}}">Unsubscribe</a></td></tr></tbody></table></body></html>',text:'Hello {{firstName}}\nUnsubscribe: {{unsubscribeUrl}}',source:{'email.tsx':'export default function Email(){ return <p>Hello</p>; }'},dependencies:{react:'19.2.7'},fields:[{name:'firstName',required:true,sample:'Example',default:'there'}]});
+  test('draft saves are revision-checked, publishing is immutable and test publication never calls SES', async t => {
+    const key=await keyFixture(t),reader=await keyFixture(t,{permissions:['read']}),live=await keyFixture(t,{environment:'live',permissions:['read']});
+    const template=ok(await http('POST','/v1/template-library',key.secret,{name:unique('template')}),201);
+    error(await http('POST',`/v1/template-library/${template.id}/versions`,reader.secret,{revision:0,artifact:artifact()}),403);
+    const saved=ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:0,artifact:artifact()}),201);
+    const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=';
+    error(await http('POST',`/v1/template-library/${template.id}/images`,reader.secret,{contentType:'image/png',content:png}),403);
+    const image=ok(await http('POST',`/v1/template-library/${template.id}/images`,key.secret,{contentType:'image/png',content:png}),201);
+    const imageResponse=await fetch(image.url);assert.equal(imageResponse.status,200);assert.equal(imageResponse.headers.get('cache-control'),'public, max-age=31536000, immutable');assert.equal(Buffer.from(await imageResponse.arrayBuffer()).toString('base64'),png);
+    error(await http('POST',`/v1/template-library/${template.id}/images`,key.secret,{contentType:'image/png',content:Buffer.from('<script>bad</script>').toString('base64')}),422,'IMAGE_CONTENT_INVALID');
+    assert.equal(saved.validation.valid,true);
+    assert.equal(ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:0,artifact:artifact()}),201).id,saved.id);
+    error(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:0,artifact:artifact('Changed')}),409,'STALE_TEMPLATE_REVISION');
+    error(await http('GET',`/v1/template-library/${template.id}/versions/${saved.id}`,live.secret),404);
+    ok(await http('POST',`/v1/template-library/${template.id}/versions/${saved.id}/publish`,key.secret,{region:REGION}),202);
+    await poll(`/v1/template-library/${template.id}/versions/${saved.id}`,key.secret,r=>r.version.status==='published');
+    const next=ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:1,artifact:artifact('Next draft')}),201);
+    assert.equal(next.status,'draft');assert.equal(ok(await http('GET',`/v1/template-library/${template.id}`,key.secret)).publishedVersionId,saved.id);
+    assert.equal(ok(await http('GET',`/v1/template-library/${template.id}/versions/${saved.id}`,key.secret)).artifact.subject,'A synthetic template');
+    const invalid=ok(await http('POST',`/v1/template-library/${template.id}/versions`,key.secret,{revision:2,artifact:{...artifact(),html:'<script>alert(1)</script>'}}),201);
+    assert.equal(invalid.validation.valid,false);error(await http('POST',`/v1/template-library/${template.id}/versions/${invalid.id}/publish`,key.secret,{region:REGION}),422,'TEMPLATE_VALIDATION_FAILED');
+  });
+  test('the authoring outbox reconciles sessions and its capability can save only its own template', async t => {
+    const [{drizzle},{loadConfig},{authoringJobs},{createApp},{createHmac}]=await Promise.all([import('drizzle-orm/node-postgres'),import('./src/config.js'),import('./src/authoring.js'),import('./src/app.js'),import('node:crypto')]);
+    const db=await fixtureDatabase(t),workspaceId=unique('author-fixture'),templateId=unique('tpl'),sessionId=unique('ses'),messageId=unique('msg'),expiresAt=new Date(Date.now()+3600000).toISOString();
+    const config=loadConfig({BETTER_AUTH_SECRET:AUTH_SECRET,PUBLIC_URL:BASE,OPENCODE_URL:'https://authoring.example.com',OPENCODE_PASSWORD:'synthetic-only'});config.workspaceId=workspaceId;
+    const objects=new Map<string,{body:Uint8Array;contentType:string}>();
+    const runtime:import('./src/core.js').Runtime={db:drizzle(db),config,storage:{async put(k,body,contentType){objects.set(k,{body,contentType});},async get(k){return objects.get(k)??null;},async delete(k){objects.delete(k);}}};
+    const capability=`os_tpl_${createHmac('sha256',AUTH_SECRET!).update(`opensend:template:${templateId}:${sessionId}:${expiresAt}`).digest('hex')}`;
+    await db.query(`INSERT INTO template_library(id,workspace_id,environment,name,kind) VALUES($1,$2,'test','Synthetic author','marketing')`,[templateId,workspaceId]);
+    await db.query(`INSERT INTO template_sessions(template_id,workspace_id,environment,session_id,token_hash,expires_at) VALUES($1,$2,'test',$3,$4,$5)`,[templateId,workspaceId,sessionId,createHash('sha256').update(capability).digest('hex'),expiresAt]);
+    await db.query(`INSERT INTO template_author_inputs(id,template_id,prompt,checksum) VALUES($1,$2,'Create a synthetic email','fixture')`,[messageId,templateId]);
+    const calls:string[]=[],fetchOriginal=globalThis.fetch;let remoteExists=false;
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const url=new URL(input instanceof Request?input.url:String(input));if(url.origin!=='https://authoring.example.com')return fetchOriginal(input,init);
+      assert.equal(new Headers(init?.headers).get('authorization'),`Basic ${Buffer.from('opencode:synthetic-only').toString('base64')}`);calls.push(`${init?.method??'GET'} ${url.pathname}`);
+      if(url.pathname==='/api/session'&&init?.method==='POST'){remoteExists=true;const body=JSON.parse(String(init.body));assert.equal(body.location.directory,`${config.openCode!.directory}/${templateId}`);return Response.json({data:{id:sessionId}});}
+      if(url.pathname.endsWith('/prompt')){const body=JSON.parse(String(init?.body));assert.equal(body.id,messageId);assert.ok(body.text.includes(capability));return Response.json({data:{id:messageId}});}
+      return remoteExists?Response.json({data:{id:sessionId}}):Response.json({error:'missing'},{status:404});
+    });
+    await authoringJobs['template.author']!(runtime,{templateId,messageId},{id:'job',attempts:1,workspaceId,environment:'test'});
+    await authoringJobs['template.author']!(runtime,{templateId,messageId},{id:'job',attempts:2,workspaceId,environment:'test'});
+    assert.equal(calls.filter(p=>p.endsWith('/prompt')).length,1);assert.equal(calls.filter(p=>p==='POST /api/session').length,1);
+    const app=createApp(),headers={authorization:`Bearer ${capability}`,'content-type':'application/json'};
+    const saved=await app.fetch(new Request(`${BASE}/authoring/templates/${templateId}`,{method:'PUT',headers,body:JSON.stringify({revision:0,artifact:artifact()})}),runtime);assert.equal(saved.status,201);
+    const read=await app.fetch(new Request(`${BASE}/authoring/templates/${templateId}`,{headers}),runtime);assert.equal((await read.json() as Json).revision,1);
+    const foreign=await app.fetch(new Request(`${BASE}/authoring/templates/other-template`,{headers}),runtime);assert.equal(foreign.status,401);
+    const elevated=await app.fetch(new Request(`${BASE}/v1/template-library`,{method:'POST',headers,body:JSON.stringify({name:'Forbidden'})}),runtime);assert.equal(elevated.status,401);
+    await db.query('UPDATE template_sessions SET expires_at=now()-interval \'1 second\' WHERE template_id=$1',[templateId]);
+    assert.equal((await app.fetch(new Request(`${BASE}/authoring/templates/${templateId}`,{headers}),runtime)).status,401);
+  });
+});
+
 test('LIVE SES: one explicitly authorized recipient reaches provider acceptance (not a delivery claim)', { skip: process.env.LIVE_SES_TEST !== '1' ? 'Set LIVE_SES_TEST=1, SES_TEST_RECIPIENT and SES_TEST_FROM to authorize one real email.' : false }, async t => {
   const to = process.env.SES_TEST_RECIPIENT;
   const from = process.env.SES_TEST_FROM;

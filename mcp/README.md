@@ -30,7 +30,7 @@ Authenticated dashboard clients can inspect their approvals with `GET /api/auth/
 
 ## Arguments and results
 
-`tools/list` provides the exact schemas for a curated 31-tool task surface. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
+`tools/list` provides the exact schemas for a curated task surface. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
 
 Collection tools use `findCampaigns`, `findContacts`, `findLists`, `findSegments`, `findEmails`, `findWebhooks`, and `findDomains`. Omit `id` to list/filter one page, or supply `id` alone to retrieve one complete record. Exact email, list, and webhook reads also compose their related content/events, members, or deliveries. Exact domain reads return current SES DKIM and custom MAIL FROM DNS records. Mixing `id` with pagination/filters is rejected rather than silently ignoring arguments.
 
@@ -48,7 +48,7 @@ Workflow tools compose API operations behind an explicit `action`, `mode`, or `i
 
 Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` returns both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
 
-The full writable catalog has **31 tools**; read-only OAuth grants expose the nine read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
+The template tools cover private version inspection, draft saves, scoped authoring, and explicit SES publication. Existing hosted integrations must refresh their tool catalog after upgrading.
 
 ### Temporary script tokens
 

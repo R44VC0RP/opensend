@@ -26,7 +26,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : 'So
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review', environment?: 'live' | 'test') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}${environment ? `?environment=${environment}` : ''}`
 function campaignReadinessError(campaign: Campaign) {
-  const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
+  const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && !campaign.draft?.templateVersionId && 'email content'].filter(Boolean)
   return missing.length ? `Complete the draft before reviewing or sending: add ${missing.join(', ')}.` : ''
 }
 const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.revision ?? 1) < (baseline.revision ?? 1) || ((candidate.revision ?? 1) === (baseline.revision ?? 1) && Date.parse(candidate.updatedAt) < Date.parse(baseline.updatedAt))
@@ -95,8 +95,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const composer = useRef<EmailComposerRef>(null)
   const attachments = useRef<CampaignAttachmentsRef>(null)
   const [generation, setGeneration] = useState(0)
-  const [composerReady, setComposerReady] = useState(false)
-  const readyRef = useRef(false)
+  const [composerReady, setComposerReady] = useState(Boolean(initial?.draft?.templateVersionId))
+  const readyRef = useRef(Boolean(initial?.draft?.templateVersionId))
   const [dirty, setDirty] = useState(false)
   const dirtyRef = useRef(false)
   const busyRef = useRef(false)
@@ -153,7 +153,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     creation.current = null
     dirtyRef.current = false
     setDirty(false)
-    readyRef.current = false
+    readyRef.current = Boolean(next.draft?.templateVersionId)
     setComposerReady(readyRef.current)
     setGeneration(value => value + 1)
     setPreviewOpen(Boolean(next.previewText))
@@ -219,9 +219,9 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     try {
       let submitted = creation.current?.input
       if (!submitted) {
-        const content = await composer.current?.prepare()
+        const content = input.draft?.templateVersionId ? {html:'', inlineAttachmentIds: []} : await composer.current?.prepare()
         if (!content) throw new Error('The composer is still loading. Try again in a moment.')
-        if (continuing && !content.html.trim()) throw new Error('Add some email content before continuing.')
+        if (continuing && !input.draft?.templateVersionId && !content.html.trim()) throw new Error('Add some email content before continuing.')
         submitted = { ...input, ...content, attachments: [...new Set([...(input.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])], name: input.name.trim(), subject: input.subject.trim(), fromName: input.fromName.trim(), fromEmail: input.fromEmail.trim(), regionId: input.regionId.trim() }
         if (!submitted.id) {
           submitted.idempotencyKey = crypto.randomUUID()
@@ -289,7 +289,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
             </div>
             <div className="campaign-compose-row campaign-compose-subject"><label htmlFor="campaign-subject">Subject</label><Input id="campaign-subject" placeholder="Add a subject" value={form.subject} onChange={event => change('subject', event.target.value)} disabled={controlsDisabled} /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled={controlsDisabled} aria-expanded={previewOpen} aria-controls="campaign-preview-row" onClick={() => {setPreviewOpen(!previewOpen); if (!previewOpen) requestAnimationFrame(() => previewInput.current?.focus({preventScroll: true}))}}>Preview text</Button></div>
           </div>
-          <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>
+          {form.draft?.templateVersionId ? <TemplateCampaignPreview id={form.id!} /> : <Suspense fallback={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={api.attachments ? () => {markDirty(); attachments.current?.open()} : undefined} /></Suspense>}
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
         </div>
       </div>
@@ -422,4 +422,9 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients now. This action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>
+}
+
+function TemplateCampaignPreview({id}:{id:string}) {
+  const preview=useApiQuery(['campaign-template-preview',id],(api,signal)=>api.campaigns.preview(id,signal))
+  return <div className="stack"><p className="muted">This campaign uses a published template version. Edit its source in Templates and publish a new version to change the design.</p>{preview.error?<ErrorState error={preview.error}/>:<EmailPreview html={preview.data?.html??''} title="Published template" respectStyles remoteImages/>}</div>
 }

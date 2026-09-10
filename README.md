@@ -40,3 +40,5 @@ npm install opensend-js
 ```
 
 See the [SDK guide](sdk/README.md) for usage examples, or [connect an MCP client](mcp/README.md).
+
+Template authoring and migration: [authoring/README.md](authoring/README.md).

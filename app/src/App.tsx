@@ -7,6 +7,8 @@ const loadLogs = () => import('./features/logs')
 const loadCampaigns = () => import('./features/campaigns')
 const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
+const TemplatesPage = lazy(() => import('./features/templates').then(m => ({default: m.TemplatesPage})))
+const TemplateDetailPage = lazy(() => import('./features/templates').then(m => ({default: m.TemplateDetailPage})))
 const loadDeveloper = () => import('./features/developer')
 const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
@@ -51,6 +53,7 @@ export function App() {
     <Route path="lists" element={<ListsPage />} /><Route path="lists/:id" element={<ListDetailPage />} />
     <Route path="segments" element={<SegmentsPage />} /><Route path="segments/new" element={<SegmentEditorPage />} /><Route path="segments/:id" element={<SegmentEditorPage />} />
     <Route path="api-keys" element={<ApiKeysPage />} /><Route path="domains" element={<DomainsPage />} /><Route path="domains/:id" element={<DomainDetailPage />} />
+    <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateDetailPage />} />
     <Route path="developer" element={<DeveloperPage />} />
     <Route path="settings" element={<SettingsPage />} /><Route path="settings/webhooks" element={<WebhooksPage />} /><Route path="settings/webhooks/new" element={<WebhookDetailPage />} /><Route path="settings/webhooks/:id" element={<WebhookDetailPage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />

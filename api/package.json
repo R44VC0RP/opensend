@@ -14,7 +14,8 @@
     "sdk": "npm run openapi && openapi-ts && tsc -p ../sdk/tsconfig.json",
     "cf:dev": "wrangler dev",
     "cf:check": "wrangler deploy --dry-run",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "test:isolated": "node --import tsx scripts/acceptance-isolated.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1128.0",

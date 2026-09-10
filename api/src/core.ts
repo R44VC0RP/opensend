@@ -34,6 +34,8 @@ export interface Config {
   webhookAllowedHosts: string[];
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
   configurationSets: { transactional: string; marketing: string };
+  templateS3?: Record<string, string | undefined>;
+  openCode?: { url: string; token?: string; username?: string; password?: string; directory: string; agent: string };
 }
 export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; }
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };

@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateLibraryTemplateData, CreateLibraryTemplateErrors, CreateLibraryTemplateResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetLibraryTemplateData, GetLibraryTemplateErrors, GetLibraryTemplateResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateArtifactData, GetTemplateArtifactErrors, GetTemplateArtifactResponses, GetTemplateAuthoringData, GetTemplateAuthoringErrors, GetTemplateAuthoringResponses, GetTemplateAuthorMessagesData, GetTemplateAuthorMessagesErrors, GetTemplateAuthorMessagesResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, InterruptTemplateAuthorData, InterruptTemplateAuthorErrors, InterruptTemplateAuthorResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListLibraryTemplatesData, ListLibraryTemplatesErrors, ListLibraryTemplatesResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListTemplateVersionsData, ListTemplateVersionsErrors, ListTemplateVersionsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, PreviewCampaignAudienceData, PreviewCampaignAudienceErrors, PreviewCampaignAudienceResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, PromptTemplateAuthorData, PromptTemplateAuthorErrors, PromptTemplateAuthorResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishTemplateVersionData, PublishTemplateVersionErrors, PublishTemplateVersionResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, ReviewCampaignData, ReviewCampaignErrors, ReviewCampaignResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, SaveTemplateVersionData, SaveTemplateVersionErrors, SaveTemplateVersionResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateImageData, UploadTemplateImageErrors, UploadTemplateImageResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -1628,6 +1628,254 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
         }
     ],
     url: '/v1/regions/{region}/provision',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const listLibraryTemplates = <ThrowOnError extends boolean = false>(options?: Options<ListLibraryTemplatesData, ThrowOnError>): RequestResult<ListLibraryTemplatesResponses, ListLibraryTemplatesErrors, ThrowOnError> => (options?.client ?? client).get<ListLibraryTemplatesResponses, ListLibraryTemplatesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library',
+    ...options
+});
+
+export const createLibraryTemplate = <ThrowOnError extends boolean = false>(options: Options<CreateLibraryTemplateData, ThrowOnError>): RequestResult<CreateLibraryTemplateResponses, CreateLibraryTemplateErrors, ThrowOnError> => (options.client ?? client).post<CreateLibraryTemplateResponses, CreateLibraryTemplateErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getLibraryTemplate = <ThrowOnError extends boolean = false>(options: Options<GetLibraryTemplateData, ThrowOnError>): RequestResult<GetLibraryTemplateResponses, GetLibraryTemplateErrors, ThrowOnError> => (options.client ?? client).get<GetLibraryTemplateResponses, GetLibraryTemplateErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}',
+    ...options
+});
+
+export const listTemplateVersions = <ThrowOnError extends boolean = false>(options: Options<ListTemplateVersionsData, ThrowOnError>): RequestResult<ListTemplateVersionsResponses, ListTemplateVersionsErrors, ThrowOnError> => (options.client ?? client).get<ListTemplateVersionsResponses, ListTemplateVersionsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/versions',
+    ...options
+});
+
+/**
+ * Save a versioned React source bundle and rendered HTML/text. Does not publish or send email.
+ */
+export const saveTemplateVersion = <ThrowOnError extends boolean = false>(options: Options<SaveTemplateVersionData, ThrowOnError>): RequestResult<SaveTemplateVersionResponses, SaveTemplateVersionErrors, ThrowOnError> => (options.client ?? client).post<SaveTemplateVersionResponses, SaveTemplateVersionErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/versions',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getTemplateArtifact = <ThrowOnError extends boolean = false>(options: Options<GetTemplateArtifactData, ThrowOnError>): RequestResult<GetTemplateArtifactResponses, GetTemplateArtifactErrors, ThrowOnError> => (options.client ?? client).get<GetTemplateArtifactResponses, GetTemplateArtifactErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/versions/{versionId}',
+    ...options
+});
+
+/**
+ * Explicitly publish this immutable version to SES. Test environment simulates publication. Updating an existing legacy SES name requires updateLegacy=true.
+ */
+export const publishTemplateVersion = <ThrowOnError extends boolean = false>(options: Options<PublishTemplateVersionData, ThrowOnError>): RequestResult<PublishTemplateVersionResponses, PublishTemplateVersionErrors, ThrowOnError> => (options.client ?? client).post<PublishTemplateVersionResponses, PublishTemplateVersionErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/versions/{versionId}/publish',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getTemplateAuthoring = <ThrowOnError extends boolean = false>(options: Options<GetTemplateAuthoringData, ThrowOnError>): RequestResult<GetTemplateAuthoringResponses, GetTemplateAuthoringErrors, ThrowOnError> => (options.client ?? client).get<GetTemplateAuthoringResponses, GetTemplateAuthoringErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/authoring',
+    ...options
+});
+
+/**
+ * Start or resume an isolated authoring session. The author can save drafts only; publishing and sending are separate actions.
+ */
+export const promptTemplateAuthor = <ThrowOnError extends boolean = false>(options: Options<PromptTemplateAuthorData, ThrowOnError>): RequestResult<PromptTemplateAuthorResponses, PromptTemplateAuthorErrors, ThrowOnError> => (options.client ?? client).post<PromptTemplateAuthorResponses, PromptTemplateAuthorErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/authoring',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const getTemplateAuthorMessages = <ThrowOnError extends boolean = false>(options: Options<GetTemplateAuthorMessagesData, ThrowOnError>): RequestResult<GetTemplateAuthorMessagesResponses, GetTemplateAuthorMessagesErrors, ThrowOnError> => (options.client ?? client).get<GetTemplateAuthorMessagesResponses, GetTemplateAuthorMessagesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/authoring/messages',
+    ...options
+});
+
+export const interruptTemplateAuthor = <ThrowOnError extends boolean = false>(options: Options<InterruptTemplateAuthorData, ThrowOnError>): RequestResult<InterruptTemplateAuthorResponses, InterruptTemplateAuthorErrors, ThrowOnError> => (options.client ?? client).post<InterruptTemplateAuthorResponses, InterruptTemplateAuthorErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/authoring/interrupt',
+    ...options
+});
+
+/**
+ * Upload a raster image and return its immutable PUBLIC email URL. Template source and draft artifacts remain private.
+ */
+export const uploadTemplateImage = <ThrowOnError extends boolean = false>(options: Options<UploadTemplateImageData, ThrowOnError>): RequestResult<UploadTemplateImageResponses, UploadTemplateImageErrors, ThrowOnError> => (options.client ?? client).post<UploadTemplateImageResponses, UploadTemplateImageErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/template-library/{id}/images',
     ...options,
     headers: {
         'Content-Type': 'application/json',

@@ -14,6 +14,8 @@ import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.j
 import { contacts } from './db/audience.js';
 import { unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, regionalLimits, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { getTemplateVersion } from './templates.js';
+import { assertTemplateFields, type TemplateArtifact } from './template-content.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
@@ -26,11 +28,11 @@ const SENDING_LIMITS = {
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes both environments without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
-async function lockAdmission(db: DbExecutor, a: Actor) {
+export async function lockAdmission(db: DbExecutor, a: Actor) {
   await db.insert(jobSchedule).values({ workspaceId: a.workspaceId }).onConflictDoNothing();
   await db.select({ workspaceId: jobSchedule.workspaceId }).from(jobSchedule).where(eq(jobSchedule.workspaceId, a.workspaceId)).for('update');
 }
-async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
+export async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
   const limits = SENDING_LIMITS[a.environment];
   const [counts] = await db.select({ total: sql<number>`count(*)::int`, key: sql<number>`count(*) filter (where ${emails.actorKeyId} = ${a.keyId})::int` }).from(emails).where(and(scope(emails, a), inArray(emails.status, ['queued', 'attempting'])));
   if (Number(counts!.total) + incoming > limits.pending || Number(counts!.key) + incoming > limits.keyPending) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the ${a.environment} outstanding email limit (${limits.pending} per environment, ${limits.keyPending} per key). Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
@@ -114,13 +116,13 @@ function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes:
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.');
-const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
+const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, templateVersionId: z.string().min(1).max(120).optional() };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
 const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
 const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.') }).strict().openapi('CreateCampaignInput');
-const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
+const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim() || !!v.templateVersionId, { message: 'Provide html or a published template before reviewing.', path: ['html'] });
 const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
@@ -203,7 +205,7 @@ function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, char
 const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
 const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
 const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
-function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
+export function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
   region(runtime, selectedRegion);
   const domain = from.split('@')[1]!.toLowerCase();
   if (a.domains.length && !a.domains.some(d => d.toLowerCase() === domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain.', 'from');
@@ -212,7 +214,7 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   region(runtime, draft.region);
   if (draft.from) sender(runtime, a, draft.from, draft.region);
 }
-function readyCampaign(draft: CampaignDraft) {
+export function readyCampaign(draft: CampaignDraft) {
   const parsed = CampaignReady.safeParse(draft);
   if (!parsed.success) {
     const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))];
@@ -225,7 +227,7 @@ function campaignAudience(draft: CampaignDraft) {
   if (!parsed.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before previewing or reviewing this campaign.', 'audience.listId');
   return parsed.data;
 }
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
@@ -257,7 +259,7 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   if (!row) notFound('Email');
   return row;
 }
-async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock = false) {
+export async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
   const [row] = await (lock ? query.for('update') : query);
   if (!row) notFound('Campaign');
@@ -389,7 +391,7 @@ function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], unsubscribeOverride?: string): Promise<EmailSnapshot> {
   const input = { ...request, region: await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
   sender(runtime, a, input.from, input.region);
@@ -421,19 +423,22 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     }
   }
   if (input.kind === 'marketing' && !preview) {
-    const url = await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db);
-    if (snapshot.html) {
-      const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(url)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
-      const close = snapshot.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
-      snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
-    }
-    snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
-    snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+    const url = unsubscribeOverride ?? await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db);
+    appendMarketingFooter(snapshot, url);
   }
   sizeCheck(snapshot, rows);
   return snapshot;
 }
-async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, campaignId?: string, availableAt?: string, requestId?: string, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
+export function appendMarketingFooter(snapshot: EmailSnapshot, url: string) {
+    if (snapshot.html && !snapshot.html.includes(escaped(url))) {
+      const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(url)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
+      const close = snapshot.html.search(/<\/td>\s*<\/tr>\s*<\/table>\s*<\/td>\s*<\/tr>\s*<\/table>\s*<\/body>/i);
+      snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
+    }
+    if (!snapshot.text?.includes(url)) snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
+    snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+}
+export async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, campaignId?: string, availableAt?: string, requestId?: string, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
   const emailId = id('email');
   await db.insert(emails).values({ id: emailId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, region: snapshot.region, campaignId: campaignId ?? null, from: snapshot.from, to: snapshot.to, cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, snapshot, simulated: a.environment === 'test', scheduledAt: availableAt ?? null });
   await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
@@ -456,7 +461,7 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: z.infer<typeof Attachm
     } catch (error) { await c.env.storage.delete(storageKey).catch(() => undefined); throw error; }
   });
 }
-function editable(row: typeof campaigns.$inferSelect, revision?: number) {
+export function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
   if (revision !== undefined && row.revision !== revision) throw new ApiError(409, 'STALE_CAMPAIGN_REVISION', 'The campaign has changed; fetch it and review again.');
   if (!['draft', 'reviewed'].includes(row.status)) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'Only drafts and reviewed campaigns may be changed.');
@@ -470,21 +475,37 @@ function assertBlockContent(html: string | undefined, complete = false) {
   }
 }
 /** Block HTML becomes the styled email plus a plain-text alternative. Legacy drafts fail here with the block error until re-saved. */
-function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft, 'html' | 'subject'>, complete = true): { html: string | undefined; text: string | undefined } {
+const templateCache = new WeakMap<Runtime, Map<string, TemplateArtifact>>();
+export async function renderCampaignContent(runtime: Runtime, draft: CampaignDraft, complete = true, a?: Actor, db: DbExecutor = runtime.db): Promise<{ html: string | undefined; text: string | undefined; artifact?: TemplateArtifact }> {
+  if (draft.templateVersionId) {
+    if (!a) throw new ApiError(500, 'TEMPLATE_SCOPE_REQUIRED', 'Template rendering requires an environment.');
+    let cache = templateCache.get(runtime); if (!cache) { cache = new Map(); templateCache.set(runtime, cache); }
+    const key = `${a.workspaceId}:${a.environment}:${draft.region}:${draft.templateVersionId}`;
+    let artifact = cache.get(key);
+    if (!artifact) { const result = await getTemplateVersion(runtime, a, draft.templateVersionId, db); if (result.version.region !== draft.region) throw new ApiError(422, 'TEMPLATE_REGION_MISMATCH', 'The template was published in a different region.'); artifact = result.artifact; if (cache.size >= 16) cache.delete(cache.keys().next().value!); cache.set(key, artifact); }
+    return { html: artifact.html, text: artifact.text, artifact };
+  }
   if (!draft.html?.trim()) return { html: undefined, text: undefined };
   assertBlockContent(draft.html, complete);
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
-async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[]) {
+export function personalizeCampaign(draft: CampaignDraft, contact: ReviewedRecipient, rendered: Awaited<ReturnType<typeof renderCampaignContent>>, unsubscribe: string) {
+  const values: Record<string, unknown> = {...draft.defaults,...Object.fromEntries(Object.entries(contact.properties).filter(([,v])=>v!=null)),email:contact.email,...(contact.name?{name:contact.name}:{})};
+  if(rendered.artifact) assertTemplateFields(rendered.artifact, values);
+  values.unsubscribeUrl=unsubscribe;
+  return {subject:interpolate(draft.subject,values,false),html:withPreheader(interpolate(rendered.html,values,true),draft.templateVersionId?undefined:draft.previewText),text:interpolate(rendered.text,values,false)};
+}
+export async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], unsubscribeOverride?: string, contentOverride?: Awaited<ReturnType<typeof renderCampaignContent>>) {
   try {
-    const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
-    const rendered = renderCampaignContent(runtime, draft);
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(rendered.html, values, true), draft.previewText), text: interpolate(rendered.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const rendered = contentOverride ?? await renderCampaignContent(runtime, draft, true, a, db);
+    const unsubscribe = unsubscribeOverride ?? (!test && !preview ? await unsubscribeUrl(runtime, a.workspaceId, a.environment, contact.email, db) : `${runtime.config.publicUrl}/unsubscribe-preview`);
+    const body = personalizeCampaign(draft, contact, rendered, unsubscribe);
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', ...body, attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
     }
-    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments);
+    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments, unsubscribe);
     if (draft.previewText !== undefined) snapshot.previewText = draft.previewText;
     return snapshot;
   } catch (error) {
@@ -592,9 +613,11 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign; only a name is required. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together; sender, subject, content and audience are required at review, not creation. Content is block HTML: call getCampaignContentGuide before writing html.', tags: ['Campaigns'], security, request: { body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
+    if (input.templateVersionId && input.html) throw new ApiError(422, 'CAMPAIGN_CONTENT_CONFLICT', 'Choose block HTML or a published template.');
     assertBlockContent(input.html);
     const result = await idempotent(c, a, input, async db => {
       const draft = { ...input, region: await assertRegionEnabled(db, a.workspaceId, input.region) };
+      if (draft.templateVersionId) { const { artifact } = await getTemplateVersion(c.env, a, draft.templateVersionId, db); if (!draft.subject) draft.subject = artifact.subject; }
       draftSender(c.env, a, draft);
       const campaignId = id('campaign'); await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft }).returning();
@@ -626,7 +649,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, without personalization or the unsubscribe footer. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
     const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
-    const rendered = renderCampaignContent(c.env, row.draft, false);
+    const rendered = await renderCampaignContent(c.env, row.draft, false, a);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/state', operationId: 'getCampaignState', description: 'Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignState), ...errors } }), async c => {
@@ -635,6 +658,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/campaigns/{id}', operationId: 'updateCampaign', description: 'Replace the whole draft at the current revision. Read the campaign first: html is block HTML that people may have edited in the dashboard composer, so send the complete updated html rather than a fragment. Rejected content names the unsupported tag or attribute.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignUpdate) }, responses: { 200: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
+    if (input.draft.templateVersionId && input.draft.html) throw new ApiError(422, 'CAMPAIGN_CONTENT_CONFLICT', 'Choose block HTML or a published template.');
     assertBlockContent(input.draft.html);
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
@@ -645,6 +669,7 @@ export function registerSending(app: App) {
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
       const draft = { ...input.draft, region: selectedRegion };
+      if (draft.templateVersionId) { const { artifact } = await getTemplateVersion(c.env, a, draft.templateVersionId, db); if (!draft.subject) draft.subject = artifact.subject; }
       const [updated] = await db.update(campaigns).set({ draft, revision: current.revision + 1, status: 'draft', reviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
       return updated;
     });

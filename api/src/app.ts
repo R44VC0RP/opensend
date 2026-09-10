@@ -11,6 +11,9 @@ import { registerOperations } from './operations.js';
 import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
 import { registerMcp } from './mcp.js';
 import { registerMcpAuth } from './mcp-auth.js';
+import { registerTemplateAssets } from './template-assets.js';
+import { registerTemplates } from './templates.js';
+import { registerAuthoring } from './authoring.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -25,7 +28,7 @@ export function createApp() {
     const start = Date.now();
     await next();
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
-    c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
+    c.header('x-request-id', requestId); if (!c.req.path.startsWith('/template-assets/') || c.res.status !== 200) c.header('cache-control', 'no-store');
     const timings = c.get('serverTimings');
     if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
@@ -55,6 +58,7 @@ export function createApp() {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerSending(app); registerOperations(app); registerSesRegions(app);
+  registerTemplates(app); registerAuthoring(app); registerTemplateAssets(app);
   registerMcp(app);
   app.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending.' } });
   return app;

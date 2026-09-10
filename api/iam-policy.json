@@ -47,6 +47,12 @@
       "Resource": "*"
     },
     {
+      "Sid": "PublishImmutableOpenSendTemplates",
+      "Effect": "Allow",
+      "Action": "ses:CreateEmailTemplate",
+      "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/os_tplv_*"
+    },
+    {
       "Sid": "ReadAndRenderStoredTemplates",
       "Effect": "Allow",
       "Action": ["ses:GetEmailTemplate", "ses:TestRenderEmailTemplate"],

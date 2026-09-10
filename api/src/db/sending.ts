@@ -10,6 +10,7 @@ export type EmailSnapshot = {
   headers: { Name: string; Value: string }[];
 };
 export type CampaignDraft = {
+  templateVersionId?: string;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };

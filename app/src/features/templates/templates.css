@@ -1,0 +1,60 @@
+.template-create {
+  align-items: end;
+}
+.template-create .ui-field {
+  flex: 1;
+  max-width: 480px;
+}
+.template-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(380px, 1.2fr);
+  gap: 32px;
+}
+.template-conversation {
+  border-right: 1px solid var(--color-border);
+  padding-right: 24px;
+  min-width: 0;
+}
+.template-messages {
+  max-height: 480px;
+  overflow: auto;
+  min-height: 180px;
+}
+.template-messages article {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.template-messages p,
+.template-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.template-prompt {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  color: inherit;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  padding: 12px;
+}
+.template-preview {
+  min-width: 0;
+}
+.template-preview .ui-email-preview {
+  width: 100%;
+  min-height: 600px;
+}
+.template-preview-mobile {
+  width: min(100%, 390px);
+  margin-inline: auto;
+}
+@media (max-width: 1050px) {
+  .template-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .template-conversation {
+    border-right: 0;
+    padding-right: 0;
+  }
+}

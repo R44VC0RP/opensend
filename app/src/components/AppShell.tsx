@@ -7,7 +7,7 @@ import { Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from '
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 
-const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/campaigns', 'Campaigns'], ['/contacts', 'Contacts'], ['/lists', 'Lists'], ['/segments', 'Segments'], ['/api-keys', 'API keys'], ['/domains', 'Domains'], ['/developer', 'Developer'], ['/settings', 'Settings']] as const
+const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/campaigns', 'Campaigns'], ['/templates', 'Templates'], ['/contacts', 'Contacts'], ['/lists', 'Lists'], ['/segments', 'Segments'], ['/api-keys', 'API keys'], ['/domains', 'Domains'], ['/developer', 'Developer'], ['/settings', 'Settings']] as const
 export function AppShell() {
   const api = useApi()
   const { regionId, setRegionId } = useRegion()

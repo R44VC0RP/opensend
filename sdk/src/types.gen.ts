@@ -362,6 +362,7 @@ export type CampaignDraft = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    templateVersionId?: string;
     html?: string;
 };
 
@@ -390,6 +391,7 @@ export type CreateCampaignInput = {
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
+    templateVersionId?: string;
     /**
      * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
      */
@@ -508,6 +510,7 @@ export type CampaignUpdateInput = {
         defaults?: {
             [key: string]: string | number | boolean | null;
         };
+        templateVersionId?: string;
         /**
          * Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, <a data-button>, and <div data-columns> layout with strong/em/u/s/code/sup/br/a inline. No wrappers, tables, class, id or style. OpenSend renders the styled email. Call getCampaignContentGuide (GET /v1/campaign-content-guide) for the full vocabulary and examples.
          */
@@ -854,6 +857,71 @@ export type RegionProvisionReceipt = {
 
 export type ProvisionRegion = {
     confirm: true;
+};
+
+export type LibraryTemplate = {
+    id: string;
+    name: string;
+    kind: 'marketing' | 'automation';
+    revision: number;
+    publishedVersionId: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type TemplateVersion = {
+    id: string;
+    templateId: string;
+    revision: number;
+    subject: string;
+    checksum: string;
+    status: 'draft' | 'publishing' | 'published' | 'failed';
+    region: string | null;
+    sesName: string | null;
+    legacySesName: string | null;
+    errorCode: string | null;
+    validation: {
+        valid: boolean;
+        errors: Array<string>;
+        bytes: number;
+    };
+    createdAt: string;
+    publishedAt: string | null;
+};
+
+export type TemplateArtifact = {
+    subject: string;
+    previewText?: string;
+    html: string;
+    text: string;
+    source: {
+        [key: string]: string;
+    };
+    dependencies: {
+        [key: string]: string;
+    };
+    fields?: Array<{
+        name: string;
+        required?: boolean;
+        sample?: string;
+        default?: string;
+    }>;
+    legacySesName?: string;
+};
+
+export type TemplateAuthoringSession = {
+    sessionId: string | null;
+    expiresAt: string | null;
+    configured: boolean;
+    inputStatus?: string | null;
+    errorCode?: string | null;
+};
+
+export type TemplateImage = {
+    id: string;
+    url: string;
+    contentType: string;
+    size: number;
 };
 
 export type GetCurrentIdentityData = {
@@ -6172,3 +6240,795 @@ export type ProvisionRegionResponses = {
 };
 
 export type ProvisionRegionResponse = ProvisionRegionResponses[keyof ProvisionRegionResponses];
+
+export type ListLibraryTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/template-library';
+};
+
+export type ListLibraryTemplatesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListLibraryTemplatesError = ListLibraryTemplatesErrors[keyof ListLibraryTemplatesErrors];
+
+export type ListLibraryTemplatesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<LibraryTemplate>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListLibraryTemplatesResponse = ListLibraryTemplatesResponses[keyof ListLibraryTemplatesResponses];
+
+export type CreateLibraryTemplateData = {
+    body: {
+        name: string;
+        kind?: 'marketing' | 'automation';
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/template-library';
+};
+
+export type CreateLibraryTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateLibraryTemplateError = CreateLibraryTemplateErrors[keyof CreateLibraryTemplateErrors];
+
+export type CreateLibraryTemplateResponses = {
+    /**
+     * Success
+     */
+    201: LibraryTemplate;
+};
+
+export type CreateLibraryTemplateResponse = CreateLibraryTemplateResponses[keyof CreateLibraryTemplateResponses];
+
+export type GetLibraryTemplateData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}';
+};
+
+export type GetLibraryTemplateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetLibraryTemplateError = GetLibraryTemplateErrors[keyof GetLibraryTemplateErrors];
+
+export type GetLibraryTemplateResponses = {
+    /**
+     * Success
+     */
+    200: LibraryTemplate;
+};
+
+export type GetLibraryTemplateResponse = GetLibraryTemplateResponses[keyof GetLibraryTemplateResponses];
+
+export type ListTemplateVersionsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/template-library/{id}/versions';
+};
+
+export type ListTemplateVersionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListTemplateVersionsError = ListTemplateVersionsErrors[keyof ListTemplateVersionsErrors];
+
+export type ListTemplateVersionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<TemplateVersion>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListTemplateVersionsResponse = ListTemplateVersionsResponses[keyof ListTemplateVersionsResponses];
+
+export type SaveTemplateVersionData = {
+    body: {
+        revision: number;
+        artifact: TemplateArtifact;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/versions';
+};
+
+export type SaveTemplateVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SaveTemplateVersionError = SaveTemplateVersionErrors[keyof SaveTemplateVersionErrors];
+
+export type SaveTemplateVersionResponses = {
+    /**
+     * Success
+     */
+    201: TemplateVersion;
+};
+
+export type SaveTemplateVersionResponse = SaveTemplateVersionResponses[keyof SaveTemplateVersionResponses];
+
+export type GetTemplateArtifactData = {
+    body?: never;
+    path: {
+        id: string;
+        versionId: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/versions/{versionId}';
+};
+
+export type GetTemplateArtifactErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetTemplateArtifactError = GetTemplateArtifactErrors[keyof GetTemplateArtifactErrors];
+
+export type GetTemplateArtifactResponses = {
+    /**
+     * Success
+     */
+    200: {
+        version: TemplateVersion;
+        artifact: TemplateArtifact;
+    };
+};
+
+export type GetTemplateArtifactResponse = GetTemplateArtifactResponses[keyof GetTemplateArtifactResponses];
+
+export type PublishTemplateVersionData = {
+    body: {
+        region: string;
+        updateLegacy?: boolean;
+    };
+    path: {
+        id: string;
+        versionId: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/versions/{versionId}/publish';
+};
+
+export type PublishTemplateVersionErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PublishTemplateVersionError = PublishTemplateVersionErrors[keyof PublishTemplateVersionErrors];
+
+export type PublishTemplateVersionResponses = {
+    /**
+     * Success
+     */
+    202: TemplateVersion;
+};
+
+export type PublishTemplateVersionResponse = PublishTemplateVersionResponses[keyof PublishTemplateVersionResponses];
+
+export type GetTemplateAuthoringData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/authoring';
+};
+
+export type GetTemplateAuthoringErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetTemplateAuthoringError = GetTemplateAuthoringErrors[keyof GetTemplateAuthoringErrors];
+
+export type GetTemplateAuthoringResponses = {
+    /**
+     * Success
+     */
+    200: TemplateAuthoringSession;
+};
+
+export type GetTemplateAuthoringResponse = GetTemplateAuthoringResponses[keyof GetTemplateAuthoringResponses];
+
+export type PromptTemplateAuthorData = {
+    body: {
+        prompt: string;
+        messageId: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/authoring';
+};
+
+export type PromptTemplateAuthorErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PromptTemplateAuthorError = PromptTemplateAuthorErrors[keyof PromptTemplateAuthorErrors];
+
+export type PromptTemplateAuthorResponses = {
+    /**
+     * Success
+     */
+    202: TemplateAuthoringSession;
+};
+
+export type PromptTemplateAuthorResponse = PromptTemplateAuthorResponses[keyof PromptTemplateAuthorResponses];
+
+export type GetTemplateAuthorMessagesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/authoring/messages';
+};
+
+export type GetTemplateAuthorMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetTemplateAuthorMessagesError = GetTemplateAuthorMessagesErrors[keyof GetTemplateAuthorMessagesErrors];
+
+export type GetTemplateAuthorMessagesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<{
+            id: string;
+            role: string;
+            text: string;
+        }>;
+    };
+};
+
+export type GetTemplateAuthorMessagesResponse = GetTemplateAuthorMessagesResponses[keyof GetTemplateAuthorMessagesResponses];
+
+export type InterruptTemplateAuthorData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/authoring/interrupt';
+};
+
+export type InterruptTemplateAuthorErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type InterruptTemplateAuthorError = InterruptTemplateAuthorErrors[keyof InterruptTemplateAuthorErrors];
+
+export type InterruptTemplateAuthorResponses = {
+    /**
+     * Success
+     */
+    200: {
+        interrupted: true;
+    };
+};
+
+export type InterruptTemplateAuthorResponse = InterruptTemplateAuthorResponses[keyof InterruptTemplateAuthorResponses];
+
+export type UploadTemplateImageData = {
+    body: {
+        contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+        content: string;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/template-library/{id}/images';
+};
+
+export type UploadTemplateImageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UploadTemplateImageError = UploadTemplateImageErrors[keyof UploadTemplateImageErrors];
+
+export type UploadTemplateImageResponses = {
+    /**
+     * Success
+     */
+    201: TemplateImage;
+};
+
+export type UploadTemplateImageResponse = UploadTemplateImageResponses[keyof UploadTemplateImageResponses];

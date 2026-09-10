@@ -1,0 +1,20 @@
+{
+  "name": "@opensend/authoring",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "tsx src/cli.ts build",
+    "import": "tsx src/cli.ts import",
+    "restore": "tsx src/cli.ts restore",
+    "save": "tsx src/cli.ts save"
+  },
+  "dependencies": {
+    "@react-email/components": "^1.0.12",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tsx": "^4.23.0",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": { "@types/node": "^26.5.0", "@types/react": "^19.2.17" }
+}
