@@ -58,12 +58,17 @@ work around that privacy boundary.
 \`<a href="https://… | mailto: | tel:">text</a>\` (optional \`target="_blank"\`), and
 \`<span style="text-transform:uppercase">\` for small caps. Buttons may not contain links.
 
-## Personalization
+## Campaign personalization
 
 Use \`{{name}}\` placeholders in text and in quoted \`href\`/\`alt\` attributes. Values come
 from recipient properties plus the campaign \`defaults\`; every placeholder must resolve at
 review time. \`{{email}}\` and \`{{name}}\` are always available. Values are escaped
 automatically.
+
+Templates are reusable concrete campaign drafts, not personalization presets. Template subject,
+preview text and HTML must contain literal example content and cannot contain \`{{placeholder}}\`
+syntax. After creating a campaign from a template, replace its example content and add campaign
+personalization only when the specific campaign needs it.
 
 ## Not allowed
 

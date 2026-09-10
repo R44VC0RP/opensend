@@ -1,6 +1,5 @@
 .template-search { max-width: 310px; }
 .template-compose-page .campaign-compose-row { grid-template-columns: 72px minmax(0, 1fr); }
-.template-settings { display: grid; gap: var(--space-16); padding-block: var(--space-20); border-top: 1px solid var(--color-border); }
 .template-save-error { margin-block: var(--space-8); }
 .template-preview-dialog { width: min(760px, calc(100vw - 32px)); }
 .template-preview-dialog .ui-email-preview { min-height: 520px; }

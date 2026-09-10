@@ -740,10 +740,11 @@ describe('Hosted MCP OAuth and tools', () => {
     const template = await callTool(token, 'saveTemplate', { action: 'create', body: { name: unique('mcp-template') }, confirm: true }, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/templates/${template.id}`, MANAGER)); });
     assert.equal(template.published, null);
-    const templateDraft = { ...template.draft, subject: 'Agent template', html: '<h1>Hello, {{name}}</h1>', defaults: { name: 'friend' } };
+    const templateDraft = { ...template.draft, subject: 'Agent template', html: '<h1>Hello, friend</h1>' };
     const updatedTemplate = await callTool(token, 'saveTemplate', { action: 'update', id: template.id, body: { revision: template.revision, draft: templateDraft }, confirm: true });
     assert.equal(updatedTemplate.revision, 2);
     assert.equal(updatedTemplate.published, null);
+    error(await http('PATCH', `/v1/templates/${template.id}`, MANAGER, { revision: 2, draft: { ...updatedTemplate.draft, html: '<h1>Hello, {{name}}</h1>' } }), 422, 'TEMPLATE_PLACEHOLDERS_UNSUPPORTED');
     assert.equal(context.origin, PUBLIC_ORIGIN);
     assert.equal(context.host, new URL(PUBLIC_ORIGIN).host);
     assert.deepEqual(context.domains, []);

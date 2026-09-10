@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { CampaignTemplate, CampaignTemplateDraft } from '../../data/types'
-import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, StatusBadge, Switch, Tabs, Textarea, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, StatusBadge, Tabs, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from '../campaigns/CampaignAttachments'
@@ -73,7 +73,6 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const [template, setTemplate] = useState(initial)
   const [draft, setDraft] = useState(initial.draft)
   const draftRef = useRef(draft)
-  const [defaultsText, setDefaultsText] = useState(JSON.stringify(initial.draft.defaults, null, 2))
   const [ready, setReady] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -91,19 +90,16 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     if (!dirty || saving || savingRef.current || !ready || assetBusy || composerBusy || archived || !draft.name.trim()) return
     const timer = window.setTimeout(() => void save(), 800)
     return () => window.clearTimeout(timer)
-  }, [dirty, saving, ready, assetBusy, composerBusy, archived, draft.name, defaultsText])
+  }, [dirty, saving, ready, assetBusy, composerBusy, archived, draft.name])
   useEffect(() => { const warn = (event: BeforeUnloadEvent) => { if (dirty || savingRef.current) { event.preventDefault(); event.returnValue = '' } }; window.addEventListener('beforeunload', warn); return () => window.removeEventListener('beforeunload', warn) }, [dirty])
   async function save(): Promise<CampaignTemplate | null> {
     if (savingRef.current || !ready || archived) return null
     savingRef.current = true; setSaving(true); setError('')
     const submittedVersion = version.current
     try {
-      let defaults: CampaignTemplateDraft['defaults']
-      try { defaults = JSON.parse(defaultsText || '{}') } catch { throw new Error('Personalization defaults must be valid JSON.') }
-      if (!defaults || Array.isArray(defaults) || typeof defaults !== 'object') throw new Error('Personalization defaults must be a JSON object.')
       const content = await composer.current?.prepare()
       if (!content) throw new Error('The composer is still loading.')
-      const submitted = {...draftRef.current, ...content, defaults, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])], name: draftRef.current.name.trim(), subject: draftRef.current.subject.trim()}
+      const submitted = {...draftRef.current, ...content, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])], name: draftRef.current.name.trim(), subject: draftRef.current.subject.trim()}
       const updated = await api.templates.update(template.id, template.revision, submitted)
       setTemplate(updated); draftRef.current = version.current === submittedVersion ? updated.draft : draftRef.current; if (version.current === submittedVersion) { setDraft(updated.draft); setDirty(false) }
       return updated
@@ -140,10 +136,6 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       {error && <p className="ui-field__error template-save-error" role="alert">{error}</p>}
       <Suspense fallback={<ComposerSkeleton />}><EmailComposer ref={composer} attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></Suspense>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
-      <div className="template-settings">
-        <Field label="Personalization defaults" hint="JSON object used when a campaign does not provide a value."><Textarea rows={5} value={defaultsText} disabled={archived} onChange={event => { setDefaultsText(event.target.value); changed() }} /></Field>
-        <Switch label="Track opens and clicks by default" checked={draft.tracking} disabled={archived} onCheckedChange={value => change('tracking', value)} />
-      </div>
     </div></div></section>
     <Dialog open={previewOpen} onOpenChange={setPreviewOpen} title="Template preview" className="template-preview-dialog"><EmailPreview html={draft.html ?? ''} attachmentIds={draft.attachments} attachmentApi={api.templateAssets} respectStyles /></Dialog>
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); navigate('/templates') }} />

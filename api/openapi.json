@@ -1400,36 +1400,10 @@
             "maxItems": 10,
             "default": []
           },
-          "tracking": {
-            "type": "boolean",
-            "default": true
-          },
-          "defaults": {
-            "type": "object",
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 65536
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "default": {},
-            "description": "Fallback values for simple {{name}} placeholders. OpenSend HTML-escapes substituted values. Call getContentGuide in MCP before writing personalized content."
-          },
           "html": {
             "type": "string",
             "maxLength": 524288,
-            "description": "OpenSend block HTML shared with the campaign editor. Call getContentGuide in MCP before writing: arbitrary document HTML, CSS, tables and scripts are rejected."
+            "description": "Concrete OpenSend block HTML shared with the campaign editor. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing."
           },
           "attachments": {
             "type": "array",
@@ -12309,12 +12283,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { updateCampaignTemplate } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await updateCampaignTemplate({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1,\n    \"draft\": {\n      \"name\": \"Example\",\n      \"description\": \"\",\n      \"subject\": \"\",\n      \"replyTo\": [],\n      \"tracking\": true,\n      \"defaults\": {},\n      \"attachments\": []\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { updateCampaignTemplate } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await updateCampaignTemplate({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1,\n    \"draft\": {\n      \"name\": \"Example\",\n      \"description\": \"\",\n      \"subject\": \"\",\n      \"replyTo\": [],\n      \"attachments\": []\n    }\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/v1/templates/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"draft\": {\n    \"name\": \"Example\",\n    \"description\": \"\",\n    \"subject\": \"\",\n    \"replyTo\": [],\n    \"tracking\": true,\n    \"defaults\": {},\n    \"attachments\": []\n  }\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/v1/templates/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"draft\": {\n    \"name\": \"Example\",\n    \"description\": \"\",\n    \"subject\": \"\",\n    \"replyTo\": [],\n    \"attachments\": []\n  }\n}'"
           }
         ]
       },

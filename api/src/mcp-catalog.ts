@@ -314,7 +314,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     steps: [{ operation: previewTemplate, args }, { operation: previewTemplateImage, args }], parallel: true,
     combine: ([preview, visual]) => ({ ...preview, response: { ...preview.response, visualPreview: { mimeType: visual.response.mimeType } }, image: { data: visual.response.data, mimeType: visual.response.mimeType } }),
   }), templatePreviewOutput));
-  add(actionTool('saveTemplate', 'Create or update a global campaign template, or archive/restore it. Call getContentGuide before writing draft.html.', { create: need('createCampaignTemplate', raw), update: need('updateCampaignTemplate', raw), archive: need('setCampaignTemplateArchived', raw) }));
+  add(actionTool('saveTemplate', 'Create or update a global concrete campaign template, or archive/restore it. Use literal example subject, preview text and HTML—no personalization defaults or placeholders. Call getContentGuide before writing draft.html.', { create: need('createCampaignTemplate', raw), update: need('updateCampaignTemplate', raw), archive: need('setCampaignTemplateArchived', raw) }));
   direct('importTemplateImage', 'Import a public HTTPS raster image into stable private template assets. Add asset.id to draft.attachments and use the returned cid: src in draft.html; no browser or base64 transfer is needed.', 'importTemplateImage');
   direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');

@@ -266,15 +266,8 @@ export type CampaignTemplateDraft = {
     previewText?: string;
     fromName?: string;
     replyTo?: Array<string>;
-    tracking?: boolean;
     /**
-     * Fallback values for simple {{name}} placeholders. OpenSend HTML-escapes substituted values. Call getContentGuide in MCP before writing personalized content.
-     */
-    defaults?: {
-        [key: string]: string | number | boolean | null;
-    };
-    /**
-     * OpenSend block HTML shared with the campaign editor. Call getContentGuide in MCP before writing: arbitrary document HTML, CSS, tables and scripts are rejected.
+     * Concrete OpenSend block HTML shared with the campaign editor. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.
      */
     html?: string;
     attachments?: Array<string>;
