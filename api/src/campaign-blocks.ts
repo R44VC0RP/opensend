@@ -43,6 +43,15 @@ this vocabulary with a 422 that names the offending tag or attribute.
 
 List items hold inline content and may contain a nested \`<ul>\`/\`<ol>\`; \`<li><p>…</p></li>\` is also accepted.
 
+### Images in templates
+
+For an existing public image, call \`importTemplateImage\`. Add the returned \`asset.id\` to
+the template draft's \`attachments\` and use its returned \`cid:…\` value as the image
+\`src\`. This produces a stable private asset that renders in the dashboard, campaigns and
+\`previewTemplate\`. Direct HTTPS image URLs remain valid email content, but the dashboard
+does not load remote images because they can track the viewer; do not use Browser Control to
+work around that privacy boundary.
+
 ## Inline formatting (inside headings, paragraphs, list items, quotes, buttons)
 
 \`<strong>\`, \`<em>\`, \`<u>\`, \`<s>\`, \`<code>\`, \`<sup>\`, \`<br>\`, links as
@@ -83,7 +92,8 @@ handlers, comments, and document wrappers (\`<!doctype>\`, \`<html>\`, \`<head>\
 Fetch a campaign with findCampaigns or a template with findTemplates to read the current
 block HTML, including edits made in the dashboard composer. Send the complete replacement
 \`html\` with saveCampaign or saveTemplate at the current revision; the dashboard reflects it
-live. Preview campaigns through reviewCampaign and templates through the template preview.`;
+live. Preview campaigns through reviewCampaign and templates through previewTemplate; neither
+workflow requires browser automation.`;
 
 export class BlockContentError extends Error {}
 

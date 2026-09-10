@@ -716,13 +716,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 38);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 12);
+    assert.equal(catalog.tools.length, 40);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 13);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getContentGuide', 'getContext', 'getMetrics',
-      'importContacts', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'importContacts', 'importTemplateImage', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -737,6 +737,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(contentGuide.format, 'markdown');
     assert.match(contentGuide.markdown, /campaign and template content/i);
     assert.match(contentGuide.markdown, /## Personalization/);
+    const template = await callTool(token, 'saveTemplate', { action: 'create', body: { name: unique('mcp-template') }, confirm: true }, 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/templates/${template.id}`, MANAGER)); });
+    assert.equal(template.published, null);
+    const templateDraft = { ...template.draft, subject: 'Agent template', html: '<h1>Hello, {{name}}</h1>', defaults: { name: 'friend' } };
+    const updatedTemplate = await callTool(token, 'saveTemplate', { action: 'update', id: template.id, body: { revision: template.revision, draft: templateDraft }, confirm: true });
+    assert.equal(updatedTemplate.revision, 2);
+    assert.equal(updatedTemplate.published, null);
     assert.equal(context.origin, PUBLIC_ORIGIN);
     assert.equal(context.host, new URL(PUBLIC_ORIGIN).host);
     assert.deepEqual(context.domains, []);

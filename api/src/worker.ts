@@ -8,13 +8,14 @@ import { cleanup } from './maintenance.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
+import { publicImageImporter } from './adapters/public-image.js';
 
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
   const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2 });
   try {
-    return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async () => { await env.WAKE_QUEUE.send({ kind: 'wake' }); }, renderHtmlImage: browserImageRenderer(env.BROWSER) });
+    return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async () => { await env.WAKE_QUEUE.send({ kind: 'wake' }); }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
 }
 export default {

@@ -252,9 +252,7 @@ export type CampaignTemplate = {
     url: string;
     revision: number;
     draft: CampaignTemplateDraft;
-    published: CampaignTemplateDraft & ({
-        [key: string]: unknown;
-    } | null);
+    published: CampaignTemplateDraft | null;
     publishedRevision: number | null;
     archivedAt: string | null;
     createdAt: string;
@@ -299,6 +297,16 @@ export type CampaignTemplatePreview = {
     published: boolean;
 };
 
+export type CampaignTemplatePreviewImage = {
+    /**
+     * Canonical base64 PNG screenshot.
+     */
+    data: string;
+    mimeType: 'image/png';
+    revision: number;
+    published: boolean;
+};
+
 export type TemplateAsset = {
     id: string;
     filename: string;
@@ -315,6 +323,17 @@ export type TemplateAssetUpload = {
     disposition?: 'attachment' | 'inline';
     contentId?: string;
     content: string;
+};
+
+export type ImportedTemplateImage = {
+    asset: TemplateAsset;
+    src: string;
+};
+
+export type TemplateImageImport = {
+    url: string;
+    filename?: string;
+    contentId?: string;
 };
 
 export type EmailQueued = {
@@ -3968,6 +3987,71 @@ export type PreviewCampaignTemplateResponses = {
 
 export type PreviewCampaignTemplateResponse = PreviewCampaignTemplateResponses[keyof PreviewCampaignTemplateResponses];
 
+export type RenderCampaignTemplatePreviewImageData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        published?: 'true' | 'false';
+    };
+    url: '/v1/templates/{id}/preview-image';
+};
+
+export type RenderCampaignTemplatePreviewImageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RenderCampaignTemplatePreviewImageError = RenderCampaignTemplatePreviewImageErrors[keyof RenderCampaignTemplatePreviewImageErrors];
+
+export type RenderCampaignTemplatePreviewImageResponses = {
+    /**
+     * Success
+     */
+    200: CampaignTemplatePreviewImage;
+};
+
+export type RenderCampaignTemplatePreviewImageResponse = RenderCampaignTemplatePreviewImageResponses[keyof RenderCampaignTemplatePreviewImageResponses];
+
 export type SetCampaignTemplateArchivedData = {
     body: {
         archived: boolean;
@@ -4093,6 +4177,67 @@ export type UploadTemplateAssetResponses = {
 };
 
 export type UploadTemplateAssetResponse = UploadTemplateAssetResponses[keyof UploadTemplateAssetResponses];
+
+export type ImportTemplateImageData = {
+    body: TemplateImageImport;
+    path?: never;
+    query?: never;
+    url: '/v1/template-assets/import';
+};
+
+export type ImportTemplateImageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ImportTemplateImageError = ImportTemplateImageErrors[keyof ImportTemplateImageErrors];
+
+export type ImportTemplateImageResponses = {
+    /**
+     * Success
+     */
+    201: ImportedTemplateImage;
+};
+
+export type ImportTemplateImageResponse = ImportTemplateImageResponses[keyof ImportTemplateImageResponses];
 
 export type DeleteTemplateAssetData = {
     body?: never;
