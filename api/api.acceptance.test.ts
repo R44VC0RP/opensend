@@ -686,32 +686,6 @@ describe('Hosted MCP OAuth and tools', () => {
     return output.response;
   }
 
-  test('hosted MCP prepares background campaign reviews without changing the legacy review tool', async t => {
-    const db = await fixtureDatabase(t);
-    const { token } = await oauthGrant(t, db);
-    const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-async-list') });
-    const contact = await resource(t, MANAGER, '/v1/contacts', { email: address(), properties: { firstName: 'MCP reader' } });
-    ok(await consent(MANAGER, contact.id, 'subscribed'));
-    ok(await http('POST', `/v1/lists/${list.id}/members`, MANAGER, { contactIds: [contact.id] }));
-    const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
-    const started = await callTool(token, 'prepareCampaign', { action: 'start', id: campaign.id, body: { revision: campaign.revision }, confirm: true }, 202);
-    assert.equal(started.eligible, 1);
-    let current = started;
-    const deadline = Date.now() + 10000;
-    while (['pending', 'processing'].includes(current.status) && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 150));
-      current = await callTool(token, 'prepareCampaign', { action: 'get', id: campaign.id, reviewId: started.id, confirm: true });
-    }
-    assert.equal(current.status, 'ready');
-    assert.equal(current.processed, 1);
-    assert.equal(typeof current.contentHash, 'string');
-    assert.equal((await allPages(`/v1/emails?campaignId=${campaign.id}`, MANAGER)).length, 0);
-    const legacy = await callTool(token, 'reviewCampaign', { id: campaign.id, body: { revision: campaign.revision }, confirm: true });
-    assert.equal(legacy.eligible, 1);
-    assert.equal(legacy.status, undefined);
-    assert.equal(typeof legacy.preview.html, 'string');
-  });
-
   test('hosted MCP accepts omitted-type loopback desktop registration without weakening redirect validation', async t => {
     const db = await fixtureDatabase(t);
     for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
@@ -742,13 +716,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 41);
+    assert.equal(catalog.tools.length, 40);
     assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 13);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getContentGuide', 'getContext', 'getMetrics',
-      'importContacts', 'importTemplateImage', 'prepareCampaign', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'importContacts', 'importTemplateImage', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -756,6 +730,9 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(tool.inputSchema.properties.path, undefined, tool.name);
       assert.equal(tool.inputSchema.properties.query, undefined, tool.name);
     }
+    assert.ok(!tools.has('prepareCampaign'));
+    assert.doesNotMatch(JSON.stringify(tools.get('deliverCampaign')!.inputSchema), /reviewId/);
+    assert.doesNotMatch(JSON.stringify(tools.get('reviewCampaign')!.outputSchema), /contentHash|campaignId|reviewId/);
     for (const removed of ['getDomains', 'createDomain', 'configureDomainMailFrom', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
     const context = await callTool(token, 'getContext');
     assert.equal(context.environment, 'test');
