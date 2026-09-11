@@ -827,7 +827,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-unknown:${mail.id}` });
     await finishCampaign(runtime, a, mail.campaignId); return;
   }
-  if (mail.status !== 'queued') return;
+  if (mail.status !== 'queued') { await finishCampaign(runtime, a, mail.campaignId); return; }
   // Fail closed before storage/SES preflight as well as at the final atomic claim.
   const authorized = await runtime.db.transaction(async db => { if (await originAllowed(runtime, db, mail)) return true; await cancelRevokedOrigin(db, a, mail); return false; });
   if (!authorized) { await finishCampaign(runtime, a, mail.campaignId); return; }

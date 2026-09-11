@@ -165,8 +165,11 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
       if (!list) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'The planned list was deleted. Review a new plan.');
       const currentMemberships = operation.targetIds.length ? await tx.select({ contactId: listMembers.contactId }).from(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, operation.targetIds))) : [];
       if (operation.kind === 'add_to_list' && currentMemberships.length || operation.kind === 'remove_from_list' && currentMemberships.length !== operation.targetIds.length) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'List memberships changed after review. Review a new plan.');
-      if (operation.kind === 'add_to_list') for (const batch of chunks(operation.targetIds, 1000)) if (batch.length) await tx.insert(listMembers).values(batch.map(contactId => ({ workspaceId: identity.workspaceId, environment: identity.environment, listId: operation.listId, contactId }))).onConflictDoNothing();
-      else for (const batch of chunks(operation.targetIds, 5000)) if (batch.length) await tx.delete(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, batch)));
+      if (operation.kind === 'add_to_list') {
+        for (const batch of chunks(operation.targetIds, 1000)) if (batch.length) await tx.insert(listMembers).values(batch.map(contactId => ({ workspaceId: identity.workspaceId, environment: identity.environment, listId: operation.listId, contactId }))).onConflictDoNothing();
+      } else {
+        for (const batch of chunks(operation.targetIds, 5000)) if (batch.length) await tx.delete(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, batch)));
+      }
     }
     await tx.update(audiencePlans).set({ appliedAt }).where(and(scoped(audiencePlans, identity), eq(audiencePlans.id, plan.id)));
     return { id: plan.id, operation: operation.kind, affected: plan.matched, appliedAt };
