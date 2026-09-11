@@ -319,10 +319,11 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
+  add(actionTool('prepareCampaign', 'Prepare a campaign review in durable background batches for up to 1,000,000 matching contacts. Use action=start with the current revision, then action=get with the returned reviewId to poll progress. Preparation does not send email. Only status=ready supplies a usable review ID/contentHash for deliverCampaign; failed or superseded reviews cannot send. Read the campaign content and obtain explicit recipient/content/time confirmation before delivery.', { start: need('startCampaignReview', raw), get: need('getCampaignReview', raw) }));
   const previewCampaign = need('previewCampaign', raw), previewImage = need('renderCampaignPreviewImage', raw), reviewCampaign = need('reviewCampaign', raw);
   const reviewInput = structuredClone(reviewCampaign.tool.inputSchema) as ObjectValue;
   reviewInput.properties = { ...(reviewInput.properties ?? {}), visualPreview: { type: 'boolean', default: false, description: 'Also return a rendered PNG image of the saved campaign draft.' } };
-  add(custom('reviewCampaign', `Render, validate and review a campaign revision, returning its message preview, eligible audience counts and delivery review ID. Set visualPreview=true to also receive a PNG image of the email. ${EMAIL_SEND_CONFIRMATION}`, reviewInput as Tool['inputSchema'], true, args => {
+  add(custom('reviewCampaign', `Render, validate and synchronously review a campaign revision (up to 1,000 matches), returning its message preview, eligible audience counts and delivery review ID. For larger audiences use prepareCampaign start/get instead. Set visualPreview=true to also receive a PNG image of the email. ${EMAIL_SEND_CONFIRMATION}`, reviewInput as Tool['inputSchema'], true, args => {
     const reviewArgs = { ...args }; delete reviewArgs.visualPreview;
     return {
       steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args: reviewArgs }, ...(args.visualPreview === true ? [{ operation: previewImage, args: { id: args.id } }] : [])],
@@ -398,7 +399,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 40) invalid(`Curated catalog must contain exactly 40 tools, got ${result.size}.`);
+  if (result.size !== 41) invalid(`Curated catalog must contain exactly 41 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

@@ -2196,6 +2196,9 @@
       "Campaign": {
         "type": "object",
         "properties": {
+          "expansion": {
+            "$ref": "#/components/schemas/CampaignExpansion"
+          },
           "id": {
             "type": "string"
           },
@@ -2357,6 +2360,61 @@
           "counts"
         ]
       },
+      "CampaignExpansion": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "expanding",
+              "completed",
+              "failed",
+              "canceled"
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "description": "Fixed reviewed recipient count reserved at send or schedule."
+          },
+          "expanded": {
+            "type": "integer",
+            "description": "Recipients materialized as immutable email records."
+          },
+          "canceled": {
+            "type": "integer",
+            "description": "Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled."
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "total",
+          "expanded",
+          "canceled",
+          "error"
+        ]
+      },
       "CampaignDraft": {
         "type": "object",
         "properties": {
@@ -2500,7 +2558,7 @@
           "region"
         ],
         "additionalProperties": false,
-        "description": "Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live."
+        "description": "Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Legacy synchronous reviews retain their 16 MiB test/128 MiB live bounds; durable background campaign preparation is bounded separately."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -2655,6 +2713,9 @@
       "CampaignSummary": {
         "type": "object",
         "properties": {
+          "expansion": {
+            "$ref": "#/components/schemas/CampaignExpansion"
+          },
           "id": {
             "type": "string"
           },
@@ -3286,6 +3347,95 @@
         ],
         "additionalProperties": false
       },
+      "CampaignReviewPreparation": {
+        "type": "object",
+        "properties": {
+          "matched": {
+            "type": "integer"
+          },
+          "eligible": {
+            "type": "integer"
+          },
+          "suppressed": {
+            "type": "integer"
+          },
+          "unsubscribed": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "campaignId": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "contentHash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "ready",
+              "failed"
+            ]
+          },
+          "processed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "code",
+                  "message"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "matched",
+          "eligible",
+          "suppressed",
+          "unsubscribed",
+          "id",
+          "campaignId",
+          "revision",
+          "contentHash",
+          "createdAt",
+          "status",
+          "processed",
+          "error"
+        ],
+        "description": "A durable audience snapshot and bounded preparation. Only ready reviews may be sent. Counts are fixed at creation; live consent is checked again at dispatch."
+      },
       "CampaignQueued": {
         "type": "object",
         "properties": {
@@ -3325,7 +3475,8 @@
         "properties": {
           "reviewId": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "description": "Optional completed review. Omit to snapshot and validate the current revision automatically before delivery."
           },
           "revision": {
             "type": "integer",
@@ -3333,7 +3484,6 @@
           }
         },
         "required": [
-          "reviewId",
           "revision"
         ],
         "additionalProperties": false
@@ -3343,7 +3493,8 @@
         "properties": {
           "reviewId": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "description": "Optional completed review. Omit to snapshot and validate the current revision automatically before delivery."
           },
           "revision": {
             "type": "integer",
@@ -3355,7 +3506,6 @@
           }
         },
         "required": [
-          "reviewId",
           "revision",
           "scheduledAt"
         ],
@@ -17762,9 +17912,342 @@
         ]
       }
     },
+    "/v1/campaigns/{id}/reviews": {
+      "post": {
+        "operationId": "startCampaignReview",
+        "description": "Opt in to durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation. The existing /review endpoint remains synchronous.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignRevisionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignReviewPreparation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { startCampaignReview } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await startCampaignReview({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/reviews' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/campaigns/{id}/reviews/{reviewId}": {
+      "get": {
+        "operationId": "getCampaignReview",
+        "description": "Read fixed audience counts and durable preparation progress. A ready review is usable only while it remains the campaign’s current review and revision.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "reviewId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignReviewPreparation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { getCampaignReview } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await getCampaignReview({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"reviewId\": \"review_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/reviews/review_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/campaigns/{id}/send": {
       "post": {
         "operationId": "sendCampaign",
+        "description": "Accept the current revision for durable background delivery. Omit reviewId to snapshot and validate the complete audience automatically before any provider attempt; supply an existing completed reviewId to reuse it. The 202 count is accepted recipient intents, not SES acceptance or delivery.",
         "tags": [
           "Campaigns"
         ],
@@ -17917,12 +18400,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { sendCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await sendCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"reviewId\": \"review_123\",\n    \"revision\": 1\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { sendCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await sendCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/send' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"reviewId\": \"review_123\",\n  \"revision\": 1\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/send' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1\n}'"
           }
         ]
       }
@@ -17930,6 +18413,7 @@
     "/v1/campaigns/{id}/schedule": {
       "post": {
         "operationId": "scheduleCampaign",
+        "description": "Accept the current revision for durable scheduled delivery. Omit reviewId to snapshot and validate automatically; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.",
         "tags": [
           "Campaigns"
         ],
@@ -18082,12 +18566,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { scheduleCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await scheduleCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"reviewId\": \"review_123\",\n    \"revision\": 1,\n    \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { scheduleCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await scheduleCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1,\n    \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/schedule' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"reviewId\": \"review_123\",\n  \"revision\": 1,\n  \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/schedule' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"scheduledAt\": \"2026-09-18T19:00:00Z\"\n}'"
           }
         ]
       }

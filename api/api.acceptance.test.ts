@@ -686,6 +686,32 @@ describe('Hosted MCP OAuth and tools', () => {
     return output.response;
   }
 
+  test('hosted MCP prepares background campaign reviews without changing the legacy review tool', async t => {
+    const db = await fixtureDatabase(t);
+    const { token } = await oauthGrant(t, db);
+    const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-async-list') });
+    const contact = await resource(t, MANAGER, '/v1/contacts', { email: address(), properties: { firstName: 'MCP reader' } });
+    ok(await consent(MANAGER, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, MANAGER, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
+    const started = await callTool(token, 'prepareCampaign', { action: 'start', id: campaign.id, body: { revision: campaign.revision }, confirm: true }, 202);
+    assert.equal(started.eligible, 1);
+    let current = started;
+    const deadline = Date.now() + 10000;
+    while (['pending', 'processing'].includes(current.status) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      current = await callTool(token, 'prepareCampaign', { action: 'get', id: campaign.id, reviewId: started.id, confirm: true });
+    }
+    assert.equal(current.status, 'ready');
+    assert.equal(current.processed, 1);
+    assert.equal(typeof current.contentHash, 'string');
+    assert.equal((await allPages(`/v1/emails?campaignId=${campaign.id}`, MANAGER)).length, 0);
+    const legacy = await callTool(token, 'reviewCampaign', { id: campaign.id, body: { revision: campaign.revision }, confirm: true });
+    assert.equal(legacy.eligible, 1);
+    assert.equal(legacy.status, undefined);
+    assert.equal(typeof legacy.preview.html, 'string');
+  });
+
   test('hosted MCP accepts omitted-type loopback desktop registration without weakening redirect validation', async t => {
     const db = await fixtureDatabase(t);
     for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
@@ -716,13 +742,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 40);
+    assert.equal(catalog.tools.length, 41);
     assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 13);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getContentGuide', 'getContext', 'getMetrics',
-      'importContacts', 'importTemplateImage', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'importContacts', 'importTemplateImage', 'prepareCampaign', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -736,7 +762,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const contentGuide = await callTool(token, 'getContentGuide');
     assert.equal(contentGuide.format, 'markdown');
     assert.match(contentGuide.markdown, /campaign and template content/i);
-    assert.match(contentGuide.markdown, /## Personalization/);
+    assert.match(contentGuide.markdown, /## Campaign personalization/);
     const template = await callTool(token, 'saveTemplate', { action: 'create', body: { name: unique('mcp-template') }, confirm: true }, 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/templates/${template.id}`, MANAGER)); });
     assert.equal(template.published, null);
@@ -883,7 +909,8 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 10);
+    assert.equal(catalog.tools.length, 13);
+    assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findCampaigns'));
@@ -1490,6 +1517,99 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
     assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
     error(await http('GET', `/v1/attachments/${attachment.id}`, key.secret), 404, 'ATTACHMENT_NOT_FOUND');
+  });
+
+  test('background campaign reviews preserve immutable recipients and existing schedule/cancel contracts', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-review-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Reviewed name' } });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    const started = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    assert.equal(started.campaignId, campaign.id);
+    assert.equal(started.eligible, 1);
+    const reviewPath = `/v1/campaigns/${campaign.id}/reviews/${started.id}`;
+    const review = await poll(reviewPath, key.secret, row => ['ready', 'failed'].includes(row.status));
+    assert.equal(review.status, 'ready');
+    assert.equal(review.processed, 1);
+    assert.equal(typeof review.contentHash, 'string');
+    ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { firstName: 'Later name' } }));
+    const sent = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { reviewId: review.id, revision: review.revision }), 202);
+    assert.equal(sent.status, 'sending');
+    assert.equal(sent.queued, 1);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed');
+    const [email] = await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret);
+    assert.ok(email);
+    const content = ok(await http('GET', `/v1/emails/${email.id}/content`, key.secret));
+    assert.ok(content.html.includes('Reviewed name'), 'Expansion must use reviewed personalization, not later contact edits.');
+    assert.ok(!content.html.includes('Later name'));
+    const later = await campaignFixture(t, key.secret, { listId: list.id });
+    const laterStart = ok(await http('POST', `/v1/campaigns/${later.id}/reviews`, key.secret, { revision: later.revision }), 202);
+    const laterReview = await poll(`/v1/campaigns/${later.id}/reviews/${laterStart.id}`, key.secret, row => row.status === 'ready');
+    const scheduled = ok(await http('POST', `/v1/campaigns/${later.id}/schedule`, key.secret, { reviewId: laterReview.id, revision: laterReview.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
+    assert.equal(scheduled.status, 'scheduled');
+    assert.equal(scheduled.queued, 1);
+    const canceled = ok(await http('POST', `/v1/campaigns/${later.id}/cancel`, key.secret));
+    assert.equal(canceled.status, 'canceled');
+    assert.equal(canceled.canceled, 1);
+    assert.equal((await allPages(`/v1/emails?campaignId=${later.id}`, key.secret)).length, 0);
+  });
+
+  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('automatic-review-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Automatic reader' } });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    const accepted = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
+    assert.equal(accepted.status, 'sending');
+    assert.equal(accepted.queued, 1);
+    const completed = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.expansion.status, 'completed');
+    assert.equal(completed.counts.byStatus.simulated, 1);
+    const invalid = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Hello {{missing}}</p>', defaults: {} });
+    const invalidAccepted = ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: invalid.revision }), 202);
+    assert.equal(invalidAccepted.queued, 1);
+    const failed = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.expansion?.status === 'failed');
+    assert.equal(failed.status, 'draft');
+    assert.equal(failed.expansion.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    assert.equal(failed.counts.total, 0);
+    const corrected = ok(await http('PATCH', `/v1/campaigns/${invalid.id}`, key.secret, { revision: invalid.revision, draft: { ...invalid.draft, html: '<p>Corrected automatic message</p>' } }));
+    ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: corrected.revision }), 202);
+    const retried = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
+    assert.equal(retried.status, 'completed');
+    assert.equal(retried.counts.byStatus.simulated, 1);
+    const scheduled = await campaignFixture(t, key.secret, { listId: list.id });
+    const scheduledAccepted = ok(await http('POST', `/v1/campaigns/${scheduled.id}/schedule`, key.secret, { revision: scheduled.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
+    assert.equal(scheduledAccepted.status, 'scheduled');
+    const canceled = ok(await http('POST', `/v1/campaigns/${scheduled.id}/cancel`, key.secret));
+    assert.equal(canceled.status, 'canceled');
+    assert.equal(canceled.canceled, 1);
+    assert.equal((await allPages(`/v1/emails?campaignId=${scheduled.id}`, key.secret)).length, 0);
+  });
+
+  test('background review failures and superseded revisions cannot authorize campaign delivery', async t => {
+    const key = await keyFixture(t);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-invalid-list') });
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    ok(await consent(key.secret, contact.id, 'subscribed'));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Hello {{missing}}</p>', defaults: {} });
+    const started = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const failed = await poll(`/v1/campaigns/${campaign.id}/reviews/${started.id}`, key.secret, row => ['ready', 'failed'].includes(row.status));
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { reviewId: started.id, revision: campaign.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 409);
+    const updated = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, subject: 'Corrected subject', html: '<p>Corrected message</p>' } }));
+    const next = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: updated.revision }), 202);
+    const ready = await poll(`/v1/campaigns/${campaign.id}/reviews/${next.id}`, key.secret, row => ['ready', 'failed'].includes(row.status));
+    assert.equal(ready.status, 'ready');
+    ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: updated.revision, draft: { ...updated.draft, subject: 'Changed after review' } }));
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { reviewId: ready.id, revision: ready.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 409);
+    assert.equal((await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
   });
 
   test('draft review, stale revisions, attachment removal, immutable scheduling and cancellation are observable', async t => {

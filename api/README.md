@@ -2,6 +2,29 @@
 
 One Hono/TypeScript API for Node/Docker and Cloudflare Workers. The dashboard and generated SDK use that same public API; MCP discovers its OpenAPI contract. PostgreSQL is the source of truth, a Postgres outbox drives sending/webhooks, and private R2/S3 stores attachments. No Redis, D1, Durable Objects, passwords, teams, or production admin bypass.
 
+## Large campaigns
+
+Existing `POST /v1/campaigns/{id}/review` clients retain their completed-only `200` response and existing limits. The normal send/schedule request needs only the current `revision`: when `reviewId` is omitted, OpenSend snapshots and validates the audience durably, then begins delivery automatically. The `202` response means the complete background workflow was accepted, not that validation or SES delivery has finished. Existing callers may still pass a completed `reviewId` unchanged.
+
+To inspect counts before committing to delivery, call `POST /v1/campaigns/{id}/reviews` with `{ "revision": ... }`, then poll `GET /v1/campaigns/{id}/reviews/{reviewId}`. `pending` and `processing` are not completed reviews; only `ready` can be passed to send/schedule after user confirmation. The dashboard uses this explicit preview flow; MCP exposes `prepareCampaign` (`start`/`get`). The generated SDK includes both endpoints.
+
+An audience is captured with one database snapshot. Only referenced personalization properties are copied into immutable recipient rows; the rendered base email is shared. Preparation validates every message before `ready`. Send/schedule returns the unchanged `202` receipt with the number of durable recipient intents; email rows are materialized progressively rather than all existing immediately. Future schedules reserve capacity without filling the active dispatch buffer. Optional campaign `expansion` metadata reports progress and errors; its `canceled` count is unmaterialized cancellations, separate from canceled email rows. Final personalized audit snapshots are saved at dispatch. Failed expansion is visible and cancelable; never manually replay an uncertain SES send.
+
+| Bound | Current implementation |
+| --- | --- |
+| Matching contacts per background review | 1,000,000, before consent/suppression filtering |
+| Concurrent review execution | Bounded by worker/runner job concurrency; additional reviews remain durable queue work |
+| Referenced personalization snapshot | 1 GiB per review, 1 MiB per recipient |
+| Estimated final content | 64 GiB per campaign; attachments remain shared references |
+| Preparation/expansion chunk | Up to 100 recipients; byte-bounded processing |
+| Active campaign dispatch buffer | 200 emails per campaign, 1,000 per environment |
+| Outstanding campaign intents | 1,000,000 per originating credential; 2,000,000 per environment |
+| Active jobs per process/invocation | `JOB_CONCURRENCY`: default 2, maximum 8 for Node and 4 for Cloudflare |
+
+These are application bounds, not a guaranteed SES send rate. All workers share regional permits, respect provider throttling, and use short database leases; no SES request holds a database transaction. Rate utilization depends on provider latency, database latency, available connections, and total worker concurrency. Direct/legacy sends retain their separate existing pending limits. Use a staged load test before increasing consumer/replica counts, especially with a small Hyperdrive origin pool. The included Cloudflare configuration allows four concurrent queue invocations with four active jobs each; `JOB_CONCURRENCY` controls parallel work inside each invocation. Node runners can be replicated against the same database.
+
+Apply migration `017_scalable_campaigns.sql` before deploying this backend. For Docker, stop old runners and upgrade API/runner images together before accepting background preparations; old runners do not recognize the new job types. Do not roll back to an older backend while new-format reviews or campaigns are active. Existing reviews and emails use the legacy storage path without a content backfill. This release adds public API operations; it does not change the old review response or require existing integrations to adopt asynchronous preparation.
+
 ## Configuration
 
 Use Node.js **24** and Docker Compose for the local quickstart. All commands below run from `api/` unless stated otherwise.
@@ -20,6 +43,7 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | Setting | What to enter |
 | --- | --- |
 | `BETTER_AUTH_SECRET` | At least 32 random bytes, such as the 64-character hex output above. This is the installation root secret for authentication and domain-separated webhook encryption. |
+| `JOB_CONCURRENCY` | Optional active background jobs per process/invocation. Defaults to 2; capped at 8 for Docker/Node and 4 for Cloudflare. Increase only after measuring database and SES latency; the shared regional permit gate still enforces SES send rate. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Your installation's real Google OAuth **Web application** client credentials. See below. |
 | `AUTH_ALLOWED_EMAILS` | Comma-separated exact Google email addresses. Use this for personal Gmail accounts. |
 | `AUTH_ALLOWED_DOMAINS` | Optional comma-separated exact Google Workspace hosted domains, checked against Google's verified `hd` claim—not an email suffix. Either allowlist can approve a user; missing/empty lists deny everyone. All approved users are admins. |
@@ -192,7 +216,7 @@ Use the route schemas in [`src/ses-regions.ts`](src/ses-regions.ts) for the exac
 | Capability | Current boundary |
 | --- | --- |
 | Single / batch sends | Durable per-message jobs, at most 50 recipients/message and 100 messages/submission. Plain ASCII addresses (punycode domains supported), with an optional validated `fromName` for the sender display name; no arbitrary message headers. Each result has a message ID, not a separate batch-status resource. SES sends are individual, not `SendBulkEmail`. |
-| Campaigns | Versioned drafts/reviews, previews, scheduling, and cancellation before dispatch. Draft `html` is block HTML (`GET /v1/campaign-content-guide`); the server validates it on save and renders the styled email plus a plain-text part at review/test/send, so the dashboard composer, SDK and MCP share one content document. Initial review/import limit is 1,000 contacts/rows; larger input fails rather than truncates. Revocation cannot recall accepted or in-flight mail. |
+| Campaigns | Versioned drafts/reviews, previews, scheduling, and cancellation before dispatch. Draft `html` is block HTML (`GET /v1/campaign-content-guide`); the server validates it on save and renders the styled email plus a plain-text part at review/test/send, so the dashboard composer, SDK and MCP share one content document. The original synchronous `/review` remains capped at 1,000 matching contacts. The additive `/v1/campaigns/{id}/reviews` preparation flow supports up to 1,000,000 matching contacts in durable, bounded batches; poll its returned review ID until `ready`. CSV imports remain capped at 1,000 rows per import. Larger input fails rather than truncates. Revocation cannot recall accepted or in-flight mail. |
 | Templates | SES Get/TestRender/Get snapshots; callers must HTML-escape template data. The campaign editor escapes its own simple substitutions. Local test rendering is not proof of a real SES render. |
 | Attachments | JSON/base64 upload plus raw-byte `POST /v1/attachments/upload` for the SDK/CLI, and authenticated `/v1/attachments/{id}/content` download with private object IDs and ownership/reference checks. Extension, MIME declaration and file signature/content are checked. At most 8 MiB decoded attachments, 16 MiB estimated encoded message size, and 512 KiB per direct body part. No arbitrary URL fetching. SES-rendered raw templates cannot add structured attachments. |
 | Retries / rate | Shared regional quota reservations. Six bounded transient attempts, delayed 15s, 1m, 4m, 16m, and 1h; ambiguous provider acceptance is not automatically replayed. Failed jobs remain inspectable. |

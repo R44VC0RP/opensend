@@ -453,6 +453,7 @@ export type DeletedSendingResource = {
 };
 
 export type Campaign = {
+    expansion?: CampaignExpansion;
     id: string;
     /**
      * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
@@ -493,8 +494,28 @@ export type Campaign = {
     };
 };
 
+export type CampaignExpansion = {
+    status: 'pending' | 'expanding' | 'completed' | 'failed' | 'canceled';
+    /**
+     * Fixed reviewed recipient count reserved at send or schedule.
+     */
+    total: number;
+    /**
+     * Recipients materialized as immutable email records.
+     */
+    expanded: number;
+    /**
+     * Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.
+     */
+    canceled: number;
+    error: {
+        code: string;
+        message: string;
+    } | null;
+} | null;
+
 /**
- * Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Expanded review/send content is limited to 16 MiB in test and 128 MiB in live.
+ * Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Legacy synchronous reviews retain their 16 MiB test/128 MiB live bounds; durable background campaign preparation is bounded separately.
  */
 export type CampaignDraft = {
     name: string;
@@ -560,6 +581,7 @@ export type CreateCampaignInput = {
  * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.
  */
 export type CampaignSummary = {
+    expansion?: CampaignExpansion;
     id: string;
     /**
      * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
@@ -715,6 +737,27 @@ export type CampaignRevisionInput = {
     revision: number;
 };
 
+/**
+ * A durable audience snapshot and bounded preparation. Only ready reviews may be sent. Counts are fixed at creation; live consent is checked again at dispatch.
+ */
+export type CampaignReviewPreparation = {
+    matched: number;
+    eligible: number;
+    suppressed: number;
+    unsubscribed: number;
+    id: string;
+    campaignId: string;
+    revision: number;
+    contentHash: string | null;
+    createdAt: string;
+    status: 'pending' | 'processing' | 'ready' | 'failed';
+    processed: number;
+    error: {
+        code: string;
+        message: string;
+    } | null;
+};
+
 export type CampaignQueued = {
     id: string;
     status: 'scheduled' | 'sending';
@@ -724,12 +767,18 @@ export type CampaignQueued = {
 };
 
 export type CampaignSendInput = {
-    reviewId: string;
+    /**
+     * Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.
+     */
+    reviewId?: string;
     revision: number;
 };
 
 export type CampaignScheduleInput = {
-    reviewId: string;
+    /**
+     * Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.
+     */
+    reviewId?: string;
     revision: number;
     scheduledAt: string;
 };
@@ -5892,6 +5941,133 @@ export type ReviewCampaignResponses = {
 };
 
 export type ReviewCampaignResponse = ReviewCampaignResponses[keyof ReviewCampaignResponses];
+
+export type StartCampaignReviewData = {
+    body: CampaignRevisionInput;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/reviews';
+};
+
+export type StartCampaignReviewErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type StartCampaignReviewError = StartCampaignReviewErrors[keyof StartCampaignReviewErrors];
+
+export type StartCampaignReviewResponses = {
+    /**
+     * Success
+     */
+    202: CampaignReviewPreparation;
+};
+
+export type StartCampaignReviewResponse = StartCampaignReviewResponses[keyof StartCampaignReviewResponses];
+
+export type GetCampaignReviewData = {
+    body?: never;
+    path: {
+        id: string;
+        reviewId: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/reviews/{reviewId}';
+};
+
+export type GetCampaignReviewErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignReviewError = GetCampaignReviewErrors[keyof GetCampaignReviewErrors];
+
+export type GetCampaignReviewResponses = {
+    /**
+     * Success
+     */
+    200: CampaignReviewPreparation;
+};
+
+export type GetCampaignReviewResponse = GetCampaignReviewResponses[keyof GetCampaignReviewResponses];
 
 export type SendCampaignData = {
     body: CampaignSendInput;

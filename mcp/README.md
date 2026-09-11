@@ -46,7 +46,11 @@ For example, call `findEmails` with either:
 
 Workflow tools compose API operations behind an explicit `action`, `mode`, or `include` selector: `saveCampaign`, `deliverCampaign`, `saveContact`, `importContacts`, `saveList`, `setListMembers`, `saveSegment`, `sendEmail`, `getAttachment`, `saveWebhook`, and `saveDomain`. The public HTTP API and generated SDK remain more granular; SES region/provisioning, long-lived API-key and workspace-setting operations are intentionally absent from hosted MCP.
 
-Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` returns both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
+Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` preserves synchronous review for audiences up to 1,000 matching contacts, returning both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
+
+For larger audiences (up to 1,000,000 matching contacts within the data/content budgets), use `prepareCampaign` with `action: "start"`, the campaign `id`, `body: { revision }`, and `confirm: true`. Poll with `action: "get"`, the same campaign `id`, the returned review's `id` as `reviewId`, and `confirm: true` as required by the workflow tool. Preparation runs in durable batches and does not send email. Only `status: "ready"` is a completed validation review; `pending` or `processing` is not a completed review, and `failed` requires correction/retry. Use the ready review's ID and revision with the existing `deliverCampaign` tool after obtaining the user's explicit audience/content/time confirmation.
+
+Explicit preparation is optional. After the same audience/content/time confirmation, `deliverCampaign` send/schedule may omit `reviewId` and supply the current campaign `revision`; OpenSend then snapshots, validates and starts delivery as one durable background workflow. Its `202` result means accepted for preparation/delivery, not sent or delivered.
 
 The full writable catalog has **31 tools**; read-only OAuth grants expose the nine read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
 
