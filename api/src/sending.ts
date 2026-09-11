@@ -265,22 +265,23 @@ async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, b
     return result;
   });
 }
-async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
-  const [row] = await db.select().from(emails).where(mailWhere(a, emailId));
+async function findEmail(db: DbExecutor, a: Actor, emailId: string, lock = false) {
+  const query = db.select().from(emails).where(mailWhere(a, emailId));
+  const [row] = await (lock ? query.for('update') : query);
   if (!row) notFound('Email');
   return row;
 }
-async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock = false) {
+async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
-  const [row] = await (lock ? query.for('update') : query);
+  const [row] = await (lock ? query.for(lock === 'share' ? 'share' : 'update') : query);
   if (!row) notFound('Campaign');
   return row;
 }
-async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false) {
+async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock: boolean | 'share' = false) {
   if (!ids.length) return [];
   if (new Set(ids).size !== ids.length) throw new ApiError(422, 'DUPLICATE_ATTACHMENT', 'An attachment can appear only once per message.');
   const query = db.select().from(attachments).where(and(scope(attachments, a), inArray(attachments.id, ids))).orderBy(asc(attachments.id));
-  const rows = await (lock ? query.for('update') : query);
+  const rows = await (lock ? query.for(lock === 'share' ? 'share' : 'update') : query);
   if (rows.length !== ids.length) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', 'One or more attachments were not found in this environment.');
   if (rows.reduce((n, row) => n + row.size, 0) > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Combined attachments may not exceed 8 MiB of decoded data.');
   const cid = rows.flatMap(r => r.contentId ? [r.contentId] : []);
@@ -989,7 +990,7 @@ async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, 
 async function deferDispatch(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, payload: Record<string, unknown>, availableAt: string, attempted = false) {
   await runtime.db.transaction(async db => {
     if (mail.campaignId) {
-      const campaign = await findCampaign(db, a, mail.campaignId, true);
+      const campaign = await findCampaign(db, a, mail.campaignId, 'share');
       if (campaign.status === 'canceled') {
         // A definitive throttle after cancellation must not resurrect an in-flight message as queued.
         await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, attempted ? 'attempting' : 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion)));
@@ -1011,8 +1012,8 @@ async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspace
       senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
   }
   // Removed bootstrap origins fail closed; only durable API keys are accepted below.
-  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('update');
-  // FOR UPDATE serializes with revocation/permission updates through the durable attempt claim,
+  const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('share');
+  // Shared readers allow parallel sends but conflict with revocation/permission updates through the durable attempt claim,
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
   return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);
 }
@@ -1021,15 +1022,17 @@ async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails
 }
 async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
   return runtime.db.transaction(async db => {
-    const campaign = await findCampaign(db, a, mail.campaignId!, true);
+    const campaign = await findCampaign(db, a, mail.campaignId!, 'share');
     if (campaign.status === 'canceled') return null;
-    const current = await findEmail(db, a, mail.id);
+    // Different recipients can render together; the same email must retain one
+    // immutable materialization (including its unsubscribe token) through claim.
+    const current = await findEmail(db, a, mail.id, true);
     if (current.status !== 'queued' || current.dispatchVersion !== mail.dispatchVersion) return null;
     if (!current.snapshot.deferredCampaign) return { mail: current, rows: await attachmentRows(db, a, current.snapshot.attachments) };
     const [review] = await db.select({ draft: campaignReviews.draft, rendered: campaignReviews.rendered, status: campaignReviews.status }).from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, current.reviewId!)));
     const [recipient] = await db.select().from(reviewRecipients).where(and(eq(reviewRecipients.reviewId, current.reviewId!), eq(reviewRecipients.ordinal, current.reviewOrdinal!)));
     if (!review?.rendered || review.status !== 'ready' || !recipient?.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
-    const rows = await attachmentRows(db, a, review.draft.attachments, true);
+    const rows = await attachmentRows(db, a, review.draft.attachments, 'share');
     const snapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, rows, review.rendered);
     if (await digest(canonical(snapshot)) !== recipient.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
     marketingFooter(snapshot, await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db));
@@ -1040,8 +1043,14 @@ async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof
 }
 const dispatch: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.emailId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Email dispatch requires emailId.');
+  const started = Date.now(), timings: Record<string, number> = {};
+  const phase = async <T>(name: string, work: () => Promise<T>) => {
+    const start = Date.now();
+    try { return await work(); } finally { timings[name] = (timings[name] ?? 0) + Date.now() - start; }
+  };
+  try {
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
-  let mail = await findEmail(runtime.db, a, payload.emailId);
+  let mail = await phase('read', () => findEmail(runtime.db, a, payload.emailId as string));
   if (mail.dispatchVersion !== (payload.version ?? 0)) return;
   if (mail.status === 'attempting') {
     // A previous lease died after recording attempt start. SES has no idempotency token: never automatically resend.
@@ -1051,27 +1060,32 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   }
   if (mail.status !== 'queued') { await finishEmailCampaign(runtime, a, mail); return; }
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
-  if (a.environment === 'live') await assertDispatchRegionReady(runtime, mail.snapshot.region, mail.snapshot.kind);
+  if (a.environment === 'live') await phase('readiness', () => assertDispatchRegionReady(runtime, mail.snapshot.region, mail.snapshot.kind));
   let preparedAttachments: (typeof attachments.$inferSelect)[] | undefined;
   if (mail.snapshot.deferredCampaign) {
-    const materialized = await materializeCampaignEmail(runtime, a, mail);
+    const materialized = await phase('materialize', () => materializeCampaignEmail(runtime, a, mail));
     if (!materialized) { await finishEmailCampaign(runtime, a, mail); return; }
     mail = materialized.mail; preparedAttachments = materialized.rows;
   }
   const s = mail.snapshot;
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];
-  const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
-  if (a.environment === 'live') for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
-  sizeCheck(s, rows);
+  await phase('attachments', async () => {
+    const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
+    if (a.environment === 'live') for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+    sizeCheck(s, rows);
+  });
   const ses = a.environment === 'live' ? getSes(runtime, s.region) : null;
   if (ses) {
-    const permit = await reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses);
+    const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
     if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
-    if (permit.waitUntil && permit.waitUntil > Date.now()) await new Promise(resolve => setTimeout(resolve, permit.waitUntil! - Date.now()));
+    if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, permit.waitUntil! - Date.now())));
   }
-  const claimed = await runtime.db.transaction(async db => {
-    const campaign = mail.campaignId ? await findCampaign(db, a, mail.campaignId, true) : null;
+  const claim = (lock: true | 'share') => runtime.db.transaction(async db => {
+    const campaign = mail.campaignId ? await findCampaign(db, a, mail.campaignId, lock) : null;
+    // Never upgrade shared campaign locks: concurrent scheduled claims would
+    // deadlock. Release and retry with the writer lock before any other locks.
+    if (campaign?.status === 'scheduled' && lock === 'share') return null;
     if (!await originAllowed(runtime, db, mail)) return cancelRevokedOrigin(db, a, mail);
     if (campaign) { if (campaign.status === 'canceled') return []; if (campaign.status === 'scheduled') await db.update(campaigns).set({ status: 'sending', updatedAt: now() }).where(campaignWhere(a, campaign.id)); }
     const destinations = [...s.to, ...s.cc, ...s.bcc].map(email => email.toLowerCase());
@@ -1082,7 +1096,8 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     if (eligible && changed.length) await db.insert(emailEvents).values({ id: id('event'), workspaceId: a.workspaceId, environment: a.environment, emailId: mail.id, type: 'dispatch_attempt', externalId: `attempt-start:${mail.id}:${mail.dispatchVersion}`, simulated: a.environment === 'test', data: { attempt: mail.dispatchVersion + 1, providerCallPlanned: a.environment === 'live' } }).onConflictDoNothing();
     return changed;
   });
-  if (!claimed.length) return;
+  const claimed = await phase('claim', async () => await claim('share') ?? await claim(true));
+  if (!claimed?.length) return;
   mail = claimed[0]!;
   if (mail.status === 'canceled') { await finishEmailCampaign(runtime, a, mail); return; }
   if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishEmailCampaign(runtime, a, mail); return; }
@@ -1096,7 +1111,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     Content: s.raw ? { Raw: { Data: new TextEncoder().encode(s.raw) } } : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } },
   };
   let providerId: string | undefined;
-  try { const result = await ses.send(new SendEmailCommand(request)); providerId = result.MessageId; }
+  try { const result = await phase('ses', () => ses.send(new SendEmailCommand(request))); providerId = result.MessageId; }
   catch (error) {
     const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
     const status = failure.$metadata?.httpStatusCode;
@@ -1127,12 +1142,17 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: definitive ? 'reject' : 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: definitive ? failure.name ?? 'SES_REJECTED' : 'SES_ACCEPTANCE_UNKNOWN', retryable: false, ...diagnostics } });
     await finishEmailCampaign(runtime, a, mail); return;
   }
-  if (!providerId) {
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_MESSAGE_ID_MISSING' } });
-  } else {
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'accepted', providerId, externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}` });
-  }
+  await phase('record', async () => {
+    if (!providerId) {
+      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_MESSAGE_ID_MISSING' } });
+    } else {
+      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'accepted', providerId, externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}` });
+    }
+  });
   await finishEmailCampaign(runtime, a, mail);
+  } finally {
+    log('info', { code: 'DISPATCH_TIMINGS', jobId: job.id, emailId: payload.emailId, version: payload.version ?? 0, environment: job.environment, durationMs: Date.now() - started, timings });
+  }
 };
 const guardedDispatch: JobHandler = async (runtime, payload, job) => {
   try { await dispatch(runtime, payload, job); }
