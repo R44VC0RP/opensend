@@ -62,7 +62,7 @@ export function TemplateEditorPage() {
   const query = useApiQuery(['template', id], (api, signal) => api.templates.get(id, signal))
   if (query.isPending) return <div className="campaign-compose-page"><ComposerSkeleton /></div>
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <TemplateEditor key={`${query.data.id}:${query.data.revision}`} initial={query.data} />
+  return <TemplateEditor key={query.data.id} initial={query.data} />
 }
 
 function TemplateEditor({ initial }: {initial: CampaignTemplate}) {

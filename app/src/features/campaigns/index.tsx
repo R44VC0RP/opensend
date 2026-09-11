@@ -264,7 +264,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   }
   return <div className="campaign-compose-page">
     <PageHeader title={accepted ? 'Edit campaign' : 'Create campaign'} backTo="/campaigns" actions={<>
-      <div className="campaign-sync-status" role="status" data-state={error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection} title={error || sync.error?.message || (remote ? 'A newer version is available. Your unsaved changes are safe.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')}>
+      <div className="campaign-sync-status" role="status" data-state={error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection} data-actionable={remote || error || autosavePaused || sync.connection === 'offline' || undefined} title={error || sync.error?.message || (remote ? 'A newer version is available. Your unsaved changes are safe.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? 'This campaign is no longer editable.' : 'Changes save automatically and sync with MCP and the API.')}>
         <span className="campaign-sync-dot" aria-hidden="true" />
         {remote || error || autosavePaused || sync.connection === 'offline' ? <Button variant="ghost" size="sm" disabled={pending} onClick={() => { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }}>{syncLabel}</Button> : <span>{syncLabel}</span>}
       </div>

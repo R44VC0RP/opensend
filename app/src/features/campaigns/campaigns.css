@@ -67,6 +67,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
   .campaign-message-details { grid-template-columns: minmax(0, 1fr); }
   body:has(.campaign-compose-page) .sidebar { display: none; }
   body:has(.campaign-compose-page) .page-surface:has(.campaign-compose-page) { height: calc(100dvh - 16px); margin: 8px; padding: 8px; border-radius: var(--radius-sm); }
-  .campaign-compose-page .campaign-sync-status { display: none; }
+  .campaign-compose-page .campaign-sync-status:not([data-actionable]) { display: none; }
   .campaign-compose-sheet { padding: 12px; }
 }

@@ -22,6 +22,8 @@ export function AppShell() {
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const navigate = useNavigate()
   const content = useRef<HTMLElement>(null)
+  const testEnvironment = api.environment === 'test' || new URLSearchParams(location.search).get('environment') === 'test'
+  const environmentSearch = testEnvironment ? '?environment=test' : ''
   useEffect(() => {
     window.scrollTo(0, 0)
     content.current?.scrollTo(0, 0)
@@ -31,6 +33,11 @@ export function AppShell() {
     if (regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
+  useEffect(() => {
+    if (api.environment !== 'test' || new URLSearchParams(location.search).get('environment') === 'test') return
+    const search = new URLSearchParams(location.search); search.set('environment', 'test')
+    navigate({ pathname: location.pathname, search: search.toString() }, { replace: true })
+  }, [api.environment, location.pathname, location.search, navigate])
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -46,14 +53,14 @@ export function AppShell() {
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
+      <NavLink className="wordmark" to={`/${environmentSearch}`} aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
         <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />
         {regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
-      <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
+      <nav className="main-navigation" aria-label="Main navigation">{navigation.map(([path, title]) => <NavLink key={path} to={`${path}${environmentSearch}`} end={path === '/'}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
         {needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
       <div className="sidebar-quota">{api.environment === 'test' ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>

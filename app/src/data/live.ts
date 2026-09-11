@@ -132,6 +132,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       preview: (id, signal) => call(`/campaigns/${idPath(id)}/preview`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),
       save: async (input, signal) => {
+        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region: input.regionId}, signal, environment, idempotencyKey: input.idempotencyKey}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
         const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
