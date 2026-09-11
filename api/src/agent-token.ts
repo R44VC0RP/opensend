@@ -25,8 +25,7 @@ export async function createAgentToken(config: Config, input: { id: string; gran
 export async function verifyAgentToken(config: Config, token: string): Promise<AgentTokenPayload | null> {
   const match = token.match(/^os_agent_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/);
   if (!match || token.length > 16 * 1024) return null;
-  const valid = await Promise.any([config.authSecret, config.previousAuthSecret].filter((secret): secret is string => Boolean(secret)).map(async secret =>
-    await crypto.subtle.verify('HMAC', await key(secret), decode(match[2]!), encoder.encode(signed(match[1]!))) ? true : Promise.reject())).catch(() => false);
+  const valid = await crypto.subtle.verify('HMAC', await key(config.authSecret), decode(match[2]!), encoder.encode(signed(match[1]!)));
   if (!valid) return null;
   try {
     const payload = Payload.parse(JSON.parse(new TextDecoder().decode(decode(match[1]!))));
