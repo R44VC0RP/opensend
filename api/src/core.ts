@@ -82,7 +82,8 @@ export const SECURITY_HEADERS = {
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
 } as const;
 export function applySecurityHeaders(headers: Headers): Headers {
-  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
+  // Route-specific policies (notably OAuth form redirects) take precedence.
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!headers.has(name)) headers.set(name, value);
   return headers;
 }
 export function secureResponse(response: Response): Response {
