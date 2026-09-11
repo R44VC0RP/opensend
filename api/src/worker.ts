@@ -4,16 +4,19 @@ import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
 import { drain } from './dispatch.js';
+import { jobConcurrency, nextWakeDelay } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
 import { publicImageImporter } from './adapters/public-image.js';
 
+// Optional Worker variable, default two active jobs; a four-job cap leaves room for control-plane requests.
+const workerConcurrency = (env: Env) => jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 4);
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
-  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2 });
+  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: workerConcurrency(env) });
   try {
     return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async () => { await env.WAKE_QUEUE.send({ kind: 'wake' }); }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
@@ -51,16 +54,20 @@ export default {
   },
   async queue(batch, env) {
     await withRuntime(env, async runtime => {
-      const count = await drain(runtime);
-      if (count === 1) await runtime.wake?.();
+      const concurrency = workerConcurrency(env);
+      await drain(runtime, 100, concurrency);
+      const delaySeconds = await nextWakeDelay(runtime);
+      if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
     batch.ackAll();
   },
   async scheduled(controller, env) {
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') await cleanup(runtime);
-      const count = await drain(runtime);
-      if (count === 1) await runtime.wake?.();
+      const concurrency = workerConcurrency(env);
+      await drain(runtime, 100, concurrency);
+      const delaySeconds = await nextWakeDelay(runtime);
+      if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
   },
 } satisfies ExportedHandler<Env>;

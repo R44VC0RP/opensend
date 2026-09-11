@@ -11,25 +11,40 @@ export async function enqueue(db: DbExecutor, input: { type: string; workspaceId
 }
 
 // Postgres is the durable queue. CF Queue messages only wake it; cron/polling recovers missed wakeups.
-export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1) {
-  const claimed = await runtime.db.execute<{
-    id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
-  }>(sql`WITH rotation AS (
-    INSERT INTO job_schedule(workspace_id, turn)
-      SELECT ${runtime.config.workspaceId}, 1 WHERE EXISTS (
-        SELECT 1 FROM jobs WHERE workspace_id = ${runtime.config.workspaceId}
-          AND ((status = 'pending' AND available_at <= now()) OR (status = 'running' AND lease_until < now()))
-      )
-    ON CONFLICT (workspace_id) DO UPDATE SET turn = (job_schedule.turn + 1) % 4 RETURNING turn
-  ), due AS (
-    SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
-      AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
-    ORDER BY CASE WHEN j.environment = CASE WHEN r.turn = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-      CASE WHEN j.type = 'operation.ses' THEN 0 WHEN j.type = 'email.dispatch' THEN 1 ELSE 2 END,
-      j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT ${limit}
-  ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
-    FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
-  for (const job of claimed.rows) {
+export function jobConcurrency(value: unknown, maximum = 8) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 1 ? Math.min(number, maximum) : 2;
+}
+export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1, concurrency = 1) {
+  const started = Date.now(); let processed = 0, claims = 0;
+  // Each bounded worker claims only its next job, then immediately starts it. Never pre-lease a waiting batch.
+  const run = async () => {
+  while (claims < Math.min(Math.max(1, limit), 100) && Date.now() - started < 20000) {
+    claims++;
+    const claimed = await runtime.db.execute<{
+      id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
+    }>(sql`WITH rotation AS (
+      INSERT INTO job_schedule(workspace_id, turn)
+        SELECT ${runtime.config.workspaceId}, 1 WHERE EXISTS (
+          SELECT 1 FROM jobs WHERE workspace_id = ${runtime.config.workspaceId}
+            AND ((status = 'pending' AND available_at <= now()) OR (status = 'running' AND lease_until < now()))
+        )
+      ON CONFLICT (workspace_id) DO UPDATE SET turn = (job_schedule.turn + 1) % 16 RETURNING turn
+    ), due AS (
+      SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
+        AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+      ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
+        CASE WHEN (r.turn / 4) = CASE WHEN j.type = 'operation.ses' THEN 0
+          WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
+          WHEN j.type = 'email.dispatch' THEN 2 ELSE 3 END THEN 0 ELSE 1 END,
+        CASE WHEN j.type = 'operation.ses' THEN 0 WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
+          WHEN j.type = 'email.dispatch' THEN 2 ELSE 3 END,
+        j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
+    ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
+      FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
+    const job = claimed.rows[0];
+    if (!job) break;
+    processed++;
     const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'));
     const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, environment: job.environment, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     try {
@@ -40,10 +55,22 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       log('info', { ...context, code: 'JOB_COMPLETED' });
     } catch (error) {
       const code = error instanceof ApiError ? error.code : 'JOB_INTERNAL_ERROR';
-      const retry = error instanceof ApiError && error.retryable && job.attempts < MAX_ATTEMPTS;
+      // Domain failure-state persistence must eventually commit; stopping at the
+      // ordinary attempt ceiling would strand a campaign in pending forever.
+      const retry = error instanceof ApiError && error.retryable && (job.attempts < MAX_ATTEMPTS || error.code === 'JOB_FINALIZATION_FAILED');
       await runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + Math.min(3600000, 15000 * 4 ** (job.attempts - 1))).toISOString() }).where(fence);
       log('error', { ...context, code, retryable: retry, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     }
   }
-  return claimed.rows.length;
+  };
+  await Promise.all(Array.from({ length: jobConcurrency(concurrency) }, run));
+  return processed;
+}
+// Keep short quota deferrals moving without spinning wakeups or waiting for the next minute's cron.
+export async function nextWakeDelay(runtime: Runtime) {
+  const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
+    FROM (SELECT min(CASE WHEN status = 'running' THEN lease_until ELSE available_at END) AS due
+      FROM jobs WHERE workspace_id = ${runtime.config.workspaceId} AND status IN ('pending','running')) upcoming`);
+  const delay = result.rows[0]?.delay;
+  return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }

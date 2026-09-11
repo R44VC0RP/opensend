@@ -18,6 +18,7 @@
     "PUBLIC_URL": "https://opensend.anoma.ly",
     "DEFAULT_SES_REGION": "us-east-2",
     "ENABLE_LIVE_SES": "true",
+    "JOB_CONCURRENCY": "4",
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
@@ -25,7 +26,7 @@
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
     "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],
-    "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3, "max_concurrency": 2 }]
+    "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 4 }]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
   "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } }],

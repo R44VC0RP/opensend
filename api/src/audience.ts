@@ -79,7 +79,9 @@ function compileRuleCondition(rule: SegmentRule): SQL {
   // strpos treats wildcard characters as literal text, never SQL syntax.
   return sql`strpos(lower(${field}), lower(${rule.value})) > 0`;
 }
-function inList(identity: Actor, listId: string): SQL { return sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`; }
+// Keep the full membership-key probe correlated even immediately after a large import,
+// before PostgreSQL has analyzed the new row distribution.
+function inList(identity: Actor, listId: string): SQL { return sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id} OFFSET 0)`; }
 function counts(rows: Array<typeof contacts.$inferSelect>) {
   const suppressed = rows.filter(c => c.suppressed).length;
   const unsubscribed = rows.filter(c => !c.suppressed && c.marketingConsent !== 'subscribed').length;
@@ -103,6 +105,50 @@ export async function getAudience(runtime: Runtime, identity: Actor, spec: z.inf
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule((await findSegment(db, identity, segmentId)).rule)})`);
   const rows = await boundedContacts(db, identity, conditions, limit);
   return { ...counts(rows), contacts: rows.filter(c => !c.suppressed && c.marketingConsent === 'subscribed').map(c => ({ id: c.id, email: c.email, ...(c.name ? { name: c.name } : {}), properties: c.properties })) };
+}
+// One INSERT ... SELECT captures membership, consent and only referenced personalization values.
+// Keyset-paging the live audience across transactions would not be a review snapshot.
+export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[]) {
+  const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
+  const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
+  const lockedLists = await db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id)).for('share');
+  if (lockedLists.length !== listIds.length) notFound('List');
+  const lockedSegments = segmentIds.length ? await db.select().from(segments).where(and(scope(segments, identity), inArray(segments.id, segmentIds))).orderBy(asc(segments.id)).for('share') : [];
+  if (lockedSegments.length !== segmentIds.length) notFound('Segment');
+  const conditions = [inList(identity, spec.listId)];
+  if (spec.segmentId) conditions.push(compileRule(lockedSegments.find(row => row.id === spec.segmentId)!.rule));
+  for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${inList(identity, listId)})`);
+  for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
+  const result = await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string; captured: number }>(sql`
+    WITH matched AS MATERIALIZED (
+      SELECT ${contacts.id} AS id, ${contacts.email} AS email, CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END AS name,
+        ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS consent,
+        coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
+          WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb) AS properties
+      FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}
+      ORDER BY ${contacts.id} LIMIT 1000001
+    ), eligible AS (
+      SELECT row_number() OVER (ORDER BY id ROWS UNBOUNDED PRECEDING)::int AS ordinal,
+        jsonb_strip_nulls(jsonb_build_object('id', id, 'email', email, 'name', nullif(name, ''), 'properties', properties)) AS recipient
+      FROM matched WHERE NOT suppressed AND consent = 'subscribed'
+    ), sized AS (
+      SELECT *, octet_length(recipient::text) AS bytes,
+        sum(octet_length(recipient::text)) OVER (ORDER BY ordinal ROWS UNBOUNDED PRECEDING) AS running_bytes FROM eligible
+    ), captured AS (
+      INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
+      SELECT ${reviewId}, ordinal, recipient, bytes FROM sized WHERE bytes <= 1048576 AND running_bytes <= 1073741824
+      RETURNING recipient_bytes
+    ) SELECT count(*)::int AS matched,
+      count(*) FILTER (WHERE NOT suppressed AND consent = 'subscribed')::int AS eligible,
+      count(*) FILTER (WHERE suppressed)::int AS suppressed,
+      count(*) FILTER (WHERE NOT suppressed AND consent <> 'subscribed')::int AS unsubscribed,
+      (SELECT count(*)::int FROM captured) AS captured,
+      (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM captured) AS bytes FROM matched`);
+  const row = result.rows[0]!;
+  if (row.matched > 1000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 1,000,000 matching contacts. No recipients were truncated.');
+  if (row.captured !== row.eligible) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
+  if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
+  return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, recipientBytes: Number(row.bytes) };
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {
   const [row] = await runtime.db.select({ suppressed: contacts.suppressed }).from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);

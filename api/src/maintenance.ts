@@ -14,6 +14,22 @@ export async function cleanup(runtime: Runtime) {
     await tx.execute(sql`DELETE FROM sending_email_events WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM sending_attachment_links l USING sending_emails e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id AND l.environment = e.environment AND e.workspace_id = ${workspace} AND e.created_at < now() - interval '30 days' AND e.status NOT IN ('queued','attempting')`);
     await tx.execute(sql`DELETE FROM sending_emails WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days' AND status NOT IN ('queued','attempting')`);
+    // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a current review
+    // or unfinished delivery, including a failed expansion with an outstanding reservation.
+    await tx.execute(sql`WITH expired AS (
+      SELECT r.review_id, r.ordinal FROM sending_review_recipients r
+      JOIN sending_campaign_reviews v ON v.id = r.review_id
+      WHERE v.workspace_id = ${workspace} AND v.created_at < now() - interval '30 days'
+        AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id AND c.environment = v.environment
+          AND (c.updated_at >= now() - interval '30 days' OR c.status IN ('scheduled','sending') OR c.preparing_review_id = v.id OR (c.status = 'reviewed' AND c.review_id = v.id)))
+      LIMIT 10000
+    ) DELETE FROM sending_review_recipients r USING expired e WHERE r.review_id = e.review_id AND r.ordinal = e.ordinal`);
+    await tx.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews v
+      WHERE l.owner_type = 'review' AND l.owner_id = v.id AND l.workspace_id = v.workspace_id AND l.environment = v.environment
+        AND v.workspace_id = ${workspace} AND v.created_at < now() - interval '30 days'
+        AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
+        AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id AND c.environment = v.environment
+          AND (c.status IN ('scheduled','sending') OR c.preparing_review_id = v.id OR (c.status = 'reviewed' AND c.review_id = v.id)))`);
     await tx.execute(sql`DELETE FROM operation_delivery_attempts WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
     await tx.execute(sql`DELETE FROM operation_deliveries WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days' AND status NOT IN ('pending','paused')`);
     await tx.execute(sql`DELETE FROM operation_events WHERE workspace_id = ${workspace} AND created_at < now() - interval '30 days'`);
