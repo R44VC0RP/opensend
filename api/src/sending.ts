@@ -310,6 +310,73 @@ function formattedSender(from: string, fromName?: string, foldMime = false): str
   const separator = foldMime ? '\r\n ' : ' ';
   return `${words.join(separator)}${separator}<${from}>`;
 }
+// SES Simple puts CID images beside the body in multipart/mixed. Build only
+// the inline-image case ourselves so each image is related to its HTML part.
+function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uint8Array {
+  const crlf = '\r\n';
+  const base64 = (value: string | Uint8Array) => Buffer.from(value).toString('base64').match(/.{1,76}/g)?.join(crlf) ?? '';
+  const encodedWords = (value: string) => {
+    const words: string[] = []; let chunk = '';
+    for (const character of value) {
+      if (Buffer.byteLength(chunk + character) > 45) { words.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`); chunk = ''; }
+      chunk += character;
+    }
+    if (chunk) words.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`);
+    return words.join(`${crlf} `);
+  };
+  const quotedPrintable = (value: string) => {
+    const lines: string[] = []; let line = '';
+    const flush = (soft: boolean) => { lines.push(soft ? `${line}=` : line.replace(/[ \t]$/, c => c === ' ' ? '=20' : '=09')); line = ''; };
+    for (const byte of Buffer.from(value.replace(/\r\n|\r|\n/g, '\n'), 'utf8')) {
+      if (byte === 0x0a) { flush(false); continue; }
+      const token = byte === 0x3d || (byte < 0x20 && byte !== 0x09) || byte > 0x7e ? `=${byte.toString(16).toUpperCase().padStart(2, '0')}` : String.fromCharCode(byte);
+      if (line.length + token.length > 73) flush(true);
+      line += token;
+    }
+    flush(false);
+    return lines.join(crlf);
+  };
+  const textPart = (type: 'plain' | 'html', body: string) => `Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`;
+  const multipart = (type: 'related' | 'alternative' | 'mixed', children: string[]) => {
+    const boundary = `opensend_${crypto.randomUUID()}`;
+    return `Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}` +
+      children.map(child => `--${boundary}${crlf}${child}${crlf}`).join('') + `--${boundary}--${crlf}`;
+  };
+  const filePart = (part: Attachment) => {
+    if (!part.RawContent || !part.FileName || !part.ContentType || /[\r\n]/.test(part.ContentType) || (part.ContentId && !/^[a-zA-Z0-9_.@-]+$/.test(part.ContentId))) throw new ApiError(422, 'INVALID_MIME_ATTACHMENT', 'Attachment metadata cannot be encoded safely.');
+    // RFC 2231 continuations preserve Unicode/quotes and keep filename lines short.
+    const filename = [...Buffer.from(part.FileName)].map(byte => `%${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('').match(/.{1,60}/g)!;
+    const disposition = part.ContentDisposition === 'INLINE' ? 'inline' : 'attachment';
+    const parameters = filename.map((value, index) => ` filename*${index}*=${index === 0 ? "UTF-8''" : ''}${value}`).join(`;${crlf}`);
+    return `Content-Type: ${part.ContentType}${crlf}Content-Transfer-Encoding: base64${crlf}Content-Disposition: ${disposition};${crlf}${parameters}${crlf}` +
+      (part.ContentId ? `Content-ID: <${part.ContentId}>${crlf}` : '') + `${crlf}${base64(part.RawContent)}`;
+  };
+  const inline = parts.filter(part => part.ContentDisposition === 'INLINE');
+  const files = parts.filter(part => part.ContentDisposition !== 'INLINE');
+  let body = multipart('related', [textPart('html', snapshot.html!), ...inline.map(filePart)]);
+  if (snapshot.text !== undefined) body = multipart('alternative', [textPart('plain', snapshot.text), body]);
+  if (files.length) body = multipart('mixed', [body, ...files.map(filePart)]);
+  // Bcc stays only in the SES envelope, never the MIME headers.
+  const headers = [
+    `From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`,
+    `To: ${snapshot.to.join(`,${crlf} `)}`,
+    ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(`,${crlf} `)}`] : []),
+    ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(`,${crlf} `)}`] : []),
+    `Subject: ${/^[\x20-\x7e]{1,900}$/.test(snapshot.subject) && !snapshot.subject.includes('=?') ? snapshot.subject : encodedWords(snapshot.subject)}`,
+    `Date: ${new Date().toUTCString()}`,
+    'MIME-Version: 1.0',
+    ...snapshot.headers.map(header => {
+      if (!/^[A-Za-z0-9-]+$/.test(header.Name) || /[\r\n]/.test(header.Value)) throw new ApiError(422, 'INVALID_MIME_HEADER', 'Message headers cannot contain line breaks.');
+      return `${header.Name}: ${header.Value}`;
+    }),
+  ];
+  // Body/attachment lines are bounded by their encoders. Check only message
+  // headers rather than splitting a potentially multi-megabyte MIME body.
+  if (headers.some(header => header.split(crlf).some(line => Buffer.byteLength(line) > 998))) throw new ApiError(422, 'MIME_LINE_TOO_LONG', 'An encoded message header exceeds the SMTP line limit.');
+  const bytes = Buffer.from([...headers, body].join(crlf), 'utf8');
+  if (bytes.length > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Encoded MIME exceeds the 16 MiB message limit.');
+  return bytes;
+}
 function withPreheader(html: string | undefined, previewText?: string): string | undefined {
   if (!html || !previewText) return html;
   const stack: DefaultTreeAdapterMap['node'][] = [parse(html, { sourceCodeLocationInfo: true })];
@@ -1075,6 +1142,12 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     if (a.environment === 'live') for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
     sizeCheck(s, rows);
   });
+  // Serialization/size failures are preflight failures, never uncertain sends.
+  const content: SendEmailCommandInput['Content'] = await phase('mime', async () => s.raw
+    ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
+    : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
+      ? { Raw: { Data: inlineMessage(s, parts) } }
+      : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } });
   const ses = a.environment === 'live' ? getSes(runtime, s.region) : null;
   if (ses) {
     const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
@@ -1108,7 +1181,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
-    Content: s.raw ? { Raw: { Data: new TextEncoder().encode(s.raw) } } : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } },
+    Content: content,
   };
   let providerId: string | undefined;
   try { const result = await phase('ses', () => ses.send(new SendEmailCommand(request))); providerId = result.MessageId; }
