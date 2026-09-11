@@ -252,6 +252,27 @@ const scopeLabels: Record<string, string> = {
   'opensend:manage': 'Full account access, including sending and managing credentials',
   'offline_access': 'Stay connected for up to 30 days without signing in again',
 };
+function consentFormHeaders(runtime: Runtime, request: Request) {
+  const headers = new Headers(request.headers);
+  if (request.method !== 'POST') return headers;
+  if (headers.get('origin')) {
+    requireDashboardOrigin(runtime, headers);
+    return headers;
+  }
+  const expected = new URL(runtime.config.publicUrl).origin;
+  const referer = headers.get('referer');
+  try {
+    if (referer && new URL(referer).origin === expected) {
+      // Some browser-mediated OAuth handoffs omit Origin on ordinary HTML form
+      // submissions. Normalize a verified same-origin Referer for Better Auth's
+      // internal consent endpoint; dashboard API writes remain Origin-only.
+      headers.set('origin', expected);
+      return headers;
+    }
+  } catch { /* Invalid referers fail through the normal origin guard below. */ }
+  requireDashboardOrigin(runtime, headers);
+  return headers;
+}
 const McpConnection = z.object({ id: z.string(), clientId: z.string(), name: z.string().nullable(), userEmail: z.string(), scopes: z.array(z.string()), createdAt: z.string(), updatedAt: z.string() }).openapi('McpConnection');
 function dashboardOwner(c: Parameters<typeof actor>[0]) {
   const identity = actor(c, 'manage');
@@ -260,7 +281,7 @@ function dashboardOwner(c: Parameters<typeof actor>[0]) {
 }
 async function consentPage(runtime: Runtime, request: Request) {
   try {
-    if (request.method === 'POST') requireDashboardOrigin(runtime, request.headers);
+    const requestHeaders = consentFormHeaders(runtime, request);
     const form = request.method === 'POST' ? new URLSearchParams(await boundedBody(request, 20 * 1024)) : null;
     const query = form?.get('oauth_query') ?? new URL(request.url).search.slice(1);
     if (query.length > 16 * 1024 || !query) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
@@ -274,11 +295,11 @@ async function consentPage(runtime: Runtime, request: Request) {
     if (!requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length || params.getAll('resource').length !== 1 || params.get('resource') !== resourceOf(runtime)) {
       return page('Invalid connection request', '<p>Restart the connection from your MCP client.</p>');
     }
-    const session = await auth.api.getSession({ headers: request.headers });
+    const session = await auth.api.getSession({ headers: requestHeaders });
     const approvedSession = session && await isApprovedUser(runtime, session.user.id) ? session : null;
     const action = form?.get('action');
     if (action === 'signin') {
-      const headers = new Headers(request.headers); headers.set('Content-Type', 'application/json');
+      const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
       const result = await auth.handler(new Request(`${issuerOf(runtime)}/sign-in/social`, { method: 'POST', headers,
         body: JSON.stringify({ provider: 'google', callbackURL: `${originOf(runtime)}/mcp/consent?${query}`, errorCallbackURL: `${originOf(runtime)}/?auth=error` }),
       }));
@@ -286,7 +307,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     }
     if (form && action !== 'approve' && action !== 'deny') return oauthError(400, 'invalid_request', 'Choose an approval action.');
     if (form && approvedSession) {
-      const headers = new Headers(request.headers); headers.set('Content-Type', 'application/json');
+      const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
       return redirectResult(await auth.handler(new Request(`${issuerOf(runtime)}/oauth2/consent`, { method: 'POST', headers, body: JSON.stringify({ accept: action === 'approve', oauth_query: query }) })));
     }
     const hidden = `<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">`;
