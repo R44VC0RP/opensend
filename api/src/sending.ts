@@ -5,9 +5,9 @@ import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobs, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime, type Storage } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { AudienceSpec, canMarket, getAudience, isSuppressed, snapshotCampaignAudience } from './audience.js';
+import { AudienceSpec, getAudience, snapshotCampaignAudience } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
@@ -889,6 +889,31 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   return { id: campaignId, status, queued: review.recipients.length, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
+const attachmentCaches = new WeakMap<Storage, { bytes: number; entries: Map<string, Uint8Array>; pending: Map<string, Promise<Uint8Array>> }>();
+async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inferSelect) {
+  let cache = attachmentCaches.get(runtime.storage);
+  if (!cache) { cache = { bytes: 0, entries: new Map(), pending: new Map() }; attachmentCaches.set(runtime.storage, cache); }
+  const key = `${row.storageKey}:${row.checksum}`;
+  const cached = cache.entries.get(key);
+  if (cached) { cache.entries.delete(key); cache.entries.set(key, cached); return cached; }
+  const existing = cache.pending.get(key);
+  if (existing) return existing;
+  const load = (async () => {
+    const asset = await runtime.storage.get(row.storageKey);
+    if (!asset || asset.body.length !== row.size || await bytesDigest(asset.body) !== row.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
+    const already = cache!.entries.get(key);
+    if (already) return already;
+    const limit = 32 * 1024 * 1024;
+    while (cache!.bytes + asset.body.length > limit && cache!.entries.size) {
+      const oldest = cache!.entries.entries().next().value as [string, Uint8Array];
+      cache!.entries.delete(oldest[0]); cache!.bytes -= oldest[1].length;
+    }
+    if (asset.body.length <= limit) { cache!.entries.set(key, asset.body); cache!.bytes += asset.body.length; }
+    return asset.body;
+  })();
+  cache.pending.set(key, load);
+  try { return await load; } finally { if (cache.pending.get(key) === load) cache.pending.delete(key); }
+}
 
 const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
@@ -913,11 +938,27 @@ async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | n
     const row = await findCampaign(db, a, campaignId, true);
     if (!['scheduled', 'sending'].includes(row.status)) return;
     const [expansion] = await db.select({ status: campaignExpansions.status }).from(campaignExpansions).where(eq(campaignExpansions.campaignId, campaignId));
-    // Empty gaps between chunks are not completion. Failed expansion remains visible and cancelable.
-    if (expansion && expansion.status !== 'completed') return;
+    // Normalized campaigns use one durable finalizer instead of one completion
+    // transaction per recipient. Legacy reviews retain this compatibility path.
+    if (expansion) return;
     const pending = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaignId), inArray(emails.status, ['queued', 'attempting']))).limit(1);
     if (!pending.length) await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaignId));
   });
+}
+async function finishEmailCampaign(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
+  if (!mail.reviewId) await finishCampaign(runtime, a, mail.campaignId);
+}
+const liveReadiness = new WeakMap<Runtime, Map<string, Promise<void>>>();
+async function assertDispatchRegionReady(runtime: Runtime, region: string, kind: 'transactional' | 'marketing') {
+  let cache = liveReadiness.get(runtime);
+  if (!cache) { cache = new Map(); liveReadiness.set(runtime, cache); }
+  const key = `${region}:${kind}`;
+  let pending = cache.get(key);
+  if (!pending) {
+    pending = assertLiveRegionReady(runtime, runtime.db, region, kind, true).finally(() => { if (cache!.get(key) === pending) cache!.delete(key); });
+    cache.set(key, pending);
+  }
+  await pending;
 }
 async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, recipients: number, ses: SESv2Client): Promise<{ deferUntil?: string; waitUntil?: number }> {
   const identity = { workspaceId: a.workspaceId, environment: a.environment, region: selectedRegion };
@@ -981,11 +1022,10 @@ async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails
 async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
   return runtime.db.transaction(async db => {
     const campaign = await findCampaign(db, a, mail.campaignId!, true);
-    if (!await originAllowed(runtime, db, mail)) { await cancelRevokedOrigin(db, a, mail); return null; }
     if (campaign.status === 'canceled') return null;
     const current = await findEmail(db, a, mail.id);
     if (current.status !== 'queued' || current.dispatchVersion !== mail.dispatchVersion) return null;
-    if (!current.snapshot.deferredCampaign) return current;
+    if (!current.snapshot.deferredCampaign) return { mail: current, rows: await attachmentRows(db, a, current.snapshot.attachments) };
     const [review] = await db.select({ draft: campaignReviews.draft, rendered: campaignReviews.rendered, status: campaignReviews.status }).from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, current.reviewId!)));
     const [recipient] = await db.select().from(reviewRecipients).where(and(eq(reviewRecipients.reviewId, current.reviewId!), eq(reviewRecipients.ordinal, current.reviewOrdinal!)));
     if (!review?.rendered || review.status !== 'ready' || !recipient?.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
@@ -995,7 +1035,7 @@ async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof
     marketingFooter(snapshot, await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db));
     sizeCheck(snapshot, rows);
     const [updated] = await db.update(emails).set({ snapshot, updatedAt: now() }).where(and(mailWhere(a, current.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, current.dispatchVersion))).returning();
-    return updated ?? null;
+    return updated ? { mail: updated, rows } : null;
   });
 }
 const dispatch: JobHandler = async (runtime, payload, job) => {
@@ -1007,34 +1047,24 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     // A previous lease died after recording attempt start. SES has no idempotency token: never automatically resend.
     await runtime.db.update(emails).set({ status: 'acceptance_unknown', errorCode: 'INTERRUPTED_PROVIDER_ATTEMPT', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'attempting')));
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-unknown:${mail.id}` });
-    await finishCampaign(runtime, a, mail.campaignId); return;
+    await finishEmailCampaign(runtime, a, mail); return;
   }
-  if (mail.status !== 'queued') { await finishCampaign(runtime, a, mail.campaignId); return; }
-  // Fail closed before storage/SES preflight as well as at the final atomic claim.
-  const authorized = await runtime.db.transaction(async db => { if (await originAllowed(runtime, db, mail)) return true; await cancelRevokedOrigin(db, a, mail); return false; });
-  if (!authorized) { await finishCampaign(runtime, a, mail.campaignId); return; }
+  if (mail.status !== 'queued') { await finishEmailCampaign(runtime, a, mail); return; }
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
-  if (a.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, mail.snapshot.region, mail.snapshot.kind, true);
+  if (a.environment === 'live') await assertDispatchRegionReady(runtime, mail.snapshot.region, mail.snapshot.kind);
+  let preparedAttachments: (typeof attachments.$inferSelect)[] | undefined;
   if (mail.snapshot.deferredCampaign) {
     const materialized = await materializeCampaignEmail(runtime, a, mail);
-    if (!materialized) { await finishCampaign(runtime, a, mail.campaignId); return; }
-    mail = materialized;
+    if (!materialized) { await finishEmailCampaign(runtime, a, mail); return; }
+    mail = materialized.mail; preparedAttachments = materialized.rows;
   }
   const s = mail.snapshot;
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];
-  const rows = await attachmentRows(runtime.db, a, s.attachments);
-  if (a.environment === 'live') for (const row of rows) { const asset = await runtime.storage.get(row.storageKey); if (!asset || asset.body.length !== row.size || await bytesDigest(asset.body) !== row.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true); parts.push({ FileName: row.filename, RawContent: asset.body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+  const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
+  if (a.environment === 'live') for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
   sizeCheck(s, rows);
   const ses = a.environment === 'live' ? getSes(runtime, s.region) : null;
-  // Check every destination and cancel the whole message, avoiding accidental exposure via a partially filtered Cc list.
-  let blocked = false;
-  for (const recipient of [...s.to, ...s.cc, ...s.bcc]) if (await isSuppressed(runtime, a, recipient) || (s.kind === 'marketing' && !await canMarket(runtime, a, recipient))) { blocked = true; break; }
-  if (blocked) {
-    const changed = await runtime.db.update(emails).set({ status: 'suppressed', errorCode: 'RECIPIENT_INELIGIBLE', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'))).returning();
-    if (changed.length) await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` });
-    await finishCampaign(runtime, a, mail.campaignId); return;
-  }
   if (ses) {
     const permit = await reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses);
     if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
@@ -1054,11 +1084,11 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   });
   if (!claimed.length) return;
   mail = claimed[0]!;
-  if (mail.status === 'canceled') { await finishCampaign(runtime, a, mail.campaignId); return; }
-  if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishCampaign(runtime, a, mail.campaignId); return; }
+  if (mail.status === 'canceled') { await finishEmailCampaign(runtime, a, mail); return; }
+  if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishEmailCampaign(runtime, a, mail); return; }
   if (!ses) {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'simulated', externalId: `simulated:${mail.id}`, data: { stage: 'validated', providerCalled: false, deliveryObserved: false } });
-    await finishCampaign(runtime, a, mail.campaignId); return;
+    await finishEmailCampaign(runtime, a, mail); return;
   }
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
@@ -1095,14 +1125,14 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     const next: EmailStatus = definitive ? 'rejected' : 'acceptance_unknown';
     await runtime.db.update(emails).set({ status: next, errorCode: definitive ? (failure.name ?? 'SES_REJECTED') : 'SES_ACCEPTANCE_UNKNOWN', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'attempting')));
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: definitive ? 'reject' : 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: definitive ? failure.name ?? 'SES_REJECTED' : 'SES_ACCEPTANCE_UNKNOWN', retryable: false, ...diagnostics } });
-    await finishCampaign(runtime, a, mail.campaignId); return;
+    await finishEmailCampaign(runtime, a, mail); return;
   }
   if (!providerId) {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_MESSAGE_ID_MISSING' } });
   } else {
     await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'accepted', providerId, externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}` });
   }
-  await finishCampaign(runtime, a, mail.campaignId);
+  await finishEmailCampaign(runtime, a, mail);
 };
 const guardedDispatch: JobHandler = async (runtime, payload, job) => {
   try { await dispatch(runtime, payload, job); }
@@ -1113,7 +1143,7 @@ const guardedDispatch: JobHandler = async (runtime, payload, job) => {
     if (!mail) throw error;
     if (mail.status === 'attempting') {
       await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `interrupted:${mail.id}:${mail.dispatchVersion}`, data: { code: 'INTERRUPTED_PROVIDER_ATTEMPT' } });
-      await finishCampaign(runtime, a, mail.campaignId); return;
+      await finishEmailCampaign(runtime, a, mail); return;
     }
     if (mail.status === 'queued') {
       const failure = error instanceof ApiError ? error : new ApiError(503, 'DISPATCH_PREFLIGHT_FAILED', 'A dispatch dependency failed before the provider attempt.', undefined, true);
@@ -1122,7 +1152,7 @@ const guardedDispatch: JobHandler = async (runtime, payload, job) => {
       await runtime.db.update(emails).set({ status: 'rejected', errorCode: failure.code, updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued')));
       await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'reject', externalId: `preflight-failed:${mail.id}`, data: { code: failure.code, providerCalled: false } });
     }
-    await finishCampaign(runtime, a, mail.campaignId);
+    await finishEmailCampaign(runtime, a, mail);
   }
 };
 const prepareCampaign: JobHandler = async (runtime, payload, job) => {
@@ -1235,10 +1265,10 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       await db.insert(jobs).values(prepared.map(({ id: emailId }) => ({ id: id('job'), type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { emailId, campaignId: campaign.id, version: 0, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } })));
       const expanded = recipients[recipients.length - 1]!.ordinal, completed = expanded === expansion.total;
       const jobId = completed ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } });
+      if (completed) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
       await db.update(campaignExpansions).set({ expanded, jobId, status: completed ? 'completed' : 'expanding', updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
       await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
     });
-    await finishCampaign(runtime, a, initial.campaignId);
   } catch (error) {
     const retry = !(error instanceof ApiError) || error.retryable;
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_EXPANSION_FAILED', 'Campaign expansion will retry its durable cursor.', undefined, true);
@@ -1249,4 +1279,19 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
     }); } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign failure state will retry until it is durable.', undefined, true); }
   }
 };
-export const jobHandlers: Record<string, JobHandler> = { 'email.dispatch': guardedDispatch, 'campaign.prepare': prepareCampaign, 'campaign.expand': expandCampaign };
+const finishExpandedCampaign: JobHandler = async (runtime, payload, job) => {
+  if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Campaign completion requires a campaign.');
+  const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
+  try {
+    await runtime.db.transaction(async db => {
+      const campaign = await findCampaign(db, a, payload.campaignId as string, true);
+      if (!['scheduled', 'sending'].includes(campaign.status)) return;
+      const [expansion] = await db.select({ status: campaignExpansions.status }).from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaign.id)));
+      if (expansion?.status !== 'completed') return;
+      const pending = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaign.id), inArray(emails.status, ['queued', 'attempting']))).limit(1);
+      if (pending.length) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
+      else await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaign.id));
+    });
+  } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign completion will retry until it is durable.', undefined, true); }
+};
+export const jobHandlers: Record<string, JobHandler> = { 'email.dispatch': guardedDispatch, 'campaign.prepare': prepareCampaign, 'campaign.expand': expandCampaign, 'campaign.finish': finishExpandedCampaign };

@@ -34,11 +34,11 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
         AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
       ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-        CASE WHEN (r.turn / 4) = CASE WHEN j.type = 'operation.ses' THEN 0
+        CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('operation.ses','operation.publish') THEN 0
           WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
-          WHEN j.type = 'email.dispatch' THEN 2 ELSE 3 END THEN 0 ELSE 1 END,
-        CASE WHEN j.type = 'operation.ses' THEN 0 WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
-          WHEN j.type = 'email.dispatch' THEN 2 ELSE 3 END,
+          WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 2 WHEN j.type = 'email.dispatch' THEN 3 ELSE 0 END THEN 0 ELSE 1 END,
+        CASE WHEN j.type = 'campaign.finish' THEN 0 WHEN j.type = 'email.dispatch' THEN 1
+          WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type IN ('operation.ses','operation.publish') THEN 3 ELSE 4 END,
         j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
     ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
       FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
