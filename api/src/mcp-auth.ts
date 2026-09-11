@@ -255,7 +255,8 @@ const scopeLabels: Record<string, string> = {
 function consentFormHeaders(runtime: Runtime, request: Request) {
   const headers = new Headers(request.headers);
   if (request.method !== 'POST') return headers;
-  if (headers.get('origin')) {
+  const origin = headers.get('origin');
+  if (origin && origin !== 'null') {
     requireDashboardOrigin(runtime, headers);
     return headers;
   }
@@ -270,6 +271,14 @@ function consentFormHeaders(runtime: Runtime, request: Request) {
       return headers;
     }
   } catch { /* Invalid referers fail through the normal origin guard below. */ }
+  if (origin === 'null' && headers.get('sec-fetch-site') === 'same-origin' && headers.get('sec-fetch-mode') === 'navigate' &&
+    headers.get('sec-fetch-dest') === 'document' && headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() === 'application/x-www-form-urlencoded') {
+    // Sandboxed browser handoffs can serialize a same-origin form with an opaque
+    // Origin. Fetch Metadata is browser-controlled and still distinguishes this
+    // top-level same-origin navigation from a cross-site form submission.
+    headers.set('origin', expected);
+    return headers;
+  }
   requireDashboardOrigin(runtime, headers);
   return headers;
 }
