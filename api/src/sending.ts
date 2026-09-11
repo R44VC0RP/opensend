@@ -5,7 +5,7 @@ import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, canMarket, getAudience, isSuppressed } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
@@ -209,7 +209,7 @@ const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a),
 function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
   region(runtime, selectedRegion);
   const domain = from.split('@')[1]!.toLowerCase();
-  if (a.domains.length && !a.domains.some(d => d.toLowerCase() === domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain.', 'from');
+  if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   region(runtime, draft.region);
@@ -805,13 +805,13 @@ async function originAllowed(runtime: Runtime, db: DbExecutor, mail: typeof emai
     const grant = await getMcpGrantActor(runtime, mail.actorKeyId, db);
     return !!grant && grant.workspaceId === mail.workspaceId && (mail.environment === 'test' || grant.environment === mail.environment) &&
       (grant.permissions.includes('manage') || grant.permissions.includes('send')) &&
-      (!grant.domains.length || grant.domains.some(domain => domain.toLowerCase() === mail.snapshot.from.split('@')[1]!.toLowerCase()));
+      senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
   }
   // Removed bootstrap origins fail closed; only durable API keys are accepted below.
   const [key] = await db.select().from(apiKeys).where(and(eq(apiKeys.id, mail.actorKeyId), eq(apiKeys.workspaceId, mail.workspaceId), eq(apiKeys.environment, mail.environment))).for('update');
   // FOR UPDATE serializes with revocation/permission updates through the durable attempt claim,
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
-  return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && (!key.domains.length || key.domains.some(domain => domain.toLowerCase() === mail.snapshot.from.split('@')[1]!.toLowerCase()));
+  return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);
 }
 async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails.$inferSelect) {
   return db.update(emails).set({ status: 'canceled', errorCode: 'ORIGIN_KEY_REVOKED', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();

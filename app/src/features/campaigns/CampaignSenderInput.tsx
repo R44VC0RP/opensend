@@ -14,6 +14,7 @@ const formatSender = ({ name, email }: Sender) => email ? (name ? `${name} <${em
 const validName = (name: string) => name.length <= 200 && !/[\x00-\x1f\x7f]/.test(name)
 // Match the API's practical ASCII address shape, not a general mailbox grammar.
 const validEmail = (email: string) => email.length <= 254 && /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/.test(email)
+const verifiedDomain = (domain: string, parents: string[]) => parents.some(parent => domain === parent || domain.endsWith(`.${parent}`))
 const unquote = (name: string) => name.startsWith('"') && name.endsWith('"') ? name.slice(1, -1).replace(/\\(["\\])/g, '$1') : name
 const draftName = (text: string) => unquote((text.includes('<') ? text.slice(0, text.indexOf('<')) : text.includes('@') ? '' : text).trim())
 
@@ -54,7 +55,7 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
   // a saved domain that is absent from the current verified-domain page.
   const retained = useRef(new Set(!allowUnverified && validEmail(email) ? [email.toLowerCase()] : []))
   const verified = [...new Set(domains.map(domain => domain.trim().toLowerCase()))]
-  const allowed = (sender: Sender) => allowUnverified || verified.includes(sender.email.split('@')[1].toLowerCase()) || retained.current.has(sender.email.toLowerCase())
+  const allowed = (sender: Sender) => allowUnverified || verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
   const parsed = parseSender(draft)
   const candidates = parsed ? (allowed(parsed) ? [parsed] : []) : suggestSenders(draft, verified)
   const expanded = open && !disabled && candidates.length > 0

@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gte, inArray, lt, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -33,7 +33,7 @@ const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQ
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 function external(a: Actor) { if (a.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Test keys cannot access or modify live SES resources.'); }
 function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
-function allowedDomain(a: Actor, name: string) { if (a.domains.length && !a.domains.includes(name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain.'); }
+function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
   try { return await operation(); } catch (error) {
     if (error instanceof ApiError) throw error;
@@ -171,7 +171,8 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
-    const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), a.domains.length ? inArray(domains.name, a.domains) : undefined, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
+    const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
+    const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
     if (q.refresh === 'false') {
       const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
       const data = rows.slice(0, q.limit).map(row => {

@@ -203,7 +203,7 @@ function requireUnarchived(campaign: Campaign) {
 }
 function validateSender(state: DemoState, campaign: CampaignInput) {
   const senderDomain = campaign.fromEmail.split('@')[1]
-  if (!state.domains.some(domain => domain.regionId === campaign.regionId && domain.status === 'verified' && domain.name === senderDomain)) invalid('fromEmail', 'Verify the sender domain in this region before sending.')
+  if (!state.domains.some(domain => domain.regionId === campaign.regionId && domain.status === 'verified' && (domain.name === senderDomain || senderDomain.endsWith(`.${domain.name}`)))) invalid('fromEmail', 'Verify the sender domain or a parent domain in this region before sending.')
 }
 function copyJson(value: unknown, field = 'editor', maxCharacters = 262_144): unknown {
   const label = field === 'editor' ? 'Editor' : 'Draft'
@@ -622,7 +622,7 @@ export function createMockApi(): OpenSendApi {
         enabledRegion(s, campaign.regionId)
         const region = checkRegion(s, campaign.regionId)
         if (!region.sendingEnabled || region.health === 'shutdown') throw new ApiError('Sending is disabled in this region.', 'conflict')
-        if (region.access === 'sandbox' && !s.domains.some(d => d.regionId === region.id && d.status === 'verified' && d.name === to.split('@')[1])) invalid('to', 'Sandbox test recipients must use a domain verified in this region.')
+        if (region.access === 'sandbox' && !s.domains.some(d => d.regionId === region.id && d.status === 'verified' && (d.name === to.split('@')[1] || to.split('@')[1]!.endsWith(`.${d.name}`)))) invalid('to', 'Sandbox test recipients must use a domain or subdomain verified in this region.')
         validateSender(s, campaign)
         return { accepted: true }
       }),

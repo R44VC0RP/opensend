@@ -61,6 +61,10 @@ export function actor(c: Ctx, permission: Permission = 'read'): Actor {
   if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
 }
+export function senderDomainAllowed(allowed: readonly string[], candidate: string) {
+  const domain = candidate.toLowerCase();
+  return !allowed.length || allowed.some(value => { const parent = value.toLowerCase(); return domain === parent || domain.endsWith(`.${parent}`); });
+}
 export function region(runtime: Runtime, value: string) {
   if (!runtime.config.regions.includes(value)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested region is not configured for this deployment.', 'region');
   return value;

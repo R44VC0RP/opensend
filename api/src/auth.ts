@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security, timed } from './core.js';
+import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed } from './core.js';
 import type { Actor, App, AppEnv, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
@@ -86,6 +86,7 @@ export function registerAuth(app: App) {
     if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.');
     if (input.environment === 'live' && identity.environment !== 'live') throw new ApiError(403, 'LIVE_SCOPE_REQUIRED', 'The MCP approval does not permit live access.');
     if (input.permissions.some(permission => !identity.permissions.includes('manage') && !identity.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', 'The MCP approval does not include every requested permission.');
+    if (identity.domains.length && (!input.domains.length || input.domains.some(domain => !senderDomainAllowed(identity.domains, domain)))) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'The temporary token must remain restricted to the approved sender domains or their subdomains.', 'domains');
     const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();
     const tokenId = id('agt');
     const token = await createAgentToken(c.env.config, { id: tokenId, grant: identity.keyId, environment: input.environment, permissions: input.permissions, domains: input.domains, expiresAt });
