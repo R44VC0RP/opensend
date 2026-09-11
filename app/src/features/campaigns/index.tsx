@@ -339,11 +339,6 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal))
-  useEffect(() => {
-    if (query.data?.status !== 'sending' || query.data.expansion?.status === 'failed') return
-    const timer = window.setInterval(() => void query.refetch(), 5000)
-    return () => window.clearInterval(timer)
-  }, [query.data?.status, query.data?.expansion?.status, query.refetch])
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <CampaignReview key={id} campaign={query.data} />

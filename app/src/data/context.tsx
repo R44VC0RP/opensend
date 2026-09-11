@@ -61,7 +61,7 @@ export function useApi() {
 }
 export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>) {
   const api = useApi()
-  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal) })
+  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: 3000, refetchIntervalInBackground: true })
 }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false) {
   const api = useApi()

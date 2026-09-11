@@ -46,7 +46,7 @@ export function useCampaignSync(campaign: Campaign | null, onUpdate: (next: Camp
     async function poll() {
       if (!active() || !visible()) return
       busy = true
-      let delay = 2000
+      let delay = 3000
       try {
         const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10000)])
         const state = await api.campaigns.state(id!, signal)
@@ -72,7 +72,7 @@ export function useCampaignSync(campaign: Campaign | null, onUpdate: (next: Camp
         setStatus({ api, id, connection: 'live', error: null })
       } catch (cause) {
         if (!active() || controller.signal.aborted) return
-        delay = Math.min(2000 * 2 ** failures, 30000)
+        delay = Math.min(3000 * 2 ** failures, 30000)
         failures = Math.min(failures + 1, 4)
         setStatus({ api, id, connection: 'offline', error: cause instanceof Error ? cause : new Error('Campaign synchronization failed.') })
       } finally {
@@ -99,7 +99,7 @@ export function useCampaignSync(campaign: Campaign | null, onUpdate: (next: Camp
     window.addEventListener('pageshow', requestCheck)
     window.addEventListener('focus', requestCheck)
     window.addEventListener('online', requestCheck)
-    timer = setTimeout(requestCheck, 2000)
+    timer = setTimeout(requestCheck, 3000)
     return () => {
       stopped = true
       clearTimer()
