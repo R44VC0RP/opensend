@@ -332,6 +332,11 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal))
+  useEffect(() => {
+    if (query.data?.status !== 'sending' || query.data.expansion?.status === 'failed') return
+    const timer = window.setInterval(() => void query.refetch(), 5000)
+    return () => window.clearInterval(timer)
+  }, [query.data?.status, query.data?.expansion?.status, query.refetch])
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <CampaignReview key={id} campaign={query.data} />
@@ -339,7 +344,7 @@ export function CampaignReviewPage() {
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
 function CampaignRenderedPreview({ campaign }: { campaign: Campaign }) {
-  const preview = useApiQuery(['campaign-preview', campaign.id, campaign.revision, campaign.updatedAt], (api, signal) => api.campaigns.preview(campaign.id, signal))
+  const preview = useApiQuery(['campaign-preview', campaign.id, campaign.revision], (api, signal) => api.campaigns.preview(campaign.id, signal))
   if (preview.isPending) return <div className="ui-email-preview campaign-preview-loading" role="status"><SkeletonText width="55%" lineHeight={28} /><SkeletonText /><SkeletonText width="80%" /></div>
   if (preview.isError) return <ErrorState error={preview.error} onRetry={() => void preview.refetch()} />
   return <EmailPreview html={preview.data.html} title="Campaign email preview" attachmentIds={campaign.attachments} respectStyles remoteImages />
@@ -355,9 +360,16 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
   const api = useApi()
   const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
   const readinessError = campaignReadinessError(campaign)
+  const reviewPolling = useRef<AbortController | null>(null)
+  const [reviewProgress, setReviewProgress] = useState<{ processed: number; eligible: number } | null>(null)
+  useEffect(() => () => { reviewPolling.current?.abort() }, [campaign.id, campaign.revision])
   const audience = useApiMutation(async api => {
     if (readinessError) throw new Error(readinessError)
-    return api.review ? api.review(campaign.id, campaign.revision!) : {...await api.campaigns.audience({listId: campaign.listId, segmentId: campaign.segmentId}), id: 'demo', revision: campaign.revision ?? 1} as ReviewResult
+    reviewPolling.current?.abort()
+    const controller = new AbortController()
+    reviewPolling.current = controller
+    setReviewProgress(null)
+    return api.review ? api.review(campaign.id, campaign.revision!, { signal: controller.signal, onProgress: setReviewProgress }) : {...await api.campaigns.audience({listId: campaign.listId, segmentId: campaign.segmentId}), id: 'demo', revision: campaign.revision ?? 1} as ReviewResult
   })
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
@@ -365,8 +377,8 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     if (!draft || sendMutation.isPending) return
     if (readinessError) { setError(readinessError); return }
     setError('')
-    if (!audience.data || audience.data.eligible < 1) { setError('Choose an audience with at least one eligible contact before sending.'); return }
-    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', reviewId: audience.data.id, revision: audience.data.revision }
+    if (audience.data && audience.data.eligible < 1) { setError('Choose an audience with at least one eligible contact before sending.'); return }
+    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', ...(audience.data ? { reviewId: audience.data.id } : {}), revision: audience.data?.revision ?? campaign.revision }
     if (mode === 'schedule') {
       // datetime-local has no offset: this field is explicitly UTC, never the browser's local zone.
       const parsed = new Date(`${scheduled}:00Z`)
@@ -380,7 +392,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} queued` : ''} · ${api.environment ?? 'demo'} mode${'simulated' in result && result.simulated ? ' (simulated)' : ''}`); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} recipient intents accepted` : ''} · ${api.environment ?? 'demo'} mode${'simulated' in result && result.simulated ? ' (simulated)' : ''}`); setConfirmation(null) }
     catch (cause) { setError(message(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
@@ -388,21 +400,22 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster"><StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit', api.environment)}>Edit draft</Link></Alert>}
-    {receipt && <Alert tone="success">{receipt}</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
+    {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
         <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit audience</Button> : undefined} />
-        {draft ? audience.isPending ? <CampaignAudienceSkeleton /> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <Button variant="primary" disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Generate recipient review</Button> : <>
+        {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">{reviewProgress ? `Validating recipients: ${number(reviewProgress.processed)} / ${number(reviewProgress.eligible)}` : 'Preparing recipient count…'}</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>
             <div className="campaign-summary-line muted"><span>Suppressed</span><span>−{number(audience.data.suppressed)}</span></div>
             <div className="campaign-summary-line muted"><span>Not subscribed (including unknown)</span><span>−{number(audience.data.unsubscribed)}</span></div>
           </div>
-          <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Generate new review</Button>
+          <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Refresh recipient count</Button>
           {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
         </> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
+          {campaign.expansion && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
           {['sent', 'completed'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
         </div>}
       </section>
@@ -417,9 +430,9 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
       {mode === 'schedule' && <div className="form-grid"><Field label="Time zone"><Input value="UTC (UTC+00:00)" readOnly aria-label="Time zone" /></Field><Field label="Date and time (UTC)" htmlFor="campaign-schedule"><Input id="campaign-schedule" type="datetime-local" value={scheduled} onChange={event => { setScheduled(event.target.value); setError('') }} disabled={sendMutation.isPending} /></Field></div>}
       {error && <Alert tone="danger">{error}</Alert>}
-      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={Boolean(readinessError) || audience.isPending || audience.isError || !audience.data?.eligible} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${number(audience.data?.eligible ?? 0)} eligible recipients now. This action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC. OpenSend validates the complete audience before delivery.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now. OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>
 }

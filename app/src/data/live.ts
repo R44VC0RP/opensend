@@ -36,7 +36,7 @@ const unsupported = (message: string): never => { throw new ApiError(message, 'U
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, consent: { source: '', at: null }, suppressionReason: r.suppressionReason ?? undefined } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json): Segment => ({ ...r, rule: r.rule, match: r.rule?.operator === 'or' ? 'any' : 'all', rules: [], matched: undefined, eligible: undefined } as unknown as Segment)
-const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.status, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, reviewId: r.reviewId, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], timezone: 'UTC', recipients: r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
+const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.status, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, reviewId: r.reviewId, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], timezone: 'UTC', recipients: r.expansion?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
 const mapCampaignSummary = (r: Json): Campaign => ({...mapCampaign(r), draft: undefined, attachments: undefined})
 const mapEmailEvent = (r: Json) => ({id: r.id, type: r.type, at: r.createdAt, description: r.type, diagnostic: typeof r.data?.diagnostic === 'string' ? r.data.diagnostic : undefined})
 const mapEmail = (r: Json): Email => ({ ...r, id: r.id, from: r.from, subject: r.subject, status: r.status, to: r.to.join(', '), regionId: r.region, stream: r.kind, sentAt: r.createdAt, html: '', events: [] })
@@ -141,13 +141,29 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       },
       audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
       send: async (input, signal) => {
-        if (!input.reviewId || !input.revision) throw new ApiError('Generate a recipient review before sending.', 'REVIEW_REQUIRED')
-        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {reviewId: input.reviewId, revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {})}, signal)
+        if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
+        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {...(input.reviewId ? {reviewId: input.reviewId} : {}), revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {})}, signal)
         return receipt as import('./types').CampaignSendReceipt
       },
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
-    review: async (id, revision) => ({ ...(await call(`/campaigns/${idPath(id)}/review`, 'POST', {revision})), contacts: [] } as any),
+    review: async (id, revision, options = {}) => {
+      const path = `/campaigns/${idPath(id)}/reviews`
+      let preparation = await call(path, 'POST', { revision }, options.signal)
+      while (true) {
+        options.signal?.throwIfAborted()
+        options.onProgress?.({ processed: preparation.processed, eligible: preparation.eligible })
+        if (preparation.status === 'failed') throw new ApiError(preparation.error?.message ?? 'Campaign review failed. Generate a new review to retry.', preparation.error?.code ?? 'CAMPAIGN_REVIEW_FAILED')
+        if (preparation.status === 'ready') return { id: preparation.id, campaignId: preparation.campaignId, revision: preparation.revision, contentHash: preparation.contentHash, createdAt: preparation.createdAt, matched: preparation.matched, eligible: preparation.eligible, suppressed: preparation.suppressed, unsubscribed: preparation.unsubscribed, contacts: [] }
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => { window.clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(new DOMException('Review polling was stopped.', 'AbortError')) }
+          const timer = window.setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve() }, 1500)
+          if (options.signal?.aborted) abort()
+          else options.signal?.addEventListener('abort', abort, { once: true })
+        })
+        preparation = await call(`${path}/${idPath(preparation.id)}`, 'GET', undefined, options.signal)
+      }
+    },
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),
       content: (id, signal) => call<any>(`/attachments/${idPath(id)}/content`, 'GET', undefined, signal),

@@ -44,7 +44,7 @@ export interface Segment { rule?: Record<string, unknown>; id: string; name: str
 export type SegmentInput = Pick<Segment, 'name' | 'match' | 'rules' | 'rule'> & { id?: string }
 export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; contacts: Contact[] }
 export type CampaignPreview = { html: string; text: string }
-export interface Campaign { archivedAt?: ISODate | null; revision?: number; reviewId?: string | null; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
+export interface Campaign { expansion?: { status: 'pending' | 'expanding' | 'completed' | 'failed' | 'canceled'; total: number; expanded: number; canceled: number; error: { code: string; message: string } | null }; archivedAt?: ISODate | null; revision?: number; reviewId?: string | null; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; reviewId: string | null; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { reviewId?: string; revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string }
@@ -75,7 +75,7 @@ export interface OpenSendApi {
   consentHistory?: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   readonly environment?: 'live' | 'test'
-  review?: (id: string, revision: number) => Promise<CampaignReview>
+  review?: (id: string, revision: number, options?: { signal?: AbortSignal; onProgress?: (progress: { processed: number; eligible: number }) => void }) => Promise<CampaignReview>
   attachments?: AttachmentApi
   templateAssets?: AttachmentApi
   imports?: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string): Promise<ImportPreview> }
