@@ -34,7 +34,7 @@
     {
       "Sid": "SendFromAccountIdentities",
       "Effect": "Allow",
-      "Action": "ses:SendEmail",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
       "Resource": [
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:identity/*",
         "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*",
