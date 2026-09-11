@@ -268,10 +268,12 @@ function validateCampaign(state: DemoState, input: CampaignInput, existing?: Cam
   if (input.segmentId) find(state.segments, input.segmentId, 'Segment')
   const metadata = validateDraft(input.draft ?? existing?.draft ?? {})
   const attachments = validateAttachments(state, input.attachments ?? metadata.attachments ?? existing?.attachments ?? [])
-  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998, !requireComplete), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName', 200, true), fromEmail: requireComplete || input.fromEmail.trim() ? email(input.fromEmail, 'fromEmail') : '', listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000, true), attachments }
+  const replyTo = input.replyTo ?? metadata.replyTo ?? existing?.replyTo ?? []
+  if (!Array.isArray(replyTo) || replyTo.length > 10) invalid('replyTo', 'Use at most 10 Reply-To addresses.')
+  const clean: CampaignInput = { ...(input.id ? { id: input.id } : {}), regionId: input.regionId, name: text(input.name, 'name'), subject: text(input.subject, 'subject', 998, !requireComplete), previewText: text(input.previewText, 'previewText', 200, true), fromName: text(input.fromName, 'fromName', 200, true), fromEmail: requireComplete || input.fromEmail.trim() ? email(input.fromEmail, 'fromEmail') : '', replyTo: replyTo.map((value: string) => email(value, 'replyTo')), listId: input.listId, segmentId: input.segmentId, html: text(input.html, 'html', 500_000, true), attachments }
   if (requireComplete && !clean.html.trim()) invalid('html', 'Add some email content before continuing.')
   const { listId: _oldList, segmentId: _oldSegment, ...audience } = metadata.audience ?? {}
-  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, subject: clean.subject, previewText: clean.previewText, html: clean.html, attachments, audience: { ...audience, ...(clean.listId ? { listId: clean.listId } : {}), ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
+  clean.draft = validateDraft({ ...metadata, name: clean.name, region: clean.regionId, from: clean.fromEmail, fromName: clean.fromName, replyTo: clean.replyTo, subject: clean.subject, previewText: clean.previewText, html: clean.html, attachments, audience: { ...audience, ...(clean.listId ? { listId: clean.listId } : {}), ...(clean.segmentId ? { segmentId: clean.segmentId } : {}) } })
   return clean
 }
 function validDateTime(value: string): boolean {
@@ -570,7 +572,7 @@ export function createMockApi(): OpenSendApi {
           next = {...input, subject: input.subject || sourceTemplate.published.subject, previewText: input.previewText || sourceTemplate.published.previewText || '', fromName: input.fromName || sourceTemplate.published.fromName || '', html: input.html || sourceTemplate.published.html || '', attachments: [...copied, ...(input.attachments ?? [])]}
         }
         const clean = validateCampaign(s, next, existing)
-        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(sourceTemplate ? {sourceTemplateId: sourceTemplate.id, sourceTemplateRevision: sourceTemplate.publishedRevision} : {}), ...clean }
+        const campaign: Campaign = { id: existing?.id ?? id('cmp'), status: 'draft', revision: existing ? (existing.revision ?? 1) + 1 : 1, createdAt: existing?.createdAt ?? now(), updatedAt: now(), scheduledAt: null, archivedAt: existing?.archivedAt ?? null, timezone: existing?.timezone ?? 'UTC', recipients: 0, delivered: 0, bounced: 0, complaints: 0, ...(sourceTemplate ? {sourceTemplateId: sourceTemplate.id, sourceTemplateRevision: sourceTemplate.publishedRevision} : {}), ...clean, replyTo: clean.replyTo ?? [] }
         campaign.recipients = campaign.listId ? campaignAudience(s, campaign.listId, campaign.segmentId).eligible : 0
         if (existing) Object.assign(existing, campaign)
         else s.campaigns.push(campaign)

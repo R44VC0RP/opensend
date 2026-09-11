@@ -24,6 +24,8 @@ const EmailComposer = lazy(loadEmailComposer)
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+const replyToAddresses = (value: string) => value.split(',').map(address => address.trim()).filter(Boolean)
+const replyToError = (value: string) => { const addresses = replyToAddresses(value); return addresses.length > 10 ? 'Use at most 10 Reply-To addresses.' : addresses.some(address => !emailIsValid(address)) ? 'Enter valid Reply-To addresses separated by commas.' : '' }
 const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review', environment?: 'live' | 'test') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}${environment ? `?environment=${environment}` : ''}`
 function campaignReadinessError(campaign: Campaign) {
   const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
@@ -32,7 +34,7 @@ function campaignReadinessError(campaign: Campaign) {
 const olderCampaign = (candidate: Campaign, baseline: Campaign) => (candidate.revision ?? 1) < (baseline.revision ?? 1) || ((candidate.revision ?? 1) === (baseline.revision ?? 1) && Date.parse(candidate.updatedAt) < Date.parse(baseline.updatedAt))
 const campaignInput = (campaign: Campaign): CampaignInput => ({
   id: campaign.id, revision: campaign.revision, draft: campaign.draft, attachments: campaign.attachments, regionId: campaign.regionId,
-  name: campaign.name, subject: campaign.subject, previewText: campaign.previewText, fromName: campaign.fromName, fromEmail: campaign.fromEmail,
+  name: campaign.name, subject: campaign.subject, previewText: campaign.previewText, fromName: campaign.fromName, fromEmail: campaign.fromEmail, replyTo: campaign.replyTo,
   listId: campaign.listId, segmentId: campaign.segmentId, html: campaign.html,
 })
 
@@ -83,7 +85,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const navigate = useNavigate()
   const [accepted, setAccepted] = useState(initial)
   const acceptedRef = useRef(initial)
-  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' })
+  const [form, setForm] = useState<CampaignInput>(() => initial ? campaignInput(initial) : { regionId: fallbackRegion, name: '', subject: '', previewText: '', fromName: '', fromEmail: '', replyTo: [], listId: '', segmentId: null, html: '' })
+  const [replyToText, setReplyToText] = useState(() => (initial?.replyTo ?? []).join(', '))
   const formRef = useRef(form)
   function updateForm(next: CampaignInput) { formRef.current = next; setForm(next) }
   const editVersion = useRef(0)
@@ -149,6 +152,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     acceptedRef.current = next
     setAccepted(next)
     updateForm(campaignInput(next))
+    setReplyToText(next.replyTo.join(', '))
     setAutosavePaused(false)
     creation.current = null
     dirtyRef.current = false
@@ -175,7 +179,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !['draft', 'reviewed'].includes(current.status)))
   const controlsDisabled = preparing || attachmentsBusy || composerBusy || loadingLatest || readOnly
-  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote)
+  const replyToValidation = replyToError(replyToText)
+  const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToValidation)
   useEffect(() => {
     if (!dirty || pending || saveDisabled || autosavePaused || !form.name.trim()) return
     const timer = setTimeout(() => { void save('auto') }, 800)
@@ -280,6 +285,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
           <div className="campaign-compose-metadata">
             <div className="campaign-compose-row"><label htmlFor="campaign-name">Name</label><Input id="campaign-name" placeholder="Campaign name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} /></div>
             <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} allowUnverified={testEnvironment} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /></div>
+            <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="Optional reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} disabled={controlsDisabled} /></div>
+            {replyToValidation && <div id="campaign-reply-to-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
             {!testEnvironment && (optionCursors.domains || choices.next.domains) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
             {!testEnvironment && !options.isPending && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
             <div className="campaign-compose-row"><label htmlFor="campaign-list">To</label><Select id="campaign-list" aria-label="Include list" disabled={controlsDisabled || options.isPending} value={form.listId} onValueChange={value => change('listId', value)} options={options.isPending ? [{value: form.listId, label: 'Loading recipient lists…', disabled: true}] : choices.lists.length ? [{ value: '', label: 'Select a recipient list' }, ...(form.listId && !choices.lists.some(l => l.id === form.listId) ? [{value: form.listId, label: form.listId}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.total === undefined ? list.name : `${list.name} · ${number(list.total)} contacts` }))] : [{value: '', label: 'No recipient lists created', disabled: true}]} /></div>
@@ -421,7 +428,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
       </section>
       <section className="campaign-fields">
         <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
-        <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd><dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
+        <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd>{campaign.replyTo.join(', ')}</dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} />
       </section>
     </div>
