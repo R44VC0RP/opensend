@@ -51,7 +51,7 @@ export class DispatcherShard extends DurableObject<Env> {
       const runtime = await this.runtime();
       const report = await runDispatcher(runtime, {
         environment: identity.environment, region: identity.region, shard: identity.shard, gate: this.gate,
-        until: started + RUN_MS, lanes: 2, batchSize: 20, sendConcurrency: 6,
+        until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the

@@ -40,7 +40,7 @@ export interface DispatcherOptions {
   /** Refresh quota from the provider at most this often. */
   quotaRefreshMs?: number;
 }
-export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; recovered: number; batches: number; idle: boolean; durationMs: number }
+export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; recovered: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number }
 
 const worker = (runtime: Runtime, environment: Mode): Actor => ({ workspaceId: runtime.config.workspaceId, environment, keyId: 'worker', domains: [], permissions: ['manage'] });
 // Timestamps are cast to text so raw rows match Drizzle's string-mode timestamp columns.
@@ -186,72 +186,79 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
   await finishEmailCampaign(runtime, a, mail);
 }
 
-// One transaction elects every row in the batch: origin authorization under shared key locks,
-// consent locks, campaign cancellation, unsubscribe tokens and attempt events, all in PostgreSQL.
-async function claimBatch(runtime: Runtime, a: Actor, prepared: Prepared[]): Promise<Map<string, EmailStatus>> {
-  return runtime.db.transaction(async tx => {
-    const allowed = new Map<string, boolean>();
-    for (const item of prepared) {
-      const key = `${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
-      if (!allowed.has(key)) allowed.set(key, await originAllowed(runtime, tx, { workspaceId: a.workspaceId, environment: a.environment, actorKeyId: item.mail.actorKeyId, snapshot: { from: item.snapshot.from } }));
-    }
-    const revoked = prepared.filter(item => !allowed.get(`${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`));
-    const statuses = new Map<string, EmailStatus>();
-    if (revoked.length) {
-      const rows = await tx.execute<{ id: string }>(sql`UPDATE sending_emails SET status = 'canceled', error_code = 'ORIGIN_KEY_REVOKED', lease_until = NULL, updated_at = clock_timestamp()
-        WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND status = 'queued'
-          AND (id, dispatch_version) IN (SELECT x.id, x.v FROM jsonb_to_recordset(${JSON.stringify(revoked.map(item => ({ id: item.mail.id, v: item.mail.dispatchVersion })))}::jsonb) AS x(id text, v int)) RETURNING id`);
-      for (const row of rows.rows) statuses.set(row.id, 'canceled');
-    }
-    const eligible = prepared.filter(item => !revoked.includes(item));
-    if (!eligible.length) return statuses;
-    const input = eligible.map(item => ({
-      id: item.mail.id, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
-      destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
-      marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.snapshot : null,
-      token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
-      event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
-    }));
-    const claimed = await tx.execute<{ id: string; status: EmailStatus }>(sql`WITH input AS (
-        SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-          AS x(id text, dispatch_version int, campaign_id text, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)
-      ), campaign_state AS MATERIALIZED (
-        SELECT id, status FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment}
-          AND id IN (SELECT DISTINCT campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
-      ), dest AS (
-        SELECT x.id AS email_id, d.value AS email FROM input x, jsonb_array_elements_text(x.destinations) d
-      ), consent AS MATERIALIZED (
-        SELECT email, suppressed, deleted_at, marketing_consent FROM audience_contacts
-        WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email IN (SELECT DISTINCT email FROM dest)
-        ORDER BY id FOR UPDATE
-      ), eligibility AS (
-        SELECT x.id,
-          (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.id = x.campaign_id AND c.status <> 'canceled')) AS campaign_allowed,
-          NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (email)
-            WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed
-        FROM input x
-      ), claimed AS (
-        UPDATE sending_emails e SET
-          status = CASE WHEN NOT el.campaign_allowed THEN 'canceled' WHEN el.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
-          attempt_started_at = CASE WHEN el.campaign_allowed AND el.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
-          error_code = CASE WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
-          snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
-        FROM input x JOIN eligibility el ON el.id = x.id
-        WHERE e.workspace_id = ${a.workspaceId} AND e.environment = ${a.environment} AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
-        RETURNING e.id, e.status
-      ), token AS (
-        INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, environment, email)
-        SELECT x.token_hash, ${a.workspaceId}, ${a.environment}, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL
-        ON CONFLICT DO NOTHING
-      ), attempt AS (
-        INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-        SELECT x.event_id, ${a.workspaceId}, ${a.environment}, c.id, 'dispatch_attempt', x.external_id, ${a.environment === 'test'}::boolean,
-          jsonb_build_object('attempt', x.attempt, 'providerCallPlanned', true, 'providerCallSimulated', ${a.environment === 'test'}::boolean)
-        FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'attempting' ON CONFLICT DO NOTHING
-      ) SELECT id, status FROM claimed`);
-    for (const row of claimed.rows) statuses.set(row.id, row.status);
-    return statuses;
-  });
+// Origin authorization (permissions, sender domains, Google approval, MCP grants) is evaluated once
+// per actor/domain per run and cached briefly; durable API key revocation is re-checked inside the
+// claim statement under a shared row lock, so a revoked key never sends after revocation commits.
+type OriginCache = Map<string, { allowed: boolean; until: number }>;
+async function originDecisions(runtime: Runtime, a: Actor, prepared: Prepared[], cache: OriginCache): Promise<Map<string, boolean>> {
+  const decisions = new Map<string, boolean>();
+  for (const item of prepared) {
+    const key = `${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
+    if (decisions.has(key)) continue;
+    const cached = cache.get(key);
+    if (cached && cached.until > Date.now()) { decisions.set(key, cached.allowed); continue; }
+    const allowed = await originAllowed(runtime, runtime.db, { workspaceId: a.workspaceId, environment: a.environment, actorKeyId: item.mail.actorKeyId, snapshot: { from: item.snapshot.from } });
+    cache.set(key, { allowed, until: Date.now() + 10000 });
+    decisions.set(key, allowed);
+  }
+  return decisions;
+}
+const originKey = (item: Prepared) => `${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
+
+// One statement elects every row in the group: key revocation under FOR SHARE, consent locks, campaign
+// cancellation, unsubscribe tokens and attempt events. Rows flip queued → attempting here, so the group
+// is kept to the provider in-flight width: a platform reset can only strand what was actually mid-call.
+async function claimGroup(runtime: Runtime, a: Actor, prepared: Prepared[], origins: Map<string, boolean>): Promise<Map<string, EmailStatus>> {
+  const input = prepared.map(item => ({
+    id: item.mail.id, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
+    actor_key_id: item.mail.actorKeyId, origin_allowed: origins.get(originKey(item)) ?? false,
+    destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
+    marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.snapshot : null,
+    token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
+    event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
+  }));
+  const claimed = await runtime.db.execute<{ id: string; status: EmailStatus }>(sql`WITH input AS (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
+        AS x(id text, dispatch_version int, campaign_id text, actor_key_id text, origin_allowed boolean, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)
+    ), key_state AS MATERIALIZED (
+      SELECT id, revoked_at FROM api_keys WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment}
+        AND id IN (SELECT DISTINCT actor_key_id FROM input WHERE actor_key_id LIKE 'key\\_%') FOR SHARE
+    ), campaign_state AS MATERIALIZED (
+      SELECT id, status FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment}
+        AND id IN (SELECT DISTINCT campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
+    ), dest AS (
+      SELECT x.id AS email_id, d.value AS email FROM input x, jsonb_array_elements_text(x.destinations) d
+    ), consent AS MATERIALIZED (
+      SELECT email, suppressed, deleted_at, marketing_consent FROM audience_contacts
+      WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email IN (SELECT DISTINCT email FROM dest)
+      ORDER BY id FOR UPDATE
+    ), eligibility AS (
+      SELECT x.id,
+        (x.origin_allowed AND (x.actor_key_id NOT LIKE 'key\\_%' OR EXISTS (SELECT 1 FROM key_state k WHERE k.id = x.actor_key_id AND k.revoked_at IS NULL))) AS origin_ok,
+        (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.id = x.campaign_id AND c.status <> 'canceled')) AS campaign_allowed,
+        NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (email)
+          WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed
+      FROM input x
+    ), claimed AS (
+      UPDATE sending_emails e SET
+        status = CASE WHEN NOT el.origin_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
+        attempt_started_at = CASE WHEN el.origin_ok AND el.campaign_allowed AND el.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN NOT el.origin_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
+      FROM input x JOIN eligibility el ON el.id = x.id
+      WHERE e.workspace_id = ${a.workspaceId} AND e.environment = ${a.environment} AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
+      RETURNING e.id, e.status
+    ), token AS (
+      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, environment, email)
+      SELECT x.token_hash, ${a.workspaceId}, ${a.environment}, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
+      ON CONFLICT DO NOTHING
+    ), attempt AS (
+      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
+      SELECT x.event_id, ${a.workspaceId}, ${a.environment}, c.id, 'dispatch_attempt', x.external_id, ${a.environment === 'test'}::boolean,
+        jsonb_build_object('attempt', x.attempt, 'providerCallPlanned', true, 'providerCallSimulated', ${a.environment === 'test'}::boolean)
+      FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'attempting' ON CONFLICT DO NOTHING
+    ) SELECT id, status FROM claimed`);
+  return new Map(claimed.rows.map(row => [row.id, row.status]));
 }
 
 // Scheduled campaigns become "sending" on their first claim; a plain UPDATE avoids the shared-lock
@@ -379,7 +386,8 @@ async function recordSuppressed(runtime: Runtime, a: Actor, mails: Mail[]) {
     FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ id: m.id })))}::jsonb) AS x(id text) ON CONFLICT DO NOTHING`);
 }
 
-type Lane = { ses: SESv2Client; gate: GateState; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport };
+type Lane = { ses: SESv2Client; gate: GateState; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
 async function releaseLeases(runtime: Runtime, a: Actor, mails: Mail[]) {
@@ -388,14 +396,16 @@ async function releaseLeases(runtime: Runtime, a: Actor, mails: Mail[]) {
     AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(mails.map(m => m.id))}::jsonb))`);
 }
 
-// One batch: lease → prepare (CPU) → claim (1 tx) → paced provider calls → record (1 statement).
+// One batch: lease up to batchSize rows and prepare them (CPU), then for each group of sendConcurrency
+// rows: one claim statement, paced provider calls, one record statement. Recording overlaps the next
+// group's claim and sends; failures surface at the end of the batch.
 async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
-  const { a, ses, gate, options, counters } = lane;
-  const leased = await leaseDue(runtime, a, options.region, options.batchSize);
+  const { a, ses, gate, options, counters, phase } = lane;
+  const leased = await phase('lease', () => leaseDue(runtime, a, options.region, options.batchSize));
   if (!leased.length) return { processed: 0, blocked: false };
   counters.claimed += leased.length;
   // Quota is loaded lazily so idle regions never touch the provider control plane.
-  if (await ensureQuota(runtime, a, options.region, gate, ses, options.quotaRefreshMs)) await options.onGate?.(gate);
+  if (await phase('quota', () => ensureQuota(runtime, a, options.region, gate, ses, options.quotaRefreshMs))) await options.onGate?.(gate);
   if (dailyRemaining(gate) <= 0) {
     await releaseLeases(runtime, a, leased.map(item => item.mail));
     counters.claimed -= leased.length;
@@ -403,31 +413,36 @@ async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed:
     return { processed: 0, blocked: true };
   }
   const prepared: Prepared[] = [];
-  await Promise.all(leased.map(async item => {
+  await phase('prepare', () => Promise.all(leased.map(async item => {
     try { prepared.push(await prepareMail(runtime, a, item)); }
     catch (error) { counters.skipped++; await rejectPreflight(runtime, a, item.mail, error); }
-  }));
+  })));
   if (!prepared.length) return { processed: leased.length, blocked: false };
   const campaignIds = [...new Set(prepared.flatMap(item => item.mail.campaignId && item.mail.scheduledAt && !lane.activated.has(item.mail.campaignId) ? [item.mail.campaignId] : []))];
-  if (campaignIds.length) { await activateCampaigns(runtime, a, campaignIds); for (const campaignId of campaignIds) lane.activated.add(campaignId); }
-  const statuses = await claimBatch(runtime, a, prepared);
-  const attempting = prepared.filter(item => statuses.get(item.mail.id) === 'attempting');
-  const suppressed = prepared.filter(item => statuses.get(item.mail.id) === 'suppressed').map(item => item.mail);
-  const lost = prepared.filter(item => !statuses.has(item.mail.id));
-  counters.skipped += prepared.length - attempting.length;
-  await recordSuppressed(runtime, a, suppressed);
-  for (const item of prepared) if (statuses.get(item.mail.id) === 'canceled' || statuses.get(item.mail.id) === 'suppressed') await finishEmailCampaign(runtime, a, { ...item.mail, status: statuses.get(item.mail.id)! });
-  if (lost.length) log('warn', { code: 'DISPATCH_CLAIM_LOST', count: lost.length, environment: a.environment, message: 'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
-  if (!attempting.length) return { processed: leased.length, blocked: false };
-  // Pace the whole batch once, then let the provider calls overlap up to the connection budget.
-  const wait = reserve(gate, attempting.reduce((n, item) => n + item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, 0), options.shard);
-  if (wait > 0) await sleep(wait);
-  const outcomes = await Promise.all(attempting.map(item => lane.limitSends(() => sendOne(runtime, a, ses, item))));
-  await recordOutcomes(runtime, a, outcomes);
-  for (const outcome of outcomes) {
-    if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
-    if (!outcome.mail.reviewId) await finishEmailCampaign(runtime, a, { ...outcome.mail, status: statusForEvent[outcome.type] ?? outcome.mail.status });
+  if (campaignIds.length) { await phase('activate', () => activateCampaigns(runtime, a, campaignIds)); for (const campaignId of campaignIds) lane.activated.add(campaignId); }
+  const origins = await phase('origin', () => originDecisions(runtime, a, prepared, lane.origins));
+  const pendingRecords: Promise<void>[] = [];
+  for (const group of chunk(prepared, options.sendConcurrency)) {
+    const statuses = await phase('claim', () => claimGroup(runtime, a, group, origins));
+    const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
+    const suppressed = group.filter(item => statuses.get(item.mail.id) === 'suppressed').map(item => item.mail);
+    const lost = group.filter(item => !statuses.has(item.mail.id));
+    counters.skipped += group.length - attempting.length;
+    if (suppressed.length) await phase('record', () => recordSuppressed(runtime, a, suppressed));
+    for (const item of group) if (statuses.get(item.mail.id) === 'canceled' || statuses.get(item.mail.id) === 'suppressed') await finishEmailCampaign(runtime, a, { ...item.mail, status: statuses.get(item.mail.id)! });
+    if (lost.length) log('warn', { code: 'DISPATCH_CLAIM_LOST', count: lost.length, environment: a.environment, message: 'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
+    if (!attempting.length) continue;
+    const wait = reserve(gate, attempting.reduce((n, item) => n + item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, 0), options.shard);
+    if (wait > 0) await phase('pace', () => sleep(wait));
+    const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.limitSends(() => sendOne(runtime, a, ses, item)))));
+    pendingRecords.push(phase('record', () => recordOutcomes(runtime, a, outcomes)).then(async () => {
+      for (const outcome of outcomes) {
+        if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
+        if (!outcome.mail.reviewId) await finishEmailCampaign(runtime, a, { ...outcome.mail, status: statusForEvent[outcome.type] ?? outcome.mail.status });
+      }
+    }));
   }
+  await Promise.all(pendingRecords);
   return { processed: leased.length, blocked: false };
 }
 
@@ -439,11 +454,15 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const started = Date.now();
   const a = worker(runtime, options.environment);
   const gate = options.gate ?? initialGate();
-  const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, recovered: 0, batches: 0, idle: false, durationMs: 0 };
+  const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, recovered: 0, batches: 0, idle: false, durationMs: 0, timings: {}, statements: 0 };
+  const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
+    try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
+  };
   const ses = providerClient(runtime, options.environment, options.region);
   if (options.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, options.region, 'marketing', true);
-  counters.recovered = await recoverInterrupted(runtime, a);
-  const lane: Lane = { ses, gate, a, activated: new Set(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, options: { ...options, batchSize: options.batchSize ?? 20, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  counters.recovered = await phase('recover', () => recoverInterrupted(runtime, a));
+  const lane: Lane = { ses, gate, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lanes = Math.max(1, options.lanes ?? 2);
   let idleLanes = 0, blocked = false;
   await Promise.all(Array.from({ length: lanes }, async () => {
