@@ -513,9 +513,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     const templateData = JSON.stringify(input.template.data);
     if (templateData.length > 262144) throw new ApiError(413, 'TEMPLATE_DATA_TOO_LARGE', 'Serialized template data exceeds 262,144 characters.');
     if (a.environment === 'test') {
-      if (runtime.config.simulatedSes) throw new ApiError(422, 'SIMULATED_TEMPLATE_UNSUPPORTED', 'The latency simulator supports explicit content and campaigns, not AWS-stored templates.');
-      snapshot.subject = `[simulated template: ${input.template.name}]`;
-      snapshot.template = { ...input.template, source: {}, render: 'simulated' };
+      throw new ApiError(422, 'SIMULATED_TEMPLATE_UNSUPPORTED', 'Test sending supports explicit content and campaigns, not AWS-stored templates.');
     } else {
       const ses = getSes(runtime, input.region);
       const before = await ses.send(new GetEmailTemplateCommand({ TemplateName: input.template.name }));
@@ -1073,9 +1071,9 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
     SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
   ), simulated_callbacks AS (
     SELECT 'urn:opensend:simulated-ses:' || mail.region AS topic_arn, mail.id || ':' || kind AS message_id, inserted.workspace_id, 'test' AS environment,
-      inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes?.deliveryDelayMs ?? 0} ELSE 0 END * interval '1 millisecond' AS created_at
+      inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs} ELSE 0 END * interval '1 millisecond' AS created_at
     FROM inserted, mail, unnest(ARRAY['Send','Delivery']) kind
-    WHERE ${input.environment === 'test' && !!runtime.config.simulatedSes && input.type === 'accepted' && !!input.providerId?.startsWith('sim_')}
+    WHERE ${input.environment === 'test' && input.type === 'accepted' && !!input.providerId?.startsWith('sim_')}
   ), simulated_jobs AS (
     INSERT INTO jobs(id, workspace_id, environment, type, available_at, payload)
     SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, r.environment, 'operation.simulatedFeedback', r.created_at,
@@ -1233,12 +1231,12 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     mail = materialized.mail; preparedAttachments = materialized.rows; pendingUnsubscribe = materialized.unsubscribe;
   }
   const s = mail.snapshot;
-  const ses = a.environment === 'live' ? getSes(runtime, s.region) : a.environment === 'test' && runtime.config.simulatedSes ? simulatedSes(runtime, s.region) : null;
+  const ses = a.environment === 'live' ? getSes(runtime, s.region) : simulatedSes(runtime, s.region);
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];
   await phase('attachments', async () => {
     const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
-    if (ses) for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+    for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
     sizeCheck(s, rows);
   });
   // Serialization/size failures are preflight failures, never uncertain sends.
@@ -1247,11 +1245,9 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } });
-  if (ses) {
-    const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
-    if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
-    if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, Math.max(0, permit.waitUntil! - Date.now()))));
-  }
+  const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
+  if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
+  if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, Math.max(0, permit.waitUntil! - Date.now()))));
   const claim = (lock: true | 'share') => runtime.db.transaction(async db => {
     const campaign = mail.campaignId && mail.scheduledAt ? await findCampaign(db, a, mail.campaignId, lock) : null;
     // Never upgrade shared campaign locks: concurrent scheduled claims would
@@ -1292,7 +1288,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
       INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
       SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, claimed.id, 'dispatch_attempt',
         ${`attempt-start:${mail.id}:${mail.dispatchVersion}`}, ${a.environment === 'test'},
-        ${JSON.stringify({ attempt: mail.dispatchVersion + 1, providerCallPlanned: a.environment === 'live' })}::jsonb
+        ${JSON.stringify({ attempt: mail.dispatchVersion + 1, providerCallPlanned: true, providerCallSimulated: a.environment === 'test' })}::jsonb
       FROM claimed WHERE claimed.status = 'attempting' ON CONFLICT DO NOTHING
     ) SELECT status FROM claimed`);
     return changed.rows;
@@ -1302,10 +1298,6 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   mail = { ...mail, status: claimed[0]!.status };
   if (mail.status === 'canceled') { await finishEmailCampaign(runtime, a, mail); return; }
   if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishEmailCampaign(runtime, a, mail); return; }
-  if (!ses) {
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'simulated', externalId: `simulated:${mail.id}`, data: { stage: 'validated', providerCalled: false, deliveryObserved: false } });
-    await finishEmailCampaign(runtime, a, mail); return;
-  }
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },

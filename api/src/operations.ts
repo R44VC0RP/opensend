@@ -516,21 +516,21 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
   verifySesAccount(runtime, payload.message);
   await processSesReceipt(runtime, payload, job);
 };
-function assertSimulatedFeedback(runtime: Runtime, payload: Record<string, unknown>, job: { environment: Mode }) {
+function assertSimulatedFeedback(payload: Record<string, unknown>, job: { environment: Mode }) {
   const message = payload.message as { mail?: { messageId?: unknown } } | undefined;
-  if (job.environment !== 'test' || !runtime.config.simulatedSes ||
+  if (job.environment !== 'test' ||
     payload.topicArn !== `urn:opensend:simulated-ses:${payload.region}` ||
     typeof message?.mail?.messageId !== 'string' || !message.mail.messageId.startsWith('sim_')) {
-    throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires opted-in test mode and a synthetic provider identity.');
+    throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires test mode and a synthetic provider identity.');
   }
 }
 const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
-  assertSimulatedFeedback(runtime, payload, job);
+  assertSimulatedFeedback(payload, job);
   const routine = await ingestRoutineFeedback(runtime, payload, job);
   if (routine === null) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
 };
 const simulatedFeedbackRecovery: JobHandler = async (runtime, payload, job) => {
-  assertSimulatedFeedback(runtime, payload, job);
+  assertSimulatedFeedback(payload, job);
   await processSesReceipt(runtime, payload, job);
 };
 const publishJob: JobHandler = async (runtime, payload, job) => {

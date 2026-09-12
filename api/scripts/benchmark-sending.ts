@@ -12,7 +12,6 @@ import { drain } from '../src/dispatch.js';
 const url = new URL(process.env.DATABASE_URL ?? '');
 assert(['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname.startsWith('/opensend_perf_'), 'Use a dedicated local opensend_perf_ database.');
 assert(String(process.env.ENABLE_LIVE_SES) === 'false' && !process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_SECRET_ACCESS_KEY, 'Disable live SES and remove AWS credentials.');
-assert(process.env.SIMULATED_SES_ENABLED === 'true', 'Enable the simulated SES transport explicitly.');
 const count = Number(process.env.BENCHMARK_RECIPIENTS ?? 1000);
 const replicas = Number(process.env.BENCHMARK_REPLICAS ?? 4);
 const lanes = Number(process.env.BENCHMARK_LANES ?? 6);
@@ -131,7 +130,7 @@ try {
   for (const point of timeline) { if (pending === 0) emptyMs += point.at-lastAt; pending += point.delta; lastAt=point.at; }
   const result = { runId, campaignId: campaign.id, simulated: true, count, replicas, lanes,
     pendingBufferEmptyMs: emptyMs, materializationBatches: materialized.rows.map(row => ({ at: Number(row.at), count: row.n })),
-    rate: process.env.SIMULATED_SES_RATE, latencyMs: process.env.SIMULATED_SES_LATENCY_MS,
+    rate: config.simulatedSes.maxSendRate, latencyMs: config.simulatedSes.latencyMs,
     requestMs, allAcceptedMs, feedbackAndPublicationDrainedMs: completedMs,
     overallAcceptedPerSecond: count * 1000 / allAcceptedMs,
     activeAcceptedPerSecond: (count - 1) * 1000 / (times.at(-1)! - times[0]!),

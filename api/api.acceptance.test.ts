@@ -461,7 +461,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], publicUrl: origin, regions: [REGION], liveEnabled: false, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], publicUrl: origin, regions: [REGION], liveEnabled: false, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const kid = unique('mock-google-signing-key');
@@ -916,9 +916,9 @@ describe('Hosted MCP OAuth and tools', () => {
 
 describe('DB region catalog and explicit SES setup', () => {
   test('MOCK AWS TRANSPORT: catalog changes are immediate, discovery is read-only, and provisioning is explicit and idempotent', async t => {
-    const [{ createApp }, { nodeRuntime }, { drizzle }, { drain }, ses, sns, sts] = await Promise.all([
+    const [{ createApp }, { nodeRuntime }, { drizzle }, { drain }, ses, sns, sts, { regionalLimits }] = await Promise.all([
       import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/dispatch.js'),
-      import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'),
+      import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'), import('./src/db/sending.js'),
     ]);
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
@@ -1006,7 +1006,13 @@ describe('DB region catalog and explicit SES setup', () => {
           throw new Error(`Unexpected mocked AWS command: ${name}`);
       }
     };
-    t.mock.method(ses.SESv2Client.prototype, 'send', provider as any);
+    const sendThroughTransport = ses.SESv2Client.prototype.send;
+    t.mock.method(ses.SESv2Client.prototype, 'send', function(this: InstanceType<typeof ses.SESv2Client>, command: { constructor: { name: string }; input: Json }) {
+      // Test-environment dispatch still runs the SES SDK, but its client must reach
+      // the in-process request handler rather than this live-control-plane mock.
+      if (command.constructor.name === 'SendEmailCommand') return Reflect.apply(sendThroughTransport as any, this, [command]);
+      return provider(command);
+    } as any);
     t.mock.method(sns.SNSClient.prototype, 'send', provider as any);
     t.mock.method(sts.STSClient.prototype, 'send', provider as any);
     try {
@@ -1044,8 +1050,11 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).region, second, 'Changing the DB default must affect send without rebuilding the environment.');
         ok(await local('PUT', `/v1/regions/${REGION}`, { makeDefault: true }, admin));
         error(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin), 409, undefined);
+        // Avoid routing the simulator's quota read through the live AWS mock; this
+        // fixture is testing persisted region selection, not quota discovery.
+        await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, environment: 'test', region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
         for (let count = 0; count < 5 && await drain(runtime, 10); count++) { /* Drain only this transaction's unique workspace. */ }
-        assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'simulated');
+        assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'accepted');
         ok(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin));
         error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: second, subject: 'Disabled region', text: 'Synthetic only' }, testKey), 422);
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).region, second, 'Disabling a region must not hide its historical email.');
@@ -1382,7 +1391,7 @@ describe('Import property boundaries', () => {
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {
-  test('test sends have a persisted simulated lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
+  test('test sends use the provider-parity simulated lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
     const liveKey = await keyFixture(t, { environment: 'live', permissions: ['read'] });
     const payload = mail();
@@ -1395,19 +1404,19 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.equal(retry.id, queued.id);
     assert.equal(retry.simulated, true);
     error(await http('POST', '/v1/emails/send', key.secret, { ...payload, subject: 'Different payload' }, headers), 409, 'IDEMPOTENCY_CONFLICT');
-    const completed = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'simulated');
+    const completed = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'delivered');
     assert.equal(completed.simulated, true);
     assert.equal(completed.environment, 'test');
-    assert.equal(completed.providerId, null, 'Simulation must not fabricate a provider message ID.');
+    assert.match(completed.providerId, /^sim_/, 'Simulation must return an isolated provider-shaped message ID.');
     assert.deepEqual(completed.to, [payload.to]);
     assert.equal(completed.subject, payload.subject);
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, key.secret));
     assert.equal(content.text, payload.text);
     assert.equal(content.simulated, true);
     const events = page(await http('GET', `/v1/emails/${queued.id}/events`, key.secret));
-    assert.equal(events.filter(event => event.type === 'simulated').length, 1, 'Exact retry must not produce another lifecycle event.');
-    assert.ok(events.every(event => event.simulated && event.environment === 'test' && event.providerId === null));
-    assert.ok(events.every(event => event.type !== 'delivery'), 'Simulation must never be labeled observed SES delivery.');
+    for (const type of ['dispatch_attempt', 'accepted', 'send', 'delivery']) assert.equal(events.filter(event => event.type === type).length, 1, 'Exact retry must not duplicate lifecycle events.');
+    assert.ok(events.every(event => event.simulated && event.environment === 'test'));
+    assert.ok(events.every(event => event.providerId === null || /^sim_/.test(event.providerId)));
     error(await http('GET', `/v1/emails/${queued.id}`, liveKey.secret), 404, 'NOT_FOUND');
     const testMetrics = ok(await http('GET', '/v1/metrics', key.secret));
     const liveMetrics = ok(await http('GET', '/v1/metrics', liveKey.secret));
@@ -1431,7 +1440,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('GET', `/v1/emails/${allowed.id}`, sender.secret), 403, 'PERMISSION_DENIED');
   });
 
-  test('batch results retain individual IDs and retries, while test templates never claim live rendering', async t => {
+  test('batch results retain individual IDs and retries, while test templates are rejected without AWS rendering', async t => {
     const key = await keyFixture(t);
     const payload = { emails: [mail(), mail()] };
     const headers = { 'Idempotency-Key': unique('batch') };
@@ -1441,14 +1450,9 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.ok(first.data.every((row: Json) => row.simulated && row.environment === 'test'));
     const retry = ok(await http('POST', '/v1/emails/batch', key.secret, payload, headers), 202);
     assert.deepEqual(retry.data.map((row: Json) => row.id), first.data.map((row: Json) => row.id));
-    for (const item of first.data) await poll(`/v1/emails/${item.id}`, key.secret, body => body.status === 'simulated');
+    for (const item of first.data) await poll(`/v1/emails/${item.id}`, key.secret, body => body.status === 'delivered');
     error(await http('POST', '/v1/emails/batch', key.secret, { emails: [] }), 422);
-    const template = ok(await http('POST', '/v1/emails/send', key.secret, { from: 'sender@example.com', to: address(), region: REGION, template: { name: unique('missing-template'), data: { firstName: '<script>safe</script>' } } }), 202);
-    const content = ok(await http('GET', `/v1/emails/${template.id}/content`, key.secret));
-    assert.equal(content.render, 'simulated');
-    assert.equal(content.simulated, true);
-    assert.equal(content.raw, null, 'A test key must not invoke SES to render a real stored template.');
-    await poll(`/v1/emails/${template.id}`, key.secret, body => body.status === 'simulated');
+    error(await http('POST', '/v1/emails/send', key.secret, { from: 'sender@example.com', to: address(), region: REGION, template: { name: unique('missing-template'), data: { firstName: '<script>safe</script>' } } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
   });
 });
 
@@ -1548,7 +1552,7 @@ describe('Private attachment assets and campaign revisions', () => {
     const completed = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
     assert.equal(completed.status, 'completed');
     assert.equal(completed.expansion.status, 'completed');
-    assert.equal(completed.counts.byStatus.simulated, 1);
+    assert.equal(completed.counts.byStatus.delivered, 1);
     const invalid = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Hello {{missing}}</p>', defaults: {} });
     const invalidAccepted = ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: invalid.revision }), 202);
     assert.equal(invalidAccepted.queued, 1);
@@ -1560,7 +1564,7 @@ describe('Private attachment assets and campaign revisions', () => {
     ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: corrected.revision }), 202);
     const retried = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
     assert.equal(retried.status, 'completed');
-    assert.equal(retried.counts.byStatus.simulated, 1);
+    assert.equal(retried.counts.byStatus.delivered, 1);
     const scheduled = await campaignFixture(t, key.secret, { listId: list.id });
     ok(await http('POST', `/v1/campaigns/${scheduled.id}/review`, key.secret, { revision: scheduled.revision }));
     const scheduledAccepted = ok(await http('POST', `/v1/campaigns/${scheduled.id}/schedule`, key.secret, { revision: scheduled.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
@@ -1979,13 +1983,13 @@ describe('Dashboard API capabilities', () => {
     for (const suffix of ['%_\\literal', 'ZZZliteral', '%_\\literal newest']) {
       const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ subject: `${marker} ${suffix}`, fromName: 'Élodie 日本語' })), 202);
       ids.push(queued.id);
-      await poll(`/v1/emails/${queued.id}`, key.secret, row => row.status === 'simulated');
+      await poll(`/v1/emails/${queued.id}`, key.secret, row => row.status === 'delivered');
     }
     error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: 'Name\nBcc: victim@example.com' })), 422);
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email, kind: 'marketing', subject: `${marker} marketing` })), 202);
-    await poll(`/v1/emails/${marketing.id}`, key.secret, row => row.status === 'simulated');
+    await poll(`/v1/emails/${marketing.id}`, key.secret, row => row.status === 'delivered');
     const to = new Date(Date.now() + 1000).toISOString();
     const query = new URLSearchParams({ search: marker.toUpperCase(), kind: 'transactional', region: REGION, from, to, limit: '1' });
     const first = await http('GET', `/v1/emails?${query}`, key.secret);
@@ -2126,7 +2130,7 @@ describe('Bounded campaign admission', () => {
     error(await http('POST', '/v1/emails/send', key.secret, mail()), 429, 'PENDING_EMAIL_LIMIT_EXCEEDED');
     assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret)).canceled, 100);
     const released = ok(await http('POST', '/v1/emails/send', key.secret, mail()), 202);
-    assert.equal((await poll(`/v1/emails/${released.id}`, key.secret, body => body.status === 'simulated')).providerId, null);
+    assert.match((await poll(`/v1/emails/${released.id}`, key.secret, body => body.status === 'delivered')).providerId, /^sim_/);
   });
 });
 
@@ -2308,7 +2312,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.ok(campaignEvents.some(event => event.type === 'suppressed'));
     assert.ok(!campaignEvents.some(event => ['accepted', 'delivery', 'simulated'].includes(event.type)), 'Opt-out must be checked before even simulated marketing dispatch.');
     const transactional = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: email })), 202);
-    assert.equal((await poll(`/v1/emails/${transactional.id}`, key.secret, body => body.status === 'simulated')).status, 'simulated');
+    assert.equal((await poll(`/v1/emails/${transactional.id}`, key.secret, body => body.status === 'delivered')).status, 'delivered');
   });
 
   test('a first-use RFC 8058 POST records its own source independently of footer GET', async t => {
@@ -2346,7 +2350,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     const contact = await resource(t, manager.secret, '/v1/contacts', { email: address() });
     ok(await consent(manager.secret, contact.id, 'subscribed'));
     const queued = ok(await http('POST', '/v1/emails/send', manager.secret, mail({ to: contact.email, kind: 'marketing' })), 202);
-    await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'simulated');
+    await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'delivered');
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, manager.secret));
     const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
     assert.ok(match, 'A real test-marketing snapshot must supply this fixture’s owned unsubscribe capability.');
@@ -2705,8 +2709,8 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   cleanup(t, instance.close);
   const runtime = instance.runtime;
   runtime.config.workspaceId = unique('simulated-ses-workspace');
-  assert.equal(runtime.config.simulatedSes, undefined, 'Legacy test mode must remain the default.');
-  runtime.config.simulatedSes = { latencyMs: 0, maxSendRate: 1000, deliveryDelayMs: 250 };
+  assert.deepEqual(runtime.config.simulatedSes, { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, 'Test dispatch must default to the 100 ms provider simulator.');
+  runtime.config.simulatedSes.latencyMs = 0;
   const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
   const rollback = new Error('Rollback isolated simulated SES fixtures');
   const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network is forbidden in simulated SES acceptance scenarios.'); });
@@ -2766,7 +2770,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(network.mock.callCount(), 0);
   });
 
-  test('test email and automatic campaign follow accepted → delivered through durable feedback; legacy mode is unchanged', async t => {
+  test('test email and automatic campaign follow accepted → delivered through durable feedback', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
       assert.equal(email.simulated, true);
@@ -2805,13 +2809,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(completed.counts.byStatus.delivered, 1);
 
       error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: REGION, template: { name: 'not-rendered-by-simulator', data: {} } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
-      runtime.config.simulatedSes = undefined;
-      const legacy = ok(await local('POST', '/v1/emails/send', mail()), 202);
-      await run('email.dispatch');
-      const legacyEmail = ok(await local('GET', `/v1/emails/${legacy.id}`));
-      assert.equal(legacyEmail.status, 'simulated');
-      assert.equal(legacyEmail.providerId, null);
-      assert.equal((await jobs('operation.simulatedFeedback')).filter(job => job.status === 'pending').length, 0);
     });
   });
 
@@ -2848,10 +2845,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('operation.publishBatch')).length, 0);
       await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, deliver.payload, { ...context(deliver), environment: 'live' }), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
       await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ENVIRONMENT_MISMATCH' });
-      const enabled = runtime.config.simulatedSes;
-      runtime.config.simulatedSes = undefined;
-      await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, deliver.payload, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
-      runtime.config.simulatedSes = enabled;
       await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, { ...deliver.payload, message: { mail: { messageId: 'real-provider-id' } } }, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
       error(await local('GET', `/v1/emails/${email.id}`, undefined, 'live'), 404);
 

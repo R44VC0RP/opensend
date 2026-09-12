@@ -11,7 +11,7 @@ export interface SimulatedSesOptions {
 }
 
 export function createSimulatedSesHandler(options: SimulatedSesOptions = {}): RequestHandler<HttpRequest, HttpResponse, HttpHandlerOptions> {
-  const latencyMs = options.latencyMs ?? 200;
+  const latencyMs = options.latencyMs ?? 100;
   const maxSendRate = options.maxSendRate ?? 1000;
   const outcomes = [...(options.outcomes ?? [])];
   let sent = 0;
