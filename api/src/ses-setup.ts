@@ -33,7 +33,9 @@ export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId:
 
 // OPEN/CLICK destinations support tracking-enabled sends; per-message tracking overrides
 // in sending.ts still disable instrumentation when tracking:false. Consent stays in OpenSend.
-const EVENTS = ['SEND', 'DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'] as const;
+// SEND is intentionally absent: provider acceptance is already recorded from the SendEmail response,
+// and the callback would double feedback volume at the full send rate.
+const EVENTS = ['DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'] as const;
 const OWNER_TAG = 'opensend:installation-id';
 const PURPOSE_TAG = 'opensend:purpose';
 const PURPOSE = 'ses-feedback';

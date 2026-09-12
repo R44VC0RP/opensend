@@ -2951,6 +2951,48 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a feedback sink carries simulated callbacks off the jobs table and the batch consumer ingests them exactly once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const { ingestFeedbackBatch } = await import('./src/operations.js');
+      // Cloudflare provides this sink (the feedback queue); here it is an in-memory capture.
+      const sink: import('./src/core.js').FeedbackItem[] = [];
+      runtime.feedback = { enqueue: async items => { sink.push(...items); } };
+      cleanup(t, async () => { delete runtime.feedback; });
+      const first = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const second = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await run('email.dispatch');
+      assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'With a sink, acceptance must not create feedback jobs.');
+      assert.equal(sink.length, 4, 'Two accepted emails produce Send and Delivery callbacks each.');
+      assert.ok(sink.every(item => item.environment === 'test' && item.topicArn === `urn:opensend:simulated-ses:${REGION}` && String(item.message.mail && (item.message.mail as Json).messageId).startsWith('sim_')));
+      const receipts = async () => (await db.query('SELECT message_id, processed_at FROM operation_sns_receipts WHERE workspace_id = $1 ORDER BY message_id', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(await receipts(), []);
+      // Out of order, duplicated, plus one non-routine item the simulator can never legitimately emit.
+      // Live items are trusted here because SNS signature verification happens before enqueueing.
+      const deliveries = sink.filter(item => item.message.eventType === 'Delivery'), sends = sink.filter(item => item.message.eventType === 'Send');
+      const bounce = { ...sends[0]!, messageId: `${sends[0]!.messageId}-bounce`, message: { ...sends[0]!.message, eventType: 'Bounce' } };
+      const outcomes = await ingestFeedbackBatch(runtime, [...deliveries, ...sends, deliveries[0]!, bounce]);
+      assert.deepEqual(outcomes.slice(0, 5).map(outcome => outcome.ok), [true, true, true, true, true], 'Routine items and an exact duplicate are acknowledged.');
+      assert.equal(outcomes[5]!.ok, false);
+      assert.equal(outcomes[5]!.error, 'SIMULATED_FEEDBACK_UNSUPPORTED');
+      const persisted = await receipts();
+      assert.equal(persisted.length, 4, 'Exactly one receipt per distinct callback; duplicates and rejected items add none.');
+      assert.ok(persisted.every(receipt => receipt.processed_at !== null));
+      for (const email of [first, second]) {
+        assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered', 'A late Send must not regress a delivered status.');
+        const observed = page(await local('GET', `/v1/emails/${email.id}/events`));
+        for (const type of ['accepted', 'send', 'delivery']) assert.equal(observed.filter(event => event.type === type).length, 1);
+      }
+      const published = (await db.query('SELECT type, count(*)::int AS count FROM operation_events WHERE workspace_id = $1 GROUP BY type ORDER BY type', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(published, [{ type: 'email.delivered', count: 2 }, { type: 'email.sent', count: 2 }]);
+      for (const type of ['operation.ses', 'operation.simulatedFeedback', 'operation.simulatedFeedbackRecovery', 'operation.publish', 'operation.webhook']) assert.equal((await jobs(type)).length, 0);
+      // Re-ingesting the whole batch is a no-op.
+      const again = await ingestFeedbackBatch(runtime, [...deliveries, ...sends]);
+      assert.ok(again.every(outcome => outcome.ok));
+      assert.equal((await receipts()).length, 4);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM sending_email_events WHERE workspace_id = $1 AND type IN ('send','delivery')", [runtime.config.workspaceId])).rows[0].count, 4);
+    });
+  });
+
   test('unmatched callback retains one deferred recovery and later records delivery exactly once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const [{ operationJobs }, { recordEmailEvent }] = await Promise.all([import('./src/operations.js'), import('./src/sending.js')]);

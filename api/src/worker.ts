@@ -13,7 +13,9 @@ import { browserImageRenderer } from './adapters/browser-rendering.js';
 import { publicImageImporter } from './adapters/public-image.js';
 import { dispatcherName, shardCount } from './dispatcher-do.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
-import type { Mode } from './core.js';
+import type { FeedbackItem, Mode } from './core.js';
+import { ingestFeedbackBatch } from './operations.js';
+import { feedbackSink } from './adapters/feedback-queue.js';
 export { DispatcherShard } from './dispatcher-do.js';
 
 // Nudges every shard for one environment/region. Objects are created near the database on first use.
@@ -66,7 +68,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
 }
 export default {
@@ -75,7 +77,10 @@ export default {
       const admissionStarted = performance.now();
       const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';
       const peer = await digest(address);
-      const gate = await env.ADMISSION.limit({ key: `opensend:default:${peer}` });
+      // SNS publishes from a small IP pool at the full send rate; its requests are authenticated by
+      // signature verification in the handler, so the per-address admission gate does not apply.
+      const feedbackIngress = new URL(request.url).pathname === '/v1/events/ses' && request.method === 'POST';
+      const gate = feedbackIngress ? { success: true } : await env.ADMISSION.limit({ key: `opensend:default:${peer}` });
       if (!gate.success) return admissionDenied();
       const admissionMs = performance.now() - admissionStarted;
       const headers = new Headers(request.headers);
@@ -102,6 +107,17 @@ export default {
   },
   // Queue/scheduled continuations bypass coalescing to preserve active worker chains and future due times.
   async queue(batch, env) {
+    if (batch.queue === 'opensend-feedback') {
+      // Each message is one verified callback; acknowledge and retry individually so one bad
+      // payload never blocks a batch of routine deliveries.
+      await withRuntime(env, async runtime => {
+        const messages = batch.messages as readonly Message<FeedbackItem>[];
+        const outcomes = await ingestFeedbackBatch(await resolveRegionRuntime(runtime), messages.map(message => message.body));
+        for (const [index, message] of messages.entries()) outcomes[index]?.ok ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
+        log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
+      });
+      return;
+    }
     await withRuntime(env, async runtime => {
       const concurrency = workerConcurrency(env);
       // Return frequently so Queues can reassess concurrency. Already claimed

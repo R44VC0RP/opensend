@@ -4,6 +4,7 @@ interface __BaseEnv_Env {
 	ATTACHMENTS: R2Bucket;
 	HYPERDRIVE: Hyperdrive;
 	WAKE_QUEUE: Queue;
+	FEEDBACK_QUEUE: Queue<import("./src/core").FeedbackItem>;
 	ADMISSION: RateLimit;
 	BROWSER: BrowserRun;
 	PUBLIC_URL: "https://opensend.anoma.ly";
@@ -12,7 +13,7 @@ interface __BaseEnv_Env {
 	JOB_CONCURRENCY: "6";
 	SIMULATED_SES_LATENCY_MS: "170";
 	SIMULATED_SES_RATE: "5000";
-	DISPATCH_SHARDS: "1";
+	DISPATCH_SHARDS: "4";
 	WEBHOOK_ALLOWED_HOSTS: "";
 	DISPATCHER: DurableObjectNamespace<import("./src/dispatcher-do").DispatcherShard>;
 }

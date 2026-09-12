@@ -2,7 +2,7 @@ import { getTableColumns, sql } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, id, log, type Actor, type Mode, type Runtime } from './core.js';
 import { emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { attachmentRows, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
+import { attachmentRows, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { assertLiveRegionReady } from './ses-region-state.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
 
@@ -356,7 +356,7 @@ async function recordOutcomes(runtime: Runtime, a: Actor, outcomes: Outcome[]) {
       SELECT 'urn:opensend:simulated-ses:' || m.region AS topic_arn, m.id || ':' || kind AS message_id, i.workspace_id, m.region, x.provider_id,
         i.created_at + CASE WHEN kind = 'Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at, kind
       FROM inserted i JOIN input x ON x.event_id = i.id JOIN mail m ON m.id = i.email_id, unnest(ARRAY['Send','Delivery']) kind
-      WHERE ${simulated}::boolean AND x.type = 'accepted' AND x.provider_id LIKE 'sim\\_%'
+      WHERE ${simulated && !runtime.feedback}::boolean AND x.type = 'accepted' AND x.provider_id LIKE 'sim\\_%'
     ), simulated_jobs AS (
       INSERT INTO jobs(id, workspace_id, environment, type, available_at, payload)
       SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, 'test', 'operation.simulatedFeedback', r.created_at,
@@ -364,6 +364,11 @@ async function recordOutcomes(runtime: Runtime, a: Actor, outcomes: Outcome[]) {
           'message', jsonb_build_object('eventType', r.kind, 'mail', jsonb_build_object('messageId', r.provider_id), lower(r.kind), jsonb_build_object('timestamp', r.created_at)))
       FROM simulated_callbacks r RETURNING id
     ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`);
+  // With a feedback sink, simulated Send/Delivery callbacks travel the same queue live SNS feedback does.
+  if (simulated && runtime.feedback) {
+    const recorded = new Date().toISOString();
+    await queueSimulatedFeedback(runtime, outcomes.filter(o => o.type === 'accepted' && o.providerId?.startsWith('sim_')).map(o => ({ emailId: o.mail.id, region: o.mail.region, providerId: o.providerId!, createdAt: recorded })));
+  }
 }
 
 // Suppressed claims record their event; canceled rows are already final.

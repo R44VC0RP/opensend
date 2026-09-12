@@ -45,12 +45,16 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
+export type FeedbackItem = { environment: Mode; region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   wake?: (readyJobs?: number) => Promise<void>;
   // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (environment: Mode, region: string) => Promise<void>;
+  // Verified provider feedback (and test-mode simulated callbacks) leave the request path through this
+  // sink and are ingested in batches, never through the sending jobs table.
+  feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
 }
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };

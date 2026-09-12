@@ -11,7 +11,8 @@ import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { ingestRoutineSesEvent, recordEmailEvent } from './sending.js';
+import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, type RoutineIngress } from './sending.js';
+import type { FeedbackItem } from './core.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -355,6 +356,12 @@ function registerPublicEvents(app: App) {
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
     verifySesAccount(c.env, message);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
+    // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
+    // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
+    if (c.env.feedback) {
+      await c.env.feedback.enqueue([{ environment: 'live', region: trusted.region, topicArn: envelope.TopicArn, messageId: envelope.MessageId, message: message as Record<string, unknown> }]);
+      return c.json({ accepted: true }, 202);
+    }
     const identity = { workspaceId: c.env.config.workspaceId, environment: 'live' as const };
     const routine = await ingestRoutineFeedback(c.env, payload, identity);
     const runnable = routine ?? await c.env.db.transaction(async tx => {
@@ -455,6 +462,69 @@ async function ingestRoutineFeedback(runtime: Runtime, payload: Record<string, u
   });
   log('info', { code: 'SES_FEEDBACK_INGESTED', ...identity, kind, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
   return result.runnable;
+}
+
+function routineInput(item: FeedbackItem, workspaceId: string): RoutineIngress | null {
+  const data = item.message as Record<string, any>;
+  const kind = data?.eventType ?? data?.notificationType;
+  const providerId = data?.mail?.messageId;
+  if ((kind !== 'Send' && kind !== 'Delivery') || typeof providerId !== 'string') return null;
+  const timestamp = data?.[kind.toLowerCase()]?.timestamp;
+  const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
+  const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
+  return { workspaceId, environment: item.environment, type: kind === 'Send' ? 'send' : 'delivery', providerId, createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
+    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: item.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' } };
+}
+/**
+ * Batch feedback ingestion for the feedback queue consumer. Routine Send/Delivery callbacks are
+ * persisted in one statement per environment; everything else (bounce, complaint, engagement,
+ * subscription) is processed inline with its receipt. Returns one outcome per input so the caller
+ * can acknowledge or retry messages individually. Live items are trusted only after the SNS
+ * signature check at ingress; test items must carry the simulator's synthetic identity.
+ */
+export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[]): Promise<{ ok: boolean; error?: string }[]> {
+  const workspaceId = runtime.config.workspaceId;
+  const outcomes: { ok: boolean; error?: string }[] = items.map(() => ({ ok: false }));
+  const routine = new Map<Mode, { index: number; input: RoutineIngress }[]>();
+  const other: { index: number; item: FeedbackItem }[] = [];
+  for (const [index, item] of items.entries()) {
+    try {
+      if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
+      else verifySesAccount(runtime, item.message);
+      const input = routineInput(item, workspaceId);
+      if (input) { const group = routine.get(item.environment) ?? []; group.push({ index, input }); routine.set(item.environment, group); }
+      else if (item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
+      else other.push({ index, item });
+    } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
+  }
+  for (const [environment, group] of routine) {
+    try {
+      const results = await ingestRoutineSesEvents(runtime, group.map(entry => entry.input));
+      for (const [position, entry] of group.entries()) {
+        const result = results[position]!;
+        outcomes[entry.index] = { ok: true };
+        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId, environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+      }
+      // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
+      if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+    } catch (error) {
+      for (const entry of group) outcomes[entry.index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PERSIST_FAILED' };
+    }
+  }
+  if (other.length) {
+    // Non-routine callbacks need a receipt row first; processing is idempotent per receipt.
+    await runtime.db.insert(snsReceipts).values(other.map(({ item }) => ({ topicArn: item.topicArn, messageId: item.messageId, workspaceId, environment: item.environment }))).onConflictDoNothing();
+    await Promise.all(other.map(async ({ index, item }) => {
+      try {
+        await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
+        outcomes[index] = { ok: true };
+      } catch (error) {
+        outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
+        log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', environment: item.environment, message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
+      }
+    }));
+  }
+  return outcomes;
 }
 
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {

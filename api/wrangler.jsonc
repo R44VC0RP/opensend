@@ -24,7 +24,7 @@
     "SIMULATED_SES_LATENCY_MS": "170",
     "SIMULATED_SES_RATE": "5000",
     // Dispatcher shards per environment/region; each owns 1/N of the regional send quota.
-    "DISPATCH_SHARDS": "1",
+    "DISPATCH_SHARDS": "4",
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
   // One long-lived dispatcher per environment/region/shard, placed near the database.
@@ -34,8 +34,15 @@
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
-    "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],
-    "consumers": [{ "queue": "opensend-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 }]
+    "producers": [
+      { "binding": "WAKE_QUEUE", "queue": "opensend-work" },
+      // Verified provider feedback and test-mode simulated callbacks; ingested in batches, never via the jobs table.
+      { "binding": "FEEDBACK_QUEUE", "queue": "opensend-feedback" }
+    ],
+    "consumers": [
+      { "queue": "opensend-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      { "queue": "opensend-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 }
+    ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
   "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } }],
