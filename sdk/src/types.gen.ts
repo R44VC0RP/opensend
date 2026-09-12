@@ -982,6 +982,14 @@ export type Metrics = {
         bounced: number;
         complained: number;
     }>;
+    hourly?: Array<{
+        date: string;
+        count: number;
+        sent: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
+    }>;
 };
 
 export type RegionCatalog = {
@@ -7651,6 +7659,7 @@ export type GetMetricsData = {
         from?: string;
         to?: string;
         stream?: 'transactional' | 'marketing';
+        granularity?: 'day' | 'hour';
     };
     url: '/v1/metrics';
 };

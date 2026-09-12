@@ -107,17 +107,22 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       const params = new URLSearchParams({ region: input.regionId, from: start.toISOString(), to: end.toISOString() })
       if (input.stream) params.set('stream', input.stream)
       const previousParams = new URLSearchParams(params); previousParams.set('to', start.toISOString()); previousParams.set('from', new Date(start.getTime() - (end.getTime() - start.getTime())).toISOString())
+      const hourly = input.range !== '30d'
+      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day')
       const [metrics, campaigns, previous, transactional, marketing] = await Promise.all([
-        call(`/metrics?${params}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal),
+        call(`/metrics?${chartParams}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal),
         call(`/metrics?${previousParams}`, 'GET', undefined, signal), ...(['transactional', 'marketing'] as const).map(stream => {const q = new URLSearchParams(params); q.set('stream', stream); return call(`/metrics?${q}`, 'GET', undefined, signal)}),
       ])
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
-      const daily = new Map<string, Json>(metrics.daily.map((row: Json) => [String(row.date).slice(0, 10), row]))
-      const startAt = new Date(metrics.from), endAt = Date.parse(metrics.to)
+      const buckets = hourly ? metrics.hourly : metrics.daily
+      if (!Array.isArray(buckets)) throw new ApiError('The API did not return the requested chart buckets.', 'INVALID_RESPONSE')
+      const series = new Map<number, Json>(buckets.map((row: Json) => [Date.parse(row.date), row]))
+      const step = hourly ? 3600000 : 86400000
+      const startAt = Math.floor(Date.parse(metrics.from) / step) * step, endAt = Date.parse(metrics.to)
       const points = []
-      for (let day = Date.UTC(startAt.getUTCFullYear(), startAt.getUTCMonth(), startAt.getUTCDate()); day < endAt; day += 86400000) {
-        const at = new Date(day).toISOString(), row = daily.get(at.slice(0, 10))
+      for (let bucket = startAt; bucket < endAt; bucket += step) {
+        const at = new Date(bucket).toISOString(), row = series.get(bucket)
         points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: previous.totals.emails, points, streams: [{name: 'transactional', sent: transactional.totals.emails}, {name: 'marketing', sent: marketing.totals.emails}], recentCampaigns: campaigns.items }

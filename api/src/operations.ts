@@ -375,20 +375,32 @@ function registerPublicEvents(app: App) {
 }
 
 function registerMetrics(app: App) {
-  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional() }).openapi('MetricsQuery');
-  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() })) }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (daily sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails; absent days have no created emails. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day') }).openapi('MetricsQuery');
+  const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
+  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(bucket), hourly: z.array(bucket).optional() }).openapi('Metrics');
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
     const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
     const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
     const outcome = (status: string, type: EventType) => distinct(sql`${emails.status} = ${status} OR ${events.type} = ${type}`);
-    const date = sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
-    // ROLLUP computes the total and at most 367 daily aggregates in one snapshot.
+    const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+    // ROLLUP computes the total and at most 367 daily or 8785 hourly aggregates in one snapshot.
     // The scoped left join retains queued emails and limits all events to this cohort.
     const rows = await c.env.db.select({ date, emails: sql<number>`count(DISTINCT ${emails.id})::int`, accepted: distinct(sql`NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${events.type} IN ('email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.delivery_delayed'))`), delivered: outcome('delivered', 'email.delivered'), bounced: outcome('bounced', 'email.bounced'), complained: outcome('complained', 'email.complained'), opened: distinct(sql`${events.type} = 'email.opened'`), clicked: distinct(sql`${events.type} = 'email.clicked'`), failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${events.type} IN ('email.rejected', 'email.rendering_failed')`), deliveryDelayed: outcome('delayed', 'email.delivery_delayed'), simulated: distinct(sql`${emails.simulated}`) }).from(emails).leftJoin(events, and(eq(emails.id, sql`${events.data}->>'emailId'`), eq(emails.workspaceId, events.workspaceId), eq(emails.environment, events.environment), scoped(events, a))).where(filter).groupBy(sql`ROLLUP (${date})`).orderBy(date);
     const { date: _date, ...totals } = rows.find(row => row.date === null)!;
-    const daily = rows.filter(row => row.date !== null).map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
-    return c.json({ basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily }, 200);
+    const buckets = rows.filter(row => row.date !== null).map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
+    let daily = buckets;
+    if (q.granularity === 'hour') {
+      const days = new Map<string, z.infer<typeof bucket>>();
+      // Every email belongs to one creation hour, so its outcome counts remain additive by day.
+      for (const row of buckets) {
+        const date = row.date.slice(0, 10), day = days.get(date);
+        if (day) for (const key of ['count', 'sent', 'delivered', 'bounced', 'complained'] as const) day[key] += row[key];
+        else days.set(date, { ...row, date });
+      }
+      daily = [...days.values()];
+    }
+    return c.json({ basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) }, 200);
   });
 }
 

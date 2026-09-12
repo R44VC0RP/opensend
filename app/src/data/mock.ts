@@ -521,13 +521,13 @@ export function createMockApi(): OpenSendApi {
         const end = Date.now()
         const start = end - duration
         const all = s.emails.filter(e => e.regionId === input.regionId && (!input.stream || e.stream === input.stream))
-        const emails = all.filter(e => Date.parse(e.sentAt) >= start && Date.parse(e.sentAt) <= end)
+        const emails = all.filter(e => Date.parse(e.sentAt) >= start && Date.parse(e.sentAt) < end)
         const count = (status: Email['status']) => emails.filter(e => e.status === status).length
-        const buckets = input.range === '24h' ? 24 : input.range === '7d' ? 7 : 30
-        const points = Array.from({ length: buckets }, (_, i) => {
-          const from = start + i * duration / buckets
-          const to = start + (i + 1) * duration / buckets
-          const rows = emails.filter(e => Date.parse(e.sentAt) >= from && (i === buckets - 1 ? Date.parse(e.sentAt) <= to : Date.parse(e.sentAt) < to))
+        const step = input.range === '30d' ? 86400000 : 3600000
+        const firstBucket = Math.floor(start / step) * step
+        const points = Array.from({ length: Math.ceil((end - firstBucket) / step) }, (_, i) => {
+          const from = firstBucket + i * step, to = from + step
+          const rows = emails.filter(e => Date.parse(e.sentAt) >= from && Date.parse(e.sentAt) < to)
           return { at: new Date(from).toISOString(), sent: rows.length, delivered: rows.filter(e => e.status === 'delivered').length, bounced: rows.filter(e => e.status === 'bounced').length, complaints: rows.filter(e => e.status === 'complaint').length }
         })
         return { periodStart: new Date(start).toISOString(), periodEnd: new Date(end).toISOString(), sent: emails.length, delivered: count('delivered'), bounced: count('bounced'), complaints: count('complaint'), deferred: count('deferred'), previousSent: all.filter(e => Date.parse(e.sentAt) >= start - duration && Date.parse(e.sentAt) < start).length, points, streams: (['transactional', 'marketing'] as const).map(name => ({ name, sent: emails.filter(e => e.stream === name).length })), recentCampaigns: s.campaigns.filter(c => c.regionId === input.regionId && c.archivedAt == null).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 4).map(c => campaignTotals(s, c)) }

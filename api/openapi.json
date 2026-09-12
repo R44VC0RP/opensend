@@ -4382,6 +4382,40 @@
                 "complained"
               ]
             }
+          },
+          "hourly": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "sent": {
+                  "type": "number"
+                },
+                "delivered": {
+                  "type": "number"
+                },
+                "bounced": {
+                  "type": "number"
+                },
+                "complained": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "date",
+                "count",
+                "sent",
+                "delivered",
+                "bounced",
+                "complained"
+              ]
+            }
           }
         },
         "required": [
@@ -22178,7 +22212,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (daily sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails; absent days have no created emails. Engagement is observed, not verified human activity.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.",
         "tags": [
           "Metrics"
         ],
@@ -22230,6 +22264,19 @@
             },
             "required": false,
             "name": "stream",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "day",
+                "hour"
+              ],
+              "default": "day"
+            },
+            "required": false,
+            "name": "granularity",
             "in": "query"
           }
         ],
