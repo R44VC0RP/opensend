@@ -48,8 +48,8 @@ export interface Campaign { expansion?: { status: 'pending' | 'expanding' | 'com
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; reviewId: string | null; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { reviewId?: string; revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string }
-export interface ApiKey { environment?: 'live' | 'test'; revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
-export interface ApiKeyInput { environment?: 'live' | 'test'; name: string; permission: 'send' | 'read'; domains: string[] }
+export interface ApiKey { environment?: 'live' | 'test'; revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
+export interface ApiKeyInput { environment?: 'live' | 'test'; name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }
 export interface AgentTokenSummary { id: string; grantId: string; environment: 'live' | 'test'; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate }
