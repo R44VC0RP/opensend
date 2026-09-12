@@ -61,7 +61,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
         ON CONFLICT (workspace_id) DO UPDATE SET turn = (job_schedule.turn + 1) % 16 RETURNING turn
       ), feedback AS (
         SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1}
-          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type IN ('operation.ses','operation.publish')
+          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type = 'operation.ses'
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
         ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
@@ -69,12 +69,13 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
         SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
-        ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
+        ORDER BY CASE WHEN j.type IN ('operation.ses','operation.publish') THEN 1 ELSE 0 END,
+          CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
           CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('operation.ses','operation.publish') THEN 0
             WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
             WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 2 WHEN j.type = 'email.dispatch' THEN 3 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN j.type = 'campaign.finish' THEN 0 WHEN j.type = 'email.dispatch' THEN 1
-            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type IN ('operation.ses','operation.publish') THEN 3 ELSE 4 END,
+            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type = 'operation.ses' THEN 3 WHEN j.type = 'operation.publish' THEN 4 ELSE 5 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM regular
