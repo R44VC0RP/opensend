@@ -23,8 +23,9 @@ const SENDING_LIMITS = {
   test: { pending: 500, keyPending: 100, storedAttachmentBytes: 64 * 1024 * 1024, expandedCampaignBytes: 16 * 1024 * 1024 },
   live: { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 },
 } as const;
-const CAMPAIGN_CHUNK_ROWS = 200;
-const CAMPAIGN_CHUNK_BYTES = 2 * 1024 * 1024;
+const CAMPAIGN_PREPARE_ROWS = 1000;
+const CAMPAIGN_EXPAND_ROWS = 200;
+const CAMPAIGN_CHUNK_BYTES = 4 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 const CAMPAIGN_BUFFER = 400;
 // Called only inside admission transactions, before campaign/attachment locks.
@@ -895,7 +896,7 @@ async function cancelCampaignWork(db: DbExecutor, a: Actor, row: typeof campaign
   await db.update(campaigns).set({ status: 'canceled', preparingReviewId: null, updatedAt: now() }).where(campaignWhere(a, row.id));
   return { id: row.id, status: 'canceled' as const, canceled: changed.rows[0]!.count + unexpanded, inFlight: inFlight!.count };
 }
-async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, limit = CAMPAIGN_CHUNK_ROWS) {
+async function recipientChunk(db: DbExecutor, reviewId: string, cursor: number, limit = CAMPAIGN_PREPARE_ROWS) {
   const result = await db.execute<{ ordinal: number; recipient: ReviewedRecipient; content_hash: string | null; subject: string | null; snapshot_bytes: number | null }>(sql`
     WITH batch AS (
       SELECT ordinal, recipient, content_hash, subject, snapshot_bytes, recipient_bytes FROM sending_review_recipients
@@ -1433,7 +1434,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
       const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int` }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
-      const capacity = Math.min(CAMPAIGN_CHUNK_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
+      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
       if (capacity <= 0) { await defer(new Date(Date.now() + 2000).toISOString()); return; }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
       if (!review || !recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== expansion.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
