@@ -16,7 +16,7 @@
 .composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { box-sizing: border-box; padding: 24px; }
 .composer-document .tiptap * { font-family: var(--font-email); }
 .composer-document .tiptap:focus-visible { outline: none; }
-:is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+:is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { outline: 1px solid var(--color-focus); outline-offset: 1px; }
 body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-slash-command]) { visibility: hidden; pointer-events: none; }
 .composer-document .tiptap h1, .composer-document .tiptap h2, .composer-document .tiptap h3 { color: inherit; }
 /* Converted paragraphs retain node-paragraph; its later theme rule must not override heading metrics. */
