@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobs, jobSchedule } from './db/core.js';
@@ -268,6 +268,22 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   const [row] = await db.select().from(emails).where(mailWhere(a, emailId));
   if (!row) notFound('Email');
   return row;
+}
+async function findDispatchEmail(db: DbExecutor, a: Actor, emailId: string) {
+  const [row] = await db.select({
+    ...getTableColumns(emails),
+    reviewDraft: campaignReviews.draft,
+    reviewRendered: campaignReviews.rendered,
+    reviewStatus: campaignReviews.status,
+    reviewContentHash: reviewRecipients.contentHash,
+    reviewRecipient: reviewRecipients.recipient,
+  }).from(emails)
+    .leftJoin(campaignReviews, and(scope(campaignReviews, a), eq(campaignReviews.id, emails.reviewId), eq(campaignReviews.campaignId, emails.campaignId)))
+    .leftJoin(reviewRecipients, and(eq(reviewRecipients.reviewId, emails.reviewId), eq(reviewRecipients.ordinal, emails.reviewOrdinal)))
+    .where(mailWhere(a, emailId));
+  if (!row) notFound('Email');
+  const { reviewDraft, reviewRendered, reviewStatus, reviewContentHash, reviewRecipient, ...mail } = row!;
+  return { mail, review: reviewDraft && reviewRendered && reviewRecipient ? { draft: reviewDraft, rendered: reviewRendered, status: reviewStatus, contentHash: reviewContentHash, recipient: reviewRecipient } : null };
 }
 async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
@@ -1126,18 +1142,12 @@ async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspace
 async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails.$inferSelect) {
   return db.update(emails).set({ status: 'canceled', errorCode: 'ORIGIN_KEY_REVOKED', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
 }
-async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
+async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient } | null) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
   // The winning claim persists its snapshot and token atomically; losing workers
   // discard their render without writing a different snapshot over the winner.
-  const [reviews, rows] = await Promise.all([
-    runtime.db.select({ draft: campaignReviews.draft, rendered: campaignReviews.rendered, status: campaignReviews.status, recipient: reviewRecipients.recipient, contentHash: reviewRecipients.contentHash })
-      .from(campaignReviews).innerJoin(reviewRecipients, and(eq(reviewRecipients.reviewId, campaignReviews.id), eq(reviewRecipients.ordinal, mail.reviewOrdinal!)))
-      .where(and(scope(campaignReviews, a), eq(campaignReviews.id, mail.reviewId!), eq(campaignReviews.campaignId, mail.campaignId!))),
-    attachmentRows(runtime.db, a, mail.snapshot.attachments),
-  ]);
-  const review = reviews[0];
+  const rows = await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || review.status !== 'ready' || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
   const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
   if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
@@ -1155,7 +1165,8 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   };
   try {
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
-  let mail = await phase('read', () => findEmail(runtime.db, a, payload.emailId as string));
+  const dispatchInput = await phase('read', () => findDispatchEmail(runtime.db, a, payload.emailId as string));
+  let mail = dispatchInput.mail;
   if (mail.dispatchVersion !== (payload.version ?? 0)) return;
   if (mail.status === 'attempting') {
     // A previous lease died after recording attempt start. SES has no idempotency token: never automatically resend.
@@ -1169,7 +1180,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   let preparedAttachments: (typeof attachments.$inferSelect)[] | undefined;
   let pendingUnsubscribe: Awaited<ReturnType<typeof createUnsubscribeLink>>['record'] | undefined;
   if (mail.snapshot.deferredCampaign) {
-    const materialized = await phase('materialize', () => materializeCampaignEmail(runtime, a, mail));
+    const materialized = await phase('materialize', () => materializeCampaignEmail(runtime, a, mail, dispatchInput.review));
     mail = materialized.mail; preparedAttachments = materialized.rows; pendingUnsubscribe = materialized.unsubscribe;
   }
   const s = mail.snapshot;
