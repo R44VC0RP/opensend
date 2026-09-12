@@ -72,10 +72,17 @@ export function region(runtime: Runtime, value: string) {
   if (!runtime.config.regions.includes(value)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested region is not configured for this deployment.', 'region');
   return value;
 }
+// Runtime identities are invocation-local in Workers; never reuse an I/O client
+// across requests. Node drains also receive a fresh resolved runtime.
+const sesClients = new WeakMap<Runtime, Map<string, SESv2Client>>();
 export function getSes(runtime: Runtime, selectedRegion: string): SESv2Client {
   region(runtime, selectedRegion);
   if (!runtime.config.liveEnabled || !runtime.config.aws) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
-  return new SESv2Client({ region: selectedRegion, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) });
+  let clients = sesClients.get(runtime);
+  if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
+  let client = clients.get(selectedRegion);
+  if (!client) { client = new SESv2Client({ region: selectedRegion, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(selectedRegion, client); }
+  return client;
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
   // Callers supply operation/IDs/codes, never request bodies, tokens, addresses or arbitrary provider errors.

@@ -41,13 +41,20 @@ export function createSimulatedSesHandler(options: SimulatedSesOptions = {}): Re
   };
 }
 
-// Callers select this only for opted-in test environments; live getSes is unchanged.
+// Same invocation-local client lifetime as the live SDK transport.
+const clients = new WeakMap<Runtime, Map<string, SESv2Client>>();
 export function simulatedSes(runtime: Runtime, region: string): SESv2Client {
-  return new SESv2Client({
+  let regions = clients.get(runtime);
+  if (!regions) { regions = new Map(); clients.set(runtime, regions); }
+  const existing = regions.get(region);
+  if (existing) return existing;
+  const client = new SESv2Client({
     region,
     credentials: { accessKeyId: 'SIMULATED_SES_ACCESS_KEY', secretAccessKey: 'simulated-ses-secret-not-an-aws-credential' },
     endpoint: 'https://ses-simulator.invalid',
     maxAttempts: 1,
     requestHandler: createSimulatedSesHandler(runtime.config.simulatedSes),
   });
+  regions.set(region, client);
+  return client;
 }
