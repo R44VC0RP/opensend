@@ -14,6 +14,8 @@ export interface Actor {
   workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
   // "environment:region" pairs whose queued mail this request committed; the response path nudges their dispatcher.
   dispatchTargets?: Set<string>;
+  // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
+  wakeJobs?: number;
 }
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
@@ -35,6 +37,8 @@ export interface Config {
   regions: string[];
   liveEnabled: boolean;
   simulatedSes: { latencyMs: number; maxSendRate: number; deliveryDelayMs: number };
+  // Pacing target relative to the provider quota: factor (1.1 aims 10% above) and an optional absolute live rate.
+  dispatch: { rateFactor: number; targetRate?: number };
   encryptionKey: string;
   previousEncryptionKey?: string;
   awsAccountId?: string;

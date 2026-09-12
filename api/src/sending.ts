@@ -28,6 +28,9 @@ const SENDING_LIMITS = {
 const CAMPAIGN_PREPARE_ROWS = 20000;
 const CAMPAIGN_EXPAND_ROWS = 2000;
 const CAMPAIGN_CHUNK_BYTES = 4 * 1024 * 1024;
+// Estimated final content validated per preparation job. Snapshots are transient here (only their
+// digests are kept), so the ten-second bound is the real guard; this keeps a 10k static campaign to one hop.
+const CAMPAIGN_PREPARE_BYTES = 64 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 // Materialized-but-unsent rows per campaign / per environment: about ten seconds of the regional
 // send rate, so expansion (a scheduler job with its own latency) never starves the dispatcher.
@@ -903,6 +906,8 @@ function backgroundFailure(error: unknown) {
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and prepare a new review, or cancel the campaign.` };
 }
 async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { reviewId?: string; revision: number; scheduledAt?: string }, requestId?: string) {
+  // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
+  a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   await db.delete(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaignId), eq(campaignExpansions.status, 'failed')));
@@ -1251,7 +1256,7 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
         marketingFooter(snapshot, `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_${'0'.repeat(64)}`);
         sizeCheck(snapshot, lockedAttachments);
         const size = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
-        if (prepared.length && bytes + size > CAMPAIGN_CHUNK_BYTES) break;
+        if (prepared.length && bytes + size > CAMPAIGN_PREPARE_BYTES) break;
         if (review.preparedBytes + bytes + size > CAMPAIGN_PREPARED_BYTES) throw new ApiError(413, 'EXPANDED_CAMPAIGN_TOO_LARGE', 'Prepared campaign content exceeds 64 GiB.');
         prepared.push({ ordinal: recipient.ordinal, hash: contentHash, subject: snapshot.subject, bytes: size }); bytes += size; cursor = recipient.ordinal;
         hash = await digest(canonical([hash, recipient.ordinal, recipient.recipient, contentHash]));
