@@ -18,6 +18,7 @@ function requireConfigured(runtime: Runtime) {
   if (!configured(runtime)) throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Google sign-in is not configured for this deployment.');
 }
 export function approvedGoogleIdentity(runtime: Runtime, email: unknown, emailVerified: unknown, hostedDomain: unknown) {
+  if (!configured(runtime)) return false;
   if (emailVerified !== true || typeof email !== 'string' || !email) return false;
   return runtime.config.allowedEmails.includes(email.toLowerCase()) ||
     (typeof hostedDomain === 'string' && hostedDomain !== '' && runtime.config.allowedDomains.includes(hostedDomain.toLowerCase()));
