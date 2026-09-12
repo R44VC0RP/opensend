@@ -22,9 +22,9 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
   try {
     const db = drizzle(client);
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
-      // A bounded burst advertises newly committed work to Queues autoscaling.
-      // These are hints, not email jobs; Postgres still owns every claim.
-      const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
+      // Emit one wake per local claim group so Queues sees the real runnable
+      // backlog and can scale short consumer invocations horizontally.
+      const count = Math.min(100, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
       if (count === 1) {
         // Compute conflict expiry under its row lock, not from an earlier EXCLUDED timestamp.
         const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)
@@ -90,9 +90,9 @@ export default {
   async queue(batch, env) {
     await withRuntime(env, async runtime => {
       const concurrency = workerConcurrency(env);
-      // Return frequently so Queues can reassess concurrency. Already claimed
-      // jobs finish normally; the budget never interrupts a provider attempt.
-      await drain(runtime, 100, concurrency, 2000);
+      // One claim group per wake lets Queues reassess horizontal concurrency
+      // after every short batch. Already claimed provider attempts still finish.
+      await drain(runtime, concurrency, concurrency, 2000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
