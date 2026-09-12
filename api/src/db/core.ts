@@ -22,6 +22,7 @@ export const agentTokens = pgTable('agent_tokens', {
 }, t => [index('agent_tokens_workspace_page').on(t.workspaceId, t.id), index('agent_tokens_grant').on(t.workspaceId, t.grantId), index('agent_tokens_expiry').on(t.expiresAt)]);
 export const jobSchedule = pgTable('job_schedule', {
   workspaceId: text('workspace_id').primaryKey(), turn: integer('turn').notNull().default(0),
+  wakeNotBefore: timestamp('wake_not_before', { withTimezone: true, mode: 'string' }),
 });
 export const jobs = pgTable('jobs', {
   id: text('id').primaryKey(), workspaceId: text('workspace_id').notNull(),

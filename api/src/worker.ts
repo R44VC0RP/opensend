@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
+import { sql } from 'drizzle-orm';
 import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
@@ -18,11 +19,37 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
   const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: workerConcurrency(env) });
   try {
-    return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
+    const db = drizzle(client);
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
       // A bounded burst advertises newly committed work to Queues autoscaling.
       // These are hints, not email jobs; Postgres still owns every claim.
       const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
-      await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
+      if (count === 1) {
+        // Compute conflict expiry under its row lock, not from an earlier EXCLUDED timestamp.
+        const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)
+          VALUES (${config.workspaceId}, clock_timestamp() + interval '1 second')
+          ON CONFLICT (workspace_id) DO UPDATE SET wake_not_before = clock_timestamp() + interval '1 second'
+          WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before <= clock_timestamp()
+          RETURNING wake_not_before::text`);
+        const fence = reserved.rows[0]?.wake_not_before;
+        if (!fence) {
+          log('info', { code: 'QUEUE_WAKE_COALESCED', readyJobs });
+          return;
+        }
+        try {
+          // Delay past the window so the signal cannot be consumed before later coalesced job commits.
+          await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds: 1 });
+        } catch (error) {
+          // Keep the exact database timestamp: an older failed send must not clear a newer reservation.
+          try {
+            await db.execute(sql`UPDATE job_schedule SET wake_not_before = NULL
+              WHERE workspace_id = ${config.workspaceId} AND wake_not_before = ${fence}::timestamptz`);
+          } catch { /* Preserve the original send error; the window also expires on its own. */ }
+          throw error;
+        }
+      } else {
+        await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
+      }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
     }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
@@ -58,6 +85,7 @@ export default {
       return secureResponse(Response.json({ error: { code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } }, { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } }));
     }
   },
+  // Queue/scheduled continuations bypass coalescing to preserve active worker chains and future due times.
   async queue(batch, env) {
     await withRuntime(env, async runtime => {
       const concurrency = workerConcurrency(env);

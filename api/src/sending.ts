@@ -960,14 +960,21 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   return { id: campaignId, status, queued: review.recipients.length, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
-const attachmentCaches = new WeakMap<Storage, { bytes: number; entries: Map<string, Uint8Array>; pending: Map<string, Promise<Uint8Array>> }>();
+// Reuse fully verified bytes across invocations sharing the same bucket binding.
+// Pending reads remain local to each Storage wrapper/invocation: Workers cannot
+// await I/O owned by a different request. Both paths retain bounded byte storage.
+const attachmentCaches = new WeakMap<object, { bytes: number; entries: Map<string, Uint8Array> }>();
+const attachmentLoads = new WeakMap<Storage, Map<string, Promise<Uint8Array>>>();
 async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inferSelect) {
-  let cache = attachmentCaches.get(runtime.storage);
-  if (!cache) { cache = { bytes: 0, entries: new Map(), pending: new Map() }; attachmentCaches.set(runtime.storage, cache); }
-  const key = `${row.storageKey}:${row.checksum}`;
+  const scope = runtime.storage.cacheScope ?? runtime.storage;
+  let cache = attachmentCaches.get(scope);
+  if (!cache) { cache = { bytes: 0, entries: new Map() }; attachmentCaches.set(scope, cache); }
+  const key = `${row.storageKey}:${row.checksum}:${row.size}`;
   const cached = cache.entries.get(key);
   if (cached) { cache.entries.delete(key); cache.entries.set(key, cached); return cached; }
-  const existing = cache.pending.get(key);
+  let pending = attachmentLoads.get(runtime.storage);
+  if (!pending) { pending = new Map(); attachmentLoads.set(runtime.storage, pending); }
+  const existing = pending.get(key);
   if (existing) return existing;
   const load = (async () => {
     const asset = await runtime.storage.get(row.storageKey);
@@ -982,8 +989,8 @@ async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inf
     if (asset.body.length <= limit) { cache!.entries.set(key, asset.body); cache!.bytes += asset.body.length; }
     return asset.body;
   })();
-  cache.pending.set(key, load);
-  try { return await load; } finally { if (cache.pending.get(key) === load) cache.pending.delete(key); }
+  pending.set(key, load);
+  try { return await load; } finally { if (pending.get(key) === load) pending.delete(key); }
 }
 
 const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };

@@ -5,6 +5,7 @@ import type { Storage } from '../core.js';
 const MAX_OBJECT_BYTES = 8 * 1024 * 1024;
 export function r2Storage(bucket: R2Bucket): Storage {
   return {
+    cacheScope: bucket,
     async put(key, body, contentType) { await bucket.put(key, body, { httpMetadata: { contentType } }); },
     async get(key) {
       const object = await bucket.get(key);

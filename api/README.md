@@ -148,6 +148,8 @@ Build `app/` with `npm ci` and `npm run build` before `npm run cf:check` in `api
 
 HTTP, Queue, and scheduled handlers share the outbox. Queue messages are wakeups; committed jobs survive a lost wakeup. Workers consume one wake signal per queue invocation and stop claiming new jobs after a two-second turn, while allowing every in-flight job to finish. Campaign expansion emits a bounded burst of up to eight wake signals after committing new email jobs. Cron recovers due work and performs hourly retention. Scheduling prefers live/test work 3:1 with fallback and reserves one feedback-first lane when concurrency exceeds one. PostgreSQL transactions/leases, not wake messages or process-local state, control dispatch.
 
+Apply migration `018_wake_coalescing.sql` before deploying this Worker; singleton wake coalescing requires its nullable `job_schedule.wake_not_before` column. Singleton notifications share a one-second window per workspace and are delayed one second; larger bursts and queue/scheduled continuations remain ungated.
+
 ### Automatic deployments
 
 Pushes to `main` deploy through [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml): it installs both packages, type-checks the API, builds the dashboard, and runs `wrangler deploy` from `api/`. It needs a `CLOUDFLARE_API_TOKEN` repository secret created from the **Edit Cloudflare Workers** token template, scoped to this account. Other branches do not deploy; give them separate database, bucket, queue, and credentials before enabling that. Schema migrations remain an explicit step using the migration role, not an automatic side effect of deploying code.
