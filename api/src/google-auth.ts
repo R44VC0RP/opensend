@@ -17,7 +17,7 @@ function configured(runtime: Runtime) {
 function requireConfigured(runtime: Runtime) {
   if (!configured(runtime)) throw new ApiError(503, 'AUTH_NOT_CONFIGURED', 'Google sign-in is not configured for this deployment.');
 }
-function approved(runtime: Runtime, email: unknown, emailVerified: unknown, hostedDomain: unknown) {
+export function approvedGoogleIdentity(runtime: Runtime, email: unknown, emailVerified: unknown, hostedDomain: unknown) {
   if (emailVerified !== true || typeof email !== 'string' || !email) return false;
   return runtime.config.allowedEmails.includes(email.toLowerCase()) ||
     (typeof hostedDomain === 'string' && hostedDomain !== '' && runtime.config.allowedDomains.includes(hostedDomain.toLowerCase()));
@@ -29,7 +29,7 @@ export async function isApprovedUser(runtime: Runtime, userId: string, db: DbExe
     .from(authUser).innerJoin(authAccount, and(eq(authAccount.userId, authUser.id), eq(authAccount.providerId, 'google'), ne(authAccount.accountId, '')))
     .where(eq(authUser.id, userId)).limit(1).for('share');
   // With a transaction executor, hold the approved user/account through dispatch's claim.
-  return Boolean(user && approved(runtime, user.email, user.emailVerified, user.googleHostedDomain));
+  return Boolean(user && approvedGoogleIdentity(runtime, user.email, user.emailVerified, user.googleHostedDomain));
 }
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
@@ -78,7 +78,7 @@ export function createAuth(runtime: Runtime) {
         if (source.method !== 'oauth' || source.oauth?.providerId !== 'google' || source.action === 'link-account' ||
           typeof profile?.sub !== 'string' || !profile.sub || typeof profile.email !== 'string' ||
           user.email?.toLowerCase() !== profile.email.toLowerCase() || user.emailVerified !== true ||
-          !approved(runtime, profile.email, profile.email_verified, profile.hd)) {
+          !approvedGoogleIdentity(runtime, profile.email, profile.email_verified, profile.hd)) {
           return { error: 'GOOGLE_ACCESS_DENIED', errorDescription: 'This Google identity is not approved.' };
         }
         profiles.set(context, { email: profile.email.toLowerCase(), subject: profile.sub, hostedDomain: typeof profile.hd === 'string' ? profile.hd.toLowerCase() : null });
@@ -144,7 +144,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, returnHeaders: true }));
     applyHeaders(result.headers);
     const session = result.response;
-    if (!session || !approved(runtime, session.user.email, session.user.emailVerified, session.user.googleHostedDomain)) return null;
+    if (!session || !approvedGoogleIdentity(runtime, session.user.email, session.user.emailVerified, session.user.googleHostedDomain)) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
     return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: session.user.email, name: session.user.name };

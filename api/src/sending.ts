@@ -1193,7 +1193,7 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, permit.waitUntil! - Date.now())));
   }
   const claim = (lock: true | 'share') => runtime.db.transaction(async db => {
-    const campaign = mail.campaignId ? await findCampaign(db, a, mail.campaignId, lock) : null;
+    const campaign = mail.campaignId && mail.scheduledAt ? await findCampaign(db, a, mail.campaignId, lock) : null;
     // Never upgrade shared campaign locks: concurrent scheduled claims would
     // deadlock. Release and retry with the writer lock before any other locks.
     if (campaign?.status === 'scheduled' && lock === 'share') return null;
@@ -1202,20 +1202,24 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     const destinations = [...s.to, ...s.cc, ...s.bcc].map(email => email.toLowerCase());
     // PostgreSQL locks consent, elects one sender, and saves the exact winning
     // snapshot/token/attempt together. No intermediate application round trips.
-    const changed = await db.execute<{ status: EmailStatus }>(sql`WITH destinations AS (
+    const changed = await db.execute<{ status: EmailStatus }>(sql`WITH campaign_state AS MATERIALIZED (
+      SELECT status FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment}
+        AND id = ${mail.campaignId ?? null} FOR SHARE
+    ), destinations AS (
       SELECT jsonb_array_elements_text(${JSON.stringify(destinations)}::jsonb) AS email
     ), consent AS MATERIALIZED (
       SELECT email, suppressed, deleted_at, marketing_consent FROM audience_contacts
       WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email IN (SELECT email FROM destinations)
       ORDER BY id FOR UPDATE
     ), eligibility AS (
-      SELECT NOT EXISTS (SELECT 1 FROM destinations
+      SELECT (${mail.campaignId === null} OR EXISTS (SELECT 1 FROM campaign_state WHERE status <> 'canceled')) AS campaign_allowed,
+        NOT EXISTS (SELECT 1 FROM destinations
         LEFT JOIN consent USING (email) WHERE consent.suppressed IS TRUE
-        OR (${s.kind === 'marketing'} AND (consent.email IS NULL OR consent.deleted_at IS NOT NULL OR consent.marketing_consent <> 'subscribed'))) AS allowed
+        OR (${s.kind === 'marketing'} AND (consent.email IS NULL OR consent.deleted_at IS NOT NULL OR consent.marketing_consent <> 'subscribed'))) AS recipient_allowed
     ), claimed AS (
-      UPDATE sending_emails e SET status = CASE WHEN eligibility.allowed THEN 'attempting' ELSE 'suppressed' END,
-        attempt_started_at = CASE WHEN eligibility.allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
-        error_code = CASE WHEN eligibility.allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+      UPDATE sending_emails e SET status = CASE WHEN NOT eligibility.campaign_allowed THEN 'canceled' WHEN eligibility.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
+        attempt_started_at = CASE WHEN eligibility.campaign_allowed AND eligibility.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN NOT eligibility.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN eligibility.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
         snapshot = coalesce(${pendingUnsubscribe ? JSON.stringify(s) : null}::jsonb, e.snapshot), updated_at = clock_timestamp()
       FROM eligibility WHERE e.workspace_id = ${a.workspaceId} AND e.environment = ${a.environment}
         AND e.id = ${mail.id} AND e.status = 'queued' AND e.dispatch_version = ${mail.dispatchVersion}

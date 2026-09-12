@@ -3,12 +3,12 @@ import { createResourceServerChallenge } from '@better-auth/oauth-provider';
 import { APIError } from 'better-auth/api';
 import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, eq, gt, like } from 'drizzle-orm';
+import { and, eq, gt, like, ne } from 'drizzle-orm';
 import { actor, ApiError, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
-import { createAuth, isApprovedUser, requireDashboardOrigin } from './google-auth.js';
+import { approvedGoogleIdentity, createAuth, isApprovedUser, requireDashboardOrigin } from './google-auth.js';
 import { agentTokens } from './db/core.js';
-import { authUser } from './db/google-auth.js';
+import { authAccount, authUser } from './db/google-auth.js';
 import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
 
 const scopes = ['opensend:read', 'opensend:send', 'opensend:manage', 'opensend:live', 'offline_access'];
@@ -72,15 +72,18 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
     scopes: oauthConsent.scopes, referenceId: oauthConsent.referenceId, resources: oauthConsent.resources,
     clientDisabled: oauthClient.disabled, clientScopes: oauthClient.scopes,
     resourceDisabled: oauthResource.disabled, resourceScopes: oauthResource.allowedScopes,
+    email: authUser.email, emailVerified: authUser.emailVerified, googleHostedDomain: authUser.googleHostedDomain,
   }).from(oauthConsent)
     .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId))
     .innerJoin(oauthClientResource, eq(oauthClientResource.clientId, oauthClient.clientId))
     .innerJoin(oauthResource, and(eq(oauthResource.identifier, oauthClientResource.resourceId), eq(oauthResource.identifier, resourceOf(runtime))))
+    .innerJoin(authUser, eq(authUser.id, oauthConsent.userId))
+    .innerJoin(authAccount, and(eq(authAccount.userId, authUser.id), eq(authAccount.providerId, 'google'), ne(authAccount.accountId, '')))
     .where(eq(oauthConsent.id, keyId.slice(4))).limit(1).for('share');
-  // SHARE locks retain consent/client/resource policy through the caller's
-  // dispatch transaction. Google approval takes its own user/account locks.
+  // One joined SHARE lock retains consent, client/resource policy and Google
+  // approval through the caller's dispatch transaction.
   if (!row?.userId || row.clientDisabled || row.resourceDisabled || row.resources?.length !== 1 || row.resources[0] !== resourceOf(runtime) ||
-    !await isApprovedUser(runtime, row.userId, db)) return null;
+    !approvedGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
   const allowed = originalScopes(row.referenceId).filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
