@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
+import { sql } from 'drizzle-orm';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -24,6 +25,24 @@ export class DispatcherShard extends DurableObject<Env> {
   private pool?: Pool;
   private running = false;
   private gate?: GateState;
+  private placementLogged = false;
+
+  // Once per object lifetime: where this shard runs and what one database round trip costs from there.
+  // The location hint is only honored at creation, so this is the record of where the object actually landed.
+  private async logPlacement(identity: Identity, runtime: Runtime) {
+    try {
+      const trace = await (await fetch('https://cloudflare.com/cdn-cgi/trace')).text();
+      const colo = trace.match(/^colo=(\w+)/m)?.[1] ?? 'unknown';
+      const timed = async (work: () => Promise<unknown>) => { const at = Date.now(); await work(); return Date.now() - at; };
+      const dbPingMs = await timed(() => runtime.db.execute(sql`SELECT 1`));
+      const dbPingAgainMs = await timed(() => runtime.db.execute(sql`SELECT 1`));
+      // The dispatcher's statements carry ~20 KB JSON parameters; measure that shape separately from a bare round trip.
+      const payload = JSON.stringify(Array.from({ length: 6 }, (_, i) => ({ id: `probe_${i}`, snapshot: 'x'.repeat(3000) })));
+      const dbPayloadMs = await timed(() => runtime.db.execute(sql`SELECT count(*) FROM jsonb_to_recordset(${payload}::jsonb) AS x(id text, snapshot text)`));
+      const dbPayloadAgainMs = await timed(() => runtime.db.execute(sql`SELECT count(*) FROM jsonb_to_recordset(${payload}::jsonb) AS x(id text, snapshot text)`));
+      log('info', { code: 'DISPATCHER_PLACEMENT', shard: dispatcherName(identity), colo, dbPingMs, dbPingAgainMs, dbPayloadMs, dbPayloadAgainMs, payloadBytes: payload.length });
+    } catch { /* diagnostics only */ }
+  }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -49,6 +68,7 @@ export class DispatcherShard extends DurableObject<Env> {
     try {
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
       const runtime = await this.runtime();
+      if (!this.placementLogged) { this.placementLogged = true; await this.logPlacement(identity, runtime); }
       const report = await runDispatcher(runtime, {
         environment: identity.environment, region: identity.region, shard: identity.shard, gate: this.gate,
         until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,

@@ -120,9 +120,9 @@ export default {
     }
     await withRuntime(env, async runtime => {
       const concurrency = workerConcurrency(env);
-      // Return frequently so Queues can reassess concurrency. Already claimed
-      // jobs finish normally; the budget never interrupts a provider attempt.
-      await drainJobs(runtime, 100, concurrency, 2000);
+      // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
+      // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
+      await drainJobs(runtime, 100, concurrency, 10000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
@@ -135,9 +135,8 @@ export default {
       const resolved = await resolveRegionRuntime(runtime);
       await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
       const concurrency = workerConcurrency(env);
-      // Return frequently so Queues can reassess concurrency. Already claimed
-      // jobs finish normally; the budget never interrupts a provider attempt.
-      await drainJobs(runtime, 100, concurrency, 2000);
+      // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
+      await drainJobs(runtime, 100, concurrency, 10000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
