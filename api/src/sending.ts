@@ -1018,20 +1018,40 @@ async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inf
 
 const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
-export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: string; environment: Mode; emailId: string; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } }) {
+type EmailEventInput = { workspaceId: string; environment: Mode; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
+type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
+export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
+  return (await persistEmailEvent(runtime, input)).event;
+}
+// Only authenticated ingress and the guarded test-only callback handler use this.
+export async function ingestRoutineSesEvent(runtime: Runtime, input: EmailEventInput & { type: 'send' | 'delivery'; providerId: string; ingress: IncomingReceipt }) {
+  return persistEmailEvent(runtime, input);
+}
+async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId?: string; ingress?: IncomingReceipt }) {
   const next = statusForEvent[input.type];
   const publicType = ({ send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' } as Record<string, string>)[input.type];
   // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT
   // over the network. The locked row determines monotonic status; only a newly
   // inserted event may change it or publish a callback.
-  const result = await runtime.db.execute<typeof emailEvents.$inferSelect>(sql`WITH mail AS MATERIALIZED (
+  const result = await runtime.db.execute<{ event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH mail AS MATERIALIZED (
     SELECT id, status, region FROM sending_emails WHERE workspace_id = ${input.workspaceId}
-      AND environment = ${input.environment} AND id = ${input.emailId} FOR UPDATE
+      AND environment = ${input.environment} AND ${input.ingress
+        ? sql`region=${input.ingress.region} AND provider_id=${input.providerId} AND simulated=${input.environment === 'test'}`
+        : sql`id=${input.emailId}`} FOR UPDATE
+  ), incoming AS (
+    INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment,processed_at)
+    SELECT ${input.ingress?.topicArn ?? null}, ${input.ingress?.messageId ?? null}, ${input.workspaceId}, ${input.environment},
+      CASE WHEN EXISTS(SELECT 1 FROM mail) THEN clock_timestamp() END
+    WHERE ${!!input.ingress} ON CONFLICT DO NOTHING RETURNING *
+  ), recovery AS (
+    INSERT INTO jobs(id,workspace_id,environment,type,payload,available_at)
+    SELECT ${id('job')}, workspace_id, environment, ${input.ingress?.recoveryType ?? 'operation.ses'}, ${JSON.stringify(input.ingress?.payload ?? {})}::jsonb, now()+interval '15 seconds'
+    FROM incoming WHERE NOT EXISTS(SELECT 1 FROM mail) RETURNING id
   ), inserted AS (
     INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, provider_id, external_id, data, simulated, created_at)
     SELECT ${id('event')}, ${input.workspaceId}, ${input.environment}, mail.id, ${input.type}, ${input.providerId ?? null},
-      ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, ${input.environment === 'test'}, ${input.createdAt ?? now()}::timestamptz
-    FROM mail ON CONFLICT DO NOTHING RETURNING *
+      ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb || CASE WHEN ${!!input.ingress} THEN jsonb_build_object('emailId',mail.id,'providerId',${input.providerId ?? null}::text) ELSE '{}'::jsonb END, ${input.environment === 'test'}, ${input.createdAt ?? now()}::timestamptz
+    FROM mail WHERE ${!input.ingress} OR EXISTS(SELECT 1 FROM incoming) ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
     UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), updated_at = clock_timestamp()
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId} AND e.environment = ${input.environment}
@@ -1039,7 +1059,7 @@ export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: s
   ), published AS (
     INSERT INTO operation_events(id, workspace_id, environment, type, region, created_at, data)
     SELECT inserted.id, inserted.workspace_id, inserted.environment, ${publicType ?? null}::text, mail.region, inserted.created_at,
-      ${JSON.stringify({ ...(input.data ?? {}), emailId: input.emailId, simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb
+      ${JSON.stringify({ ...(input.data ?? {}), simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb || jsonb_build_object('emailId',mail.id)
     FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
   ), deliveries AS (
     INSERT INTO operation_deliveries(id, workspace_id, environment, webhook_id, event_id, payload)
@@ -1050,29 +1070,28 @@ export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: s
     ON CONFLICT DO NOTHING RETURNING id, workspace_id, environment
   ), webhook_jobs AS (
     INSERT INTO jobs(id, workspace_id, environment, type, payload)
-    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries
-  ), simulated_receipts AS (
-    INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, environment, created_at)
-    SELECT 'urn:opensend:simulated-ses:' || mail.region, mail.id || ':' || kind, inserted.workspace_id, 'test',
-      inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes?.deliveryDelayMs ?? 0} ELSE 0 END * interval '1 millisecond'
+    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
+  ), simulated_callbacks AS (
+    SELECT 'urn:opensend:simulated-ses:' || mail.region AS topic_arn, mail.id || ':' || kind AS message_id, inserted.workspace_id, 'test' AS environment,
+      inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes?.deliveryDelayMs ?? 0} ELSE 0 END * interval '1 millisecond' AS created_at
     FROM inserted, mail, unnest(ARRAY['Send','Delivery']) kind
     WHERE ${input.environment === 'test' && !!runtime.config.simulatedSes && input.type === 'accepted' && !!input.providerId?.startsWith('sim_')}
-    ON CONFLICT DO NOTHING RETURNING *
   ), simulated_jobs AS (
     INSERT INTO jobs(id, workspace_id, environment, type, available_at, payload)
     SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, r.environment, 'operation.simulatedFeedback', r.created_at,
       jsonb_build_object('topicArn',r.topic_arn,'messageId',r.message_id,'region',mail.region,
         'message', jsonb_build_object('eventType',split_part(r.message_id,':',2),'mail',jsonb_build_object('messageId',${input.providerId ?? null}::text),
           lower(split_part(r.message_id,':',2)),jsonb_build_object('timestamp',r.created_at)))
-    FROM simulated_receipts r, mail
+    FROM simulated_callbacks r, mail
   ), receipt_processed AS (
     UPDATE operation_sns_receipts SET processed_at=clock_timestamp()
     WHERE workspace_id=${input.workspaceId} AND environment=${input.environment}
       AND topic_arn=${input.receipt?.topicArn ?? null} AND message_id=${input.receipt?.messageId ?? null}
       AND EXISTS (SELECT 1 FROM mail)
-  ) SELECT id, workspace_id AS "workspaceId", environment, email_id AS "emailId", type,
-    provider_id AS "providerId", external_id AS "externalId", data, simulated, created_at::text AS "createdAt" FROM inserted`);
-  return result.rows[0] ?? null;
+  ) SELECT (SELECT row_to_json(e) FROM (SELECT id, workspace_id AS "workspaceId", environment, email_id AS "emailId", type,
+    provider_id AS "providerId", external_id AS "externalId", data, simulated, created_at::text AS "createdAt" FROM inserted) e) AS event,
+    ((SELECT count(*) FROM webhook_jobs)+(SELECT count(*) FROM recovery))::int AS runnable`);
+  return result.rows[0]!;
 }
 async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | null) {
   if (!campaignId) return;

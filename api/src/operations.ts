@@ -11,7 +11,7 @@ import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { recordEmailEvent } from './sending.js';
+import { ingestRoutineSesEvent, recordEmailEvent } from './sending.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -354,10 +354,15 @@ function registerPublicEvents(app: App) {
     }
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
     verifySesAccount(c.env, message);
-    await c.env.db.transaction(async tx => {
-      const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, workspaceId: c.env.config.workspaceId, environment: 'live' }).onConflictDoNothing().returning(); if (!inserted.length) return;
-      await enqueue(tx, { type: 'operation.ses', workspaceId: c.env.config.workspaceId, environment: 'live', payload: { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region } });
+    const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
+    const identity = { workspaceId: c.env.config.workspaceId, environment: 'live' as const };
+    const routine = await ingestRoutineFeedback(c.env, payload, identity);
+    const runnable = routine ?? await c.env.db.transaction(async tx => {
+      const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, ...identity }).onConflictDoNothing().returning(); if (!inserted.length) return 0;
+      await enqueue(tx, { type: 'operation.ses', ...identity, payload });
+      return 1;
     });
+    if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
     return c.json({ accepted: true }, 202);
   });
   // Hono matches HEAD as GET; intercept the original method before the mutating GET route.
@@ -435,6 +440,23 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
+async function ingestRoutineFeedback(runtime: Runtime, payload: Record<string, unknown>, identity: { workspaceId: string; environment: Mode }): Promise<number | null> {
+  const data = payload.message as Record<string, any> | undefined;
+  const kind = data?.eventType ?? data?.notificationType;
+  const providerId = data?.mail?.messageId;
+  if ((kind !== 'Send' && kind !== 'Delivery') || typeof providerId !== 'string') return null;
+  const timestamp = data?.[kind.toLowerCase()]?.timestamp;
+  const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
+  const result = await ingestRoutineSesEvent(runtime, {
+    ...identity, type: kind === 'Send' ? 'send' : 'delivery', providerId, createdAt,
+    externalId: `${payload.topicArn}:${payload.messageId}`, data: { providerId },
+    ingress: { topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), payload,
+      recoveryType: identity.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' },
+  });
+  log('info', { code: 'SES_FEEDBACK_INGESTED', ...identity, kind, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+  return result.runnable;
+}
+
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
@@ -494,13 +516,21 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
   verifySesAccount(runtime, payload.message);
   await processSesReceipt(runtime, payload, job);
 };
-const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
+function assertSimulatedFeedback(runtime: Runtime, payload: Record<string, unknown>, job: { environment: Mode }) {
   const message = payload.message as { mail?: { messageId?: unknown } } | undefined;
   if (job.environment !== 'test' || !runtime.config.simulatedSes ||
     payload.topicArn !== `urn:opensend:simulated-ses:${payload.region}` ||
     typeof message?.mail?.messageId !== 'string' || !message.mail.messageId.startsWith('sim_')) {
     throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires opted-in test mode and a synthetic provider identity.');
   }
+}
+const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
+  assertSimulatedFeedback(runtime, payload, job);
+  const routine = await ingestRoutineFeedback(runtime, payload, job);
+  if (routine === null) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
+};
+const simulatedFeedbackRecovery: JobHandler = async (runtime, payload, job) => {
+  assertSimulatedFeedback(runtime, payload, job);
   await processSesReceipt(runtime, payload, job);
 };
 const publishJob: JobHandler = async (runtime, payload, job) => {
@@ -540,4 +570,4 @@ const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtim
     throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
   }
 };
-export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

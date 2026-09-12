@@ -2928,4 +2928,123 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('email.dispatch')).length, 0);
     });
   });
+
+  test('routine callbacks create processed receipts and public events immediately, without prereceipts or SES work', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const { operationJobs } = await import('./src/operations.js');
+      const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await run('email.dispatch');
+      const callbacks = await jobs('operation.simulatedFeedback');
+      assert.equal(callbacks.length, 2);
+      const receipts = async () => (await db.query('SELECT message_id, processed_at FROM operation_sns_receipts WHERE workspace_id = $1 ORDER BY message_id', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(await receipts(), [], 'Provider acceptance queues callback vehicles, not received feedback.');
+      for (const [index, kind] of ['Send', 'Delivery'].entries()) {
+        const callback = callbacks.find(job => job.payload.message.eventType === kind)!;
+        const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+        await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
+        const persisted = await receipts();
+        assert.equal(persisted.length, index + 1);
+        assert.ok(persisted.every(receipt => receipt.processed_at !== null));
+        assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, kind === 'Send' ? 'sent' : 'delivered');
+        const published = (await db.query('SELECT type FROM operation_events WHERE workspace_id = $1 ORDER BY type', [runtime.config.workspaceId])).rows;
+        assert.equal(published.length, index + 1, 'Callback completion must include public event persistence.');
+        assert.ok(published.some(event => event.type === (kind === 'Send' ? 'email.sent' : 'email.delivered')));
+        await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
+        assert.equal((await receipts()).length, index + 1);
+      }
+      for (const type of ['operation.ses', 'operation.simulatedFeedbackRecovery', 'operation.publish', 'operation.webhook']) assert.equal((await jobs(type)).length, 0);
+    });
+  });
+
+  test('unmatched callback retains one deferred recovery and later records delivery exactly once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const [{ operationJobs }, { recordEmailEvent }] = await Promise.all([import('./src/operations.js'), import('./src/sending.js')]);
+      const providerId = `sim_${randomUUID()}`;
+      const payload = { topicArn: `urn:opensend:simulated-ses:${REGION}`, messageId: unique('early-delivery'), region: REGION,
+        message: { eventType: 'Delivery', mail: { messageId: providerId }, delivery: { timestamp: new Date().toISOString() } } };
+      const context = { id: unique('callback'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+      const receipts = async () => (await db.query('SELECT processed_at FROM operation_sns_receipts WHERE workspace_id = $1 AND message_id = $2', [runtime.config.workspaceId, payload.messageId])).rows;
+      for (let duplicate = 0; duplicate < 2; duplicate++) await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
+      assert.deepEqual(await receipts(), [{ processed_at: null }]);
+      const recovery = await jobs('operation.simulatedFeedbackRecovery');
+      assert.equal(recovery.length, 1);
+      assert.equal(recovery[0]!.status, 'pending');
+      assert.deepEqual(recovery[0]!.payload, payload);
+      const delay = (await db.query('SELECT extract(epoch FROM available_at - now())::int AS seconds FROM jobs WHERE id = $1', [recovery[0]!.id])).rows[0].seconds;
+      assert.equal(delay, 15);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 0);
+      await assert.rejects(operationJobs['operation.simulatedFeedbackRecovery']!(runtime, payload, context), { code: 'SES_EMAIL_NOT_FOUND', retryable: true });
+      assert.deepEqual(await receipts(), [{ processed_at: null }]);
+
+      ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('recovery-hook')}`, eventTypes: ['email.delivered'] }), 201);
+      const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      // Simulate the provider association becoming durable after the callback.
+      await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'test', emailId: email.id, providerId, type: 'accepted', externalId: unique('late-acceptance') });
+      await run('operation.simulatedFeedbackRecovery');
+      await operationJobs['operation.simulatedFeedbackRecovery']!(runtime, payload, context);
+      await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
+      assert.ok((await receipts())[0].processed_at);
+      assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');
+      assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 1);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_deliveries WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 1);
+      assert.equal((await jobs('operation.webhook')).length, 1);
+      assert.equal((await jobs('operation.simulatedFeedbackRecovery')).length, 1);
+      assert.equal((await jobs('operation.ses')).length, 0);
+    });
+  });
+
+  test('a real SQL fanout failure rolls back receipt, status and events before a successful callback retry', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const { operationJobs } = await import('./src/operations.js');
+      ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('atomic-hook')}`, eventTypes: ['email.delivered'] }), 201);
+      const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await run('email.dispatch');
+      const callback = (await jobs('operation.simulatedFeedback')).find(job => job.payload.message.eventType === 'Delivery')!;
+      const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+      const before = ok(await local('GET', `/v1/emails/${email.id}`));
+      const beforeEvents = page(await local('GET', `/v1/emails/${email.id}/events`));
+      // DDL and this workspace-only trigger are rollback-only. PostgreSQL itself
+      // rejects the final webhook job insert after the statement's upstream work.
+      await db.query(`CREATE FUNCTION pg_temp.reject_acceptance_fanout() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.workspace_id = TG_ARGV[0] AND NEW.type = 'operation.webhook' THEN
+          RAISE EXCEPTION 'SYNTHETIC_FANOUT_FAILURE' USING ERRCODE = '23514';
+        END IF; RETURN NEW; END $$`);
+      await db.query(`CREATE TRIGGER acceptance_fanout_failure BEFORE INSERT ON jobs FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_acceptance_fanout('${runtime.config.workspaceId}')`);
+      let databaseFailureObserved = false;
+      // Isolate only each execute statement, NOT the whole handler: successful
+      // earlier statements would remain visible and fail the rollback assertions.
+      const faultRuntime = { ...runtime, db: new Proxy(runtime.db, { get(target, property, receiver) {
+        if (property !== 'execute') return Reflect.get(target, property, receiver);
+        return async (query: Parameters<typeof target.execute>[0]) => {
+          await db.query('SAVEPOINT acceptance_statement');
+          try {
+            const result = await target.execute(query);
+            await db.query('RELEASE SAVEPOINT acceptance_statement');
+            return result;
+          } catch (cause: any) {
+            databaseFailureObserved = cause.code === '23514' || cause.cause?.code === '23514';
+            await db.query('ROLLBACK TO SAVEPOINT acceptance_statement');
+            await db.query('RELEASE SAVEPOINT acceptance_statement');
+            throw cause;
+          }
+        };
+      } }) };
+      await assert.rejects(operationJobs['operation.simulatedFeedback']!(faultRuntime, callback.payload, context), { code: 'OPERATION_TEMPORARILY_UNAVAILABLE', retryable: true });
+      assert.equal(databaseFailureObserved, true, 'The failure must originate in PostgreSQL, not a mocked request.');
+      assert.deepEqual(ok(await local('GET', `/v1/emails/${email.id}`)), before);
+      assert.deepEqual(page(await local('GET', `/v1/emails/${email.id}/events`)), beforeEvents);
+      for (const table of ['operation_sns_receipts', 'operation_events', 'operation_deliveries']) {
+        assert.equal((await db.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id = $1`, [runtime.config.workspaceId])).rows[0].count, 0, `${table} must roll back with failed fanout.`);
+      }
+      assert.equal((await jobs('operation.webhook')).length, 0);
+      await db.query('DROP TRIGGER acceptance_fanout_failure ON jobs');
+      await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
+      await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
+      assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1 AND processed_at IS NOT NULL', [runtime.config.workspaceId])).rows[0].count, 1);
+      assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
+      assert.equal((await jobs('operation.webhook')).length, 1);
+    });
+  });
 });
