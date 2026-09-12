@@ -6,6 +6,7 @@ import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
@@ -487,11 +488,29 @@ const publishJob: JobHandler = async (runtime, payload, job) => {
 };
 const publishBatchJob: JobHandler = async (runtime, payload, job) => {
   if (!Array.isArray(payload.events) || payload.events.length < 1 || payload.events.length > 100) throw new ApiError(422, 'INVALID_EVENT_BATCH', 'Event batches must contain between one and 100 events.');
+  const batch: PublishedEvent[] = [];
   for (const value of payload.events) {
     const parsed = eventSchema.safeParse(value);
     if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'A queued batch event is invalid or has mismatched scope.');
-    await publishEvent(runtime, parsed.data as PublishedEvent, false);
+    batch.push(parsed.data as PublishedEvent);
   }
+  const unique = batch.filter((event, index) => batch.findIndex(candidate => candidate.id === event.id) === index);
+  await runtime.db.transaction(async tx => {
+    const inserted = await tx.insert(events).values(unique).onConflictDoNothing().returning({ id: events.id });
+    if (!inserted.length) return;
+    const accepted = new Set(inserted.map(row => row.id));
+    const endpoints = await tx.select().from(webhooks).where(and(scoped(webhooks, unique[0]!), eq(webhooks.paused, false)));
+    const queued = unique.filter(event => accepted.has(event.id)).flatMap(event => endpoints.filter(endpoint =>
+      endpoint.eventTypes.includes(event.type) && (!endpoint.regions || event.region === null || endpoint.regions.includes(event.region)) &&
+      !(event.environment === 'live' && event.data.simulated === true)
+    ).map(endpoint => ({ event, endpoint, deliveryId: id('whd') })));
+    if (!queued.length) return;
+    for (let offset = 0; offset < queued.length; offset += 1000) {
+      const group = queued.slice(offset, offset + 1000);
+      await tx.insert(deliveries).values(group.map(({ event, endpoint, deliveryId }) => ({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event })));
+      await tx.insert(jobs).values(group.map(({ event, deliveryId }) => ({ id: id('job'), type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } })));
+    }
+  });
 };
 const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
   try { await handler(runtime, payload, job); } catch (error) {
