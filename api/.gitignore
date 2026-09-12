@@ -7,3 +7,5 @@ dist/
 *.log
 openapi-ts-error-*
 iam-policy-personal.json
+scripts/*.local.mjs
+.benchmark-results/
