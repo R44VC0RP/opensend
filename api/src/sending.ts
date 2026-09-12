@@ -23,10 +23,10 @@ const SENDING_LIMITS = {
   test: { pending: 500, keyPending: 100, storedAttachmentBytes: 64 * 1024 * 1024, expandedCampaignBytes: 16 * 1024 * 1024 },
   live: { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 },
 } as const;
-const CAMPAIGN_CHUNK_ROWS = 100;
+const CAMPAIGN_CHUNK_ROWS = 200;
 const CAMPAIGN_CHUNK_BYTES = 2 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
-const CAMPAIGN_BUFFER = 200;
+const CAMPAIGN_BUFFER = 400;
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes both environments without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.

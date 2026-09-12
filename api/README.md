@@ -16,8 +16,8 @@ An audience is captured with one database snapshot. Only referenced personalizat
 | Concurrent review execution | Bounded by worker/runner job concurrency; additional reviews remain durable queue work |
 | Referenced personalization snapshot | 1 GiB per review, 1 MiB per recipient |
 | Estimated final content | 64 GiB per campaign; attachments remain shared references |
-| Preparation/expansion chunk | Up to 100 recipients; byte-bounded processing |
-| Active campaign dispatch buffer | 200 emails per campaign, 1,000 per environment |
+| Preparation/expansion chunk | Up to 200 recipients; byte-bounded processing |
+| Active campaign dispatch buffer | 400 emails per campaign, 1,000 per environment |
 | Outstanding campaign intents | 1,000,000 per originating credential; 2,000,000 per environment |
 | Active jobs per process/invocation | `JOB_CONCURRENCY`: default 2, maximum 8 for Node and 6 for Cloudflare |
 
