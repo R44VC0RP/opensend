@@ -1047,10 +1047,11 @@ async function assertDispatchRegionReady(runtime: Runtime, region: string, kind:
   const key = `${region}:${kind}`;
   let pending = cache.get(key);
   if (!pending) {
-    pending = assertLiveRegionReady(runtime, runtime.db, region, kind, true).finally(() => { if (cache!.get(key) === pending) cache!.delete(key); });
+    pending = assertLiveRegionReady(runtime, runtime.db, region, kind, true);
     cache.set(key, pending);
   }
-  await pending;
+  try { await pending; }
+  catch (error) { if (cache.get(key) === pending) cache.delete(key); throw error; }
 }
 async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, recipients: number, ses: SESv2Client): Promise<{ deferUntil?: string; waitUntil?: number }> {
   const where = and(scope(regionalLimits, a), eq(regionalLimits.region, selectedRegion));
