@@ -3106,4 +3106,94 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('email.dispatch')).length, 500);
     });
   });
+
+  test('dispatch retries definitive throttling once but never replays rejection or uncertain provider acceptance', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }, { jobHandlers }] = await Promise.all([
+        import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'), import('./src/sending.js'),
+      ]);
+      const faultClient = new SESv2Client({ region: REGION, endpoint: 'https://ses-simulator.invalid', maxAttempts: 1,
+        credentials: { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' },
+        requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 1000, outcomes: ['throttle', 'accept', 'reject', 'timeout'] }),
+      });
+      cleanup(t, async () => { faultClient.destroy(); });
+      // Preserve the real SDK serializer, signer and error decoder. Only select
+      // the in-process fault transport; calling the captured method avoids recursion.
+      const originalSend = SESv2Client.prototype.send;
+      const providerCalls: Array<{ emailId: string; to: string[] }> = [];
+      t.mock.method(SESv2Client.prototype, 'send', (command: any) => {
+        assert.ok(command instanceof SendEmailCommand || command instanceof GetAccountCommand);
+        if (command instanceof SendEmailCommand) {
+          providerCalls.push({ emailId: command.input.EmailTags!.find(tag => tag.Name === 'opensend_email_id')!.Value!, to: command.input.Destination!.ToAddresses! });
+          assert.deepEqual(command.input.Destination!.CcAddresses, []);
+          assert.deepEqual(command.input.Destination!.BccAddresses, []);
+        }
+        return Reflect.apply(originalSend, faultClient, [command]);
+      });
+      const events = async (emailId: string) => page(await local('GET', `/v1/emails/${emailId}/events`));
+      const replay = async (job: Json) => jobHandlers['email.dispatch']!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: runtime.config.workspaceId, environment: 'test' });
+      const retryAddress = address();
+      const first = ok(await local('POST', '/v1/emails/send', mail({ to: retryAddress })), 202);
+      const originalJob = (await jobs('email.dispatch'))[0]!;
+      const beforeThrottle = Date.now();
+      await run('email.dispatch');
+      const afterThrottle = Date.now();
+      const throttled = ok(await local('GET', `/v1/emails/${first.id}`));
+      assert.equal(throttled.status, 'queued');
+      assert.equal(throttled.errorCode, 'SES_THROTTLED');
+      assert.equal(throttled.attemptStartedAt, null);
+      assert.equal(throttled.providerId, null);
+      const retryJobs = (await jobs('email.dispatch')).filter(job => job.status === 'pending');
+      assert.equal(retryJobs.length, 1);
+      assert.equal(retryJobs[0]!.payload.emailId, first.id);
+      assert.equal(retryJobs[0]!.payload.version, 1);
+      assert.equal(retryJobs[0]!.payload.providerRetries, 1);
+      const retryAt = new Date(retryJobs[0]!.available_at).getTime();
+      assert.ok(retryAt >= beforeThrottle + 2000 && retryAt <= afterThrottle + 2000);
+      assert.equal((await events(first.id)).filter(event => event.type === 'provider_throttled').length, 1);
+      assert.equal((await jobs('operation.simulatedFeedback')).length, 0);
+      await replay(originalJob);
+      assert.equal(providerCalls.length, 1, 'A stale pre-throttle dispatch must not consume the retry.');
+      assert.equal((await jobs('email.dispatch')).length, 2);
+      await run('email.dispatch');
+      const accepted = ok(await local('GET', `/v1/emails/${first.id}`));
+      assert.equal(accepted.status, 'accepted');
+      assert.match(accepted.providerId, /^sim_/);
+      assert.equal((await events(first.id)).filter(event => event.type === 'dispatch_attempt').length, 2);
+      assert.equal((await events(first.id)).filter(event => event.type === 'accepted').length, 1);
+
+      const terminal: Array<{ id: string; to: string }> = [];
+      for (const [status, code, eventType] of [['rejected', 'MessageRejected', 'reject'], ['acceptance_unknown', 'SES_ACCEPTANCE_UNKNOWN', 'acceptance_unknown']]) {
+        const to = address();
+        const email = ok(await local('POST', '/v1/emails/send', mail({ to })), 202);
+        terminal.push({ id: email.id, to });
+        await run('email.dispatch');
+        const result = ok(await local('GET', `/v1/emails/${email.id}`));
+        assert.equal(result.status, status);
+        assert.equal(result.errorCode, code);
+        assert.equal(result.providerId, null);
+        const recorded = await events(email.id);
+        assert.equal(recorded.filter(event => event.type === 'dispatch_attempt').length, 1);
+        assert.equal(recorded.filter(event => event.type === eventType).length, 1);
+        const ownJobs = (await jobs('email.dispatch')).filter(job => job.payload.emailId === email.id);
+        assert.equal(ownJobs.length, 1, 'Terminal or ambiguous outcomes must not create automatic retries.');
+        const sendsBeforeReplay: number = providerCalls.length;
+        await replay(ownJobs[0]!);
+        await replay(ownJobs[0]!);
+        assert.equal(providerCalls.length, sendsBeforeReplay, 'Replayed terminal dispatch must not call SendEmail again.');
+        assert.deepEqual(await events(email.id), recorded);
+      }
+      assert.deepEqual(providerCalls, [
+        { emailId: first.id, to: [retryAddress] }, { emailId: first.id, to: [retryAddress] },
+        ...terminal.map(email => ({ emailId: email.id, to: [email.to] })),
+      ]);
+      const callbacks = await jobs('operation.simulatedFeedback');
+      assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
+      assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
+      assert.equal((await jobs('email.dispatch')).filter(job => job.status === 'pending').length, 0);
+      const stored = (await db.query('SELECT environment, dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(stored, [{ environment: 'test', dispatch_version: 1 }, { environment: 'test', dispatch_version: 0 }, { environment: 'test', dispatch_version: 0 }]);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'live'", [runtime.config.workspaceId])).rows[0].count, 0);
+    });
+  });
 });
