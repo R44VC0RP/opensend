@@ -20,8 +20,10 @@ type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' 
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; sentSinceRefresh: number }
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; sentSinceRefresh: number; brakeUntil?: number }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
+export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
+const BRAKE_MS = 10000;
 
 export interface DispatcherOptions {
   environment: Mode; region: string;
@@ -91,18 +93,31 @@ async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: Gat
   return true;
 }
 
-export function shardRate(gate: GateState, shard?: { index: number; count: number }) {
-  const rate = gate.quota?.maxSendRate ?? 0;
-  return shard && shard.count > 1 ? Math.max(1, rate / shard.count) : rate;
+/**
+ * Target recipients per second for this shard. The provider quota is the base; DISPATCH_RATE_FACTOR
+ * (or an absolute live DISPATCH_TARGET_RATE) aims above or below it, and a recent throttled response
+ * brakes back to the raw quota so an aggressive target cannot spiral into retries.
+ */
+export function shardRate(gate: GateState, shard?: { index: number; count: number }, pacing?: Pacing) {
+  const quota = gate.quota?.maxSendRate ?? 0;
+  const braked = (gate.brakeUntil ?? 0) > Date.now();
+  let target = quota;
+  if (pacing && !braked) target = pacing.live && pacing.targetRate ? pacing.targetRate : quota * pacing.rateFactor;
+  return shard && shard.count > 1 ? Math.max(0.01, target / shard.count) : target;
 }
-/** Reserves `recipients` slots and returns how long the caller must wait before sending them. */
-export function reserve(gate: GateState, recipients: number, shard?: { index: number; count: number }): number {
-  const rate = shardRate(gate, shard);
+/** Reserves `recipients` slots and returns how long the caller must wait before sending them. Slots are spaced evenly at the target rate. */
+export function reserve(gate: GateState, recipients: number, shard?: { index: number; count: number }, pacing?: Pacing): number {
+  const rate = shardRate(gate, shard, pacing);
   if (rate <= 0) return 1000;
   const start = Math.max(Date.now(), gate.nextAllowedAt);
   gate.nextAllowedAt = start + Math.ceil(1000 * recipients / rate);
   gate.sentSinceRefresh += recipients;
   return Math.max(0, start - Date.now());
+}
+/** A throttled provider response: fall back to the raw quota for a while and yield the slots we ran ahead by. */
+export function brake(gate: GateState) {
+  gate.brakeUntil = Date.now() + BRAKE_MS;
+  gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 1000);
 }
 function dailyRemaining(gate: GateState) {
   const quota = gate.quota;
@@ -386,7 +401,7 @@ async function recordSuppressed(runtime: Runtime, a: Actor, mails: Mail[]) {
     FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ id: m.id })))}::jsonb) AS x(id text) ON CONFLICT DO NOTHING`);
 }
 
-type Lane = { ses: SESv2Client; gate: GateState; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { ses: SESv2Client; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
@@ -432,9 +447,15 @@ async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed:
     for (const item of group) if (statuses.get(item.mail.id) === 'canceled' || statuses.get(item.mail.id) === 'suppressed') await finishEmailCampaign(runtime, a, { ...item.mail, status: statuses.get(item.mail.id)! });
     if (lost.length) log('warn', { code: 'DISPATCH_CLAIM_LOST', count: lost.length, environment: a.environment, message: 'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
     if (!attempting.length) continue;
-    const wait = reserve(gate, attempting.reduce((n, item) => n + item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, 0), options.shard);
-    if (wait > 0) await phase('pace', () => sleep(wait));
-    const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.limitSends(() => sendOne(runtime, a, ses, item)))));
+    // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
+    // rate rather than one burst per group; a throttled response brakes every lane on this shard.
+    const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.limitSends(async () => {
+      const wait = reserve(gate, item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, options.shard, lane.pacing);
+      if (wait > 0) { const paced = Date.now(); await sleep(wait); counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - paced; }
+      const outcome = await sendOne(runtime, a, ses, item);
+      if (outcome.type === 'provider_throttled') brake(gate);
+      return outcome;
+    }))));
     pendingRecords.push(phase('record', () => recordOutcomes(runtime, a, outcomes)).then(async () => {
       for (const outcome of outcomes) {
         if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
@@ -462,7 +483,8 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const ses = providerClient(runtime, options.environment, options.region);
   if (options.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, options.region, 'marketing', true);
   counters.recovered = await phase('recover', () => recoverInterrupted(runtime, a));
-  const lane: Lane = { ses, gate, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: options.environment === 'live' };
+  const lane: Lane = { ses, gate, pacing, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lanes = Math.max(1, options.lanes ?? 2);
   let idleLanes = 0, blocked = false;
   await Promise.all(Array.from({ length: lanes }, async () => {
@@ -481,7 +503,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   counters.idle = blocked || (counters.batches > 0 && idleLanes >= lanes);
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
-  if (counters.claimed || counters.recovered || !counters.idle) log('info', { code: 'DISPATCH_RUN', environment: options.environment, region: options.region, shard: options.shard?.index ?? 0, ...counters, rate: shardRate(gate, options.shard) });
+  if (counters.claimed || counters.recovered || !counters.idle) log('info', { code: 'DISPATCH_RUN', environment: options.environment, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
   return counters;
 }
 

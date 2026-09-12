@@ -44,6 +44,9 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | Setting | What to enter |
 | --- | --- |
 | `BETTER_AUTH_SECRET` | At least 32 random bytes, such as the 64-character hex output above. This is the installation root secret for authentication and domain-separated webhook encryption. |
+| `DISPATCH_RATE_FACTOR` | Optional pacing target as a multiple of the SES `MaxSendRate` (default `1`; production uses `1.1`, i.e. 22/s at a 20/s quota). Slots are spaced evenly at the target and the target follows quota changes automatically; any throttled response brakes back to the raw quota for ten seconds, so a modest overshoot cannot spiral into retries. |
+| `DISPATCH_TARGET_RATE` | Optional absolute live-environment target in recipients per second; replaces the quota-derived rate (the brake still applies). Leave unset unless the SES quota is known to be stale. |
+| `DISPATCH_SHARDS` | Cloudflare only: dispatcher Durable Objects per environment/region (default 4). Each paces 1/N of the target and holds up to six provider calls in flight (about 35 sends/s per shard at 170 ms provider latency). |
 | `JOB_CONCURRENCY` | Optional active orchestration jobs (campaign preparation/expansion/completion, webhooks, maintenance) per process/invocation. Defaults to 2; capped at 8 for Docker/Node and 6 for Cloudflare. Mail dispatch is separate: the runner's in-process dispatcher, or `DISPATCH_SHARDS` Durable Objects on Cloudflare. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Your installation's real Google OAuth **Web application** client credentials. See below. |
 | `AUTH_ALLOWED_EMAILS` | Comma-separated exact Google email addresses. Use this for personal Gmail accounts. |

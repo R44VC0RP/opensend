@@ -25,6 +25,8 @@
     "SIMULATED_SES_RATE": "5000",
     // Dispatcher shards per environment/region; each owns 1/N of the regional send quota.
     "DISPATCH_SHARDS": "4",
+    // Aim 10% above the SES quota (22/s at a 20/s quota) to keep it saturated; any 429 brakes back to the quota for ten seconds.
+    "DISPATCH_RATE_FACTOR": "1.1",
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
   // One long-lived dispatcher per environment/region/shard, placed near the database.

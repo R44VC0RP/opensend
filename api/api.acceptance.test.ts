@@ -461,7 +461,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], publicUrl: origin, regions: [REGION], liveEnabled: false, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], publicUrl: origin, regions: [REGION], liveEnabled: false, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const kid = unique('mock-google-signing-key');
@@ -2746,6 +2746,28 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {
+    const { initialGate, reserve, brake, shardRate } = await import('./src/dispatcher.js');
+    const gate = initialGate();
+    gate.quota = { maxSendRate: 20, max24HourSend: -1, sentLast24Hours: 0, checkedAt: Date.now() };
+    const pacing = { rateFactor: 1.1, live: true } as const;
+    assert.equal(shardRate(gate, undefined, pacing), 22);
+    assert.equal(shardRate(gate, { index: 0, count: 4 }, pacing), 5.5, 'Shards split the target evenly.');
+    assert.equal(shardRate(gate, undefined, { rateFactor: 1.1, targetRate: 30, live: true }), 30, 'An absolute live target replaces the quota-derived rate.');
+    assert.equal(shardRate(gate, undefined, { rateFactor: 1.1, targetRate: 30, live: false }), 22, 'The absolute target never applies to the test environment.');
+    const started = Date.now();
+    const waits = Array.from({ length: 44 }, () => reserve(gate, 1, undefined, pacing));
+    assert.equal(waits[0], 0, 'The first slot is immediate.');
+    // 44 slots at 22/s span two seconds; every slot is 1/22 s after the previous one.
+    assert.ok(Math.abs(waits[43]! - 43 * Math.ceil(1000 / 22)) <= 50, `Expected the 44th slot about 1955 ms out, saw ${waits[43]} ms.`);
+    for (let index = 1; index < waits.length; index++) assert.ok(waits[index]! - waits[index - 1]! >= 40 && waits[index]! - waits[index - 1]! <= 50, 'Slots are evenly spaced, never bunched into bursts.');
+    brake(gate);
+    assert.equal(shardRate(gate, undefined, pacing), 20, 'A throttled response drops the target back to the raw quota.');
+    assert.ok(gate.nextAllowedAt >= started + 1000, 'Braking also yields the slots that ran ahead.');
+    gate.brakeUntil = Date.now() - 1;
+    assert.equal(shardRate(gate, undefined, pacing), 22, 'The brake releases after its window.');
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),

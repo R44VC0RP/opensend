@@ -14,6 +14,7 @@ interface __BaseEnv_Env {
 	SIMULATED_SES_LATENCY_MS: "170";
 	SIMULATED_SES_RATE: "5000";
 	DISPATCH_SHARDS: "4";
+	DISPATCH_RATE_FACTOR: "1.1";
 	WEBHOOK_ALLOWED_HOSTS: "";
 	DISPATCHER: DurableObjectNamespace<import("./src/dispatcher-do").DispatcherShard>;
 }
@@ -28,5 +29,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "PUBLIC_URL" | "DEFAULT_SES_REGION" | "ENABLE_LIVE_SES" | "JOB_CONCURRENCY" | "SIMULATED_SES_LATENCY_MS" | "SIMULATED_SES_RATE" | "DISPATCH_SHARDS" | "WEBHOOK_ALLOWED_HOSTS">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "PUBLIC_URL" | "DEFAULT_SES_REGION" | "ENABLE_LIVE_SES" | "JOB_CONCURRENCY" | "SIMULATED_SES_LATENCY_MS" | "SIMULATED_SES_RATE" | "DISPATCH_SHARDS" | "DISPATCH_RATE_FACTOR" | "WEBHOOK_ALLOWED_HOSTS">> {}
 }
