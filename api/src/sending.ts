@@ -25,6 +25,7 @@ const SENDING_LIMITS = {
 } as const;
 const CAMPAIGN_PREPARE_ROWS = 1000;
 const CAMPAIGN_EXPAND_ROWS = 200;
+const CAMPAIGN_EXPAND_MIN_ROWS = 100;
 const CAMPAIGN_CHUNK_BYTES = 4 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 const CAMPAIGN_BUFFER = 400;
@@ -1433,9 +1434,18 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       };
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
-      const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int` }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
+      const [buffer] = await db.select({
+        total: sql<number>`count(*)::int`,
+        campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
+        rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits l WHERE l.workspace_id = ${a.workspaceId} AND l.environment = ${a.environment} AND l.region = ${review!.draft.region} AND l.max_send_rate > 0), 1)`,
+      }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
-      if (capacity <= 0) { await defer(new Date(Date.now() + 2000).toISOString()); return; }
+      const remaining = expansion.total - expansion.expanded;
+      const minimum = Math.min(CAMPAIGN_EXPAND_MIN_ROWS, remaining);
+      if (capacity < minimum) {
+        const delay = Math.min(5000, Math.max(1000, Math.ceil(1000 * (minimum - capacity) / Math.max(1, buffer!.rate))));
+        await defer(new Date(Date.now() + delay).toISOString()); return;
+      }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
       if (!review || !recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== expansion.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
       const draft = review.draft;
