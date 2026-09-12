@@ -2956,6 +2956,319 @@
         ],
         "additionalProperties": false
       },
+      "CampaignStats": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "live",
+              "test"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "reviewed",
+              "scheduled",
+              "sending",
+              "completed",
+              "canceled"
+            ]
+          },
+          "tracking": {
+            "type": "boolean"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byStatus": {
+                "type": "object",
+                "properties": {
+                  "queued": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "attempting": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sent": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delivered": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bounced": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "complained": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rejected": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rendering_failed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "delayed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "suppressed": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "canceled": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "acceptance_unknown": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "simulated": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            },
+            "required": [
+              "total",
+              "byStatus"
+            ],
+            "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
+          },
+          "expansion": {
+            "$ref": "#/components/schemas/CampaignExpansion"
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "accepted": {
+                "type": "integer"
+              },
+              "delivered": {
+                "type": "integer"
+              },
+              "bounced": {
+                "type": "integer"
+              },
+              "complained": {
+                "type": "integer"
+              },
+              "opened": {
+                "type": "integer"
+              },
+              "clicked": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "deliveryDelayed": {
+                "type": "integer"
+              },
+              "simulated": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "accepted",
+              "delivered",
+              "bounced",
+              "complained",
+              "opened",
+              "clicked",
+              "failed",
+              "deliveryDelayed",
+              "simulated"
+            ],
+            "description": "Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events in test mode. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus."
+          },
+          "rates": {
+            "type": "object",
+            "properties": {
+              "delivery": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                  },
+                  "numerator": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "denominator": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "description": "Delivered / accepted. Receiving-server acceptance, not inbox placement."
+              },
+              "bounce": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                  },
+                  "numerator": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "denominator": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "description": "Bounced / accepted."
+              },
+              "complaint": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                  },
+                  "numerator": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "denominator": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "description": "Complained / accepted."
+              },
+              "open": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                  },
+                  "numerator": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "denominator": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "description": "Unique opened emails / delivered."
+              },
+              "click": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                  },
+                  "numerator": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "denominator": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "description": "Unique clicked emails / delivered, not click-to-open rate."
+              }
+            },
+            "required": [
+              "delivery",
+              "bounce",
+              "complaint",
+              "open",
+              "click"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "environment",
+          "status",
+          "tracking",
+          "counts",
+          "expansion",
+          "totals",
+          "rates"
+        ],
+        "description": "Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Test outcomes are simulated, never evidence of real delivery."
+      },
       "CampaignContentGuide": {
         "type": "object",
         "properties": {
@@ -16679,6 +16992,162 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request DELETE \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/campaigns/{id}/stats": {
+      "get": {
+        "operationId": "getCampaignStats",
+        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Rates are fractions, null for zero denominators or test mode; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { getCampaignStats } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await getCampaignStats({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/stats' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
           }
         ]
       }

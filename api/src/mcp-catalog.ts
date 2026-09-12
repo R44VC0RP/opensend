@@ -403,11 +403,12 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
   direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
+  direct('getCampaignStats', 'Read lifetime delivery, unique opens/clicks, bounce/complaint/failure counts and progress for one campaign. Rates include explicit numerators/denominators and are fractions, not percentages. Delivery is receiving-server acceptance, not inbox placement; engagement includes bots/privacy proxies. Test-mode rates are null.', 'getCampaignStats');
   direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read, send or manage delegation within the originating MCP approval and optional sender-domain restrictions. Cannot manage credentials.', 'createAgentToken');
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 40) invalid(`Curated catalog must contain exactly 40 tools, got ${result.size}.`);
+  if (result.size !== 41) invalid(`Curated catalog must contain exactly 41 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

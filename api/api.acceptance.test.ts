@@ -716,12 +716,12 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 40);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 13);
+    assert.equal(catalog.tools.length, 41);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 14);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
-      'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getContentGuide', 'getContext', 'getMetrics',
+      'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
       'importContacts', 'importTemplateImage', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
@@ -886,7 +886,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 13);
+    assert.equal(catalog.tools.length, 14);
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
@@ -896,6 +896,28 @@ describe('Hosted MCP OAuth and tools', () => {
     const list = await resource(t, MANAGER, '/v1/lists', { name: unique('mcp-read-state') });
     const campaign = await campaignFixture(t, MANAGER, { listId: list.id });
     assert.equal((await callTool(token, 'findCampaigns', { id: campaign.id })).data[0].id, campaign.id);
+    const stats = await callTool(token, 'getCampaignStats', { id: campaign.id });
+    assert.equal(stats.id, campaign.id);
+    assert.equal(stats.counts.total, 0);
+    assert.equal(stats.rates.delivery.value, null);
+    const emailId = unique('mcp-stats-email');
+    cleanup(t, async () => {
+      await db.query('DELETE FROM sending_email_events WHERE email_id = $1', [emailId]);
+      await db.query('DELETE FROM sending_emails WHERE id = $1', [emailId]);
+    });
+    await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status)
+      VALUES ($1,'default','test',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
+    for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,'default','test',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
+    const populated = await callTool(token, 'getCampaignStats', { id: campaign.id });
+    assert.deepEqual(populated, ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)));
+    assert.equal(populated.totals.delivered, 1);
+    assert.equal(populated.totals.opened, 1);
+    assert.equal(populated.totals.clicked, 1);
+    const missing = await rpc(token, 'tools/call', { name: 'getCampaignStats', arguments: { id: unique('missing') } });
+    assert.equal(missing.isError, true);
+    assert.equal(missing.structuredContent.status, 404);
+    const invalid = await rpc(token, 'tools/call', { name: 'getCampaignStats', arguments: { path: { id: campaign.id } } });
+    assert.equal(invalid.structuredContent.error.code, 'INVALID_ARGUMENTS');
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'archiveCampaign'));
     const archiveDenied = await rpc(token, 'tools/call', { name: 'archiveCampaign', arguments: { id: unique('missing'), body: { archived: true }, confirm: true } });
     assert.equal(archiveDenied.isError, true, redact(archiveDenied));
@@ -1971,6 +1993,94 @@ describe('Dashboard API capabilities', () => {
       for (const [status, count] of Object.entries(counts.byStatus)) assert.equal(count, current.filter(row => row.status === status).length);
       assert.equal(counts.byStatus[expected], 1);
     }
+  });
+
+  test('campaign stats expose lifetime unique outcomes, explicit rates and progress through the API', async t => {
+    const db = await fixtureDatabase(t);
+    const live = await keyFixture(t, { environment: 'live' });
+    const testKey = await keyFixture(t);
+    const sendOnly = await keyFixture(t, { environment: 'live', permissions: ['send'] });
+    const campaign = await campaignFixture(t, live.secret, {});
+    const untracked = await campaignFixture(t, live.secret, {}, { tracking: false });
+    const simulated = await campaignFixture(t, testKey.secret, {});
+    const path = `/v1/campaigns/${campaign.id}/stats`;
+    const empty = ok(await http('GET', path, live.secret));
+    assert.equal(empty.counts.total, 0);
+    assert.equal(empty.expansion, null);
+    assert.ok(Object.values(empty.totals).every(value => value === 0));
+    assert.ok(Object.values(empty.rates).every((rate: any) => rate.value === null && rate.denominator === 0));
+    error(await http('GET', path), 401);
+    error(await http('GET', path, testKey.secret), 404, 'NOT_FOUND');
+    error(await http('GET', path, sendOnly.secret), 403, 'PERMISSION_DENIED');
+    error(await http('GET', `/v1/campaigns/${unique('missing')}/stats`, live.secret), 404, 'NOT_FOUND');
+
+    // Synthetic audit rows only: no live send, AWS call or dispatch job. Old creation times
+    // prove stats have no implicit 30-day window. Raw feedback uses the real ingestion helper.
+    const { nodeRuntime } = await import('./src/adapters/node.js');
+    const { recordEmailEvent } = await import('./src/sending.js');
+    const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+    cleanup(t, close);
+    const fixtures = [
+      { status: 'delivered', events: ['delivery', 'open', 'open', 'click', 'click'], accepted: true },
+      { status: 'complained', events: ['delivery', 'complaint', 'open'], accepted: true },
+      { status: 'bounced', events: ['bounce'], accepted: true },
+      { status: 'delayed', events: ['delivery_delay'], accepted: true },
+      { status: 'rejected', events: ['reject'] }, { status: 'rendering_failed', events: ['rendering_failure'] },
+      { status: 'suppressed', events: [] }, { status: 'canceled', events: [] }, { status: 'acceptance_unknown', events: [] },
+      { status: 'sent', events: ['send'], accepted: true }, { status: 'accepted', events: [], accepted: true },
+      { status: 'delivered', events: [], accepted: true, campaignId: untracked.id },
+      { status: 'delivered', events: ['delivery'], campaignId: simulated.id, environment: 'test' },
+      { status: 'delivered', events: [], workspaceId: 'foreign-stats-workspace' },
+      { status: 'delivered', events: [], environment: 'test' },
+    ];
+    const ids: string[] = [];
+    cleanup(t, async () => {
+      await db.query('DELETE FROM operation_events WHERE data->>\'emailId\' = ANY($1::text[])', [ids]);
+      await db.query('DELETE FROM sending_email_events WHERE email_id = ANY($1::text[])', [ids]);
+      await db.query('DELETE FROM sending_emails WHERE id = ANY($1::text[])', [ids]);
+      await db.query('DELETE FROM sending_campaign_expansions WHERE campaign_id = $1', [campaign.id]);
+      await db.query("UPDATE sending_campaigns SET status = 'draft', archived_at = NULL WHERE id = $1", [campaign.id]);
+    });
+    for (const fixture of fixtures) {
+      const emailId = unique('stats-email'), environment = fixture.environment ?? 'live', workspaceId = fixture.workspaceId ?? 'default';
+      ids.push(emailId);
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',$7,$8,$9,'2020-01-01T00:00:00Z')`,
+      [emailId, workspaceId, environment, REGION, live.id, fixture.campaignId ?? campaign.id, environment === 'test', fixture.status, fixture.accepted ? unique('synthetic-provider') : null]);
+      for (const type of fixture.events) await recordEmailEvent(runtime, { workspaceId, environment: environment as 'live' | 'test', emailId, type, externalId: unique('stats-feedback'), data: { synthetic: true, isBotEvent: 'Likely' } });
+    }
+    // Even corrupt cross-scope feedback for a matching email ID must not be counted.
+    for (const [workspaceId, environment] of [['foreign-stats-workspace', 'live'], ['default', 'test']]) {
+      await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,$2,$3,$4,'click',false)", [unique('foreign-event'), workspaceId, environment, ids[6]]);
+    }
+    await db.query("UPDATE sending_campaigns SET status = 'completed', archived_at = now() WHERE id = $1", [campaign.id]);
+    await db.query("INSERT INTO sending_campaign_expansions (campaign_id, review_id, workspace_id, environment, actor_key_id, total, expanded, canceled, status) VALUES ($1,$2,'default','live',$3,13,11,2,'canceled')", [campaign.id, unique('stats-review'), live.id]);
+    const stats = ok(await http('GET', path, live.secret));
+    assert.equal(stats.status, 'completed');
+    assert.equal(stats.tracking, true);
+    assert.equal(stats.counts.total, 11);
+    assert.equal(stats.counts.byStatus.delivered, 1);
+    assert.equal(stats.counts.byStatus.complained, 1);
+    assert.equal(stats.counts.byStatus.canceled, 1);
+    assert.equal(stats.expansion.total, 13);
+    assert.equal(stats.expansion.expanded, 11);
+    assert.equal(stats.expansion.canceled, 2, 'Unmaterialized cancellations are separate from email counts.');
+    assert.deepEqual(stats.totals, { accepted: 6, delivered: 2, bounced: 1, complained: 1, opened: 2, clicked: 1, failed: 2, deliveryDelayed: 1, simulated: 0 });
+    assert.deepEqual(stats.rates.delivery, { value: 2 / 6, numerator: 2, denominator: 6 });
+    assert.deepEqual(stats.rates.bounce, { value: 1 / 6, numerator: 1, denominator: 6 });
+    assert.deepEqual(stats.rates.complaint, { value: 1 / 6, numerator: 1, denominator: 6 });
+    assert.deepEqual(stats.rates.open, { value: 1, numerator: 2, denominator: 2 });
+    assert.deepEqual(stats.rates.click, { value: 0.5, numerator: 1, denominator: 2 });
+    const disabled = ok(await http('GET', `/v1/campaigns/${untracked.id}/stats`, live.secret));
+    assert.equal(disabled.tracking, false);
+    assert.equal(disabled.rates.delivery.value, 1);
+    assert.equal(disabled.rates.open.value, null);
+    assert.equal(disabled.rates.click.value, null);
+    const testStats = ok(await http('GET', `/v1/campaigns/${simulated.id}/stats`, testKey.secret));
+    assert.equal(testStats.totals.accepted, 0);
+    assert.equal(testStats.totals.delivered, 1);
+    assert.equal(testStats.totals.simulated, 1);
+    assert.ok(Object.values(testStats.rates).every((rate: any) => rate.value === null));
   });
 
   test('dashboard email queries bind literal search, kind, region, time and cursors while cohort metrics deduplicate event replays', async t => {

@@ -638,6 +638,111 @@ export type CampaignDraftSummary = {
     };
 };
 
+/**
+ * Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Test outcomes are simulated, never evidence of real delivery.
+ */
+export type CampaignStats = {
+    id: string;
+    name: string;
+    environment: 'live' | 'test';
+    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+    tracking: boolean;
+    /**
+     * Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.
+     */
+    counts: {
+        total: number;
+        byStatus: {
+            queued?: number;
+            attempting?: number;
+            accepted?: number;
+            sent?: number;
+            delivered?: number;
+            bounced?: number;
+            complained?: number;
+            rejected?: number;
+            rendering_failed?: number;
+            delayed?: number;
+            suppressed?: number;
+            canceled?: number;
+            acceptance_unknown?: number;
+            simulated?: number;
+        };
+    };
+    expansion: CampaignExpansion;
+    /**
+     * Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events in test mode. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.
+     */
+    totals: {
+        accepted: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
+        opened: number;
+        clicked: number;
+        failed: number;
+        deliveryDelayed: number;
+        simulated: number;
+    };
+    rates: {
+        /**
+         * Delivered / accepted. Receiving-server acceptance, not inbox placement.
+         */
+        delivery: {
+            /**
+             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             */
+            value: number | null;
+            numerator: number;
+            denominator: number;
+        };
+        /**
+         * Bounced / accepted.
+         */
+        bounce: {
+            /**
+             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             */
+            value: number | null;
+            numerator: number;
+            denominator: number;
+        };
+        /**
+         * Complained / accepted.
+         */
+        complaint: {
+            /**
+             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             */
+            value: number | null;
+            numerator: number;
+            denominator: number;
+        };
+        /**
+         * Unique opened emails / delivered.
+         */
+        open: {
+            /**
+             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             */
+            value: number | null;
+            numerator: number;
+            denominator: number;
+        };
+        /**
+         * Unique clicked emails / delivered, not click-to-open rate.
+         */
+        click: {
+            /**
+             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             */
+            value: number | null;
+            numerator: number;
+            denominator: number;
+        };
+    };
+};
+
 export type CampaignContentGuide = {
     format: 'markdown';
     markdown: string;
@@ -5447,6 +5552,69 @@ export type UpdateCampaignResponses = {
 };
 
 export type UpdateCampaignResponse = UpdateCampaignResponses[keyof UpdateCampaignResponses];
+
+export type GetCampaignStatsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/stats';
+};
+
+export type GetCampaignStatsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetCampaignStatsError = GetCampaignStatsErrors[keyof GetCampaignStatsErrors];
+
+export type GetCampaignStatsResponses = {
+    /**
+     * Success
+     */
+    200: CampaignStats;
+};
+
+export type GetCampaignStatsResponse = GetCampaignStatsResponses[keyof GetCampaignStatsResponses];
 
 export type GetCampaignContentGuideData = {
     body?: never;

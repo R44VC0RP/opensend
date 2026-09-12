@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobs, jobSchedule } from './db/core.js';
@@ -141,6 +141,12 @@ const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.optio
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
 const Expansion = z.object({ status: z.enum(['pending', 'expanding', 'completed', 'failed', 'canceled']), total: z.number().int().describe('Fixed reviewed recipient count reserved at send or schedule.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: z.object({ code: z.string(), message: z.string() }).nullable() }).openapi('CampaignExpansion');
 const Campaign = z.object({ expansion: Expansion.nullable().optional(), id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
+const CampaignRate = z.object({ value: z.number().nonnegative().nullable().describe('Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.'), numerator: z.number().int().nonnegative(), denominator: z.number().int().nonnegative() });
+const CampaignStats = z.object({
+  id: z.string(), name: z.string(), environment: z.enum(['live', 'test']), status: CampaignStatus, tracking: z.boolean(), counts: CampaignCounts, expansion: Expansion.nullable(),
+  totals: z.object({ accepted: z.number().int(), delivered: z.number().int(), bounced: z.number().int(), complained: z.number().int(), opened: z.number().int(), clicked: z.number().int(), failed: z.number().int(), deliveryDelayed: z.number().int(), simulated: z.number().int() }).describe('Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events in test mode. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.'),
+  rates: z.object({ delivery: CampaignRate.describe('Delivered / accepted. Receiving-server acceptance, not inbox placement.'), bounce: CampaignRate.describe('Bounced / accepted.'), complaint: CampaignRate.describe('Complained / accepted.'), open: CampaignRate.describe('Unique opened emails / delivered.'), click: CampaignRate.describe('Unique clicked emails / delivered, not click-to-open rate.') }),
+}).describe('Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Test outcomes are simulated, never evidence of real delivery.').openapi('CampaignStats');
 const CampaignState = Campaign.pick({ id: true, environment: true, revision: true, updatedAt: true, status: true, reviewId: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
@@ -723,6 +729,31 @@ export function registerSending(app: App) {
     const a = actor(c), row = await timed(c, 'campaign-db', () => findCampaign(c.env.db, a, c.req.valid('param').id));
     const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, [row]));
     return c.json(Campaign.parse(views[0]!), 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/stats', operationId: 'getCampaignStats', description: 'Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Rates are fractions, null for zero denominators or test mode; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignStats), ...errors } }), async c => {
+    const a = actor(c), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
+    const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
+    const outcome = (status: EmailStatus, type: string) => distinct(sql`${emails.status} = ${status} OR ${emailEvents.type} = ${type}`);
+    // Aggregate in the database, using the campaign and per-email event indexes. Grouping by
+    // current status keeps progress and lifetime outcomes in the same snapshot without loading mail bodies.
+    const grouped = await c.env.db.select({
+      status: emails.status, count: sql<number>`count(DISTINCT ${emails.id})::int`,
+      accepted: distinct(sql`NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay'))`),
+      delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
+      opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
+      failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
+      deliveryDelayed: outcome('delayed', 'delivery_delay'), simulated: distinct(sql`${emails.simulated}`),
+    }).from(emails).leftJoin(emailEvents, and(scope(emailEvents, a), eq(emails.id, emailEvents.emailId))).where(and(scope(emails, a), eq(emails.campaignId, row.id))).groupBy(emails.status);
+    const counts = emptyCounts(), totals = { accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: 0 };
+    for (const item of grouped) {
+      counts.byStatus[item.status] = item.count; counts.total += item.count;
+      for (const key of Object.keys(totals) as (keyof typeof totals)[]) totals[key] += item[key];
+    }
+    const [expansion] = await c.env.db.select().from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, row.id)));
+    const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && a.environment === 'live' && enabled ? numerator / denominator : null });
+    return c.json(CampaignStats.parse({ id: row.id, name: row.draft.name, environment: row.environment, status: row.status, tracking: row.draft.tracking, counts, expansion: expansion ?? null, totals,
+      rates: { delivery: rate(totals.delivered, totals.accepted), bounce: rate(totals.bounced, totals.accepted), complaint: rate(totals.complained, totals.accepted), open: rate(totals.opened, totals.delivered, row.draft.tracking), click: rate(totals.clicked, totals.delivered, row.draft.tracking) },
+    }), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaign-content-guide', operationId: 'getCampaignContentGuide', description: 'The complete campaign and template content vocabulary, personalization syntax, restrictions and examples as Markdown. Read it once before writing or editing html.', tags: ['Campaigns'], security, responses: { 200: response(CampaignContentGuide), ...errors } }), async c => {
     actor(c);
