@@ -1018,7 +1018,7 @@ async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inf
 
 const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
-export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: string; environment: Mode; emailId: string; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string }) {
+export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: string; environment: Mode; emailId: string; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } }) {
   const next = statusForEvent[input.type];
   const publicType = ({ send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' } as Record<string, string>)[input.type];
   // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT
@@ -1065,6 +1065,11 @@ export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: s
         'message', jsonb_build_object('eventType',split_part(r.message_id,':',2),'mail',jsonb_build_object('messageId',${input.providerId ?? null}::text),
           lower(split_part(r.message_id,':',2)),jsonb_build_object('timestamp',r.created_at)))
     FROM simulated_receipts r, mail
+  ), receipt_processed AS (
+    UPDATE operation_sns_receipts SET processed_at=clock_timestamp()
+    WHERE workspace_id=${input.workspaceId} AND environment=${input.environment}
+      AND topic_arn=${input.receipt?.topicArn ?? null} AND message_id=${input.receipt?.messageId ?? null}
+      AND EXISTS (SELECT 1 FROM mail)
   ) SELECT id, workspace_id AS "workspaceId", environment, email_id AS "emailId", type,
     provider_id AS "providerId", external_id AS "externalId", data, simulated, created_at::text AS "createdAt" FROM inserted`);
   return result.rows[0] ?? null;

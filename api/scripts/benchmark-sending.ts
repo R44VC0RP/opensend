@@ -125,7 +125,12 @@ try {
   assert.equal(times.length, count);
   const windows = [];
   for (let t = times[0]!; t + 1000 <= times.at(-1)!; t += 1000) windows.push(times.filter(at => at >= t && at < t + 1000).length);
+  const materialized = await pool.query('SELECT extract(epoch FROM created_at)*1000 AS at,count(*)::int AS n FROM sending_emails WHERE campaign_id=$1 GROUP BY created_at ORDER BY created_at', [campaign.id]);
+  const timeline = [...materialized.rows.map(row => ({ at: Number(row.at), delta: Number(row.n) })), ...times.map(at => ({ at, delta: -1 }))].sort((a,b) => a.at-b.at || b.delta-a.delta);
+  let pending = 0, emptyMs = 0, lastAt = timeline[0]!.at;
+  for (const point of timeline) { if (pending === 0) emptyMs += point.at-lastAt; pending += point.delta; lastAt=point.at; }
   const result = { runId, campaignId: campaign.id, simulated: true, count, replicas, lanes,
+    pendingBufferEmptyMs: emptyMs, materializationBatches: materialized.rows.map(row => ({ at: Number(row.at), count: row.n })),
     rate: process.env.SIMULATED_SES_RATE, latencyMs: process.env.SIMULATED_SES_LATENCY_MS,
     requestMs, allAcceptedMs, feedbackAndPublicationDrainedMs: completedMs,
     overallAcceptedPerSecond: count * 1000 / allAcceptedMs,

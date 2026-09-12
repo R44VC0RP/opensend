@@ -437,10 +437,13 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
 
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
-  const [receipt] = await runtime.db.select().from(snsReceipts).where(receiptWhere); if (!receipt || receipt.processedAt) return;
   const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
-  const [email] = await runtime.db.select().from(emails).where(and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId)));
+  const [input] = await runtime.db.select({ receipt: snsReceipts, email: {
+    id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
+  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId))).where(receiptWhere);
+  if (!input || input.receipt.processedAt) return;
+  const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
   if (email.simulated !== (job.environment === 'test')) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
   const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
@@ -460,7 +463,13 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
   const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;
   const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, environment: job.environment, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
-  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: mapped.rawType, externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime });
+  // Routine send/delivery events have no later consent or engagement writes.
+  // Mark their receipt in the same commit as status, event and webhook fan-out.
+  const routine = kind === 'Send' || kind === 'Delivery';
+  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: mapped.rawType, externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime,
+    ...(routine ? { receipt: { topicArn: String(payload.topicArn), messageId: String(payload.messageId) } } : {}),
+  });
+  if (routine) return;
   const candidates = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
   const recipients = candidates.filter((value: unknown): value is string => typeof value === 'string').map((value: string) => value.toLowerCase()).filter((value: string) => [...email.to, ...email.cc, ...email.bcc].map(v => v.toLowerCase()).includes(value));
   const suppress = kind === 'Complaint' || (kind === 'Bounce' && eventDetail.bounceType === 'Permanent');
