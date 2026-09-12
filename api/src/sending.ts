@@ -893,7 +893,9 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   await db.delete(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaignId), eq(campaignExpansions.status, 'failed')));
-  let reviewId = input.reviewId ?? (row.status === 'reviewed' ? row.reviewId ?? undefined : undefined);
+  // Previewing must not silently opt normal send/schedule into the legacy path.
+  // Only clients explicitly supplying reviewId request that snapshot contract.
+  let reviewId = input.reviewId;
   if (!reviewId) {
     const draft = readyCampaign(row.draft); sender(runtime, a, draft.from, draft.region);
     await assertRegionEnabled(db, a.workspaceId, draft.region);
@@ -1029,30 +1031,40 @@ async function assertDispatchRegionReady(runtime: Runtime, region: string, kind:
   await pending;
 }
 async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, recipients: number, ses: SESv2Client): Promise<{ deferUntil?: string; waitUntil?: number }> {
-  const identity = { workspaceId: a.workspaceId, environment: a.environment, region: selectedRegion };
   const where = and(scope(regionalLimits, a), eq(regionalLimits.region, selectedRegion));
-  const [observed] = await runtime.db.select().from(regionalLimits).where(where);
-  // Control-plane network I/O must not hold the shared permit row (or a database transaction).
-  const account = !observed?.checkedAt || Date.parse(observed.checkedAt) < Date.now() - 60000 ? await ses.send(new GetAccountCommand({})) : null;
-  return runtime.db.transaction(async db => {
-    await db.insert(regionalLimits).values(identity).onConflictDoNothing();
-    const [stored] = await db.select().from(regionalLimits).where(where).for('update');
-    if (!stored) throw new ApiError(503, 'QUOTA_GATE_UNAVAILABLE', 'The regional quota gate is unavailable.', undefined, true);
-    let gate = stored;
-    if (!gate.checkedAt || Date.parse(gate.checkedAt) < Date.now() - 60000) {
-      if (!account) return { deferUntil: new Date(Date.now() + 1000).toISOString() };
-      const quota = account.SendQuota;
-      if (!account.SendingEnabled || !quota || !quota.MaxSendRate || quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) throw new ApiError(503, 'SES_SENDING_NOT_READY', 'SES sending is disabled or regional quota information is unavailable.', undefined, true);
-      gate = { ...gate, maxSendRate: quota.MaxSendRate, max24HourSend: quota.Max24HourSend, sentLast24Hours: quota.SentLast24Hours, reserved: 0, checkedAt: now() };
-      await db.update(regionalLimits).set({ maxSendRate: gate.maxSendRate, max24HourSend: gate.max24HourSend, sentLast24Hours: gate.sentLast24Hours, reserved: 0, checkedAt: gate.checkedAt }).where(where);
+  // The normal path is one atomic statement: no application-held permit lock
+  // across network round trips. Database time coordinates all Workers/replicas.
+  const reserve = () => runtime.db.execute<{ wait_until: string | number }>(sql`
+    UPDATE sending_region_limits SET reserved = reserved + ${recipients},
+      next_allowed_at = greatest(clock_timestamp(), next_allowed_at) + ceil(1000 * ${recipients} / max_send_rate) * interval '1 millisecond'
+    WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND region = ${selectedRegion}
+      AND checked_at > clock_timestamp() - interval '60 seconds' AND max_send_rate > 0
+      AND (max_24_hour_send < 0 OR sent_last_24_hours + reserved + ${recipients} <= max_24_hour_send)
+      AND (next_allowed_at IS NULL OR next_allowed_at <= clock_timestamp() + interval '1 second')
+    RETURNING extract(epoch FROM next_allowed_at) * 1000 - ceil(1000 * ${recipients} / max_send_rate) AS wait_until`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reserved = await reserve();
+    if (reserved.rows[0]) return { waitUntil: Number(reserved.rows[0].wait_until) };
+    const [gate] = await runtime.db.select().from(regionalLimits).where(where);
+    if (gate?.checkedAt && Date.parse(gate.checkedAt) > Date.now() - 60000) {
+      if (gate.max24HourSend >= 0 && gate.sentLast24Hours + gate.reserved + recipients > gate.max24HourSend) return { deferUntil: new Date(Date.now() + 60000).toISOString() };
+      return { deferUntil: new Date(Math.max(Date.now() + 1000, gate.nextAllowedAt ? Date.parse(gate.nextAllowedAt) - 1000 : 0)).toISOString() };
     }
-    if (gate.max24HourSend >= 0 && gate.sentLast24Hours + gate.reserved + recipients > gate.max24HourSend) return { deferUntil: new Date(Date.now() + 60000).toISOString() };
-    const slot = Math.max(Date.now(), gate.nextAllowedAt ? Date.parse(gate.nextAllowedAt) : 0);
-    // Reserve at most one second ahead: concurrency can fill SES capacity without a campaign hoarding future permits.
-    if (slot > Date.now() + 1000) return { deferUntil: new Date(slot - 1000).toISOString() };
-    await db.update(regionalLimits).set({ reserved: gate.reserved + recipients, nextAllowedAt: new Date(slot + Math.ceil(1000 * recipients / gate.maxSendRate)).toISOString() }).where(where);
-    return { waitUntil: slot };
-  });
+    if (attempt) break;
+    // Refresh the control-plane quota without holding a database transaction.
+    const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
+    if (!account.SendingEnabled || !quota || !quota.MaxSendRate || quota.MaxSendRate <= 0 || quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) throw new ApiError(503, 'SES_SENDING_NOT_READY', 'SES sending is disabled or regional quota information is unavailable.', undefined, true);
+    // Concurrent refreshes must not reset reservations made after the first one.
+    // Keep next_allowed_at so refreshing never discards already allocated slots.
+    await runtime.db.execute(sql`INSERT INTO sending_region_limits
+      (workspace_id, environment, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
+      VALUES (${a.workspaceId}, ${a.environment}, ${selectedRegion}, ${quota.MaxSendRate}, ${quota.Max24HourSend}, ${quota.SentLast24Hours}, 0, clock_timestamp())
+      ON CONFLICT (workspace_id, environment, region) DO UPDATE SET
+        max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
+        sent_last_24_hours = excluded.sent_last_24_hours, reserved = 0, checked_at = excluded.checked_at
+      WHERE sending_region_limits.checked_at IS NULL OR sending_region_limits.checked_at <= clock_timestamp() - interval '60 seconds'`);
+  }
+  return { deferUntil: new Date(Date.now() + 1000).toISOString() };
 }
 async function deferDispatch(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, payload: Record<string, unknown>, availableAt: string, attempted = false) {
   await runtime.db.transaction(async db => {

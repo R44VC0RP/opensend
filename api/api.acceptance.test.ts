@@ -1533,13 +1533,15 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal((await allPages(`/v1/emails?campaignId=${later.id}`, key.secret)).length, 0);
   });
 
-  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted', async t => {
+  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted, even after preview', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('automatic-review-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Automatic reader' } });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
+    const preview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
+    assert.equal(preview.eligible, 1);
     const accepted = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
     assert.equal(accepted.status, 'sending');
     assert.equal(accepted.queued, 1);
@@ -1560,6 +1562,7 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(retried.status, 'completed');
     assert.equal(retried.counts.byStatus.simulated, 1);
     const scheduled = await campaignFixture(t, key.secret, { listId: list.id });
+    ok(await http('POST', `/v1/campaigns/${scheduled.id}/review`, key.secret, { revision: scheduled.revision }));
     const scheduledAccepted = ok(await http('POST', `/v1/campaigns/${scheduled.id}/schedule`, key.secret, { revision: scheduled.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
     assert.equal(scheduledAccepted.status, 'scheduled');
     const canceled = ok(await http('POST', `/v1/campaigns/${scheduled.id}/cancel`, key.secret));
