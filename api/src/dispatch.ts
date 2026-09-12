@@ -8,4 +8,4 @@ const deleteAttachment: JobHandler = async (runtime, payload) => {
   try { await runtime.storage.delete(payload.key); }
   catch { throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true); }
 };
-export async function drain(runtime: Runtime, limit = 20, concurrency = 2) { return processJobs(await resolveRegionRuntime(runtime), { ...jobHandlers, ...operationJobs, ...sesRegionJobs, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency); }
+export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(await resolveRegionRuntime(runtime), { ...jobHandlers, ...operationJobs, ...sesRegionJobs, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }

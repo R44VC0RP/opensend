@@ -26,7 +26,7 @@
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
     "producers": [{ "binding": "WAKE_QUEUE", "queue": "opensend-work" }],
-    "consumers": [{ "queue": "opensend-work", "max_batch_size": 10, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 }]
+    "consumers": [{ "queue": "opensend-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 }]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },
   "ratelimits": [{ "name": "ADMISSION", "namespace_id": "8793001", "simple": { "limit": 6000, "period": 60 } }],

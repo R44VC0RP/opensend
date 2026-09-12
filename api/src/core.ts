@@ -38,7 +38,7 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export interface Runtime { db: Database; storage: Storage; config: Config; wake?: () => Promise<void>; renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>; }
+export interface Runtime { db: Database; storage: Storage; config: Config; wake?: (readyJobs?: number) => Promise<void>; renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>; }
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;

@@ -524,7 +524,10 @@ async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, cam
   await enqueue(db, { type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { emailId, version: 0, ...(campaignId ? { campaignId } : {}), ...(requestId ? { requestId } : {}) }, availableAt });
   return { id: emailId, status: 'queued' as const, environment: a.environment, simulated: a.environment === 'test' };
 }
-function wake(runtime: Runtime) { void runtime.wake?.().catch(() => undefined); }
+async function wake(runtime: Runtime, readyJobs: number) {
+  try { await runtime.wake?.(readyJobs); }
+  catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Expanded jobs are durable; the scheduler will recover them.' }); }
+}
 async function saveAttachment(c: Ctx, a: Actor, metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
   if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
   const input = validateAttachment(metadata, bytes);
@@ -583,7 +586,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { body: json(SendInput) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); return queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')); });
-    wake(c.env); return c.json(Receipt.parse(result), 202);
+    return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', tags: ['Emails'], security, request: { body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
@@ -599,7 +602,7 @@ export function registerSending(app: App) {
       }
       const data = []; for (const snapshot of snapshots) data.push(await queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId'))); return { data };
     });
-    wake(c.env); return c.json(BatchReceipt.parse(result), 202);
+    return c.json(BatchReceipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
@@ -778,7 +781,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
-    wake(c.env); return c.json(Receipt.parse(result), 202);
+    return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/review', operationId: 'reviewCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 200: response(Review), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
@@ -819,7 +822,7 @@ export function registerSending(app: App) {
       await enqueue(db, { type: 'campaign.prepare', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId, reviewId, cursor: 0 } });
       return asyncReviewView(review!);
     });
-    wake(c.env); return c.json(AsyncReview.parse(result), 202);
+    return c.json(AsyncReview.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/reviews/{reviewId}', operationId: 'getCampaignReview', description: 'Read fixed audience counts and durable preparation progress. A ready review is usable only while it remains the campaign’s current review and revision.', tags: ['Campaigns'], security, request: { params: ReviewParams }, responses: { 200: response(AsyncReview), ...errors } }), async c => {
     const a = actor(c), params = c.req.valid('param');
@@ -829,11 +832,11 @@ export function registerSending(app: App) {
     return c.json(asyncReviewView(review), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery. Omit reviewId to snapshot and validate the complete audience automatically before any provider attempt; supply an existing completed reviewId to reuse it. The 202 count is accepted recipient intents, not SES acceptance or delivery.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); wake(c.env); return c.json(CampaignQueued.parse(result), 202);
+    const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. Omit reviewId to snapshot and validate automatically; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); wake(c.env); return c.json(CampaignQueued.parse(result), 202);
+    const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
@@ -1377,7 +1380,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
     if (!initial || !['pending', 'expanding'].includes(initial.status) || initial.jobId !== job.id) return;
     a.keyId = initial.actorKeyId;
     const [review] = await runtime.db.select({ draft: campaignReviews.draft }).from(campaignReviews).where(eq(campaignReviews.id, initial.reviewId));
-    await runtime.db.transaction(async db => {
+    const readyJobs = await runtime.db.transaction(async db => {
       const campaign = await findCampaign(db, a, initial.campaignId, true);
       await lockAdmission(db, a);
       const authorized = !!review && await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, snapshot: { from: review.draft.from } });
@@ -1410,7 +1413,9 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       if (completed) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
       await db.update(campaignExpansions).set({ expanded, jobId, status: completed ? 'completed' : 'expanding', updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
       await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
+      return prepared.length;
     });
+    if (readyJobs) await wake(runtime, readyJobs);
   } catch (error) {
     const retry = !(error instanceof ApiError) || error.retryable;
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_EXPANSION_FAILED', 'Campaign expansion will retry its durable cursor.', undefined, true);

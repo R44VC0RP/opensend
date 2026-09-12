@@ -18,7 +18,13 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
   const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: workerConcurrency(env) });
   try {
-    return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async () => { await env.WAKE_QUEUE.send({ kind: 'wake' }); }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    return await work({ db: drizzle(client), storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
+      // A bounded burst advertises newly committed work to Queues autoscaling.
+      // These are hints, not email jobs; Postgres still owns every claim.
+      const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
+      await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
+      log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
+    }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
 }
 export default {
@@ -55,7 +61,9 @@ export default {
   async queue(batch, env) {
     await withRuntime(env, async runtime => {
       const concurrency = workerConcurrency(env);
-      await drain(runtime, 100, concurrency);
+      // Return frequently so Queues can reassess concurrency. Already claimed
+      // jobs finish normally; the budget never interrupts a provider attempt.
+      await drain(runtime, 100, concurrency, 2000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
@@ -65,7 +73,9 @@ export default {
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') await cleanup(runtime);
       const concurrency = workerConcurrency(env);
-      await drain(runtime, 100, concurrency);
+      // Return frequently so Queues can reassess concurrency. Already claimed
+      // jobs finish normally; the budget never interrupts a provider attempt.
+      await drain(runtime, 100, concurrency, 2000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });

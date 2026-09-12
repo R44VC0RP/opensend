@@ -117,10 +117,11 @@ function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
 
 export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake = true): Promise<void> {
   if (!eventTypes.includes(event.type)) throw new ApiError(422, 'INVALID_EVENT_TYPE', 'Unknown webhook event type.');
-  await runtime.db.transaction(async tx => {
+  const readyJobs = await runtime.db.transaction(async tx => {
     const inserted = await tx.insert(events).values(event).onConflictDoNothing().returning({ id: events.id });
-    if (!inserted.length) return;
+    if (!inserted.length) return 0;
     const endpoints = await tx.select().from(webhooks).where(and(scoped(webhooks, event), eq(webhooks.paused, false)));
+    let count = 0;
     for (const endpoint of endpoints) {
       if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
       // Simulated emails must never enter a live-configured endpoint, even if a caller supplied a wrong mode.
@@ -128,9 +129,11 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
       const deliveryId = id('whd');
       await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event });
       await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
+      count++;
     }
+    return count;
   });
-  if (wake) try { await runtime.wake?.(); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
+  if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
 export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, environment: Mode, email: string) {
