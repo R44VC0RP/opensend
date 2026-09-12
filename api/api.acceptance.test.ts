@@ -2697,9 +2697,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   jobs: (type: string) => Promise<Json[]>;
 }) => Promise<void>) {
   assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Simulated SES fixtures require an isolated local database.');
-  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }] = await Promise.all([
+  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }, { dispatchDue }] = await Promise.all([
     import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
-    import('./src/operations.js'), import('./src/ses-region-state.js'),
+    import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'),
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
@@ -2727,6 +2727,8 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       }
       const jobs = async (type: string): Promise<Json[]> => (await db.query('SELECT * FROM jobs WHERE workspace_id = $1 AND type = $2 ORDER BY available_at, id', [runtime.config.workspaceId, type])).rows;
       async function run(type: string) {
+        // Mail is no longer a job: the dispatcher claims due rows for one environment/region directly.
+        if (type === 'email.dispatch') { await dispatchDue(runtime, 'test', REGION); return; }
         assert.ok(handlers[type], `No handler for ${type}`);
         const pending = (await jobs(type)).filter(job => job.status === 'pending');
         assert.ok(pending.length, `Expected a pending ${type} job.`);
@@ -3041,7 +3043,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('a full campaign buffer refills at the cached regional rate without exceeding 400 queued emails', async t => {
+  test('the campaign dispatch buffer scales with the cached regional rate and never creates per-email jobs', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('refill-buffer') }), 201);
       // Bulk-seed reserved-domain contacts before the normal immutable snapshot.
@@ -3053,14 +3055,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('refill-buffer'), from: 'sender@example.com', subject: 'Synthetic refill capacity', html: '<p>Synthetic buffer acceptance only.</p>', audience: { listId: list.id } }), 201);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 500);
       await run('campaign.prepare');
-      for (const expected of [200, 400]) {
-        await run('campaign.expand');
-        const expanded = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-        assert.equal(expanded.counts.total, expected);
-        assert.equal(expanded.counts.byStatus.queued, expected);
-        assert.equal(expanded.expansion.expanded, expected);
-      }
-      for (const rate of [5000, 20, null]) {
+      // Without a cached regional rate the buffer is the 400-row floor: one chunk fills it and the continuation waits.
+      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'test' AND region = $2", [runtime.config.workspaceId, REGION]);
+      await run('campaign.expand');
+      const floor = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(floor.counts.total, 400);
+      assert.equal(floor.counts.byStatus.queued, 400);
+      assert.equal(floor.expansion.expanded, 400);
+      assert.equal((await jobs('email.dispatch')).length, 0, 'Expansion materializes rows, never per-email dispatch jobs.');
+      for (const rate of [20, null]) {
         if (rate === null) {
           await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'test' AND region = $2", [runtime.config.workspaceId, REGION]);
         } else {
@@ -3075,35 +3078,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(deferred.length, 1, 'Full capacity must retain exactly one expansion continuation.');
         assert.equal(deferred[0]!.payload.cursor, 400);
         const dueAt = new Date(deferred[0]!.available_at).getTime();
-        const expectedDelay = rate === 5000 ? 40 : 2000;
-        assert.ok(dueAt >= before + expectedDelay - 5 && dueAt <= after + expectedDelay + 5,
-          `Rate ${rate ?? 'missing'} should defer ${expectedDelay}ms; observed ${dueAt - before}ms from invocation start (${after - before}ms handler time).`);
+        // Ten seconds of a 20/s rate is below the floor, so the recheck stays at the two-second cap.
+        assert.ok(dueAt >= before + 2000 - 5 && dueAt <= after + 2000 + 5, `Rate ${rate ?? 'missing'} should defer 2000ms; observed ${dueAt - before}ms.`);
         const full = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
         assert.equal(full.counts.total, 400, 'Deferral must not materialize more immutable emails.');
-        assert.equal(full.counts.byStatus.queued, 400);
         assert.equal(full.expansion.expanded, 400);
-        assert.equal((await jobs('email.dispatch')).length, 400);
       }
-      // Free 100 slots through a terminal fixture status; do not alter reviewed
-      // recipients or immutable message snapshots, and do not invoke a provider.
-      assert.equal((await db.query(`UPDATE sending_emails SET status = 'simulated'
-        WHERE workspace_id = $1 AND environment = 'test' AND campaign_id = $2 AND review_ordinal <= 100`, [runtime.config.workspaceId, campaign.id])).rowCount, 100);
+      // A high cached rate widens the buffer (ten seconds of sends), so the remaining recipients materialize at once.
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
+        VALUES ($1, 'test', $2, 5000, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+        DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION]);
       await run('campaign.expand');
-      const refilled = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(refilled.counts.total, 500);
-      assert.equal(refilled.counts.byStatus.queued, 400);
-      assert.equal(refilled.counts.byStatus.simulated, 100);
-      assert.equal(refilled.expansion.expanded, 500);
-      assert.equal(refilled.expansion.status, 'completed');
+      const widened = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(widened.counts.total, 500);
+      assert.equal(widened.counts.byStatus.queued, 500);
+      assert.equal(widened.expansion.expanded, 500);
+      assert.equal(widened.expansion.status, 'completed');
       assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
-      assert.equal((await jobs('email.dispatch')).length, 500);
+      assert.equal((await jobs('email.dispatch')).length, 0);
+      // The dispatcher drains the whole buffer in batches; every row reaches the simulated provider exactly once.
+      await run('email.dispatch');
+      const dispatched = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(dispatched.counts.byStatus.accepted, 500);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM sending_email_events WHERE workspace_id = $1 AND type = 'dispatch_attempt'", [runtime.config.workspaceId])).rows[0].count, 500);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM sending_emails WHERE workspace_id = $1 AND lease_until IS NOT NULL", [runtime.config.workspaceId])).rows[0].count, 0, 'Leases are released by the claim.');
     });
   });
 
   test('dispatch retries definitive throttling once but never replays rejection or uncertain provider acceptance', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
-      const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }, { jobHandlers }] = await Promise.all([
-        import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'), import('./src/sending.js'),
+      const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
+        import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
       ]);
       const faultClient = new SESv2Client({ region: REGION, endpoint: 'https://ses-simulator.invalid', maxAttempts: 1,
         credentials: { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' },
@@ -3124,10 +3129,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return Reflect.apply(originalSend, faultClient, [command]);
       });
       const events = async (emailId: string) => page(await local('GET', `/v1/emails/${emailId}/events`));
-      const replay = async (job: Json) => jobHandlers['email.dispatch']!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: runtime.config.workspaceId, environment: 'test' });
+      const stored = async (emailId: string) => (await db.query('SELECT status, dispatch_version, scheduled_at, lease_until FROM sending_emails WHERE id = $1', [emailId])).rows[0];
       const retryAddress = address();
       const first = ok(await local('POST', '/v1/emails/send', mail({ to: retryAddress })), 202);
-      const originalJob = (await jobs('email.dispatch'))[0]!;
+      assert.equal((await jobs('email.dispatch')).length, 0, 'Direct sends are rows, not jobs.');
       const beforeThrottle = Date.now();
       await run('email.dispatch');
       const afterThrottle = Date.now();
@@ -3136,18 +3141,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(throttled.errorCode, 'SES_THROTTLED');
       assert.equal(throttled.attemptStartedAt, null);
       assert.equal(throttled.providerId, null);
-      const retryJobs = (await jobs('email.dispatch')).filter(job => job.status === 'pending');
-      assert.equal(retryJobs.length, 1);
-      assert.equal(retryJobs[0]!.payload.emailId, first.id);
-      assert.equal(retryJobs[0]!.payload.version, 1);
-      assert.equal(retryJobs[0]!.payload.providerRetries, 1);
-      const retryAt = new Date(retryJobs[0]!.available_at).getTime();
-      assert.ok(retryAt >= beforeThrottle + 2000 && retryAt <= afterThrottle + 2000);
+      const requeued = await stored(first.id);
+      assert.equal(requeued.dispatch_version, 1, 'A throttled attempt requeues the row under a new dispatch version.');
+      assert.equal(requeued.lease_until, null);
+      const retryAt = new Date(requeued.scheduled_at).getTime();
+      assert.ok(retryAt >= beforeThrottle + 2000 && retryAt <= afterThrottle + 2000, `Retry should be due in 2000ms; observed ${retryAt - beforeThrottle}ms.`);
       assert.equal((await events(first.id)).filter(event => event.type === 'provider_throttled').length, 1);
       assert.equal((await jobs('operation.simulatedFeedback')).length, 0);
-      await replay(originalJob);
-      assert.equal(providerCalls.length, 1, 'A stale pre-throttle dispatch must not consume the retry.');
-      assert.equal((await jobs('email.dispatch')).length, 2);
+      // Not yet due: another pass must not touch the row or consume the retry outcome.
+      await run('email.dispatch');
+      assert.equal(providerCalls.length, 1, 'A dispatch pass before the retry is due must not call the provider.');
+      assert.equal((await stored(first.id)).dispatch_version, 1);
+      await db.query('UPDATE sending_emails SET scheduled_at = clock_timestamp() WHERE id = $1', [first.id]);
       await run('email.dispatch');
       const accepted = ok(await local('GET', `/v1/emails/${first.id}`));
       assert.equal(accepted.status, 'accepted');
@@ -3168,12 +3173,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const recorded = await events(email.id);
         assert.equal(recorded.filter(event => event.type === 'dispatch_attempt').length, 1);
         assert.equal(recorded.filter(event => event.type === eventType).length, 1);
-        const ownJobs = (await jobs('email.dispatch')).filter(job => job.payload.emailId === email.id);
-        assert.equal(ownJobs.length, 1, 'Terminal or ambiguous outcomes must not create automatic retries.');
+        assert.equal((await stored(email.id)).dispatch_version, 0, 'Terminal or ambiguous outcomes must not requeue the row.');
         const sendsBeforeReplay: number = providerCalls.length;
-        await replay(ownJobs[0]!);
-        await replay(ownJobs[0]!);
-        assert.equal(providerCalls.length, sendsBeforeReplay, 'Replayed terminal dispatch must not call SendEmail again.');
+        await run('email.dispatch');
+        await run('email.dispatch');
+        assert.equal(providerCalls.length, sendsBeforeReplay, 'Further dispatch passes must not call SendEmail for terminal rows.');
         assert.deepEqual(await events(email.id), recorded);
       }
       assert.deepEqual(providerCalls, [
@@ -3183,9 +3187,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const callbacks = await jobs('operation.simulatedFeedback');
       assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
-      assert.equal((await jobs('email.dispatch')).filter(job => job.status === 'pending').length, 0);
-      const stored = (await db.query('SELECT environment, dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
-      assert.deepEqual(stored, [{ environment: 'test', dispatch_version: 1 }, { environment: 'test', dispatch_version: 0 }, { environment: 'test', dispatch_version: 0 }]);
+      const versions = (await db.query('SELECT environment, dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(versions, [{ environment: 'test', dispatch_version: 1 }, { environment: 'test', dispatch_version: 0 }, { environment: 'test', dispatch_version: 0 }]);
       assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'live'", [runtime.config.workspaceId])).rows[0].count, 0);
     });
   });

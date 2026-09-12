@@ -1,10 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobs, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { GetAccountCommand, GetEmailTemplateCommand, SendEmailCommand, TestRenderEmailTemplateCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
+import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachment } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime, type Storage } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, getAudience, snapshotCampaignAudience } from './audience.js';
@@ -12,10 +12,9 @@ import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
-import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, regionalLimits, reviewRecipients, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
+import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
-import { simulatedSes } from './adapters/simulated-ses.js';
 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
@@ -25,10 +24,14 @@ const SENDING_LIMITS = {
   live: { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 },
 } as const;
 const CAMPAIGN_PREPARE_ROWS = 1000;
-const CAMPAIGN_EXPAND_ROWS = 200;
+const CAMPAIGN_EXPAND_ROWS = 2000;
 const CAMPAIGN_CHUNK_BYTES = 4 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
+// Materialized-but-unsent rows per campaign / per environment: about ten seconds of the regional
+// send rate, so expansion (a scheduler job with its own latency) never starves the dispatcher.
 const CAMPAIGN_BUFFER = 400;
+const campaignBuffer = (rate: number) => Math.min(20000, Math.max(CAMPAIGN_BUFFER, Math.ceil(rate * 10)));
+const environmentBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ceil(rate * 20)));
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes both environments without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
@@ -215,9 +218,9 @@ function nextCursor(rows: { id: string; createdAt: string }[], limit: number, bi
   return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
 }
 function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, character => `\\${character}`)}%`; }
-const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
-const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
-const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
+export const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
+export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
+export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
 function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
   region(runtime, selectedRegion);
   const domain = from.split('@')[1]!.toLowerCase();
@@ -271,29 +274,13 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   if (!row) notFound('Email');
   return row;
 }
-async function findDispatchEmail(db: DbExecutor, a: Actor, emailId: string) {
-  const [row] = await db.select({
-    ...getTableColumns(emails),
-    reviewDraft: campaignReviews.draft,
-    reviewRendered: campaignReviews.rendered,
-    reviewStatus: campaignReviews.status,
-    reviewContentHash: reviewRecipients.contentHash,
-    reviewRecipient: reviewRecipients.recipient,
-  }).from(emails)
-    .leftJoin(campaignReviews, and(scope(campaignReviews, a), eq(campaignReviews.id, emails.reviewId), eq(campaignReviews.campaignId, emails.campaignId)))
-    .leftJoin(reviewRecipients, and(eq(reviewRecipients.reviewId, emails.reviewId), eq(reviewRecipients.ordinal, emails.reviewOrdinal)))
-    .where(mailWhere(a, emailId));
-  if (!row) notFound('Email');
-  const { reviewDraft, reviewRendered, reviewStatus, reviewContentHash, reviewRecipient, ...mail } = row!;
-  return { mail, review: reviewDraft && reviewRendered && reviewRecipient ? { draft: reviewDraft, rendered: reviewRendered, status: reviewStatus, contentHash: reviewContentHash, recipient: reviewRecipient } : null };
-}
 async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
   const [row] = await (lock ? query.for(lock === 'share' ? 'share' : 'update') : query);
   if (!row) notFound('Campaign');
   return row;
 }
-async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false) {
+export async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false) {
   if (!ids.length) return [];
   if (new Set(ids).size !== ids.length) throw new ApiError(422, 'DUPLICATE_ATTACHMENT', 'An attachment can appear only once per message.');
   const query = db.select().from(attachments).where(and(scope(attachments, a), inArray(attachments.id, ids))).orderBy(asc(attachments.id));
@@ -310,7 +297,7 @@ async function linkAttachments(db: DbExecutor, a: Actor, ids: string[], ownerTyp
   if (ids.length) await db.insert(attachmentLinks).values(ids.map(attachmentId => ({ workspaceId: a.workspaceId, environment: a.environment, attachmentId, ownerType, ownerId }))).onConflictDoNothing();
 }
 function escaped(value: string) { return value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!); }
-function formattedSender(from: string, fromName?: string, foldMime = false): string {
+export function formattedSender(from: string, fromName?: string, foldMime = false): string {
   // Domain authorization always uses the bare address; formatting happens only at the MIME/SES boundary.
   Address.parse(from);
   if (!fromName) return from;
@@ -328,7 +315,7 @@ function formattedSender(from: string, fromName?: string, foldMime = false): str
 }
 // SES Simple puts CID images beside the body in multipart/mixed. Build only
 // the inline-image case ourselves so each image is related to its HTML part.
-function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uint8Array {
+export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[]): Uint8Array {
   const crlf = '\r\n';
   const base64 = (value: string | Uint8Array) => Buffer.from(value).toString('base64').match(/.{1,76}/g)?.join(crlf) ?? '';
   const encodedWords = (value: string) => {
@@ -484,7 +471,7 @@ function interpolate(source: string | undefined, values: Record<string, unknown>
 function validateHtmlUrls(html: string | undefined) {
   if (html) inspectHtml(html);
 }
-function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
+export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const bytes = new TextEncoder().encode((snapshot.raw ?? '') + (snapshot.html ?? '') + (snapshot.text ?? '') + snapshot.subject).length;
   // Conservatively reserve base64/MIME expansion, line folding and headers. This is an application cap, not SES's 40 MB maximum.
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
@@ -542,7 +529,9 @@ async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, cam
   const emailId = id('email');
   await db.insert(emails).values({ id: emailId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, region: snapshot.region, campaignId: campaignId ?? null, from: snapshot.from, to: snapshot.to, cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, snapshot, simulated: a.environment === 'test', scheduledAt: availableAt ?? null });
   await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
-  await enqueue(db, { type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { emailId, version: 0, ...(campaignId ? { campaignId } : {}), ...(requestId ? { requestId } : {}) }, availableAt });
+  // The row itself is the dispatch queue entry; the request's response path nudges that region's dispatcher.
+  void requestId;
+  (a.dispatchTargets ??= new Set()).add(`${a.environment}:${snapshot.region}`);
   return { id: emailId, status: 'queued' as const, environment: a.environment, simulated: a.environment === 'test' };
 }
 async function wake(runtime: Runtime, readyJobs: number) {
@@ -986,7 +975,7 @@ async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array
 // await I/O owned by a different request. Both paths retain bounded byte storage.
 const attachmentCaches = new WeakMap<object, { bytes: number; entries: Map<string, Uint8Array> }>();
 const attachmentLoads = new WeakMap<Storage, Map<string, Promise<Uint8Array>>>();
-async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inferSelect) {
+export async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inferSelect) {
   const scope = runtime.storage.cacheScope ?? runtime.storage;
   let cache = attachmentCaches.get(scope);
   if (!cache) { cache = { bytes: 0, entries: new Map() }; attachmentCaches.set(scope, cache); }
@@ -1014,8 +1003,9 @@ async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inf
   try { return await load; } finally { if (pending.get(key) === load) pending.delete(key); }
 }
 
-const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
-const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
+export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
+export const publicEventType: Record<string, string> = { send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
+export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
 type EmailEventInput = { workspaceId: string; environment: Mode; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
@@ -1027,7 +1017,7 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: EmailEventI
 }
 async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId?: string; ingress?: IncomingReceipt }) {
   const next = statusForEvent[input.type];
-  const publicType = ({ send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' } as Record<string, string>)[input.type];
+  const publicType = publicEventType[input.type];
   // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT
   // over the network. The locked row determines monotonic status; only a newly
   // inserted event may change it or publish a callback.
@@ -1104,73 +1094,10 @@ async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | n
     if (!pending.length) await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaignId));
   });
 }
-async function finishEmailCampaign(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
+export async function finishEmailCampaign(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
   if (!mail.reviewId) await finishCampaign(runtime, a, mail.campaignId);
 }
-const liveReadiness = new WeakMap<Runtime, Map<string, Promise<void>>>();
-async function assertDispatchRegionReady(runtime: Runtime, region: string, kind: 'transactional' | 'marketing') {
-  let cache = liveReadiness.get(runtime);
-  if (!cache) { cache = new Map(); liveReadiness.set(runtime, cache); }
-  const key = `${region}:${kind}`;
-  let pending = cache.get(key);
-  if (!pending) {
-    pending = assertLiveRegionReady(runtime, runtime.db, region, kind, true);
-    cache.set(key, pending);
-  }
-  try { await pending; }
-  catch (error) { if (cache.get(key) === pending) cache.delete(key); throw error; }
-}
-async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, recipients: number, ses: SESv2Client): Promise<{ deferUntil?: string; waitUntil?: number }> {
-  const where = and(scope(regionalLimits, a), eq(regionalLimits.region, selectedRegion));
-  // The normal path is one atomic statement: no application-held permit lock
-  // across network round trips. Database time coordinates all Workers/replicas.
-  const reserve = () => runtime.db.execute<{ wait_until: string | number }>(sql`
-    UPDATE sending_region_limits SET reserved = reserved + ${recipients},
-      next_allowed_at = greatest(clock_timestamp(), next_allowed_at) + ceil(1000000 * ${recipients} / max_send_rate) * interval '1 microsecond'
-    WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND region = ${selectedRegion}
-      AND checked_at > clock_timestamp() - interval '60 seconds' AND max_send_rate > 0
-      AND (max_24_hour_send < 0 OR sent_last_24_hours + reserved + ${recipients} <= max_24_hour_send)
-      AND (next_allowed_at IS NULL OR next_allowed_at <= clock_timestamp() + interval '1 second')
-    RETURNING extract(epoch FROM next_allowed_at) * 1000 - ceil(1000000 * ${recipients} / max_send_rate) / 1000.0 AS wait_until`);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const reserved = await reserve();
-    if (reserved.rows[0]) return { waitUntil: Number(reserved.rows[0].wait_until) };
-    const [gate] = await runtime.db.select().from(regionalLimits).where(where);
-    if (gate?.checkedAt && Date.parse(gate.checkedAt) > Date.now() - 60000) {
-      if (gate.max24HourSend >= 0 && gate.sentLast24Hours + gate.reserved + recipients > gate.max24HourSend) return { deferUntil: new Date(Date.now() + 60000).toISOString() };
-      return { deferUntil: new Date(Math.max(Date.now() + 1000, gate.nextAllowedAt ? Date.parse(gate.nextAllowedAt) - 1000 : 0)).toISOString() };
-    }
-    if (attempt) break;
-    // Refresh the control-plane quota without holding a database transaction.
-    const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
-    if (!account.SendingEnabled || !quota || !quota.MaxSendRate || quota.MaxSendRate <= 0 || quota.Max24HourSend === undefined || quota.SentLast24Hours === undefined) throw new ApiError(503, 'SES_SENDING_NOT_READY', 'SES sending is disabled or regional quota information is unavailable.', undefined, true);
-    // Concurrent refreshes must not reset reservations made after the first one.
-    // Keep next_allowed_at so refreshing never discards already allocated slots.
-    await runtime.db.execute(sql`INSERT INTO sending_region_limits
-      (workspace_id, environment, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
-      VALUES (${a.workspaceId}, ${a.environment}, ${selectedRegion}, ${quota.MaxSendRate}, ${quota.Max24HourSend}, ${quota.SentLast24Hours}, 0, clock_timestamp())
-      ON CONFLICT (workspace_id, environment, region) DO UPDATE SET
-        max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
-        sent_last_24_hours = excluded.sent_last_24_hours, reserved = 0, checked_at = excluded.checked_at
-      WHERE sending_region_limits.checked_at IS NULL OR sending_region_limits.checked_at <= clock_timestamp() - interval '60 seconds'`);
-  }
-  return { deferUntil: new Date(Date.now() + 1000).toISOString() };
-}
-async function deferDispatch(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, payload: Record<string, unknown>, availableAt: string, attempted = false) {
-  await runtime.db.transaction(async db => {
-    if (mail.campaignId) {
-      const campaign = await findCampaign(db, a, mail.campaignId, 'share');
-      if (campaign.status === 'canceled') {
-        // A definitive throttle after cancellation must not resurrect an in-flight message as queued.
-        await db.update(emails).set({ status: 'canceled', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, attempted ? 'attempting' : 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion)));
-        return;
-      }
-    }
-    const changed = await db.update(emails).set({ status: 'queued', dispatchVersion: mail.dispatchVersion + 1, ...(attempted ? { attemptStartedAt: null, errorCode: 'SES_THROTTLED' } : {}), updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, attempted ? 'attempting' : 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
-    if (changed.length) await enqueue(db, { type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { ...payload, version: mail.dispatchVersion + 1 }, availableAt });
-  });
-}
-async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; environment: Mode; actorKeyId: string; snapshot: Pick<EmailSnapshot, 'from'> }) {
+export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; environment: Mode; actorKeyId: string; snapshot: Pick<EmailSnapshot, 'from'> }) {
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
   // Re-check its current allowlist approval under the same transaction lock as the attempt claim.
   if (mail.actorKeyId.startsWith('user_')) return mail.workspaceId === runtime.config.workspaceId && (mail.environment === 'live' || mail.environment === 'test') && await isApprovedUser(runtime, mail.actorKeyId.slice(5), db);
@@ -1186,10 +1113,7 @@ async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspace
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
   return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);
 }
-async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails.$inferSelect) {
-  return db.update(emails).set({ status: 'canceled', errorCode: 'ORIGIN_KEY_REVOKED', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
-}
-async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient } | null) {
+export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient } | null) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
   // The winning claim persists its snapshot and token atomically; losing workers
@@ -1203,171 +1127,6 @@ async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof
   sizeCheck(snapshot, rows);
   return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record };
 }
-const dispatch: JobHandler = async (runtime, payload, job) => {
-  if (typeof payload.emailId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Email dispatch requires emailId.');
-  const started = Date.now(), timings: Record<string, number> = {};
-  const phase = async <T>(name: string, work: () => Promise<T>) => {
-    const start = Date.now();
-    try { return await work(); } finally { timings[name] = (timings[name] ?? 0) + Date.now() - start; }
-  };
-  try {
-  const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
-  const dispatchInput = await phase('read', () => findDispatchEmail(runtime.db, a, payload.emailId as string));
-  let mail = dispatchInput.mail;
-  if (mail.dispatchVersion !== (payload.version ?? 0)) return;
-  if (mail.status === 'attempting') {
-    // A previous lease died after recording attempt start. SES has no idempotency token: never automatically resend.
-    await runtime.db.update(emails).set({ status: 'acceptance_unknown', errorCode: 'INTERRUPTED_PROVIDER_ATTEMPT', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'attempting')));
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-unknown:${mail.id}` });
-    await finishEmailCampaign(runtime, a, mail); return;
-  }
-  if (mail.status !== 'queued') { await finishEmailCampaign(runtime, a, mail); return; }
-  if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
-  if (a.environment === 'live') await phase('readiness', () => assertDispatchRegionReady(runtime, mail.snapshot.region, mail.snapshot.kind));
-  let preparedAttachments: (typeof attachments.$inferSelect)[] | undefined;
-  let pendingUnsubscribe: Awaited<ReturnType<typeof createUnsubscribeLink>>['record'] | undefined;
-  if (mail.snapshot.deferredCampaign) {
-    const materialized = await phase('materialize', () => materializeCampaignEmail(runtime, a, mail, dispatchInput.review));
-    mail = materialized.mail; preparedAttachments = materialized.rows; pendingUnsubscribe = materialized.unsubscribe;
-  }
-  const s = mail.snapshot;
-  const ses = a.environment === 'live' ? getSes(runtime, s.region) : simulatedSes(runtime, s.region);
-  // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
-  const parts: Attachment[] = [];
-  await phase('attachments', async () => {
-    const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
-    for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
-    sizeCheck(s, rows);
-  });
-  // Serialization/size failures are preflight failures, never uncertain sends.
-  const content: SendEmailCommandInput['Content'] = await phase('mime', async () => s.raw
-    ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
-    : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
-      ? { Raw: { Data: inlineMessage(s, parts) } }
-      : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } });
-  const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
-  if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
-  if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, Math.max(0, permit.waitUntil! - Date.now()))));
-  const claim = (lock: true | 'share') => runtime.db.transaction(async db => {
-    const campaign = mail.campaignId && mail.scheduledAt ? await findCampaign(db, a, mail.campaignId, lock) : null;
-    // Never upgrade shared campaign locks: concurrent scheduled claims would
-    // deadlock. Release and retry with the writer lock before any other locks.
-    if (campaign?.status === 'scheduled' && lock === 'share') return null;
-    if (!await originAllowed(runtime, db, mail)) return cancelRevokedOrigin(db, a, mail);
-    if (campaign) { if (campaign.status === 'canceled') return []; if (campaign.status === 'scheduled') await db.update(campaigns).set({ status: 'sending', updatedAt: now() }).where(campaignWhere(a, campaign.id)); }
-    const destinations = [...s.to, ...s.cc, ...s.bcc].map(email => email.toLowerCase());
-    // PostgreSQL locks consent, elects one sender, and saves the exact winning
-    // snapshot/token/attempt together. No intermediate application round trips.
-    const changed = await db.execute<{ status: EmailStatus }>(sql`WITH campaign_state AS MATERIALIZED (
-      SELECT status FROM sending_campaigns WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment}
-        AND id = ${mail.campaignId ?? null} FOR SHARE
-    ), destinations AS (
-      SELECT jsonb_array_elements_text(${JSON.stringify(destinations)}::jsonb) AS email
-    ), consent AS MATERIALIZED (
-      SELECT email, suppressed, deleted_at, marketing_consent FROM audience_contacts
-      WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email IN (SELECT email FROM destinations)
-      ORDER BY id FOR UPDATE
-    ), eligibility AS (
-      SELECT (${mail.campaignId === null} OR EXISTS (SELECT 1 FROM campaign_state WHERE status <> 'canceled')) AS campaign_allowed,
-        NOT EXISTS (SELECT 1 FROM destinations
-        LEFT JOIN consent USING (email) WHERE consent.suppressed IS TRUE
-        OR (${s.kind === 'marketing'} AND (consent.email IS NULL OR consent.deleted_at IS NOT NULL OR consent.marketing_consent <> 'subscribed'))) AS recipient_allowed
-    ), claimed AS (
-      UPDATE sending_emails e SET status = CASE WHEN NOT eligibility.campaign_allowed THEN 'canceled' WHEN eligibility.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
-        attempt_started_at = CASE WHEN eligibility.campaign_allowed AND eligibility.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
-        error_code = CASE WHEN NOT eligibility.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN eligibility.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
-        snapshot = coalesce(${pendingUnsubscribe ? JSON.stringify(s) : null}::jsonb, e.snapshot), updated_at = clock_timestamp()
-      FROM eligibility WHERE e.workspace_id = ${a.workspaceId} AND e.environment = ${a.environment}
-        AND e.id = ${mail.id} AND e.status = 'queued' AND e.dispatch_version = ${mail.dispatchVersion}
-      RETURNING e.id, e.status
-    ), token AS (
-      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, environment, email)
-      SELECT ${pendingUnsubscribe?.tokenHash ?? null}::text, ${a.workspaceId}, ${a.environment}, ${pendingUnsubscribe?.email ?? null}::text
-      FROM claimed WHERE ${pendingUnsubscribe?.tokenHash ?? null}::text IS NOT NULL
-    ), attempt AS (
-      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-      SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, claimed.id, 'dispatch_attempt',
-        ${`attempt-start:${mail.id}:${mail.dispatchVersion}`}, ${a.environment === 'test'},
-        ${JSON.stringify({ attempt: mail.dispatchVersion + 1, providerCallPlanned: true, providerCallSimulated: a.environment === 'test' })}::jsonb
-      FROM claimed WHERE claimed.status = 'attempting' ON CONFLICT DO NOTHING
-    ) SELECT status FROM claimed`);
-    return changed.rows;
-  });
-  const claimed = await phase('claim', async () => await claim('share') ?? await claim(true));
-  if (!claimed?.length) return;
-  mail = { ...mail, status: claimed[0]!.status };
-  if (mail.status === 'canceled') { await finishEmailCampaign(runtime, a, mail); return; }
-  if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishEmailCampaign(runtime, a, mail); return; }
-  const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
-    ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
-    ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
-    Content: content,
-  };
-  let providerId: string | undefined;
-  try { const result = await phase('ses', () => ses.send(new SendEmailCommand(request))); providerId = result.MessageId; }
-  catch (error) {
-    const failure = error as { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } };
-    const status = failure.$metadata?.httpStatusCode;
-    // Only access-denial text is retained; redact addresses, credentials and URL query strings.
-    const denial = failure.name === 'AccessDeniedException' && typeof failure.message === 'string' ? failure.message.slice(0, 8192) : '';
-    const deniedAction = denial.match(/not authorized to perform(?::\s*|\s+['"])([a-z0-9-]+:[A-Za-z0-9]+)\b/)?.[1];
-    const deniedResource = denial.match(/on resource:\s*(arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[A-Za-z0-9_+=,.@/*:-]{1,512}|\*)(?=\s|$)/)?.[1]
-      ?.replace(/[A-Za-z0-9_+=,.%-]+@/g, '[redacted]@');
-    const awsRequestId = typeof failure.$metadata?.requestId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(failure.$metadata.requestId) ? failure.$metadata.requestId : undefined;
-    const denialMessage = [runtime.config.aws?.accessKeyId, runtime.config.aws?.secretAccessKey, runtime.config.aws?.sessionToken]
-      .reduce<string>((text, secret) => secret ? text.replaceAll(secret, '[redacted credential]') : text, denial)
-      .replace(/https?:\/\/[^\s]+/gi, '[redacted URL]')
-      .replace(/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9.-]+/g, '[redacted email]')
-      .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[redacted access key]')
-      .replace(/\b(?:Bearer\s+\S+|(?:token|secret|password|credential|signature|authorization)\s*[:=]\s*\S+)/gi, '[redacted credential]')
-      .replace(/[\r\n\t\x00-\x1f\x7f]/g, ' ').slice(0, 2048);
-    const diagnostics = { ...(awsRequestId ? { awsRequestId } : {}), ...(deniedAction ? { deniedAction } : {}), ...(deniedResource ? { deniedResource } : {}), ...(denialMessage ? { denialMessage } : {}) };
-    if (denial) log('error', { code: 'SES_ACCESS_DENIED', emailId: mail.id, jobId: job.id, region: s.region, ...diagnostics });
-    const providerRetries = typeof payload.providerRetries === 'number' ? payload.providerRetries : 0;
-    if (status === 429 && providerRetries < 5) {
-      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'provider_throttled', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_THROTTLED', retryable: true, attempt: providerRetries + 1 } });
-      await deferDispatch(runtime, a, mail, { ...payload, providerRetries: providerRetries + 1 }, new Date(Date.now() + Math.min(60000, 2000 * 2 ** providerRetries)).toISOString(), true);
-      return;
-    }
-    const definitive = status !== undefined && status >= 400 && status < 500;
-    const next: EmailStatus = definitive ? 'rejected' : 'acceptance_unknown';
-    await runtime.db.update(emails).set({ status: next, errorCode: definitive ? (failure.name ?? 'SES_REJECTED') : 'SES_ACCEPTANCE_UNKNOWN', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'attempting')));
-    await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: definitive ? 'reject' : 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: definitive ? failure.name ?? 'SES_REJECTED' : 'SES_ACCEPTANCE_UNKNOWN', retryable: false, ...diagnostics } });
-    await finishEmailCampaign(runtime, a, mail); return;
-  }
-  await phase('record', async () => {
-    if (!providerId) {
-      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}`, data: { code: 'SES_MESSAGE_ID_MISSING' } });
-    } else {
-      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'accepted', providerId, externalId: `attempt-result:${mail.id}:${mail.dispatchVersion}` });
-    }
-  });
-  await finishEmailCampaign(runtime, a, mail);
-  } finally {
-    log('info', { code: 'DISPATCH_TIMINGS', jobId: job.id, emailId: payload.emailId, version: payload.version ?? 0, environment: job.environment, durationMs: Date.now() - started, timings });
-  }
-};
-const guardedDispatch: JobHandler = async (runtime, payload, job) => {
-  try { await dispatch(runtime, payload, job); }
-  catch (error) {
-    if (typeof payload.emailId !== 'string') throw error;
-    const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
-    const [mail] = await runtime.db.select().from(emails).where(mailWhere(a, payload.emailId));
-    if (!mail) throw error;
-    if (mail.status === 'attempting') {
-      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'acceptance_unknown', externalId: `interrupted:${mail.id}:${mail.dispatchVersion}`, data: { code: 'INTERRUPTED_PROVIDER_ATTEMPT' } });
-      await finishEmailCampaign(runtime, a, mail); return;
-    }
-    if (mail.status === 'queued') {
-      const failure = error instanceof ApiError ? error : new ApiError(503, 'DISPATCH_PREFLIGHT_FAILED', 'A dispatch dependency failed before the provider attempt.', undefined, true);
-      // The handler and queue must agree about terminal failure.
-      if (failure.retryable && job.attempts < MAX_ATTEMPTS) throw failure;
-      await runtime.db.update(emails).set({ status: 'rejected', errorCode: failure.code, updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued')));
-      await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'reject', externalId: `preflight-failed:${mail.id}`, data: { code: failure.code, providerCalled: false } });
-    }
-    await finishEmailCampaign(runtime, a, mail);
-  }
-};
 const prepareCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.reviewId !== 'string' || typeof payload.campaignId !== 'string' || typeof payload.cursor !== 'number') throw new ApiError(422, 'INVALID_JOB', 'Campaign preparation requires a review and cursor.');
   const reviewId = payload.reviewId, campaignId = payload.campaignId;
@@ -1477,11 +1236,11 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
         rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${review!.draft.region}),0)`,
       }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
-      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
+      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total);
       if (capacity <= 0) {
         // Recheck before half a buffer could drain. Unknown/low quotas retain the
         // old two-second pacing; high quotas must not inherit a two-second gap.
-        const delayMs = buffer!.rate > 0 ? Math.max(10, Math.min(2000, Math.ceil(500 * CAMPAIGN_BUFFER / buffer!.rate))) : 2000;
+        const delayMs = buffer!.rate > 0 ? Math.max(10, Math.min(2000, Math.ceil(500 * campaignBuffer(buffer!.rate) / buffer!.rate))) : 2000;
         await defer(new Date(Date.now() + delayMs).toISOString()); return;
       }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
@@ -1494,7 +1253,6 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       await db.insert(emails).values(prepared.map(({ id: emailId, ordinal, snapshot }) => ({ id: emailId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, region: snapshot.region, campaignId: campaign.id, reviewId: expansion.reviewId, reviewOrdinal: ordinal, from: snapshot.from, to: snapshot.to, cc: snapshot.cc, bcc: snapshot.bcc, subject: snapshot.subject, snapshot, simulated: a.environment === 'test', scheduledAt: campaign.scheduledAt })));
       const links = prepared.flatMap(({ id: emailId, snapshot }) => snapshot.attachments.map(attachmentId => ({ workspaceId: a.workspaceId, environment: a.environment, attachmentId, ownerType: 'email' as const, ownerId: emailId })));
       if (links.length) await db.insert(attachmentLinks).values(links);
-      await db.insert(jobs).values(prepared.map(({ id: emailId }) => ({ id: id('job'), type: 'email.dispatch', workspaceId: a.workspaceId, environment: a.environment, payload: { emailId, campaignId: campaign.id, version: 0, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } })));
       const expanded = recipients[recipients.length - 1]!.ordinal, completed = expanded === expansion.total;
       const jobId = completed ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } });
       if (completed) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
@@ -1502,7 +1260,11 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
       return prepared.length;
     });
-    if (readyJobs) await wake(runtime, readyJobs);
+    if (readyJobs) {
+      // Expanded rows are claimed directly by the region dispatcher; the follow-up expansion job still needs the scheduler.
+      try { await runtime.dispatch?.(a.environment, review!.draft.region); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId, message: 'Expanded mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+      await wake(runtime, 1);
+    }
   } catch (error) {
     const retry = !(error instanceof ApiError) || error.retryable;
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_EXPANSION_FAILED', 'Campaign expansion will retry its durable cursor.', undefined, true);
@@ -1528,4 +1290,6 @@ const finishExpandedCampaign: JobHandler = async (runtime, payload, job) => {
     });
   } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign completion will retry until it is durable.', undefined, true); }
 };
-export const jobHandlers: Record<string, JobHandler> = { 'email.dispatch': guardedDispatch, 'campaign.prepare': prepareCampaign, 'campaign.expand': expandCampaign, 'campaign.finish': finishExpandedCampaign };
+// Pre-migration email.dispatch job rows complete as no-ops: sending_emails.status drives the dispatcher (src/dispatcher.ts).
+const retiredDispatchJob: JobHandler = async () => {};
+export const jobHandlers: Record<string, JobHandler> = { 'email.dispatch': retiredDispatchJob, 'campaign.prepare': prepareCampaign, 'campaign.expand': expandCampaign, 'campaign.finish': finishExpandedCampaign };

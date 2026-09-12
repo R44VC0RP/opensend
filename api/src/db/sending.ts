@@ -26,6 +26,7 @@ export const emails = pgTable('sending_emails', {
   subject: text('subject').notNull(), status: text('status').$type<EmailStatus>().notNull().default('queued'), providerId: text('provider_id'),
   snapshot: jsonb('snapshot').$type<EmailSnapshot>().notNull(), simulated: boolean('simulated').notNull(),
   attemptStartedAt: time('attempt_started_at'), errorCode: text('error_code'), scheduledAt: time('scheduled_at'), dispatchVersion: integer('dispatch_version').notNull().default(0),
+  leaseUntil: time('lease_until'),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
 }, t => [index('sending_emails_page').on(t.workspaceId, t.environment, t.id), index('sending_emails_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_emails_campaign').on(t.workspaceId, t.environment, t.campaignId), uniqueIndex('sending_emails_provider').on(t.workspaceId, t.environment, t.region, t.providerId), uniqueIndex('sending_emails_review_recipient').on(t.reviewId, t.reviewOrdinal)]);
 export const emailEvents = pgTable('sending_email_events', {

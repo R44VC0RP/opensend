@@ -23,8 +23,13 @@
     // and make the simulated quota the throughput target so benchmarks measure the pipeline, not the gate.
     "SIMULATED_SES_LATENCY_MS": "170",
     "SIMULATED_SES_RATE": "5000",
+    // Dispatcher shards per environment/region; each owns 1/N of the regional send quota.
+    "DISPATCH_SHARDS": "1",
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
+  // One long-lived dispatcher per environment/region/shard, placed near the database.
+  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],

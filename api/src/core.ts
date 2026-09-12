@@ -10,7 +10,11 @@ export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
 export type Mode = 'live' | 'test';
 export type Permission = 'read' | 'send' | 'manage';
-export interface Actor { workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string; }
+export interface Actor {
+  workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
+  // "environment:region" pairs whose queued mail this request committed; the response path nudges their dispatcher.
+  dispatchTargets?: Set<string>;
+}
 export interface Storage {
   // Identity for reusable immutable bytes only, never pending request-bound I/O.
   readonly cacheScope?: object;
@@ -41,7 +45,14 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export interface Runtime { db: Database; storage: Storage; config: Config; wake?: (readyJobs?: number) => Promise<void>; renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>; }
+export interface Runtime {
+  db: Database; storage: Storage; config: Config;
+  wake?: (readyJobs?: number) => Promise<void>;
+  // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
+  // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
+  dispatch?: (environment: Mode, region: string) => Promise<void>;
+  renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+}
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;

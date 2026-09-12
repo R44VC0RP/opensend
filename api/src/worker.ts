@@ -4,13 +4,27 @@ import { sql } from 'drizzle-orm';
 import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
-import { drain } from './dispatch.js';
+import { drainJobs } from './dispatch.js';
 import { jobConcurrency, nextWakeDelay } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
 import { publicImageImporter } from './adapters/public-image.js';
+import { dispatcherName, shardCount } from './dispatcher-do.js';
+import { resolveRegionRuntime } from './ses-region-state.js';
+import type { Mode } from './core.js';
+export { DispatcherShard } from './dispatcher-do.js';
+
+// Nudges every shard for one environment/region. Objects are created near the database on first use.
+async function wakeDispatchers(env: Env, environment: Mode, region: string) {
+  const count = shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
+  await Promise.all(Array.from({ length: count }, (_, index) => {
+    const identity = { environment, region, shard: { index, count } };
+    const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
+    return stub.fetch(`https://dispatcher/wake?environment=${environment}&region=${encodeURIComponent(region)}&shard=${index}&count=${count}`);
+  }));
+}
 
 // Optional Worker variable, default two active jobs; six matches the platform's
 // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
@@ -52,7 +66,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
 }
 export default {
@@ -92,7 +106,7 @@ export default {
       const concurrency = workerConcurrency(env);
       // Return frequently so Queues can reassess concurrency. Already claimed
       // jobs finish normally; the budget never interrupts a provider attempt.
-      await drain(runtime, 100, concurrency, 2000);
+      await drainJobs(runtime, 100, concurrency, 2000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
@@ -101,10 +115,13 @@ export default {
   async scheduled(controller, env) {
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') await cleanup(runtime);
+      // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
+      const resolved = await resolveRegionRuntime(runtime);
+      await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
       const concurrency = workerConcurrency(env);
       // Return frequently so Queues can reassess concurrency. Already claimed
       // jobs finish normally; the budget never interrupts a provider attempt.
-      await drain(runtime, 100, concurrency, 2000);
+      await drainJobs(runtime, 100, concurrency, 2000);
       const delaySeconds = await nextWakeDelay(runtime);
       if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
     });
