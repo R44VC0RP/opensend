@@ -30,6 +30,7 @@ export interface Config {
   sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;
+  simulatedSes?: { latencyMs: number; maxSendRate: number; deliveryDelayMs: number };
   encryptionKey: string;
   previousEncryptionKey?: string;
   awsAccountId?: string;

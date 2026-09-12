@@ -435,15 +435,14 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
-const sesJob: JobHandler = async (runtime, payload, job) => {
-  if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
+const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const [receipt] = await runtime.db.select().from(snsReceipts).where(receiptWhere); if (!receipt || receipt.processedAt) return;
-  verifySesAccount(runtime, payload.message);
   const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
   const [email] = await runtime.db.select().from(emails).where(and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId)));
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
+  if (email.simulated !== (job.environment === 'test')) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
   const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;
@@ -480,6 +479,20 @@ const sesJob: JobHandler = async (runtime, payload, job) => {
     }
   });
   await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere);
+};
+const sesJob: JobHandler = async (runtime, payload, job) => {
+  if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
+  verifySesAccount(runtime, payload.message);
+  await processSesReceipt(runtime, payload, job);
+};
+const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
+  const message = payload.message as { mail?: { messageId?: unknown } } | undefined;
+  if (job.environment !== 'test' || !runtime.config.simulatedSes ||
+    payload.topicArn !== `urn:opensend:simulated-ses:${payload.region}` ||
+    typeof message?.mail?.messageId !== 'string' || !message.mail.messageId.startsWith('sim_')) {
+    throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires opted-in test mode and a synthetic provider identity.');
+  }
+  await processSesReceipt(runtime, payload, job);
 };
 const publishJob: JobHandler = async (runtime, payload, job) => {
   const parsed = eventSchema.safeParse(payload.event);
@@ -518,4 +531,4 @@ const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtim
     throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
   }
 };
-export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

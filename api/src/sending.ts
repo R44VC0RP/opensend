@@ -15,6 +15,7 @@ import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, regionalLimits, reviewRecipients, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
+import { simulatedSes } from './adapters/simulated-ses.js';
 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
@@ -25,7 +26,6 @@ const SENDING_LIMITS = {
 } as const;
 const CAMPAIGN_PREPARE_ROWS = 1000;
 const CAMPAIGN_EXPAND_ROWS = 200;
-const CAMPAIGN_EXPAND_MIN_ROWS = 100;
 const CAMPAIGN_CHUNK_BYTES = 4 * 1024 * 1024;
 const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 const CAMPAIGN_BUFFER = 400;
@@ -513,6 +513,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     const templateData = JSON.stringify(input.template.data);
     if (templateData.length > 262144) throw new ApiError(413, 'TEMPLATE_DATA_TOO_LARGE', 'Serialized template data exceeds 262,144 characters.');
     if (a.environment === 'test') {
+      if (runtime.config.simulatedSes) throw new ApiError(422, 'SIMULATED_TEMPLATE_UNSUPPORTED', 'The latency simulator supports explicit content and campaigns, not AWS-stored templates.');
       snapshot.subject = `[simulated template: ${input.template.name}]`;
       snapshot.template = { ...input.template, source: {}, render: 'simulated' };
     } else {
@@ -1036,12 +1037,34 @@ export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: s
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId} AND e.environment = ${input.environment}
       AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
   ), published AS (
+    INSERT INTO operation_events(id, workspace_id, environment, type, region, created_at, data)
+    SELECT inserted.id, inserted.workspace_id, inserted.environment, ${publicType ?? null}::text, mail.region, inserted.created_at,
+      ${JSON.stringify({ ...(input.data ?? {}), emailId: input.emailId, simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb
+    FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
+  ), deliveries AS (
+    INSERT INTO operation_deliveries(id, workspace_id, environment, webhook_id, event_id, payload)
+    SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, p.environment, w.id, p.id,
+      jsonb_build_object('id',p.id,'workspaceId',p.workspace_id,'environment',p.environment,'type',p.type,'region',p.region,'createdAt',p.created_at,'data',p.data)
+    FROM published p JOIN operation_webhooks w ON w.workspace_id=p.workspace_id AND w.environment=p.environment
+    WHERE NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR p.region IS NULL OR w.regions ? p.region)
+    ON CONFLICT DO NOTHING RETURNING id, workspace_id, environment
+  ), webhook_jobs AS (
     INSERT INTO jobs(id, workspace_id, environment, type, payload)
-    SELECT ${id('job')}, ${input.workspaceId}, ${input.environment}, 'operation.publish', jsonb_build_object('event', jsonb_build_object(
-      'id', inserted.id, 'workspaceId', inserted.workspace_id, 'environment', inserted.environment,
-      'type', ${publicType ?? null}::text, 'region', mail.region, 'createdAt', inserted.created_at,
-      'data', ${JSON.stringify({ ...(input.data ?? {}), emailId: input.emailId, simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb))
-    FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL
+    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries
+  ), simulated_receipts AS (
+    INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, environment, created_at)
+    SELECT 'urn:opensend:simulated-ses:' || mail.region, mail.id || ':' || kind, inserted.workspace_id, 'test',
+      inserted.created_at + CASE WHEN kind='Delivery' THEN ${runtime.config.simulatedSes?.deliveryDelayMs ?? 0} ELSE 0 END * interval '1 millisecond'
+    FROM inserted, mail, unnest(ARRAY['Send','Delivery']) kind
+    WHERE ${input.environment === 'test' && !!runtime.config.simulatedSes && input.type === 'accepted' && !!input.providerId?.startsWith('sim_')}
+    ON CONFLICT DO NOTHING RETURNING *
+  ), simulated_jobs AS (
+    INSERT INTO jobs(id, workspace_id, environment, type, available_at, payload)
+    SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, r.environment, 'operation.simulatedFeedback', r.created_at,
+      jsonb_build_object('topicArn',r.topic_arn,'messageId',r.message_id,'region',mail.region,
+        'message', jsonb_build_object('eventType',split_part(r.message_id,':',2),'mail',jsonb_build_object('messageId',${input.providerId ?? null}::text),
+          lower(split_part(r.message_id,':',2)),jsonb_build_object('timestamp',r.created_at)))
+    FROM simulated_receipts r, mail
   ) SELECT id, workspace_id AS "workspaceId", environment, email_id AS "emailId", type,
     provider_id AS "providerId", external_id AS "externalId", data, simulated, created_at::text AS "createdAt" FROM inserted`);
   return result.rows[0] ?? null;
@@ -1081,12 +1104,12 @@ async function reserveQuota(runtime: Runtime, a: Actor, selectedRegion: string, 
   // across network round trips. Database time coordinates all Workers/replicas.
   const reserve = () => runtime.db.execute<{ wait_until: string | number }>(sql`
     UPDATE sending_region_limits SET reserved = reserved + ${recipients},
-      next_allowed_at = greatest(clock_timestamp(), next_allowed_at) + ceil(1000 * ${recipients} / max_send_rate) * interval '1 millisecond'
+      next_allowed_at = greatest(clock_timestamp(), next_allowed_at) + ceil(1000000 * ${recipients} / max_send_rate) * interval '1 microsecond'
     WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND region = ${selectedRegion}
       AND checked_at > clock_timestamp() - interval '60 seconds' AND max_send_rate > 0
       AND (max_24_hour_send < 0 OR sent_last_24_hours + reserved + ${recipients} <= max_24_hour_send)
       AND (next_allowed_at IS NULL OR next_allowed_at <= clock_timestamp() + interval '1 second')
-    RETURNING extract(epoch FROM next_allowed_at) * 1000 - ceil(1000 * ${recipients} / max_send_rate) AS wait_until`);
+    RETURNING extract(epoch FROM next_allowed_at) * 1000 - ceil(1000000 * ${recipients} / max_send_rate) / 1000.0 AS wait_until`);
   for (let attempt = 0; attempt < 2; attempt++) {
     const reserved = await reserve();
     if (reserved.rows[0]) return { waitUntil: Number(reserved.rows[0].wait_until) };
@@ -1186,11 +1209,12 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     mail = materialized.mail; preparedAttachments = materialized.rows; pendingUnsubscribe = materialized.unsubscribe;
   }
   const s = mail.snapshot;
+  const ses = a.environment === 'live' ? getSes(runtime, s.region) : a.environment === 'test' && runtime.config.simulatedSes ? simulatedSes(runtime, s.region) : null;
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
   const parts: Attachment[] = [];
   await phase('attachments', async () => {
     const rows = preparedAttachments ?? await attachmentRows(runtime.db, a, s.attachments);
-    if (a.environment === 'live') for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+    if (ses) for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
     sizeCheck(s, rows);
   });
   // Serialization/size failures are preflight failures, never uncertain sends.
@@ -1199,11 +1223,10 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } });
-  const ses = a.environment === 'live' ? getSes(runtime, s.region) : null;
   if (ses) {
     const permit = await phase('permit', () => reserveQuota(runtime, a, s.region, s.to.length + s.cc.length + s.bcc.length, ses));
     if (permit.deferUntil) { await deferDispatch(runtime, a, mail, payload, permit.deferUntil); return; }
-    if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, permit.waitUntil! - Date.now())));
+    if (permit.waitUntil && permit.waitUntil > Date.now()) await phase('permitWait', () => new Promise(resolve => setTimeout(resolve, Math.max(0, permit.waitUntil! - Date.now()))));
   }
   const claim = (lock: true | 'share') => runtime.db.transaction(async db => {
     const campaign = mail.campaignId && mail.scheduledAt ? await findCampaign(db, a, mail.campaignId, lock) : null;
@@ -1372,6 +1395,7 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
         if (recipient.ordinal !== cursor + 1 || recipient.content_hash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
         // Validate every substitution, URL and MIME size, but retain only its digest and lightweight metadata.
         // The immutable rendered base is shared by all recipients; full message audit is saved at dispatch.
+        if (messageStatic && !Address.safeParse(recipient.recipient.email).success) throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Contact ${recipient.recipient.id}: Recipient or rendered message is invalid (to).`, 'contactId');
         if (messageStatic && !staticSnapshot) staticSnapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, true);
         const snapshot = staticSnapshot
           ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
@@ -1434,18 +1458,9 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       };
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
-      const [buffer] = await db.select({
-        total: sql<number>`count(*)::int`,
-        campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
-        rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits l WHERE l.workspace_id = ${a.workspaceId} AND l.environment = ${a.environment} AND l.region = ${review!.draft.region} AND l.max_send_rate > 0), 1)`,
-      }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
+      const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int` }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
-      const remaining = expansion.total - expansion.expanded;
-      const minimum = Math.min(CAMPAIGN_EXPAND_MIN_ROWS, remaining);
-      if (capacity < minimum) {
-        const delay = Math.min(5000, Math.max(1000, Math.ceil(1000 * (minimum - capacity) / Math.max(1, buffer!.rate))));
-        await defer(new Date(Date.now() + delay).toISOString()); return;
-      }
+      if (capacity <= 0) { await defer(new Date(Date.now() + 2000).toISOString()); return; }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
       if (!review || !recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== expansion.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
       const draft = review.draft;

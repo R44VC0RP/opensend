@@ -17,6 +17,10 @@ const values = z.object({
   SES_FEEDBACK_URL: optional(z.string().url().max(2048)),
   DEFAULT_SES_REGION: z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d$/).default('us-east-1'),
   ENABLE_LIVE_SES: z.enum(['true', 'false']).default('false'),
+  SIMULATED_SES_ENABLED: z.enum(['true', 'false']).default('false'),
+  SIMULATED_SES_LATENCY_MS: z.coerce.number().int().min(0).max(15000).default(200),
+  SIMULATED_SES_RATE: z.coerce.number().int().min(1).max(100000).default(1000),
+  SIMULATED_SES_DELIVERY_DELAY_MS: z.coerce.number().int().min(0).max(60000).default(250),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
   WEBHOOK_ALLOWED_HOSTS: z.string().default(''),
 });
@@ -45,6 +49,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    simulatedSes: v.SIMULATED_SES_ENABLED === 'true' ? { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS } : undefined,
     aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),

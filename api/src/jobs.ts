@@ -19,6 +19,13 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0, activeSends = 0, peakActiveSends = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
   const laneJobs = Array<number>(effectiveConcurrency).fill(0);
+  const freeLanes = new Set(laneJobs.map((_, index) => index));
+  const active = new Set<Promise<void>>();
+  const failures: unknown[] = [];
+  let activeFeedback = 0;
+  // Spread short drains across the 16-turn cycle without a shared scheduler-row lock.
+  // Live/test and job-class fairness is approximate across invocations, not serialized.
+  const rotation = Math.floor(Math.random() * 16);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const handle = async (job: { id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
@@ -47,58 +54,73 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     }
   };
   try {
-    while (claims < maximumClaims && Date.now() - started < budgetMs) {
-      const claimBatchSize = Math.min(effectiveConcurrency, maximumClaims - claims);
+    while (!failures.length && claims < maximumClaims && Date.now() - started < budgetMs) {
+      if (!freeLanes.size) {
+        await Promise.race(active);
+        continue;
+      }
+      const claimBatchSize = Math.min(freeLanes.size, maximumClaims - claims);
+      const activeAtClaim = active.size;
       const claimStarted = Date.now();
       const claimed = await runtime.db.execute<{
         id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
       }>(sql`WITH rotation AS (
-        INSERT INTO job_schedule(workspace_id, turn)
-          SELECT ${runtime.config.workspaceId}, 1 WHERE EXISTS (
-            SELECT 1 FROM jobs WHERE workspace_id = ${runtime.config.workspaceId}
-              AND ((status = 'pending' AND available_at <= now()) OR (status = 'running' AND lease_until < now()))
-          )
-        ON CONFLICT (workspace_id) DO UPDATE SET turn = (job_schedule.turn + 1) % 16 RETURNING turn
+        SELECT ${(rotation + claimRequests) % 16}::int AS turn
       ), feedback AS (
-        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1}
-          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type = 'operation.ses'
+        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
+          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type IN ('operation.ses','operation.simulatedFeedback')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
         ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
-      ), control AS (
-        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 2}
-          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type IN ('campaign.prepare','campaign.expand','campaign.finish')
-          AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
-        ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          CASE WHEN j.type = 'campaign.prepare' THEN 0 WHEN j.type = 'campaign.expand' THEN 1 ELSE 2 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
       ), regular AS (
         SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
-          AND NOT EXISTS (SELECT 1 FROM control c WHERE c.id = j.id)
-        ORDER BY CASE WHEN j.type IN ('operation.ses','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
+        ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('operation.ses','operation.publish') THEN 0
+          CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.publish') THEN 0
             WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
             WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 2 WHEN j.type = 'email.dispatch' THEN 3 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN j.type = 'campaign.finish' THEN 0 WHEN j.type = 'email.dispatch' THEN 1
-            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type = 'operation.ses' THEN 3 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 4 ELSE 5 END,
-          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback) - (SELECT count(*) FROM control))
+            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type IN ('operation.ses','operation.simulatedFeedback') THEN 3 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 4 ELSE 5 END,
+          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
-        SELECT id FROM feedback UNION ALL SELECT id FROM control UNION ALL SELECT id FROM regular
+        SELECT id FROM feedback UNION ALL SELECT id FROM regular
       ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
         FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
       claimRequests++;
       const claimMs = Date.now() - claimStarted;
-      if (!claimed.rows.length) break;
+      if (!claimed.rows.length) {
+        // A finishing handler can enqueue more work after the claim's snapshot.
+        if (active.size < activeAtClaim) continue;
+        if (!active.size) break;
+        await Promise.race(active);
+        continue;
+      }
       claims += claimed.rows.length;
-      await Promise.all(claimed.rows.map((job, index) => handle(job, index, claimMs, claimed.rows.length)));
+      for (const job of claimed.rows) {
+        const index = freeLanes.values().next().value!;
+        freeLanes.delete(index);
+        const feedback = job.type === 'operation.ses' || job.type === 'operation.simulatedFeedback';
+        if (feedback) activeFeedback++;
+        const task = handle(job, index, claimMs, claimed.rows.length).catch(error => {
+          // Observe failures immediately, but keep the database alive for siblings.
+          if (!failures.length) failures.push(error);
+        }).finally(() => {
+          active.delete(task);
+          freeLanes.add(index);
+          if (feedback) activeFeedback--;
+        });
+        active.add(task);
+      }
     }
-    return processed;
   } finally {
+    // The time budget stops new claims, not already leased work or persistence.
+    await Promise.all(active);
     log('info', { code: 'JOB_DRAIN', workspaceId: runtime.config.workspaceId, processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, peakActiveSends, laneJobs, budgetMs, durationMs: Date.now() - started });
   }
+  if (failures.length) throw failures[0];
+  return processed;
 }
 // Keep short quota deferrals moving without spinning wakeups or waiting for the next minute's cron.
 export async function nextWakeDelay(runtime: Runtime) {

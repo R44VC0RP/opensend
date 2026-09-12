@@ -2680,3 +2680,252 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
   assert.equal(accepted.simulated, false);
   assert.ok(['accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed'].includes(accepted.status), 'A provider ID alone must not conceal an explicit failed or ambiguous send.');
 });
+
+// In-process simulated-provider scenarios use the actual SQL/API/job handlers in a
+// rollback-only workspace. The external runner cannot observe these rows. Execute
+// selected durable jobs serially so each acceptance/feedback boundary is observable;
+// PostgreSQL now() is fixed inside the outer rollback transaction.
+async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
+  runtime: import('./src/core.js').Runtime;
+  db: pg.Client;
+  local: (method: string, path: string, body?: Json, environment?: 'test' | 'live') => Promise<Reply>;
+  run: (type: string) => Promise<void>;
+  jobs: (type: string) => Promise<Json[]>;
+}) => Promise<void>) {
+  assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Simulated SES fixtures require an isolated local database.');
+  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }] = await Promise.all([
+    import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
+    import('./src/operations.js'), import('./src/ses-region-state.js'),
+  ]);
+  const db = await fixtureDatabase(t);
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+    GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
+    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', WEBHOOK_ALLOWED_HOSTS: 'example.com',
+    S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+  cleanup(t, instance.close);
+  const runtime = instance.runtime;
+  runtime.config.workspaceId = unique('simulated-ses-workspace');
+  assert.equal(runtime.config.simulatedSes, undefined, 'Legacy test mode must remain the default.');
+  runtime.config.simulatedSes = { latencyMs: 0, maxSendRate: 1000, deliveryDelayMs: 250 };
+  const app = createApp(), handlers = { ...jobHandlers, ...operationJobs };
+  const rollback = new Error('Rollback isolated simulated SES fixtures');
+  const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Network is forbidden in simulated SES acceptance scenarios.'); });
+  try {
+    await drizzle(db).transaction(async tx => {
+      runtime.db = tx;
+      await ensureRegionSettings(runtime.db, runtime.config);
+      async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'test'): Promise<Reply> {
+        const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
+          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        }), runtime);
+        return { status: response.status, body: await response.json(), headers: response.headers };
+      }
+      const jobs = async (type: string): Promise<Json[]> => (await db.query('SELECT * FROM jobs WHERE workspace_id = $1 AND type = $2 ORDER BY available_at, id', [runtime.config.workspaceId, type])).rows;
+      async function run(type: string) {
+        assert.ok(handlers[type], `No handler for ${type}`);
+        const pending = (await jobs(type)).filter(job => job.status === 'pending');
+        assert.ok(pending.length, `Expected a pending ${type} job.`);
+        for (const job of pending) {
+          await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = $1", [job.id]);
+          await handlers[type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: job.workspace_id, environment: job.environment });
+          await db.query("UPDATE jobs SET status = 'completed' WHERE id = $1", [job.id]);
+        }
+      }
+      await scenario({ runtime, db, local, run, jobs });
+      assert.equal(network.mock.callCount(), 0, 'No provider, webhook, certificate or credential network request is allowed.');
+      throw rollback;
+    });
+  } catch (cause) { if (cause !== rollback) throw cause; }
+}
+
+describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
+    const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
+      import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
+    ]);
+    const network = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Simulated SDK transport must not access the network.'); });
+    const client = new SESv2Client({ region: REGION, endpoint: 'https://ses-simulator.invalid', maxAttempts: 1,
+      credentials: { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' },
+      requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 23, outcomes: ['accept', 'reject', 'throttle', 'timeout'] }),
+    });
+    cleanup(t, async () => { client.destroy(); });
+    assert.equal((await client.send(new GetAccountCommand({}))).SendQuota?.MaxSendRate, 23);
+    const command = () => new SendEmailCommand({ FromEmailAddress: 'sender@example.com', Destination: { ToAddresses: [address()] },
+      Content: { Simple: { Subject: { Data: 'Synthetic SDK acceptance' }, Body: { Text: { Data: 'No network or real delivery.' } } } } });
+    assert.match((await client.send(command())).MessageId!, /^sim_/);
+    for (const [name, status] of [['MessageRejected', 400], ['TooManyRequestsException', 429], ['TimeoutError', undefined]] as const) {
+      await assert.rejects(client.send(command()), (cause: any) => {
+        assert.equal(cause.name, name);
+        assert.equal(cause.$metadata?.httpStatusCode, status);
+        assert.equal(cause.$metadata?.attempts, 1, 'The SDK must not silently retry provider outcomes.');
+        return true;
+      });
+    }
+    await assert.rejects(createSimulatedSesHandler({ latencyMs: 0 }).handle({ protocol: 'https:', hostname: `email.${REGION}.amazonaws.com`, method: 'POST', path: '/v2/email/outbound-emails', headers: {}, query: {} }), /Unsupported simulated SES endpoint/);
+    assert.equal(network.mock.callCount(), 0);
+  });
+
+  test('test email and automatic campaign follow accepted → delivered through durable feedback; legacy mode is unchanged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      assert.equal(email.simulated, true);
+      await run('email.dispatch');
+      const accepted = ok(await local('GET', `/v1/emails/${email.id}`));
+      assert.equal(accepted.status, 'accepted');
+      assert.match(accepted.providerId, /^sim_/);
+      const feedback = await jobs('operation.simulatedFeedback');
+      assert.deepEqual(feedback.map(job => job.payload.message.eventType), ['Send', 'Delivery']);
+      assert.equal(new Date(feedback[1]!.available_at).getTime() - new Date(feedback[0]!.available_at).getTime(), 250);
+      await run('operation.simulatedFeedback');
+      assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');
+      const observed = page(await local('GET', `/v1/emails/${email.id}/events`));
+      for (const type of ['accepted', 'send', 'delivery']) assert.equal(observed.filter(event => event.type === type).length, 1);
+      assert.ok(observed.every(event => event.environment === 'test' && event.simulated));
+      assert.equal((await jobs('operation.publish')).length, 0);
+      assert.equal((await jobs('operation.webhook')).length, 0, 'Zero subscribers must enqueue zero publication work.');
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 2, 'Public events must already be persisted without a publication job.');
+
+      const list = ok(await local('POST', '/v1/lists', { name: unique('simulated-campaign') }), 201);
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'acceptance-fixture', policyVersion: 'v1', evidence: 'Synthetic reserved-domain fixture.', occurredAt: new Date().toISOString() }));
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('simulated-campaign'), from: 'sender@example.com', subject: 'Static synthetic campaign', html: '<p>No real email.</p>', audience: { listId: list.id } }), 201);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 1);
+      await run('campaign.prepare');
+      await run('campaign.expand');
+      await run('email.dispatch');
+      const [campaignEmail] = page(await local('GET', `/v1/emails?campaignId=${campaign.id}`));
+      assert.equal(campaignEmail!.status, 'accepted');
+      assert.match(campaignEmail!.providerId, /^sim_/);
+      await run('operation.simulatedFeedback');
+      await run('campaign.finish');
+      const completed = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(completed.status, 'completed');
+      assert.equal(completed.counts.byStatus.delivered, 1);
+
+      error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: REGION, template: { name: 'not-rendered-by-simulator', data: {} } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
+      runtime.config.simulatedSes = undefined;
+      const legacy = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await run('email.dispatch');
+      const legacyEmail = ok(await local('GET', `/v1/emails/${legacy.id}`));
+      assert.equal(legacyEmail.status, 'simulated');
+      assert.equal(legacyEmail.providerId, null);
+      assert.equal((await jobs('operation.simulatedFeedback')).filter(job => job.status === 'pending').length, 0);
+    });
+  });
+
+  test('duplicate/out-of-order feedback fans out once and cannot cross test/live or public SNS boundaries', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const { operationJobs } = await import('./src/operations.js');
+      const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await run('email.dispatch');
+      const otherRegion = REGION === 'eu-west-1' ? 'us-west-2' : 'eu-west-1';
+      ok(await local('PUT', `/v1/regions/${otherRegion}`, { enabled: true }, 'live'));
+      const matching: string[] = [];
+      for (const options of [{}, {}, { paused: true }, { eventTypes: ['email.bounced'] }, { regions: [otherRegion] }]) {
+        const endpoint = ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('synthetic-hook')}`, ...options }), 201);
+        if (!Object.keys(options).length) matching.push(endpoint.id);
+      }
+      const liveEndpoint = ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('live-hook')}` }, 'live'), 201);
+      const feedback = await jobs('operation.simulatedFeedback');
+      const deliver = feedback.find(job => job.payload.message.eventType === 'Delivery')!;
+      const send = feedback.find(job => job.payload.message.eventType === 'Send')!;
+      const context = (job: Json) => ({ id: job.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const });
+      for (const job of [deliver, deliver, send, send]) await operationJobs['operation.simulatedFeedback']!(runtime, job.payload, context(job));
+      const { recordEmailEvent } = await import('./src/sending.js');
+      assert.equal(await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'test', emailId: email.id, type: 'delivery', providerId: deliver.payload.message.mail.messageId, externalId: `${deliver.payload.topicArn}:${deliver.payload.messageId}` }), null, 'Replaying the same external event must not fan out again even without the receipt guard.');
+      assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered', 'Late Send feedback must not regress Delivery.');
+      assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => ['send', 'delivery'].includes(event.type)).length, 2);
+      const published = (await db.query('SELECT * FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(published.map(event => event.type).sort(), ['email.delivered', 'email.sent']);
+      const deliveries = (await db.query('SELECT * FROM operation_deliveries WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
+      assert.equal(deliveries.length, 4);
+      assert.ok(deliveries.every(delivery => matching.includes(delivery.webhook_id) && delivery.webhook_id !== liveEndpoint.id && delivery.environment === 'test' && delivery.payload.data.simulated === true));
+      assert.equal(new Set(deliveries.map(delivery => `${delivery.webhook_id}:${delivery.event_id}`)).size, 4);
+      assert.equal((await jobs('operation.webhook')).length, 4);
+      assert.equal((await jobs('operation.publish')).length, 0);
+      assert.equal((await jobs('operation.publishBatch')).length, 0);
+      await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, deliver.payload, { ...context(deliver), environment: 'live' }), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
+      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ENVIRONMENT_MISMATCH' });
+      const enabled = runtime.config.simulatedSes;
+      runtime.config.simulatedSes = undefined;
+      await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, deliver.payload, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
+      runtime.config.simulatedSes = enabled;
+      await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, { ...deliver.payload, message: { mail: { messageId: 'real-provider-id' } } }, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
+      error(await local('GET', `/v1/emails/${email.id}`, undefined, 'live'), 404);
+
+      const [{ getRegionSettings }, { setupResources }, { sesRegions }] = await Promise.all([import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js')]);
+      const settings = await getRegionSettings(runtime.db, runtime.config.workspaceId);
+      const topicArn = `arn:aws:sns:${REGION}:111122223333:${setupResources(settings.installationId).topicName}`;
+      await runtime.db.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region: REGION, trustedAccountId: '111122223333', trustedTopicArn: topicArn });
+      runtime.config.awsAccountId = '111122223333';
+      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, { ...context(deliver), environment: 'live' }), { code: 'SES_ACCOUNT_MISMATCH' });
+      error(await local('POST', '/v1/events/ses', { Type: 'Notification', MessageId: unique('unsigned-synthetic'), TopicArn: topicArn,
+        Message: JSON.stringify(deliver.payload.message), Timestamp: new Date().toISOString(), SignatureVersion: '2', Signature: '!!!',
+        SigningCertURL: `https://sns.${REGION}.amazonaws.com/SimpleNotificationService-synthetic.pem` }), 403, 'SNS_INVALID_SIGNATURE');
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 2);
+    });
+  });
+
+  test('dispatch rechecks shared consent for direct marketing mail and an already-expanded campaign', async t => {
+    await simulatedSesFixture(t, async ({ local, run, jobs }) => {
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      const consentBody = { source: 'acceptance-fixture', policyVersion: 'v1', evidence: 'Synthetic reserved-domain fixture.', occurredAt: new Date().toISOString() };
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { ...consentBody, status: 'subscribed' }));
+      const list = ok(await local('POST', '/v1/lists', { name: unique('consent-simulator') }), 201);
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('consent-simulator'), from: 'sender@example.com', subject: 'Shared consent', html: '<p>Synthetic only.</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      await run('campaign.prepare');
+      await run('campaign.expand');
+      const direct = ok(await local('POST', '/v1/emails/send', mail({ to: contact.email, kind: 'marketing' })), 202);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { ...consentBody, status: 'unsubscribed', occurredAt: new Date().toISOString() }));
+      await run('email.dispatch');
+      const [campaignEmail] = page(await local('GET', `/v1/emails?campaignId=${campaign.id}`));
+      for (const id of [direct.id, campaignEmail!.id]) {
+        const rejected = ok(await local('GET', `/v1/emails/${id}`));
+        assert.equal(rejected.status, 'suppressed');
+        assert.equal(rejected.providerId, null);
+        assert.equal(rejected.attemptStartedAt, null);
+      }
+      assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'Ineligible recipients must never get provider acceptance or feedback.');
+    });
+  });
+
+  test('static campaign preparation validates the second frozen recipient instead of trusting the first', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const list = ok(await local('POST', '/v1/lists', { name: unique('static-validation') }), 201);
+      const contacts: Json[] = [];
+      for (let index = 0; index < 2; index++) {
+        const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+        ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'acceptance-fixture', policyVersion: 'v1', evidence: 'Synthetic reserved-domain fixture.', occurredAt: new Date().toISOString() }));
+        contacts.push(contact);
+      }
+      // Seed invalid historical contact data before snapshotting. Recipient order
+      // is by contact ID; keep the first valid so the static-message cache is used.
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test' ORDER BY id", [runtime.config.workspaceId])).rows;
+      const invalidContactId = ordered[1].id;
+      const invalidAddress = `${'a'.repeat(250)}@example.com`;
+      assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND environment = 'test' AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(contact => contact.id) }));
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('static-validation'), from: 'sender@example.com', subject: 'Unpersonalized subject', html: '<p>Unpersonalized content.</p>', audience: { listId: list.id } }), 201);
+      const review = ok(await local('POST', `/v1/campaigns/${campaign.id}/reviews`, { revision: campaign.revision }), 202);
+      assert.equal(review.eligible, 2);
+      const frozen = (await db.query('SELECT ordinal, recipient FROM sending_review_recipients WHERE review_id = $1 ORDER BY ordinal', [review.id])).rows;
+      assert.equal(frozen[0].recipient.email, contacts.find(contact => contact.id === ordered[0].id)!.email);
+      assert.equal(frozen[1].ordinal, 2);
+      assert.equal(frozen[1].recipient.id, invalidContactId);
+      assert.equal(frozen[1].recipient.email, invalidAddress);
+      await run('campaign.prepare');
+      const failed = ok(await local('GET', `/v1/campaigns/${campaign.id}/reviews/${review.id}`));
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
+      assert.equal(failed.processed, 0, 'The failing preparation chunk must not commit its first valid recipient.');
+      assert.match(failed.error.message, /CAMPAIGN_RECIPIENT_INVALID/, 'Background failures expose a sanitized error summary, not contact identities.');
+      error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, reviewId: review.id }), 409);
+      assert.equal(page(await local('GET', `/v1/emails?campaignId=${campaign.id}`)).length, 0);
+      assert.equal((await jobs('email.dispatch')).length, 0);
+    });
+  });
+});
