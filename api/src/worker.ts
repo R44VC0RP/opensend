@@ -21,10 +21,9 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
   try {
     const db = drizzle(client);
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
-      // Advertise enough backlog for Queues to scale out. Each short invocation
-      // has one signal but several local claim lanes; Postgres still owns the
-      // work and safely absorbs redundant wakeups after the backlog drains.
-      const count = Math.min(100, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
+      // A bounded burst advertises newly committed work to Queues autoscaling.
+      // These are hints, not email jobs; Postgres still owns every claim.
+      const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
       if (count === 1) {
         // Compute conflict expiry under its row lock, not from an earlier EXCLUDED timestamp.
         const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)

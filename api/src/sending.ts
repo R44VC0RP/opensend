@@ -441,12 +441,16 @@ function inspectHtml(source: string, template = false) {
     if (!range || match.index < range.start || match.index + match[0].length > range.end) throw new ApiError(422, 'UNSAFE_TEMPLATE_CONTEXT', 'Campaign placeholders require HTML text nodes or quoted URL/title/alt/aria-label/aria-description attributes. Unquoted attributes, tag names, comments, script/style, event handlers and foreign markup are unsupported.');
   }
 }
-function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean): string | undefined {
-  if (!source) return source;
+function validateInterpolationTemplate(source: string | undefined, html: boolean) {
+  if (!source) return;
   const unsupported = source.replace(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g, '');
   // Nested CSS blocks legitimately end in }}. Only an unmatched opening delimiter begins unsupported template syntax.
   if (unsupported.includes('{{')) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_SYNTAX', 'Campaigns support simple {{name}} substitutions, not helpers, HTML fragments, or Liquid syntax.');
   if (html) inspectHtml(source, true);
+}
+function interpolate(source: string | undefined, values: Record<string, unknown>, html: boolean, templateValidated = false): string | undefined {
+  if (!source) return source;
+  if (!templateValidated) validateInterpolationTemplate(source, html);
   let result = ''; let offset = 0;
   for (const match of source.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)) {
     const key = match[1]!;
@@ -477,7 +481,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
   snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false): Promise<EmailSnapshot> {
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false, htmlValidated = false): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (!sharedValidated) {
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
@@ -485,7 +489,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
   }
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [] };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
-  validateHtmlUrls(snapshot.html);
+  if (!htmlValidated) validateHtmlUrls(snapshot.html);
   if (input.template) {
     // Preserve native SES semantics in both HTML and plaintext; callers own context-specific escaping.
     const templateData = JSON.stringify(input.template.data);
@@ -563,16 +567,16 @@ function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft, 'htm
   assertBlockContent(draft.html, complete);
   return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
-async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }) {
+async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft: CampaignDraft, contact: ReviewedRecipient, test = false, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], prepared?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
     const rendered = prepared ?? renderCampaignContent(runtime, draft);
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false), html: withPreheader(interpolate(rendered.html, values, true), draft.previewText), text: interpolate(rendered.text, values, false), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated), draft.previewText), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
     }
-    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments, prepared !== undefined);
+    const snapshot = await prepare(runtime, db, a, parsed.data, preview, lockedAttachments, prepared !== undefined, htmlValidated);
     if (draft.previewText !== undefined) snapshot.previewText = draft.previewText;
     return snapshot;
   } catch (error) {
@@ -1135,7 +1139,7 @@ async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof
   ]);
   const review = reviews[0];
   if (!review?.rendered || review.status !== 'ready' || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
-  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered);
+  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
   if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
   const unsubscribe = await createUnsubscribeLink(runtime, a.workspaceId, a.environment, snapshot.to[0]!);
   marketingFooter(snapshot, unsubscribe.url);
@@ -1338,13 +1342,23 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
       if (!review.rendered) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen message source is missing.');
       const recipients = await recipientChunk(db, review.id, review.processed);
       if (!recipients.length) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience is incomplete.');
+      validateInterpolationTemplate(review.draft.subject, false);
+      validateInterpolationTemplate(review.rendered.html, true);
+      validateInterpolationTemplate(review.rendered.text, false);
+      const htmlStatic = !review.rendered.html?.includes('{{');
+      if (htmlStatic) validateHtmlUrls(review.rendered.html);
+      const messageStatic = ![review.draft.subject, review.rendered.html, review.rendered.text].some(value => value?.includes('{{'));
       let cursor = review.processed, bytes = 0, hash = review.contentHash;
       const started = Date.now(), prepared: { ordinal: number; hash: string; subject: string; bytes: number }[] = [];
+      let staticSnapshot: EmailSnapshot | undefined;
       for (const recipient of recipients) {
         if (recipient.ordinal !== cursor + 1 || recipient.content_hash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen audience cursor is inconsistent.');
         // Validate every substitution, URL and MIME size, but retain only its digest and lightweight metadata.
         // The immutable rendered base is shared by all recipients; full message audit is saved at dispatch.
-        const snapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered);
+        if (messageStatic && !staticSnapshot) staticSnapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, true);
+        const snapshot = staticSnapshot
+          ? { ...staticSnapshot, to: [recipient.recipient.email], headers: [...staticSnapshot.headers] }
+          : await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, lockedAttachments, review.rendered, true, htmlStatic);
         const contentHash = await digest(canonical(snapshot));
         marketingFooter(snapshot, `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_${'0'.repeat(64)}`);
         sizeCheck(snapshot, lockedAttachments);
@@ -1355,6 +1369,7 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
         hash = await digest(canonical([hash, recipient.ordinal, recipient.recipient, contentHash]));
         if (Date.now() - started >= 10000) break;
       }
+      log('info', { code: 'CAMPAIGN_PREPARE_TIMINGS', jobId: job.id, campaignId, reviewId, cursor: review.processed, rows: prepared.length, messageStatic, durationMs: Date.now() - started });
       await db.execute(sql`UPDATE sending_review_recipients r SET content_hash = p.hash, subject = p.subject, snapshot_bytes = p.bytes
         FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) AS p(ordinal integer, hash text, subject text, bytes integer)
         WHERE r.review_id = ${review.id} AND r.ordinal = p.ordinal AND r.content_hash IS NULL`);
