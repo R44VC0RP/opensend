@@ -18,7 +18,7 @@
     "PUBLIC_URL": "https://opensend.anoma.ly",
     "DEFAULT_SES_REGION": "us-east-2",
     "ENABLE_LIVE_SES": "true",
-    "JOB_CONCURRENCY": "4",
+    "JOB_CONCURRENCY": "6",
     "WEBHOOK_ALLOWED_HOSTS": ""
   },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],

@@ -19,9 +19,9 @@ An audience is captured with one database snapshot. Only referenced personalizat
 | Preparation/expansion chunk | Up to 100 recipients; byte-bounded processing |
 | Active campaign dispatch buffer | 200 emails per campaign, 1,000 per environment |
 | Outstanding campaign intents | 1,000,000 per originating credential; 2,000,000 per environment |
-| Active jobs per process/invocation | `JOB_CONCURRENCY`: default 2, maximum 8 for Node and 4 for Cloudflare |
+| Active jobs per process/invocation | `JOB_CONCURRENCY`: default 2, maximum 8 for Node and 6 for Cloudflare |
 
-These are application bounds, not a guaranteed SES send rate. All workers share regional permits, respect provider throttling, and use short database leases; no SES request holds a database transaction. Rate utilization depends on provider latency, database latency, available connections, and total worker concurrency. Direct/legacy sends retain their separate existing pending limits. Use a staged load test before increasing consumer/replica counts, especially with a small Hyperdrive origin pool. The included Cloudflare configuration allows eight concurrent queue invocations with four active jobs each; `JOB_CONCURRENCY` controls parallel work inside each invocation. Node runners can be replicated against the same database.
+These are application bounds, not a guaranteed SES send rate. All workers share regional permits, respect provider throttling, and use short database leases; no SES request holds a database transaction. Rate utilization depends on provider latency, database latency, available connections, and total worker concurrency. Direct/legacy sends retain their separate existing pending limits. Use a staged load test before increasing consumer/replica counts, especially with a small Hyperdrive origin pool. The included Cloudflare configuration allows eight concurrent queue invocations with six active jobs each; `JOB_CONCURRENCY` controls parallel work inside each invocation. Node runners can be replicated against the same database.
 
 Apply migration `017_scalable_campaigns.sql` before deploying this backend. For Docker, stop old runners and upgrade API/runner images together before accepting background preparations; old runners do not recognize the new job types. Do not roll back to an older backend while new-format reviews or campaigns are active. Existing reviews and emails use the legacy storage path without a content backfill. This release adds public API operations; it does not change the old review response or require existing integrations to adopt asynchronous preparation.
 
@@ -43,7 +43,7 @@ node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))'
 | Setting | What to enter |
 | --- | --- |
 | `BETTER_AUTH_SECRET` | At least 32 random bytes, such as the 64-character hex output above. This is the installation root secret for authentication and domain-separated webhook encryption. |
-| `JOB_CONCURRENCY` | Optional active background jobs per process/invocation. Defaults to 2; capped at 8 for Docker/Node and 4 for Cloudflare. Increase only after measuring database and SES latency; the shared regional permit gate still enforces SES send rate. |
+| `JOB_CONCURRENCY` | Optional active background jobs per process/invocation. Defaults to 2; capped at 8 for Docker/Node and 6 for Cloudflare. Increase only after measuring database and SES latency; the shared regional permit gate still enforces SES send rate. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Your installation's real Google OAuth **Web application** client credentials. See below. |
 | `AUTH_ALLOWED_EMAILS` | Comma-separated exact Google email addresses. Use this for personal Gmail accounts. |
 | `AUTH_ALLOWED_DOMAINS` | Optional comma-separated exact Google Workspace hosted domains, checked against Google's verified `hd` claim—not an email suffix. Either allowlist can approve a user; missing/empty lists deny everyone. All approved users are admins. |

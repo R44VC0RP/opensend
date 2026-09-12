@@ -12,8 +12,9 @@ import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
 import { publicImageImporter } from './adapters/public-image.js';
 
-// Optional Worker variable, default two active jobs; a four-job cap leaves room for control-plane requests.
-const workerConcurrency = (env: Env) => jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 4);
+// Optional Worker variable, default two active jobs; six matches the platform's
+// simultaneous outbound-connection ceiling while the shared SES gate limits rate.
+const workerConcurrency = (env: Env) => jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
