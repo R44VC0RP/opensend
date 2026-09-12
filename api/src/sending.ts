@@ -11,8 +11,7 @@ import { AudienceSpec, getAudience, snapshotCampaignAudience } from './audience.
 import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
-import { contacts } from './db/audience.js';
-import { unsubscribeUrl } from './operations.js';
+import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, regionalLimits, reviewRecipients, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
@@ -265,9 +264,8 @@ async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, b
     return result;
   });
 }
-async function findEmail(db: DbExecutor, a: Actor, emailId: string, lock = false) {
-  const query = db.select().from(emails).where(mailWhere(a, emailId));
-  const [row] = await (lock ? query.for('update') : query);
+async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
+  const [row] = await db.select().from(emails).where(mailWhere(a, emailId));
   if (!row) notFound('Email');
   return row;
 }
@@ -277,11 +275,11 @@ async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: 
   if (!row) notFound('Campaign');
   return row;
 }
-async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock: boolean | 'share' = false) {
+async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false) {
   if (!ids.length) return [];
   if (new Set(ids).size !== ids.length) throw new ApiError(422, 'DUPLICATE_ATTACHMENT', 'An attachment can appear only once per message.');
   const query = db.select().from(attachments).where(and(scope(attachments, a), inArray(attachments.id, ids))).orderBy(asc(attachments.id));
-  const rows = await (lock ? query.for(lock === 'share' ? 'share' : 'update') : query);
+  const rows = await (lock ? query.for('update') : query);
   if (rows.length !== ids.length) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', 'One or more attachments were not found in this environment.');
   if (rows.reduce((n, row) => n + row.size, 0) > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Combined attachments may not exceed 8 MiB of decoded data.');
   const cid = rows.flatMap(r => r.contentId ? [r.contentId] : []);
@@ -988,19 +986,33 @@ async function verifiedAttachment(runtime: Runtime, row: typeof attachments.$inf
 const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
 const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
 export async function recordEmailEvent(runtime: Runtime, input: { workspaceId: string; environment: Mode; emailId: string; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string }) {
-  const eventId = id('event');
-  const result = await runtime.db.transaction(async db => {
-    const [mail] = await db.select().from(emails).where(mailWhere(input, input.emailId)).for('update');
-    if (!mail) return null;
-    const [event] = await db.insert(emailEvents).values({ id: eventId, workspaceId: input.workspaceId, environment: input.environment, emailId: input.emailId, type: input.type, providerId: input.providerId, externalId: input.externalId, data: input.data ?? {}, simulated: input.environment === 'test', createdAt: input.createdAt ?? now() }).onConflictDoNothing().returning();
-    if (!event) return null;
-    const next = statusForEvent[input.type];
-    if (next && rank[next] >= rank[mail.status]) await db.update(emails).set({ status: next, ...(input.providerId ? { providerId: input.providerId } : {}), updatedAt: now() }).where(mailWhere(input, input.emailId));
-    const publicType = ({ send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' } as Record<string, string>)[input.type];
-    if (publicType) await enqueue(db, { type: 'operation.publish', workspaceId: input.workspaceId, environment: input.environment, payload: { event: { id: event.id, workspaceId: input.workspaceId, environment: input.environment, type: publicType, region: mail.region, createdAt: event.createdAt, data: { ...(input.data ?? {}), emailId: input.emailId, simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) } } } });
-    return event;
-  });
-  return result;
+  const next = statusForEvent[input.type];
+  const publicType = ({ send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' } as Record<string, string>)[input.type];
+  // One transaction inside PostgreSQL instead of BEGIN/read/insert/update/enqueue/COMMIT
+  // over the network. The locked row determines monotonic status; only a newly
+  // inserted event may change it or publish a callback.
+  const result = await runtime.db.execute<typeof emailEvents.$inferSelect>(sql`WITH mail AS MATERIALIZED (
+    SELECT id, status, region FROM sending_emails WHERE workspace_id = ${input.workspaceId}
+      AND environment = ${input.environment} AND id = ${input.emailId} FOR UPDATE
+  ), inserted AS (
+    INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, provider_id, external_id, data, simulated, created_at)
+    SELECT ${id('event')}, ${input.workspaceId}, ${input.environment}, mail.id, ${input.type}, ${input.providerId ?? null},
+      ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, ${input.environment === 'test'}, ${input.createdAt ?? now()}::timestamptz
+    FROM mail ON CONFLICT DO NOTHING RETURNING *
+  ), updated AS (
+    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), updated_at = clock_timestamp()
+    FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId} AND e.environment = ${input.environment}
+      AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
+  ), published AS (
+    INSERT INTO jobs(id, workspace_id, environment, type, payload)
+    SELECT ${id('job')}, ${input.workspaceId}, ${input.environment}, 'operation.publish', jsonb_build_object('event', jsonb_build_object(
+      'id', inserted.id, 'workspaceId', inserted.workspace_id, 'environment', inserted.environment,
+      'type', ${publicType ?? null}::text, 'region', mail.region, 'createdAt', inserted.created_at,
+      'data', ${JSON.stringify({ ...(input.data ?? {}), emailId: input.emailId, simulated: input.environment === 'test', ...(input.providerId ? { providerId: input.providerId } : {}) })}::jsonb))
+    FROM inserted, mail WHERE ${publicType ?? null}::text IS NOT NULL
+  ) SELECT id, workspace_id AS "workspaceId", environment, email_id AS "emailId", type,
+    provider_id AS "providerId", external_id AS "externalId", data, simulated, created_at::text AS "createdAt" FROM inserted`);
+  return result.rows[0] ?? null;
 }
 async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | null) {
   if (!campaignId) return;
@@ -1100,25 +1112,24 @@ async function cancelRevokedOrigin(db: DbExecutor, a: Actor, mail: typeof emails
   return db.update(emails).set({ status: 'canceled', errorCode: 'ORIGIN_KEY_REVOKED', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
 }
 async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
-  return runtime.db.transaction(async db => {
-    const campaign = await findCampaign(db, a, mail.campaignId!, 'share');
-    if (campaign.status === 'canceled') return null;
-    // Different recipients can render together; the same email must retain one
-    // immutable materialization (including its unsubscribe token) through claim.
-    const current = await findEmail(db, a, mail.id, true);
-    if (current.status !== 'queued' || current.dispatchVersion !== mail.dispatchVersion) return null;
-    if (!current.snapshot.deferredCampaign) return { mail: current, rows: await attachmentRows(db, a, current.snapshot.attachments) };
-    const [review] = await db.select({ draft: campaignReviews.draft, rendered: campaignReviews.rendered, status: campaignReviews.status }).from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, current.reviewId!)));
-    const [recipient] = await db.select().from(reviewRecipients).where(and(eq(reviewRecipients.reviewId, current.reviewId!), eq(reviewRecipients.ordinal, current.reviewOrdinal!)));
-    if (!review?.rendered || review.status !== 'ready' || !recipient?.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
-    const rows = await attachmentRows(db, a, review.draft.attachments, 'share');
-    const snapshot = await campaignMessage(runtime, db, a, review.draft, recipient.recipient, false, true, rows, review.rendered);
-    if (await digest(canonical(snapshot)) !== recipient.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
-    marketingFooter(snapshot, await unsubscribeUrl(runtime, a.workspaceId, a.environment, snapshot.to[0]!, db));
-    sizeCheck(snapshot, rows);
-    const [updated] = await db.update(emails).set({ snapshot, updatedAt: now() }).where(and(mailWhere(a, current.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, current.dispatchVersion))).returning();
-    return updated ? { mail: updated, rows } : null;
-  });
+  // Review/recipient data and attachment metadata are immutable; retained email
+  // links prevent attachment deletion. No transaction is needed to render them.
+  // The winning claim persists its snapshot and token atomically; losing workers
+  // discard their render without writing a different snapshot over the winner.
+  const [reviews, rows] = await Promise.all([
+    runtime.db.select({ draft: campaignReviews.draft, rendered: campaignReviews.rendered, status: campaignReviews.status, recipient: reviewRecipients.recipient, contentHash: reviewRecipients.contentHash })
+      .from(campaignReviews).innerJoin(reviewRecipients, and(eq(reviewRecipients.reviewId, campaignReviews.id), eq(reviewRecipients.ordinal, mail.reviewOrdinal!)))
+      .where(and(scope(campaignReviews, a), eq(campaignReviews.id, mail.reviewId!), eq(campaignReviews.campaignId, mail.campaignId!))),
+    attachmentRows(runtime.db, a, mail.snapshot.attachments),
+  ]);
+  const review = reviews[0];
+  if (!review?.rendered || review.status !== 'ready' || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
+  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered);
+  if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
+  const unsubscribe = await createUnsubscribeLink(runtime, a.workspaceId, a.environment, snapshot.to[0]!);
+  marketingFooter(snapshot, unsubscribe.url);
+  sizeCheck(snapshot, rows);
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record };
 }
 const dispatch: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.emailId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Email dispatch requires emailId.');
@@ -1141,10 +1152,10 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
   if (mail.scheduledAt && Date.parse(mail.scheduledAt) > Date.now()) throw new ApiError(409, 'DISPATCH_NOT_DUE', 'The scheduled dispatch is not due.', undefined, true);
   if (a.environment === 'live') await phase('readiness', () => assertDispatchRegionReady(runtime, mail.snapshot.region, mail.snapshot.kind));
   let preparedAttachments: (typeof attachments.$inferSelect)[] | undefined;
+  let pendingUnsubscribe: Awaited<ReturnType<typeof createUnsubscribeLink>>['record'] | undefined;
   if (mail.snapshot.deferredCampaign) {
     const materialized = await phase('materialize', () => materializeCampaignEmail(runtime, a, mail));
-    if (!materialized) { await finishEmailCampaign(runtime, a, mail); return; }
-    mail = materialized.mail; preparedAttachments = materialized.rows;
+    mail = materialized.mail; preparedAttachments = materialized.rows; pendingUnsubscribe = materialized.unsubscribe;
   }
   const s = mail.snapshot;
   // Resolve storage and credentials BEFORE claiming a provider attempt; these failures cannot have sent email.
@@ -1174,16 +1185,42 @@ const dispatch: JobHandler = async (runtime, payload, job) => {
     if (!await originAllowed(runtime, db, mail)) return cancelRevokedOrigin(db, a, mail);
     if (campaign) { if (campaign.status === 'canceled') return []; if (campaign.status === 'scheduled') await db.update(campaigns).set({ status: 'sending', updatedAt: now() }).where(campaignWhere(a, campaign.id)); }
     const destinations = [...s.to, ...s.cc, ...s.bcc].map(email => email.toLowerCase());
-    const consent = await db.select().from(contacts).where(and(scope(contacts, a), inArray(contacts.email, destinations))).orderBy(asc(contacts.id)).for('update');
-    const eligible = destinations.every(email => { const contact = consent.find(row => row.email === email); return !contact?.suppressed && (s.kind !== 'marketing' || (!!contact && !contact.deletedAt && contact.marketingConsent === 'subscribed')); });
-    // Consent and the durable attempt claim share a transaction. Opt-outs after this boundary cannot recall an in-flight request.
-    const changed = await db.update(emails).set(eligible ? { status: 'attempting', attemptStartedAt: now(), updatedAt: now() } : { status: 'suppressed', errorCode: 'RECIPIENT_INELIGIBLE', updatedAt: now() }).where(and(mailWhere(a, mail.id), eq(emails.status, 'queued'), eq(emails.dispatchVersion, mail.dispatchVersion))).returning();
-    if (eligible && changed.length) await db.insert(emailEvents).values({ id: id('event'), workspaceId: a.workspaceId, environment: a.environment, emailId: mail.id, type: 'dispatch_attempt', externalId: `attempt-start:${mail.id}:${mail.dispatchVersion}`, simulated: a.environment === 'test', data: { attempt: mail.dispatchVersion + 1, providerCallPlanned: a.environment === 'live' } }).onConflictDoNothing();
-    return changed;
+    // PostgreSQL locks consent, elects one sender, and saves the exact winning
+    // snapshot/token/attempt together. No intermediate application round trips.
+    const changed = await db.execute<{ status: EmailStatus }>(sql`WITH destinations AS (
+      SELECT jsonb_array_elements_text(${JSON.stringify(destinations)}::jsonb) AS email
+    ), consent AS MATERIALIZED (
+      SELECT email, suppressed, deleted_at, marketing_consent FROM audience_contacts
+      WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email IN (SELECT email FROM destinations)
+      ORDER BY id FOR UPDATE
+    ), eligibility AS (
+      SELECT NOT EXISTS (SELECT 1 FROM destinations
+        LEFT JOIN consent USING (email) WHERE consent.suppressed IS TRUE
+        OR (${s.kind === 'marketing'} AND (consent.email IS NULL OR consent.deleted_at IS NOT NULL OR consent.marketing_consent <> 'subscribed'))) AS allowed
+    ), claimed AS (
+      UPDATE sending_emails e SET status = CASE WHEN eligibility.allowed THEN 'attempting' ELSE 'suppressed' END,
+        attempt_started_at = CASE WHEN eligibility.allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN eligibility.allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        snapshot = coalesce(${pendingUnsubscribe ? JSON.stringify(s) : null}::jsonb, e.snapshot), updated_at = clock_timestamp()
+      FROM eligibility WHERE e.workspace_id = ${a.workspaceId} AND e.environment = ${a.environment}
+        AND e.id = ${mail.id} AND e.status = 'queued' AND e.dispatch_version = ${mail.dispatchVersion}
+      RETURNING e.id, e.status
+    ), token AS (
+      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, environment, email)
+      SELECT ${pendingUnsubscribe?.tokenHash ?? null}::text, ${a.workspaceId}, ${a.environment}, ${pendingUnsubscribe?.email ?? null}::text
+      FROM claimed WHERE ${pendingUnsubscribe?.tokenHash ?? null}::text IS NOT NULL
+    ), attempt AS (
+      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
+      SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, claimed.id, 'dispatch_attempt',
+        ${`attempt-start:${mail.id}:${mail.dispatchVersion}`}, ${a.environment === 'test'},
+        ${JSON.stringify({ attempt: mail.dispatchVersion + 1, providerCallPlanned: a.environment === 'live' })}::jsonb
+      FROM claimed WHERE claimed.status = 'attempting' ON CONFLICT DO NOTHING
+    ) SELECT status FROM claimed`);
+    return changed.rows;
   });
   const claimed = await phase('claim', async () => await claim('share') ?? await claim(true));
   if (!claimed?.length) return;
-  mail = claimed[0]!;
+  mail = { ...mail, status: claimed[0]!.status };
   if (mail.status === 'canceled') { await finishEmailCampaign(runtime, a, mail); return; }
   if (mail.status === 'suppressed') { await recordEmailEvent(runtime, { ...a, emailId: mail.id, type: 'suppressed', externalId: `suppressed:${mail.id}` }); await finishEmailCampaign(runtime, a, mail); return; }
   if (!ses) {

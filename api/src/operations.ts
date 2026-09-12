@@ -133,10 +133,14 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
   if (wake) try { await runtime.wake?.(); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
-export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, environment: Mode, email: string, db: DbExecutor = runtime.db): Promise<string> {
+export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, environment: Mode, email: string) {
   const token = randomSecret('u_');
-  await db.insert(unsubscribeTokens).values({ tokenHash: await digest(token), workspaceId, environment, email: email.trim().toLowerCase() });
-  return `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`;
+  return { url: `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, environment, email: email.trim().toLowerCase() } };
+}
+export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, environment: Mode, email: string, db: DbExecutor = runtime.db): Promise<string> {
+  const link = await createUnsubscribeLink(runtime, workspaceId, environment, email);
+  await db.insert(unsubscribeTokens).values(link.record);
+  return link.url;
 }
 async function domainReadiness(runtime: Runtime, row: typeof domains.$inferSelect, identity?: GetEmailIdentityCommandOutput) {
   const value = identity ?? await sesCall(() => getSes(runtime, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })));
