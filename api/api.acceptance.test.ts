@@ -3047,4 +3047,63 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('operation.webhook')).length, 1);
     });
   });
+
+  test('a full campaign buffer refills at the cached regional rate without exceeding 400 queued emails', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const list = ok(await local('POST', '/v1/lists', { name: unique('refill-buffer') }), 201);
+      // Bulk-seed reserved-domain contacts before the normal immutable snapshot.
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'refill-' || n || '@example.com', 'subscribed'
+        FROM generate_series(1, 500) AS n`, [runtime.config.workspaceId]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id)
+        SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [runtime.config.workspaceId, list.id]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('refill-buffer'), from: 'sender@example.com', subject: 'Synthetic refill capacity', html: '<p>Synthetic buffer acceptance only.</p>', audience: { listId: list.id } }), 201);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 500);
+      await run('campaign.prepare');
+      for (const expected of [200, 400]) {
+        await run('campaign.expand');
+        const expanded = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+        assert.equal(expanded.counts.total, expected);
+        assert.equal(expanded.counts.byStatus.queued, expected);
+        assert.equal(expanded.expansion.expanded, expected);
+      }
+      for (const rate of [5000, 20, null]) {
+        if (rate === null) {
+          await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'test' AND region = $2", [runtime.config.workspaceId, REGION]);
+        } else {
+          await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
+            VALUES ($1, 'test', $2, $3, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+            DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION, rate]);
+        }
+        const before = Date.now();
+        await run('campaign.expand');
+        const after = Date.now();
+        const deferred = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+        assert.equal(deferred.length, 1, 'Full capacity must retain exactly one expansion continuation.');
+        assert.equal(deferred[0]!.payload.cursor, 400);
+        const dueAt = new Date(deferred[0]!.available_at).getTime();
+        const expectedDelay = rate === 5000 ? 40 : 2000;
+        assert.ok(dueAt >= before + expectedDelay - 5 && dueAt <= after + expectedDelay + 5,
+          `Rate ${rate ?? 'missing'} should defer ${expectedDelay}ms; observed ${dueAt - before}ms from invocation start (${after - before}ms handler time).`);
+        const full = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+        assert.equal(full.counts.total, 400, 'Deferral must not materialize more immutable emails.');
+        assert.equal(full.counts.byStatus.queued, 400);
+        assert.equal(full.expansion.expanded, 400);
+        assert.equal((await jobs('email.dispatch')).length, 400);
+      }
+      // Free 100 slots through a terminal fixture status; do not alter reviewed
+      // recipients or immutable message snapshots, and do not invoke a provider.
+      assert.equal((await db.query(`UPDATE sending_emails SET status = 'simulated'
+        WHERE workspace_id = $1 AND environment = 'test' AND campaign_id = $2 AND review_ordinal <= 100`, [runtime.config.workspaceId, campaign.id])).rowCount, 100);
+      await run('campaign.expand');
+      const refilled = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(refilled.counts.total, 500);
+      assert.equal(refilled.counts.byStatus.queued, 400);
+      assert.equal(refilled.counts.byStatus.simulated, 100);
+      assert.equal(refilled.expansion.expanded, 500);
+      assert.equal(refilled.expansion.status, 'completed');
+      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      assert.equal((await jobs('email.dispatch')).length, 500);
+    });
+  });
 });

@@ -1482,9 +1482,16 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       };
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
-      const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int` }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
+      const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
+        rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${review!.draft.region}),0)`,
+      }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, CAMPAIGN_BUFFER - buffer!.campaign, 1000 - buffer!.total);
-      if (capacity <= 0) { await defer(new Date(Date.now() + 2000).toISOString()); return; }
+      if (capacity <= 0) {
+        // Recheck before half a buffer could drain. Unknown/low quotas retain the
+        // old two-second pacing; high quotas must not inherit a two-second gap.
+        const delayMs = buffer!.rate > 0 ? Math.max(10, Math.min(2000, Math.ceil(500 * CAMPAIGN_BUFFER / buffer!.rate))) : 2000;
+        await defer(new Date(Date.now() + delayMs).toISOString()); return;
+      }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
       if (!review || !recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== expansion.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
       const draft = review.draft;
