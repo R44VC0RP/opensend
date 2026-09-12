@@ -8,7 +8,7 @@ Self-hosted transactional and marketing email on Amazon SES. Read `README.md` fo
 - `api/` — Hono API with Zod/OpenAPI schemas. `src/app.ts` assembles routes; `src/server.ts` runs on Node and `src/worker.ts` runs on Cloudflare. `src/runner.ts` runs the Node job worker. PostgreSQL schemas are in `src/db/`, migrations in `migrations/`, and platform/database/storage adapters in `src/adapters/`.
 - `sdk/` — Generated TypeScript client, published on npm as `opensend-js`. Usage is in `sdk/README.md`.
 - `mcp/` — MCP integration and client connection documentation. See `mcp/README.md`.
-- `docs/` — Public demo screenshots and SES research. Prefer `api/README.md` over older research notes for current setup instructions.
+- `docs/` — Public demo screenshots, SES research, and `dispatch-scaling.md` (measured throughput ceilings, dispatcher design rationale, and the scaling playbook by SES quota). Prefer `api/README.md` over older research notes for current setup instructions.
 
 The dashboard builds to `app/dist/`. Cloudflare serves that directory; Docker copies it into the API image's `public/` directory. There is no root HTML entry point or root npm workspace.
 
