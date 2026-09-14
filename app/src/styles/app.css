@@ -96,6 +96,8 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .logs-table .ui-table { min-width: 980px; font-size: var(--text-xs); }
 .logs-table .ui-table th { height: 30px; padding-block: var(--space-4); }
 .logs-table .ui-table td { padding-block: var(--space-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-table .ui-table :is(th, td):last-child { padding-inline: var(--space-6); text-overflow: clip; }
+.logs-table .ui-table td:last-child svg { display: block; }
 .logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: var(--color-hover); }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
 .log-recipient { display: inline-flex; white-space: nowrap; }
