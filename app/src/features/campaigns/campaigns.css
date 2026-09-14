@@ -71,3 +71,7 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
   .campaign-compose-scroll { padding-block: var(--space-8) var(--space-24); }
   .campaign-compose-sheet { width: calc(100% - 16px); min-height: calc(100% - 16px); padding: var(--space-12); }
 }
+.campaign-progress-bar { appearance: none; width: 100%; height: 6px; border: 0; border-radius: var(--radius-sm); overflow: hidden; background: var(--color-border); color: var(--color-accent); }
+.campaign-progress-bar::-webkit-progress-bar { background: var(--color-border); }
+.campaign-progress-bar::-webkit-progress-value { background: var(--color-accent); }
+.campaign-progress-bar::-moz-progress-bar { background: var(--color-accent); }

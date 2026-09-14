@@ -11,6 +11,7 @@ import {
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
+import { CampaignProgress } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
@@ -340,8 +341,11 @@ export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal))
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
-  if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <CampaignReview key={id} campaign={query.data} />
+  if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  return <>
+    {query.isError && <Alert tone="warning">Could not refresh this campaign. Showing the last available counts.</Alert>}
+    <CampaignReview key={id} campaign={query.data} refreshing={query.isFetching} refresh={() => void query.refetch()} />
+  </>
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -351,7 +355,7 @@ function CampaignRenderedPreview({ campaign }: { campaign: Campaign }) {
   if (preview.isError) return <ErrorState error={preview.error} onRetry={() => void preview.refetch()} />
   return <EmailPreview html={preview.data.html} title="Campaign email preview" attachmentIds={campaign.attachments} respectStyles remoteImages />
 }
-function CampaignReview({ campaign }: { campaign: Campaign }) {
+function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
   const [mode, setMode] = useState<'now' | 'schedule'>('now')
   const [scheduled, setScheduled] = useState('')
@@ -405,7 +409,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
-        <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit audience</Button> : undefined} />
+        <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
         {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">{reviewProgress ? `Validating recipients: ${number(reviewProgress.processed)} / ${number(reviewProgress.eligible)}` : 'Preparing recipient count…'}</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
@@ -415,7 +419,7 @@ function CampaignReview({ campaign }: { campaign: Campaign }) {
           </div>
           <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Refresh recipient count</Button>
           {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
-        </> : <div className="campaign-audience-summary">
+        </> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
           {campaign.expansion && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
           {['sent', 'completed'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
