@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
@@ -13,7 +13,17 @@ export function OverviewPage() {
   const api = useApi()
   const live = api.mode === 'live'
   const [range, setRange] = useState<TimeRange>('7d')
-  const [stream, setStream] = useState('all')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedStream = searchParams.get('stream')
+  const stream = requestedStream === 'transactional' || requestedStream === 'marketing' ? requestedStream : 'all'
+  function setStream(value: string) {
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous)
+      if (value === 'transactional' || value === 'marketing') next.set('stream', value)
+      else next.delete('stream')
+      return next
+    })
+  }
   const navigate = useNavigate()
   const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal))
   const regions = useRegionCatalog()
