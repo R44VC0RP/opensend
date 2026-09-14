@@ -26,15 +26,15 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-sync-status[data-state='offline'] .campaign-sync-dot { background: var(--color-danger); }
 .campaign-compose-page > .ui-alert { margin-bottom: var(--space-16); }
 /* The email paper stays light; the surrounding application retains its theme. */
-.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F6F6F6; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E8E8E8; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-email-surface); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
-.campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
-.campaign-compose-sheet { width: 100%; max-width: 632px; margin-inline: auto; }
-.campaign-compose-sheet { display: flex; flex-direction: column; min-height: 100%; padding: var(--space-16); }
-.campaign-compose-metadata { flex-shrink: 0; margin-bottom: var(--space-4); }
-.campaign-compose-row { display: grid; grid-template-columns: 56px minmax(0, 1fr); align-items: center; min-height: 38px; gap: var(--space-8); border-bottom: 1px solid var(--color-border); }
+.campaign-compose-workspace { --color-surface: var(--color-email-surface); --color-canvas: #F3F3F3; --color-text: var(--color-email-text); --color-muted: #707070; --color-border: #E4E4E4; --color-accent: #315EFB; --color-active-bg: #F0F0F0; --color-on-accent: #FFFFFF; --color-focus: var(--color-muted); --color-info: #315EFB; --color-danger: #995168; --color-warning: #A85E30; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--color-canvas); color: var(--color-email-text); color-scheme: light; border-radius: var(--radius-sm); }
+.campaign-compose-scroll { flex: 1; min-height: 0; overflow: auto; padding-block: var(--space-24) var(--space-40); overscroll-behavior: contain; scrollbar-gutter: stable both-edges; }
+.campaign-compose-sheet { display: flex; flex-direction: column; width: calc(100% - 32px); max-width: 680px; min-height: calc(100% - 48px); margin-inline: auto; padding: var(--space-24); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-email-surface); box-shadow: 0 2px 8px rgb(24 24 24 / 6%); }
+.campaign-compose-metadata { flex-shrink: 0; }
+.campaign-compose-row { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; min-height: 44px; gap: var(--space-12); border-bottom: 1px solid var(--color-border); }
 .campaign-compose-row > :is(label, span) { color: var(--color-muted); font-size: var(--text-xs); }
-.campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 36px; padding: var(--space-4) 0; border: 0; border-radius: 0; background: transparent; }
-.campaign-compose-subject { grid-template-columns: 56px minmax(0, 1fr) auto; }
+.campaign-compose-row :is(.ui-input, .ui-control-skeleton) { height: 43px; padding: 0; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: none; }
+.campaign-compose-page .campaign-compose-row .ui-input:hover:not(:disabled), .campaign-compose-page .campaign-compose-row .ui-input:focus { outline: 0; background: transparent; box-shadow: none; }
+.campaign-compose-subject { grid-template-columns: 64px minmax(0, 1fr) auto; }
 .campaign-compose-subject input { font-size: var(--text-md); }
 /* Ghost buttons hang out by their own padding so labels align with the row's right edge and the text column. */
 .campaign-preview-toggle { color: var(--color-muted); margin-inline-end: calc(-1 * var(--space-8)); }
@@ -68,5 +68,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
   body:has(.campaign-compose-page) .sidebar { display: none; }
   body:has(.campaign-compose-page) .page-surface:has(.campaign-compose-page) { height: calc(100dvh - 16px); margin: 8px; padding: 8px; border-radius: var(--radius-sm); }
   .campaign-compose-page .campaign-sync-status:not([data-actionable]) { display: none; }
-  .campaign-compose-sheet { padding: 12px; }
+  .campaign-compose-scroll { padding-block: var(--space-8) var(--space-24); }
+  .campaign-compose-sheet { width: calc(100% - 16px); min-height: calc(100% - 16px); padding: var(--space-12); }
 }

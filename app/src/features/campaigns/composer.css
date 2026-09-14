@@ -1,5 +1,5 @@
 .email-composer { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
-.composer-toolbar { flex-shrink: 0; padding-block: var(--space-8); margin-bottom: var(--space-8); }
+.composer-toolbar { position: sticky; top: 0; z-index: 3; flex-shrink: 0; margin: 0 calc(-1 * var(--space-24)) var(--space-16); padding: var(--space-8) var(--space-24); border-bottom: 1px solid var(--color-border); background: rgb(255 255 255 / 96%); }
 /* Pull the ghost buttons out by their own padding so the first and last icons sit on the text column edges. */
 .composer-tools { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-inline: calc(-1 * var(--space-8)); }
 .composer-tools .cluster { flex-wrap: nowrap; gap: var(--space-4); }
@@ -56,7 +56,10 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-inspector [data-re-inspector-toggle-item] { border-color: #a8a8a8; background: #fff; color: #181818; }
 .composer-inspector [data-re-inspector-toggle-item][data-active] { background: #181818; color: #fff; }
 .composer-inspector-hint { margin: 12px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.5; }
-@media (max-width: 700px) { .composer-inspector { inset: 72px 8px 8px; width: auto; } }
+@media (max-width: 700px) {
+  .composer-inspector { inset: 72px 8px 8px; width: auto; }
+  .composer-toolbar { margin-inline: calc(-1 * var(--space-12)); padding-inline: var(--space-12); }
+}
 :root {
   --re-bg: var(--color-surface);
   --re-text: var(--color-text);
