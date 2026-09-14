@@ -67,6 +67,9 @@ function EmailDetail({ email }: { email: Email }) {
   const [eventError, setEventError] = useState('')
   const [eventBusy, setEventBusy] = useState(false)
   const [view, setView] = useState('preview')
+  const hasHtml = email.html.trim().length > 0
+  const plainText = email.text ?? (api.mode === 'demo' && hasHtml ? htmlToText(email.html) : '')
+  const hasPlainText = plainText.trim().length > 0
   const contacts = useApiQuery(['contact-for-email', email.to], (api, signal) => api.contacts.list({ search: email.to, pageSize: 10 }, signal))
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
   return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
@@ -76,7 +79,7 @@ function EmailDetail({ email }: { email: Email }) {
     {['complaint', 'complained'].includes(email.status) && <Alert tone="danger">The recipient reported this message as spam.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
     {['deferred', 'delayed'].includes(email.status) && <Alert tone="warning">Delivery delayed.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'html', label: 'HTML' }, { value: 'plain', label: 'Plain text' }]} />
-      {view === 'preview' ? email.html ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} /> : <EmptyState title="No HTML snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html : email.text ?? (api.mode === 'demo' ? htmlToText(email.html) : 'No plain-text snapshot available.')}</pre>}
+      {view === 'preview' ? hasHtml ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} /> : hasPlainText ? <pre className="plain-text-preview">{plainText}</pre> : <EmptyState title="No message snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html || 'No HTML snapshot available.' : hasPlainText ? plainText : 'No plain-text snapshot available.'}</pre>}
     </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} /><ol>{events.map(event => <li key={event.id}><span className={`timeline-dot ${['bounced', 'complaint'].includes(event.type) ? 'timeline-dot--warning' : ''}`} /><div><div className="cluster between"><span>{label(event.type)}</span><time className="muted">{time(event.at)}</time></div><p className="muted">{event.description}</p>{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Could not load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>
     <div className="message-identifiers"><span className="cluster">Email ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy email ID" /></span><span>Created {date(email.sentAt)} · {time(email.sentAt)} UTC</span><span>SES · {email.regionId}</span></div>
   </div>

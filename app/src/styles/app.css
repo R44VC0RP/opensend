@@ -119,6 +119,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .diagnostic { margin: var(--space-16) 0 0; font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
 .email-preview-skeleton { height: 400px; padding: var(--space-24); display: flex; flex-direction: column; gap: var(--space-16); background: var(--color-email-surface); }
 .email-preview-skeleton .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }
+.plain-text-preview { flex: 1; min-height: 400px; margin: 0; padding: var(--space-24); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-email-surface); color: var(--color-email-text); font-family: var(--font-email); line-height: 1.5; }
 .message-source { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 360px; overflow: auto; margin: 0; padding-top: var(--space-16); line-height: var(--leading-sm); }
 .message-identifiers { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-12); padding-top: var(--space-20); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-muted); }
 .identifier { color: var(--color-text); }
