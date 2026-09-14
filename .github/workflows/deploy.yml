@@ -22,10 +22,13 @@ jobs:
           cache-dependency-path: |
             api/package-lock.json
             app/package-lock.json
+            sdk/package-lock.json
       - run: npm ci
         working-directory: app
       - run: npm ci
         working-directory: api
+      - run: npm ci
+        working-directory: sdk
       - run: npm run check
         working-directory: api
       - run: npm run docs:check
