@@ -8,9 +8,9 @@ Connect an MCP client to **`https://YOUR_OPENSEND_DOMAIN/mcp`**. The hosted endp
 2. Start OAuth authorization. OpenSend reuses your dashboard's Google session in the same browser/profile. If you are signed out, use the normal Google sign-in.
 3. Review the client, requested permissions, and test/live environment, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
 
-The server exposes ordinary named tools, each with `inputSchema`, `outputSchema`, and structured results. Code-mode clients can consume those tools directly. OpenSend does not add a `search`/`execute` wrapper or run arbitrary agent code.
+The hosted Cloudflare server exposes `search` and `execute` by default. `search` runs isolated JavaScript against the curated tool catalog without making API requests; `execute` runs isolated JavaScript with credential-free `opensend.toolName(args)` functions. Generated code has no direct network access, OAuth credentials remain in the host Worker, and every operation still passes through the existing schema, permission, confirmation, rate-limit, response-validation, and in-process API boundaries.
 
-In OpenCode V2, add the URL with `opencode2 mcp add opensend --global --url https://YOUR_OPENSEND_DOMAIN/mcp`, then use `/mcps` to select OpenSend and sign in. Code Mode is enabled by default; OAuth credentials stay outside configuration.
+Clients that already provide their own Code Mode or need ordinary function-calling tools should connect to `https://YOUR_OPENSEND_DOMAIN/mcp?codemode=false`. This preserves the named catalog exactly. In OpenCode V2, add that URL with `opencode2 mcp add opensend --global --url 'https://YOUR_OPENSEND_DOMAIN/mcp?codemode=false'`, then use `/mcps` to select OpenSend and sign in. OAuth credentials stay outside configuration.
 
 ## Permissions
 
@@ -30,7 +30,9 @@ Authenticated dashboard clients can inspect their approvals with `GET /api/auth/
 
 ## Arguments and results
 
-`tools/list` provides the exact schemas for a curated 31-tool task surface. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
+In the default mode, `tools/list` returns only `search` and `execute`. Call `search` with an async arrow function that reads `await opensend.catalog()` and returns the relevant names, descriptions, input schemas, and output schemas. Then call `execute` with an async arrow function that invokes those operations, filters intermediate results, and returns a focused JSON value. A single execution is limited to 100 host calls, 30 seconds, 100,000 code characters, and a bounded final model-facing result.
+
+With `?codemode=false`, `tools/list` provides the exact schemas for the curated 41-tool task surface. Path IDs and query filters are top-level arguments; request payloads remain in `body`. There are no hosted `path` or `query` wrappers. Writes retain `confirm` and optional `idempotencyKey`.
 
 Collection tools use `findCampaigns`, `findContacts`, `findLists`, `findSegments`, `findEmails`, `findWebhooks`, and `findDomains`. Omit `id` to list/filter one page, or supply `id` alone to retrieve one complete record. Exact email, list, and webhook reads also compose their related content/events, members, or deliveries. Exact domain reads return current SES DKIM and custom MAIL FROM DNS records. Mixing `id` with pagination/filters is rejected rather than silently ignoring arguments.
 
@@ -50,7 +52,7 @@ Campaign content remains **block HTML** shared with the dashboard composer. `sav
 
 After the required audience/content/time confirmation, use `deliverCampaign` send/schedule with the current campaign `revision`. OpenSend snapshots up to 1,000,000 matching contacts, validates them and starts delivery as one durable background workflow. MCP does not expose preparation IDs; its `202` result means recipient intents were accepted for validation/delivery, not sent or delivered. `reviewCampaign` remains an optional preview for rendered content and audience counts up to 1,000 matches.
 
-The full writable catalog has **31 tools**; read-only OAuth grants expose the nine read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
+The full writable named catalog has **41 tools**; read-only OAuth grants expose 14 read tools. Code Mode exposes the same permission-filtered operations behind `search` and `execute`. Existing hosted integrations must refresh their tool catalog after changing modes.
 
 ### Temporary script tokens
 
@@ -75,7 +77,7 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 ## Hosting and safety
 
 - OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
-- HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
+- HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`. On Cloudflare, generated code runs in a fresh Dynamic Worker isolate with outbound networking disabled. Node/Docker installations have no Worker Loader and therefore retain the named catalog; `?codemode=false` is portable across all runtimes.
 - Long-lived API-key creation, webhook-secret reveal/rotation, SES region/provisioning administration, SNS ingress, authentication routes, and unsubscribe links remain excluded. Domain identity and custom MAIL FROM setup remain available through the two focused domain tools. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
 - Test-mode email sending is simulated by the API. Test mode is not a universal dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
 - Request and response limits, safe single-segment path validation, per-principal API rate limits, output validation, and credential redaction remain enforced. API descriptions and returned data are untrusted content, not agent instructions.

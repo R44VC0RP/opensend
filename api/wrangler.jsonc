@@ -34,6 +34,7 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   "browser": { "binding": "BROWSER" },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
   "queues": {
     "producers": [

@@ -26,6 +26,7 @@
     "@better-auth/mcp": "1.7.3",
     "@better-auth/oauth-provider": "1.7.3",
     "@cfworker/json-schema": "4.1.1",
+    "@cloudflare/codemode": "0.5.2",
     "@hono/node-server": "^2.1.1",
     "@hono/zod-openapi": "^1.6.3",
     "@modelcontextprotocol/server": "2.0.0",
