@@ -10,6 +10,10 @@ import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton, logColumns } from './skeletons'
 import { useAdaptivePageSize } from '../../lib/pagination'
 
+function RecipientEmail({ email }: { email: string }) {
+  return <span className="log-recipient"><span aria-hidden="true">{email.slice(0, 2)}</span><span className="log-recipient__private" aria-hidden="true">{email.slice(2)}</span><span className="sr-only">{email}</span></span>
+}
+
 export function LogsPage() {
   const { regionId } = useRegion()
   return <RegionalLogs key={regionId} regionId={regionId} />
@@ -34,7 +38,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
       <div className="table-summary"><span>{query.data ? `${query.data.total === undefined ? `${query.data.items.length} on this page` : `${number(query.data.total)} emails`}` : <SkeletonText width={100} />}</span><span>Times in UTC</span></div>
       <DataTable<Email> tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
         { ...logColumns[0], render: row => <StatusBadge status={row.status} /> },
-        { ...logColumns[1], render: row => row.to },
+        { ...logColumns[1], render: row => <RecipientEmail email={row.to} /> },
         { ...logColumns[2], render: row => row.subject },
         { ...logColumns[3], render: row => <span className="muted">{label(row.stream)}</span> },
         { ...logColumns[4], label: 'Created', render: row => <span className="muted nowrap">{time(row.sentAt)}</span> },
