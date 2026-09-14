@@ -50,6 +50,9 @@ export interface Config {
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
 export type FeedbackItem = { environment: Mode; region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
+export interface CodeExecutor {
+  execute(code: string, providers: { name: string; fns: Record<string, (...args: unknown[]) => Promise<unknown>> }[]): Promise<{ result: unknown; error?: string; logs?: string[] }>;
+}
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   wake?: (readyJobs?: number) => Promise<void>;
@@ -59,7 +62,7 @@ export interface Runtime {
   // Verified provider feedback (and test-mode simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
-  renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+  renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>; codeExecutor?: CodeExecutor;
 }
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
 export type App = OpenAPIHono<AppEnv>;

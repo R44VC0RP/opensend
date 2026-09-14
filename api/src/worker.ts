@@ -16,6 +16,7 @@ import { resolveRegionRuntime } from './ses-region-state.js';
 import type { FeedbackItem, Mode } from './core.js';
 import { ingestFeedbackBatch } from './operations.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
+import { DynamicWorkerExecutor } from '@cloudflare/codemode';
 export { DispatcherShard } from './dispatcher-do.js';
 
 // Nudges every shard for one environment/region. Objects are created near the database on first use.
@@ -68,7 +69,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter(), codeExecutor: new DynamicWorkerExecutor({ loader: env.LOADER, timeout: 30_000 }) });
   } finally { await client.end(); }
 }
 export default {

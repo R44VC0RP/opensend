@@ -667,7 +667,7 @@ describe('Hosted MCP OAuth and tools', () => {
   }
   async function rpc(token: string, method: string, params: Json = {}): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
-    const reply = await http('POST', '/mcp', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
+    const reply = await http('POST', '/mcp?codemode=false', token, { jsonrpc: '2.0', id, method, params }, rpcHeaders);
     const body = ok(reply);
     assert.equal(body.jsonrpc, '2.0', diagnostic(reply));
     assert.equal(body.id, id, diagnostic(reply));
