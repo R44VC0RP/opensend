@@ -3,15 +3,19 @@ import { useNavigate, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight, Download, Search } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
 import type { Email } from '../../data/types'
-import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, SkeletonText, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { EmailPreview, htmlToText } from '../../components/EmailPreview'
-import { date, label, number, time } from '../../lib/format'
+import { date, label, time } from '../../lib/format'
 import { downloadCsv } from '../../lib/download'
 import { EmailDetailSkeleton, logColumns } from './skeletons'
 import { useAdaptivePageSize } from '../../lib/pagination'
 
 function RecipientEmail({ email }: { email: string }) {
   return <span className="log-recipient"><span aria-hidden="true">{email.slice(0, 2)}</span><span className="log-recipient__private" aria-hidden="true">{email.slice(2)}</span><span className="sr-only">{email}</span></span>
+}
+
+function logTimestamp(value: string) {
+  return date(value, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'UTC' })
 }
 
 export function LogsPage() {
@@ -28,25 +32,25 @@ function RegionalLogs({ regionId }: { regionId: string }) {
   const navigate = useNavigate()
   const params = { regionId, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal))
-  return <><PageHeader title="Logs" actions={<span className="muted">{regionId}</span>} />
+  return <div className="logs-page"><PageHeader title="Logs" actions={<span className="muted">{regionId}</span>} />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search emails" placeholder="Search recipient, subject or ID" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
       <Select aria-label="Email stream filter" value={stream} onValueChange={value => { setStream(value); setPage(1) }} options={[{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div>
       <Button disabled={!query.data?.items.length} onClick={() => downloadCsv('opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', 'Region'], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, email.regionId])])}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <div className="table-summary"><span>{query.data ? `${query.data.total === undefined ? `${query.data.items.length} on this page` : `${number(query.data.total)} emails`}` : <SkeletonText width={100} />}</span><span>Times in UTC</span></div>
-      <DataTable<Email> tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
-        { ...logColumns[0], render: row => <StatusBadge status={row.status} /> },
-        { ...logColumns[1], render: row => <RecipientEmail email={row.to} /> },
-        { ...logColumns[2], render: row => row.subject },
-        { ...logColumns[3], render: row => <span className="muted">{label(row.stream)}</span> },
-        { ...logColumns[4], label: 'Created', render: row => <span className="muted nowrap">{time(row.sentAt)}</span> },
-        { ...logColumns[5], render: () => <ChevronRight size={16} aria-hidden /> },
+      <DataTable<Email> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
+        { ...logColumns[0], render: row => <span className="muted" title={row.sentAt}>{logTimestamp(row.sentAt)}</span> },
+        { ...logColumns[1], render: row => <StatusBadge status={row.status} /> },
+        { ...logColumns[2], render: row => <RecipientEmail email={row.to} /> },
+        { ...logColumns[3], render: row => <span title={row.from}>{row.from}</span> },
+        { ...logColumns[4], render: row => <span title={row.subject}>{row.subject}</span> },
+        { ...logColumns[5], render: row => <span className="muted">{label(row.stream)}</span> },
+        { ...logColumns[6], render: () => <ChevronRight size={14} aria-hidden /> },
       ]} empty={<EmptyState title="No emails found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1) }}>Clear filters</Button>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
-  </>
+  </div>
 }
 export function EmailDetailPage() {
   const { id = '' } = useParams()

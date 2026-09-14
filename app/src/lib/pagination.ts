@@ -13,7 +13,8 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20) {
     const currentSurface = surface
     function measure() {
       const style = getComputedStyle(currentSurface)
-      const rowHeight = parseFloat(style.getPropertyValue('--row-height')) || 53
+      const tableStyle = getComputedStyle(currentTable)
+      const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 53
       const footerHeight = parseFloat(style.getPropertyValue('--row-height-lg')) || 64
       const contentBottom = currentSurface.getBoundingClientRect().bottom - parseFloat(style.paddingBottom)
       const availableBody = contentBottom - currentTable.getBoundingClientRect().top - 36 - footerHeight

@@ -89,6 +89,15 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }
 .table-summary { display: flex; justify-content: space-between; padding-bottom: var(--space-16); color: var(--color-muted); font-size: var(--text-xs); }
 .table-summary + .ui-table-scroll .ui-table :is(th, td):first-child { padding-left: var(--space-12); }
+.logs-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.logs-page > .ui-page-header { margin-bottom: var(--space-12); }
+.logs-page > .data-toolbar { padding-bottom: var(--space-12); }
+.logs-table { --table-row-height: 34px; }
+.logs-table .ui-table { min-width: 980px; font-size: var(--text-xs); }
+.logs-table .ui-table th { height: 30px; padding-block: var(--space-4); }
+.logs-table .ui-table td { padding-block: var(--space-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logs-table .ui-table tbody tr:nth-child(odd):not(.ui-table-spacer) { background: color-mix(in srgb, var(--color-canvas) 55%, var(--color-surface)); }
+.logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
 .log-recipient { display: inline-flex; white-space: nowrap; }
 .log-recipient__private { filter: blur(4px); transition: filter var(--motion-duration); }
 .log-recipient:hover .log-recipient__private, .ui-table__clickable:focus-visible .log-recipient__private { filter: blur(0); }
