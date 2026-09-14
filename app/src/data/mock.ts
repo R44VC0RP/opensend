@@ -534,7 +534,7 @@ export function createMockApi(): OpenSendApi {
       }),
     },
     emails: {
-      list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); const rows = s.emails.filter(e => (!input.regionId || e.regionId === input.regionId) && (!input.status || e.status === input.status) && (!input.stream || e.stream === input.stream)).sort((a, b) => b.sentAt.localeCompare(a.sentAt)); return page(rows, input, e => `${e.id} ${e.to} ${e.from} ${e.subject}`) }),
+      list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); const rows = s.emails.filter(e => (!input.regionId || e.regionId === input.regionId) && (!input.status || e.status === input.status) && (!input.stream || e.stream === input.stream)).sort((a, b) => b.sentAt.localeCompare(a.sentAt)); return page(rows, input, e => `${e.id} ${e.to} ${e.from} ${e.fromName ?? ''} ${e.subject} ${e.status} ${e.stream} ${e.regionId} ${e.sentAt} ${e.simulated ? 'simulated test' : 'live'}`) }),
       get: (emailId, signal) => run(signal, false, s => find(s.emails, emailId, 'Email')),
     },
     campaigns: {

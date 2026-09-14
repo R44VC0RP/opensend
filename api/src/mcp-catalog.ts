@@ -190,7 +190,7 @@ function combineReads(operations: Map<string, McpOperation>, spec: ObjectValue):
     const lookupNotes = spec.paths[detail.path][detail.method].description;
     const notes = `${typeof listingNotes === 'string' ? ` Listing: ${listingNotes.slice(0, 4000)}` : ''}${typeof lookupNotes === 'string' && lookupNotes !== listingNotes ? ` Lookup: ${lookupNotes.slice(0, 4000)}` : ''}`;
     const tool: Tool = { ...list.tool, name, inputSchema: schema,
-      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; use search for recipient, subject or ID text.' : ''} Permissions and environment are enforced by OpenSend.${notes}`,
+      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; search covers sender, recipients, subject, status, kind, region, IDs, error code, simulation state and timestamps.' : ''} Permissions and environment are enforced by OpenSend.${notes}`,
     };
     const combined = { ...list, tool, singlePath: detail.path, validate: validator(schema) };
     freeze(tool); Object.freeze(combined);
