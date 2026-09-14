@@ -9,7 +9,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const awaitingQueue = Math.max(0, total - materialized - canceledBeforeQueue)
   const queued = byStatus.queued ?? 0
   const processing = byStatus.attempting ?? 0
-  const processed = Math.max(0, materialized - queued - processing + canceledBeforeQueue)
+  const processed = Math.min(total, Math.max(0, materialized - queued - processing + canceledBeforeQueue))
   const outcomes = [
     ['Delivered', byStatus.delivered], ['Bounced', byStatus.bounced],
     ['Complaints', byStatus.complained], ['Rejected', byStatus.rejected],
