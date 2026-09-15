@@ -8,6 +8,7 @@ export interface McpPlan { steps: readonly { operation: McpOperation; args: Obje
 export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
+export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
 export const EMAIL_SEND_CONFIRMATION = 'Before sending or scheduling any email, including campaign tests, present the recipients or audience, message content or reviewed campaign revision, and send time, then obtain explicit user confirmation. OAuth access, a request to prepare a draft, or setting confirm=true is not confirmation. Ask again if the recipients, content, or timing changes.';
 const METHODS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -338,7 +339,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
       combine: ([preview, review, visual]) => ({ ...review, response: { matched: review.response.matched, eligible: review.response.eligible, suppressed: review.response.suppressed, unsubscribed: review.response.unsubscribed, preview: preview.response, ...(visual ? { visualPreview: { mimeType: visual.response.mimeType } } : {}) }, ...(visual ? { image: { data: visual.response.data, mimeType: visual.response.mimeType } } : {}) }),
     };
   }, campaignReviewOutput));
-  add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. Send and schedule snapshot and validate the current revision automatically; supply revision only. ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: withoutBodyProperty(need('sendCampaign', raw), 'reviewId'), schedule: withoutBodyProperty(need('scheduleCampaign', raw), 'reviewId'), cancel: need('cancelCampaign', raw) }, 'mode'));
+  add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. Send and schedule snapshot and validate the current revision automatically; supply revision only. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: withoutBodyProperty(need('sendCampaign', raw), 'reviewId'), schedule: withoutBodyProperty(need('scheduleCampaign', raw), 'reviewId'), cancel: need('cancelCampaign', raw) }, 'mode'));
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
 
@@ -386,7 +387,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
     return { steps: [{ operation: emailDetail, args: { id: args.id } }, { operation: emailContent, args: { id: args.id } }, { operation: emailEvents, args: { id: args.id, limit: 100 } }], parallel: true,
       combine: ([detail, content, events]) => ({ ...detail, response: { data: [{ ...detail.response, content: content.response, events: events.response.data, eventsNextCursor: events.response.nextCursor }], nextCursor: null } }) };
   }, pageOutput()));
-  add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
+  add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
 
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
   direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx opensend-js upload so file bytes bypass model context.', 'uploadAttachment');
