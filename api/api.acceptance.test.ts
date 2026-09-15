@@ -2795,6 +2795,60 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('attachment and template uploads accept JSON scalars and reject malformed file content', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      runtime.storage = {
+        async put(key, body, contentType) { objects.set(key, { body, contentType }); },
+        async get(key) { return objects.get(key) ?? null; },
+        async delete(key) { objects.delete(key); },
+      };
+      for (const path of ['/v1/attachments', '/v1/template-assets']) {
+        for (const text of ['false', '0', 'null', '""', '{}', '[]']) {
+          const uploaded = ok(await local('POST', path, { filename: 'scalar.json', contentType: 'application/json', content: Buffer.from(text).toString('base64') }), 201);
+          assert.equal(uploaded.size, Buffer.byteLength(text));
+        }
+        for (const [filename, contentType, bytes] of [
+          ['broken.json', 'application/json', Buffer.from('{')],
+          ['invalid.txt', 'text/plain', Buffer.from([0xff])],
+          ['null.csv', 'text/csv', Buffer.from('a\0b')],
+          ['fake.png', 'image/png', Buffer.from('not an image')],
+          ['broken.ics', 'text/calendar', Buffer.from('BEGIN:VCALENDAR\n')],
+        ] as const) {
+          error(await local('POST', path, { filename, contentType, content: bytes.toString('base64') }), 422, path === '/v1/attachments' ? 'ATTACHMENT_CONTENT_INVALID' : 'TEMPLATE_ASSET_INVALID');
+        }
+        error(await local('POST', path, { filename: 'mismatch.json', contentType: 'image/png', content: Buffer.from('{}').toString('base64') }), 422, path === '/v1/attachments' ? 'ATTACHMENT_CONTENT_TYPE_MISMATCH' : 'TEMPLATE_ASSET_TYPE_MISMATCH');
+        error(await local('POST', path, { filename: 'unsafe.exe', content: Buffer.from('unsafe').toString('base64') }), 422, path === '/v1/attachments' ? 'UNSUPPORTED_ATTACHMENT_TYPE' : 'UNSUPPORTED_TEMPLATE_ASSET');
+      }
+    });
+  });
+
+  test('job scheduling serves both environments and remaining job classes while retiring old dispatch jobs', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { processJobs, enqueue } = await import('./src/jobs.js');
+      const { jobHandlers } = await import('./src/sending.js');
+      const seen = new Set<string>();
+      const types = ['campaign.prepare', 'operation.webhook', 'operation.simulatedFeedback'];
+      const handlers: Record<string, import('./src/core.js').JobHandler> = { 'email.dispatch': jobHandlers['email.dispatch']! };
+      for (const type of types) {
+        handlers[type] = async (_runtime, _payload, job) => { seen.add(`${job.environment}:${type}`); };
+        for (const environment of ['live', 'test'] as const) {
+          for (let i = 0; i < 12; i++) await enqueue(runtime.db, { type, workspaceId: runtime.config.workspaceId, environment, payload: {} });
+        }
+      }
+      t.mock.method(Math, 'random', () => 0);
+      assert.equal(await processJobs(runtime, handlers, 16, 2), 16);
+      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[0]))].sort(), ['live', 'test']);
+      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[1]))].sort(), [...types].sort());
+      assert.equal(await processJobs(runtime, handlers, 100, 2), 56);
+      assert.deepEqual([...seen].sort(), types.flatMap(type => [`live:${type}`, `test:${type}`]).sort());
+      await db.query('DELETE FROM jobs WHERE workspace_id = $1', [runtime.config.workspaceId]);
+      const retired = await enqueue(runtime.db, { type: 'email.dispatch', workspaceId: runtime.config.workspaceId, environment: 'test', payload: {} });
+      assert.equal(await processJobs(runtime, handlers, 1, 1), 1);
+      assert.deepEqual((await db.query('SELECT status FROM jobs WHERE id = $1', [retired])).rows, [{ status: 'completed' }]);
+    });
+  });
+
   test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {
     const { initialGate, reserve, brake, shardRate } = await import('./src/dispatcher.js');
     const gate = initialGate();

@@ -389,7 +389,6 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 41) invalid(`Curated catalog must contain exactly 41 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

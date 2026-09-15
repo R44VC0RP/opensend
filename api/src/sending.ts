@@ -1,3 +1,4 @@
+import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -87,11 +88,6 @@ const attachmentTypes: Record<string, string> = {
   pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 };
-const starts = (bytes: Uint8Array, prefix: number[]) => prefix.every((value, index) => bytes[index] === value);
-function textAttachment(bytes: Uint8Array) {
-  try { const value = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (value.includes('\0')) throw new Error(); return value; }
-  catch { throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', 'Text attachments must contain valid UTF-8 without null bytes.'); }
-}
 function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
   const extension = metadata.filename.split('.').pop()?.toLowerCase();
   const expected = extension ? attachmentTypes[extension] : undefined;
@@ -103,21 +99,7 @@ function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes:
   const image = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension);
   if (metadata.disposition === 'inline' && (!image || !metadata.contentId)) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Only PNG, JPEG, GIF, and WebP images with a content ID may be inline.');
   if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'ATTACHMENT_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
-  let valid = true;
-  if (extension === 'png') valid = starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  else if (extension === 'jpg' || extension === 'jpeg') valid = starts(bytes, [0xff, 0xd8, 0xff]);
-  else if (extension === 'gif') valid = new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF87a' || new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF89a';
-  else if (extension === 'webp') valid = new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP';
-  else if (extension === 'pdf') valid = new TextDecoder().decode(bytes.slice(0, 5)) === '%PDF-';
-  else if (extension === 'txt' || extension === 'csv') textAttachment(bytes);
-  else if (extension === 'json') { try { JSON.parse(textAttachment(bytes)); } catch { valid = false; } }
-  else if (extension === 'ics') { const text = textAttachment(bytes).replaceAll('\r\n', '\n').trim(); valid = text.startsWith('BEGIN:VCALENDAR\n') && text.endsWith('END:VCALENDAR'); }
-  else {
-    const content = new TextDecoder('latin1').decode(bytes);
-    const marker = extension === 'docx' ? 'word/' : extension === 'xlsx' ? 'xl/' : 'ppt/';
-    valid = starts(bytes, [0x50, 0x4b]) && content.includes('[Content_Types].xml') && content.includes(marker);
-  }
-  if (!valid) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
+  if (!attachmentContentMatches(extension, bytes)) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
   return { ...metadata, contentType: baseType === 'application/octet-stream' ? expected : metadata.contentType };
 }
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');

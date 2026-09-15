@@ -76,8 +76,8 @@ export interface OpenSendApi {
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   readonly environment?: 'live' | 'test'
   review?: (id: string, revision: number, options?: { signal?: AbortSignal; onProgress?: (progress: { processed: number; eligible: number }) => void }) => Promise<CampaignReview>
-  attachments?: AttachmentApi
-  templateAssets?: AttachmentApi
+  attachments: AttachmentApi
+  templateAssets: AttachmentApi
   imports?: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string): Promise<ImportPreview> }
   consent?: (id: string, input: ConsentInput) => Promise<Contact>
   webhookDeliveries?: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>

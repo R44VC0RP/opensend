@@ -1,3 +1,4 @@
+import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -28,7 +29,6 @@ const TemplatePreviewImage = z.object({ data: z.string().describe('Canonical bas
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) });
 const Query = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional(), archived: z.enum(['true', 'false']).default('false'), publishedOnly: z.enum(['true', 'false']).default('false') });
 
-const starts = (bytes: Uint8Array, prefix: number[]) => prefix.every((value, index) => bytes[index] === value);
 function validateAsset(metadata: z.infer<typeof AssetMetadata>, bytes: Uint8Array) {
   const extension = metadata.filename.split('.').pop()?.toLowerCase();
   const types: Record<string, string> = { pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar' };
@@ -36,15 +36,7 @@ function validateAsset(metadata: z.infer<typeof AssetMetadata>, bytes: Uint8Arra
   const declared = metadata.contentType.split(';')[0]!.toLowerCase(); if (declared !== 'application/octet-stream' && declared !== expected) throw new ApiError(422, 'TEMPLATE_ASSET_TYPE_MISMATCH', 'The template asset content type does not match its filename.');
   if (metadata.disposition === 'inline' && (!['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension!) || !metadata.contentId)) throw new ApiError(422, 'INLINE_TEMPLATE_ASSET_INVALID', 'Only raster images with a content ID may be inline.');
   if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'TEMPLATE_ASSET_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
-  const ascii = (start: number, end: number) => new TextDecoder('latin1').decode(bytes.slice(start, end));
-  let valid = true;
-  if (extension === 'png') valid = starts(bytes, [0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
-  else if (extension === 'jpg' || extension === 'jpeg') valid = starts(bytes, [0xff, 0xd8, 0xff]);
-  else if (extension === 'gif') valid = ['GIF87a', 'GIF89a'].includes(ascii(0, 6));
-  else if (extension === 'webp') valid = ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP';
-  else if (extension === 'pdf') valid = ascii(0, 5) === '%PDF-';
-  else { try { const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); valid = !text.includes('\0') && (extension !== 'json' || Boolean(JSON.parse(text))) && (extension !== 'ics' || text.replaceAll('\r\n', '\n').trim().startsWith('BEGIN:VCALENDAR\n') && text.replaceAll('\r\n', '\n').trim().endsWith('END:VCALENDAR')); } catch { valid = false; } }
-  if (!valid) throw new ApiError(422, 'TEMPLATE_ASSET_INVALID', 'The template asset bytes do not match its filename.');
+  if (!attachmentContentMatches(extension!, bytes)) throw new ApiError(422, 'TEMPLATE_ASSET_INVALID', 'The template asset bytes do not match its filename.');
   return { ...metadata, contentType: declared === 'application/octet-stream' ? expected : metadata.contentType };
 }
 function assertContent(html?: string, complete = false) { if (!html) return; try { validateBlockHtml(html, { complete }); } catch (error) { if (error instanceof BlockContentError) throw new ApiError(422, 'TEMPLATE_CONTENT_INVALID', error.message, 'html'); throw error; } }
