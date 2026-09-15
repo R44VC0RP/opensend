@@ -2558,7 +2558,7 @@
           "region"
         ],
         "additionalProperties": false,
-        "description": "Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Legacy synchronous reviews retain their 16 MiB test/128 MiB live bounds; durable background campaign preparation is bounded separately."
+        "description": "Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -3555,29 +3555,6 @@
         ],
         "additionalProperties": false
       },
-      "CampaignAudienceCounts": {
-        "type": "object",
-        "properties": {
-          "matched": {
-            "type": "integer"
-          },
-          "eligible": {
-            "type": "integer"
-          },
-          "suppressed": {
-            "type": "integer"
-          },
-          "unsubscribed": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "matched",
-          "eligible",
-          "suppressed",
-          "unsubscribed"
-        ]
-      },
       "CampaignTestInput": {
         "type": "object",
         "properties": {
@@ -3610,53 +3587,6 @@
         },
         "required": [
           "to"
-        ],
-        "additionalProperties": false
-      },
-      "CampaignReview": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CampaignAudienceCounts"
-          },
-          {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "campaignId": {
-                "type": "string"
-              },
-              "revision": {
-                "type": "integer"
-              },
-              "contentHash": {
-                "type": "string"
-              },
-              "createdAt": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "campaignId",
-              "revision",
-              "contentHash",
-              "createdAt"
-            ]
-          }
-        ]
-      },
-      "CampaignRevisionInput": {
-        "type": "object",
-        "properties": {
-          "revision": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          }
-        },
-        "required": [
-          "revision"
         ],
         "additionalProperties": false
       },
@@ -3748,6 +3678,19 @@
           "error"
         ],
         "description": "A durable audience snapshot and bounded preparation. Only ready reviews may be sent. Counts are fixed at creation; live consent is checked again at dispatch."
+      },
+      "CampaignRevisionInput": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "revision"
+        ],
+        "additionalProperties": false
       },
       "CampaignQueued": {
         "type": "object",
@@ -17930,161 +17873,6 @@
         ]
       }
     },
-    "/v1/campaigns/{id}/audience-preview": {
-      "post": {
-        "operationId": "previewCampaignAudience",
-        "tags": [
-          "Campaigns"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "dashboardSession": []
-          },
-          {
-            "secureDashboardSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CampaignAudienceCounts"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        },
-        "x-codeSamples": [
-          {
-            "lang": "TypeScript",
-            "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { previewCampaignAudience } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await previewCampaignAudience({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
-          },
-          {
-            "lang": "Shell",
-            "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/audience-preview' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
-          }
-        ]
-      }
-    },
     "/v1/campaigns/{id}/test": {
       "post": {
         "operationId": "testCampaign",
@@ -18250,175 +18038,10 @@
         ]
       }
     },
-    "/v1/campaigns/{id}/review": {
-      "post": {
-        "operationId": "reviewCampaign",
-        "tags": [
-          "Campaigns"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "dashboardSession": []
-          },
-          {
-            "secureDashboardSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CampaignRevisionInput"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CampaignReview"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        },
-        "x-codeSamples": [
-          {
-            "lang": "TypeScript",
-            "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { reviewCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await reviewCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
-          },
-          {
-            "lang": "Shell",
-            "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/review' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1\n}'"
-          }
-        ]
-      }
-    },
     "/v1/campaigns/{id}/reviews": {
       "post": {
         "operationId": "startCampaignReview",
-        "description": "Opt in to durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation. The existing /review endpoint remains synchronous.",
+        "description": "Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.",
         "tags": [
           "Campaigns"
         ],

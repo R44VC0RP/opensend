@@ -265,7 +265,7 @@ describe('Public contract and authentication', () => {
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
-      '/v1/campaigns/{id}/state': ['get'], '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/review': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
+      '/v1/campaigns/{id}/state': ['get'], '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/reviews': ['post'], '/v1/campaigns/{id}/reviews/{reviewId}': ['get'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
     };
     for (const [path, methods] of Object.entries(contract)) for (const method of methods) {
       const operation = document.paths[path]?.[method];
@@ -273,6 +273,8 @@ describe('Public contract and authentication', () => {
       assert.ok(Object.keys(operation.responses ?? {}).some(status => /^2\d\d$/.test(status)), `OpenAPI ${method} ${path} needs a successful response contract.`);
       assert.ok(operation.responses?.['401'] && operation.responses?.['422'], `OpenAPI ${method} ${path} must document authentication/validation errors.`);
     }
+    assert.equal(document.paths['/v1/campaigns/{id}/review'], undefined);
+    assert.equal(document.paths['/v1/campaigns/{id}/audience-preview'], undefined);
     const resolve = (schema: Json): Json => schema?.$ref ? schema.$ref.slice(2).split('/').reduce((value: Json, part: string) => value?.[part], document) : schema;
     const sendSchema = resolve(document.paths['/v1/emails/send'].post.requestBody.content['application/json'].schema);
     assert.ok(sendSchema.properties?.from && sendSchema.properties?.to && sendSchema.properties?.region, 'Generated send schema needs usable typed fields, not an empty object.');
@@ -717,12 +719,12 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
     assert.equal(catalog.tools.length, 41);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 14);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 15);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
-      'importContacts', 'importTemplateImage', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'reviewCampaign', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'importContacts', 'importTemplateImage', 'previewCampaign', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -732,7 +734,7 @@ describe('Hosted MCP OAuth and tools', () => {
     }
     assert.ok(!tools.has('prepareCampaign'));
     assert.doesNotMatch(JSON.stringify(tools.get('deliverCampaign')!.inputSchema), /reviewId/);
-    assert.doesNotMatch(JSON.stringify(tools.get('reviewCampaign')!.outputSchema), /contentHash|campaignId|reviewId/);
+    assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['id']);
     for (const removed of ['getDomains', 'createDomain', 'configureDomainMailFrom', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
     const context = await callTool(token, 'getContext');
     assert.equal(context.environment, 'test');
@@ -827,8 +829,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const savedDraft = await callTool(token, 'saveCampaign', { action: 'update', id: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
     assert.equal(savedDraft.draft.region, unfinished.draft.region);
     assert.equal(savedDraft.revision, 2);
-    error(await http('POST', `/v1/campaigns/${unfinished.id}/review`, MANAGER, { revision: 2 }), 422, 'CAMPAIGN_INCOMPLETE');
-    error(await http('POST', `/v1/campaigns/${unfinished.id}/audience-preview`, MANAGER), 422, 'CAMPAIGN_INCOMPLETE');
+    error(await http('POST', `/v1/campaigns/${unfinished.id}/reviews`, MANAGER, { revision: 2 }), 422, 'CAMPAIGN_INCOMPLETE');
     error(await http('POST', `/v1/campaigns/${unfinished.id}/test`, MANAGER, { to: address() }), 422, 'CAMPAIGN_RECIPIENT_INVALID');
     error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2, reviewId: 'missing-review' }), 409, 'STALE_CAMPAIGN_REVIEW');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: '   ' }), 422, 'VALIDATION_FAILED');
@@ -849,6 +850,9 @@ describe('Hosted MCP OAuth and tools', () => {
     const detail = (await callTool(token, 'findCampaigns', { id: campaign.id })).data[0];
     assert.equal(detail.draft.html, campaign.draft.html);
     assert.equal(detail.archivedAt, null);
+    const campaignPreview = await callTool(token, 'previewCampaign', { id: campaign.id });
+    assert.ok(campaignPreview.html.includes(campaign.draft.html.replace(/^<p>|<\/p>$/g, '')));
+    assert.equal(typeof campaignPreview.text, 'string');
     cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
     const archived = await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: true }, confirm: true });
     assert.equal(typeof archived.archivedAt, 'string');
@@ -886,7 +890,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 14);
+    assert.equal(catalog.tools.length, 15);
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
@@ -1559,15 +1563,15 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal((await allPages(`/v1/emails?campaignId=${later.id}`, key.secret)).length, 0);
   });
 
-  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted, even after preview', async t => {
+  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted, even after message preview', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('automatic-review-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Automatic reader' } });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    const preview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
-    assert.equal(preview.eligible, 1);
+    const preview = ok(await http('GET', `/v1/campaigns/${campaign.id}/preview`, key.secret));
+    assert.ok(preview.html.includes('Hello'));
     const accepted = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
     assert.equal(accepted.status, 'sending');
     assert.equal(accepted.queued, 1);
@@ -1588,7 +1592,7 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(retried.status, 'completed');
     assert.equal(retried.counts.byStatus.delivered, 1);
     const scheduled = await campaignFixture(t, key.secret, { listId: list.id });
-    ok(await http('POST', `/v1/campaigns/${scheduled.id}/review`, key.secret, { revision: scheduled.revision }));
+    ok(await http('GET', `/v1/campaigns/${scheduled.id}/preview`, key.secret));
     const scheduledAccepted = ok(await http('POST', `/v1/campaigns/${scheduled.id}/schedule`, key.secret, { revision: scheduled.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
     assert.equal(scheduledAccepted.status, 'scheduled');
     const canceled = ok(await http('POST', `/v1/campaigns/${scheduled.id}/cancel`, key.secret));
@@ -1618,25 +1622,25 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal((await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
   });
 
-  test('draft review, stale revisions, attachment removal, immutable scheduling and cancellation are observable', async t => {
+  test('durable review, stale revisions, attachment removal, scheduling and cancellation are observable', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('campaign-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Name {{literal}}', properties: { firstName: '<Ada {{ & Bob>' } });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
-    const attachment = await resource(t, key.secret, '/v1/attachments', { filename: 'draft.txt', content: Buffer.from('draft attachment').toString('base64') });
+    const attachment = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'draft.txt', content: Buffer.from('draft attachment').toString('base64') }), 201);
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { attachments: [attachment.id], html: '<p>Hello {{name}} / {{firstName}}</p>' });
     assert.equal(campaign.status, 'draft');
     assert.equal(campaign.revision, 1);
     error(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret), 409, 'ATTACHMENT_IN_USE');
-    assert.deepEqual(ok(await http('POST', `/v1/campaigns/${campaign.id}/audience-preview`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { firstName: 'Ada\r\nBcc: victim@example.com' } }));
-    const invalidRecipient = error(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }), 422, 'CAMPAIGN_RECIPIENT_INVALID');
-    assert.equal(invalidRecipient.field, 'contactId');
-    assert.ok(invalidRecipient.message.includes(contact.id), 'Invalid rendered subject must identify the affected contact rather than return an internal error.');
+    const invalidStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const invalidRecipient = await poll(`/v1/campaigns/${campaign.id}/reviews/${invalidStart.id}`, key.secret, row => row.status === 'failed');
+    assert.equal(invalidRecipient.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).status, 'draft');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: contact.properties }));
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
     assert.equal(review.eligible, 1);
     assert.equal(review.revision, 1);
     assert.ok(review.contentHash);
@@ -1647,8 +1651,9 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(updated.reviewId, null);
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: 1, draft }), 409, 'STALE_CAMPAIGN_REVISION');
     error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, reviewId: review.id, scheduledAt: new Date(Date.now() + 60_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
-    assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
-    const currentReview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: 2 }));
+    error(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret), 409, 'ATTACHMENT_IN_USE');
+    const currentStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: 2 }), 202);
+    const currentReview = await poll(`/v1/campaigns/${campaign.id}/reviews/${currentStart.id}`, key.secret, row => row.status === 'ready');
     assert.notEqual(currentReview.contentHash, review.contentHash);
     error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, reviewId: currentReview.id, scheduledAt: new Date(Date.now() - 1000).toISOString() }), 422, 'INVALID_SCHEDULE');
     const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
@@ -1656,20 +1661,15 @@ describe('Private attachment assets and campaign revisions', () => {
     assert.equal(scheduled.status, 'scheduled');
     assert.equal(scheduled.queued, 1);
     assert.equal(scheduled.simulated, true);
-    const queued = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
-    assert.equal(queued.length, 1);
-    assert.equal(queued[0].status, 'queued');
-    const content = ok(await http('GET', `/v1/emails/${queued[0].id}/content`, key.secret));
-    assert.equal(content.subject, 'Revised <Ada {{ & Bob>', 'Literal braces inside a contact value must remain data, not template syntax.');
-    assert.ok(content.html.includes('&lt;Ada {{ &amp; Bob&gt;'), 'HTML personalization must preserve literal braces while escaping untrusted values.');
-    assert.ok(content.html.includes('Name {{literal}}'), 'A contact name containing literal template-like text must not be interpreted recursively.');
-    assert.deepEqual(content.attachments, []);
+    const scheduledCampaign = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+    assert.equal(scheduledCampaign.expansion.total, 1);
+    assert.equal(scheduledCampaign.expansion.expanded, 0, 'Future schedules reserve recipients without materializing email rows.');
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: 2, draft }), 409, 'CAMPAIGN_LOCKED');
     const canceled = ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret));
     assert.equal(canceled.status, 'canceled');
     assert.equal(canceled.canceled, 1);
     assert.equal(canceled.inFlight, 0);
-    assert.equal(ok(await http('GET', `/v1/emails/${queued[0].id}`, key.secret)).status, 'canceled');
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).status, 'canceled');
   });
 });
@@ -1709,14 +1709,16 @@ describe('Dashboard API capabilities', () => {
     await db.query("INSERT INTO sending_campaigns (id, workspace_id, environment, draft) VALUES ($1,$2,'test',$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
     error(await http('GET', `/v1/campaigns/${foreignId}/state`, reader.secret), 404, 'NOT_FOUND');
 
-    const reviewed = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
+    const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const reviewed = await poll(`${path}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
     const reviewState = ok(await http('GET', `${path}/state`, reader.secret));
     assert.deepEqual(reviewState, project(ok(await http('GET', path, reader.secret))));
     assert.equal(reviewState.revision, campaign.revision);
     assert.equal(reviewState.status, 'reviewed');
     assert.equal(reviewState.reviewId, reviewed.id);
     assert.notDeepEqual(reviewState, initial.body, 'Review changes must be visible even without a draft revision change.');
-    const reviewedAgain = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
+    const repeatedStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const reviewedAgain = await poll(`${path}/reviews/${repeatedStart.id}`, key.secret, row => row.status === 'ready');
     const repeatedReviewState = ok(await http('GET', `${path}/state`, reader.secret));
     assert.equal(repeatedReviewState.revision, reviewState.revision);
     assert.equal(repeatedReviewState.status, reviewState.status);
@@ -1797,8 +1799,10 @@ describe('Dashboard API capabilities', () => {
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Block Reader' });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
-    const review = ok(await http('POST', `${path}/review`, key.secret, { revision: campaign.revision }));
-    ok(await http('POST', `${path}/schedule`, key.secret, { revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`${path}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
+    ok(await http('POST', `${path}/send`, key.secret, { revision: campaign.revision, reviewId: review.id }), 202);
+    await poll(path, key.secret, row => row.status === 'completed');
     const [message] = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
     const content = ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret));
     assert.ok(content.html.includes('Hello Block Reader') && content.html.includes(`href="https://example.com/${contact.email}"`), 'Rendered email is personalized.');
@@ -1819,7 +1823,8 @@ describe('Dashboard API capabilities', () => {
       cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, key.secret, { archived: false })); });
       assert.equal(campaign.archivedAt, null);
       const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: 'Retain this revision' } }));
-      const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }));
+      const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: revised.revision }), 202);
+      const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
       const current = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
       assert.equal(current.reviewId, review.id);
       reviewed.push(current);
@@ -1835,10 +1840,9 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual({ ...archived, archivedAt: before.archivedAt, updatedAt: before.updatedAt }, before, 'Archive must preserve the complete draft, revision, review, status and counts.');
       assert.deepEqual(ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true })), archived, 'Repeated archive must keep the original timestamp.');
       assert.deepEqual(ok(await http('GET', path, key.secret)), archived);
-      assert.deepEqual(ok(await http('POST', `${path}/audience-preview`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
       error(await http('PATCH', path, key.secret, { revision: before.revision, draft: before.draft }), 409, 'CAMPAIGN_ARCHIVED');
       error(await http('DELETE', path, key.secret), 409, 'CAMPAIGN_ARCHIVED');
-      error(await http('POST', `${path}/review`, key.secret, { revision: before.revision }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/reviews`, key.secret, { revision: before.revision }), 409, 'CAMPAIGN_ARCHIVED');
       // These calls must reject before queueing, including tests that have no campaignId in their email record.
       error(await http('POST', `${path}/send`, key.secret, { revision: before.revision, reviewId: before.reviewId }), 409, 'CAMPAIGN_ARCHIVED');
       error(await http('POST', `${path}/schedule`, key.secret, { revision: before.revision, reviewId: before.reviewId, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_ARCHIVED');
@@ -1903,7 +1907,7 @@ describe('Dashboard API capabilities', () => {
     const archived = ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: true }));
     assert.equal(typeof archived.archivedAt, 'string', 'Send permission alone is sufficient to archive.');
     assert.deepEqual(ok(await http('GET', path, reader.secret)), archived);
-    assert.deepEqual(ok(await http('POST', `${path}/audience-preview`, reader.secret)), { matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0 });
+    assert.equal(typeof ok(await http('GET', `${path}/preview`, reader.secret)).html, 'string');
     error(await http('GET', path, live.secret), 404, 'NOT_FOUND');
     assert.deepEqual(page(await http('GET', `/v1/campaigns?archived=true&search=${campaign.id}`, live.secret)), []);
     assert.equal(ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: false })).archivedAt, null);
@@ -1962,16 +1966,19 @@ describe('Dashboard API capabilities', () => {
     assert.equal(persisted.draft.previewText, previewText);
     assert.equal(persisted.draft.html, html, 'Preheader injection belongs to the snapshot, not editable HTML.');
     assert.equal(persisted.counts.total, 0);
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
-    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<section><p>Not a block</p></section>' } }), 422, 'CAMPAIGN_CONTENT_INVALID');
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<table><tr><td>Not a block</td></tr></table>' } }), 422, 'CAMPAIGN_CONTENT_INVALID');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, fromName: 'Name\r\nBcc: victim@example.com' } }), 422);
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).reviewId, review.id, 'Invalid metadata must not invalidate or mutate the existing revision.');
     const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: `${previewText}!` } }));
     assert.equal(revised.reviewId, null);
     error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
-    const finalReview = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }));
+    const finalStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: revised.revision }), 202);
+    const finalReview = await poll(`/v1/campaigns/${campaign.id}/reviews/${finalStart.id}`, key.secret, row => row.status === 'ready');
     assert.notEqual(finalReview.contentHash, review.contentHash);
-    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: finalReview.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: revised.revision, reviewId: finalReview.id }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed');
     const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
     assert.equal(messages.length, 1);
     assert.equal(messages[0].fromName, fromName);
@@ -1984,15 +1991,12 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: revised.revision, draft: { ...revised.draft, previewText: 'Too late' } }), 409, 'CAMPAIGN_LOCKED');
     assert.equal(ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret)).html, content.html);
-    for (const expected of ['queued', 'canceled']) {
-      if (expected === 'canceled') ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret));
-      const current = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
-      const counts = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).counts;
-      assert.equal(counts.total, current.length);
-      assert.equal(Object.values(counts.byStatus).reduce<number>((sum, value) => sum + Number(value), 0), counts.total);
-      for (const [status, count] of Object.entries(counts.byStatus)) assert.equal(count, current.filter(row => row.status === status).length);
-      assert.equal(counts.byStatus[expected], 1);
-    }
+    const current = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    const counts = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).counts;
+    assert.equal(counts.total, current.length);
+    assert.equal(Object.values(counts.byStatus).reduce<number>((sum, value) => sum + Number(value), 0), counts.total);
+    for (const [status, count] of Object.entries(counts.byStatus)) assert.equal(count, current.filter(row => row.status === status).length);
+    assert.equal(counts.byStatus.delivered, 1);
   });
 
   test('campaign stats expose lifetime unique outcomes, explicit rates and progress through the API', async t => {
@@ -2180,70 +2184,6 @@ describe('Dashboard API capabilities', () => {
   });
 });
 
-describe('Bounded campaign admission', () => {
-  test('expanded content and 101 pending test recipients fail atomically; exactly 100 fit and cancellation releases capacity', async t => {
-    const key = await keyFixture(t);
-    const list = await resource(t, key.secret, '/v1/lists', { name: unique('pending-boundary') });
-    // One small CSV plus sequential consent writes exercises the real API without
-    // a high-concurrency load test, private fixtures, or fabricated consent in SQL.
-    const addresses = Array.from({ length: 101 }, () => address());
-    const preview = ok(await http('POST', '/v1/contact-imports', key.secret, {
-      csv: `Email\n${addresses.join('\n')}\n`, mapping: { email: 'Email' }, listId: list.id,
-    }), 201);
-    assert.equal(preview.errors.length, 0);
-    assert.equal(ok(await http('POST', `/v1/contact-imports/${preview.id}/commit`, key.secret)).imported, 101);
-    const contacts = await allPages(`/v1/lists/${list.id}/members`, key.secret);
-    assert.equal(contacts.length, 101);
-    for (const contact of contacts) cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${contact.id}`, key.secret), [200, 404]); });
-    for (const contact of contacts) ok(await consent(key.secret, contact.id, 'subscribed'));
-
-    const expansionList = await resource(t, key.secret, '/v1/lists', { name: unique('expanded-budget') });
-    ok(await http('POST', `/v1/lists/${expansionList.id}/members`, key.secret, { contactIds: contacts.slice(0, 34).map(contact => contact.id) }));
-    // The body remains below 512 KiB. Thirty-four recipients expand a 500 KiB
-    // HTML part beyond the 16 MiB test budget from a request smaller than 10 KiB.
-    const expansion = await campaignFixture(t, key.secret, { listId: expansionList.id }, {
-      subject: 'Bounded expansion', html: `<p>${'{{chunk}}'.repeat(256)}</p>`, defaults: { chunk: 'x'.repeat(2000) },
-    });
-    const before = ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails;
-    error(await http('POST', `/v1/campaigns/${expansion.id}/review`, key.secret, { revision: expansion.revision }, {}, 15_000), 413, 'EXPANDED_CAMPAIGN_TOO_LARGE');
-    const rejectedExpansion = ok(await http('GET', `/v1/campaigns/${expansion.id}`, key.secret));
-    assert.equal(rejectedExpansion.status, 'draft');
-    assert.equal(rejectedExpansion.reviewId, null);
-    assert.equal(page(await http('GET', `/v1/emails?campaignId=${expansion.id}`, key.secret)).length, 0);
-    assert.equal(ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails, before, 'Rejected expansion must not create partial email metrics.');
-
-    const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }, {}, 15_000));
-    assert.equal(review.eligible, 101);
-    const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
-    const denied = error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, {
-      revision: campaign.revision, reviewId: review.id, scheduledAt,
-    }, {}, 15_000), 429, 'PENDING_EMAIL_LIMIT_EXCEEDED');
-    assert.equal(denied.retryable, true);
-    const rejectedAdmission = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
-    assert.equal(rejectedAdmission.status, 'reviewed');
-    assert.equal(rejectedAdmission.reviewId, review.id);
-    assert.equal(rejectedAdmission.scheduledAt, null);
-    assert.equal(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
-    assert.equal(ok(await http('GET', '/v1/metrics?stream=marketing', key.secret)).totals.emails, before, 'Rejected admission must leave the email counter unchanged.');
-    ok(await http('DELETE', `/v1/lists/${list.id}/members/${contacts[0].id}`, key.secret));
-    const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: campaign.draft }));
-    const atLimit = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: revised.revision }, {}, 15_000));
-    assert.equal(atLimit.eligible, 100);
-    const scheduled = ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, {
-      revision: revised.revision, reviewId: atLimit.id, scheduledAt,
-    }, {}, 15_000), 202);
-    assert.equal(scheduled.queued, 100, 'The failed 101-recipient admission must not reserve any of the key’s 100 available slots.');
-    const queued = await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret);
-    assert.equal(queued.length, 100);
-    assert.ok(queued.every(message => message.status === 'queued' && message.environment === 'test' && message.providerId === null));
-    error(await http('POST', '/v1/emails/send', key.secret, mail()), 429, 'PENDING_EMAIL_LIMIT_EXCEEDED');
-    assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret)).canceled, 100);
-    const released = ok(await http('POST', '/v1/emails/send', key.secret, mail()), 202);
-    assert.match((await poll(`/v1/emails/${released.id}`, key.secret, body => body.status === 'delivered')).providerId, /^sim_/);
-  });
-});
-
 describe('Personalization context boundaries', () => {
   test('unquoted and executable placeholders fail review, while quoted URLs and literal-brace recipient data render safely', async t => {
     const key = await keyFixture(t);
@@ -2272,10 +2212,10 @@ describe('Personalization context boundaries', () => {
     const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
       html: '<p><a href="{{url}}">{{name}}</a> <a href="https://example.com:{{port}}/account">{{note}}</a></p><img src="https://example.com/i.png" alt="{{firstName}}"><p>Plain {{name}}: {{firstName}}</p>',
     });
-    const review = ok(await http('POST', `/v1/campaigns/${valid.id}/review`, key.secret, { revision: valid.revision }));
-    ok(await http('POST', `/v1/campaigns/${valid.id}/schedule`, key.secret, {
-      revision: valid.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
-    }), 202);
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${valid.id}/reviews`, key.secret, { revision: valid.revision }), 202);
+    const review = await poll(`/v1/campaigns/${valid.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
+    ok(await http('POST', `/v1/campaigns/${valid.id}/send`, key.secret, { revision: valid.revision, reviewId: review.id }), 202);
+    await poll(`/v1/campaigns/${valid.id}`, key.secret, row => row.status === 'completed');
     const messages = page(await http('GET', `/v1/emails?campaignId=${valid.id}`, key.secret));
     assert.equal(messages.length, 1);
     const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
@@ -2287,7 +2227,9 @@ describe('Personalization context boundaries', () => {
     assert.ok(content.html.includes('Plain Name {{literal}}: https://example.com onmouseover=alert(1)</p>'), 'Recipient data containing braces must not be parsed recursively.');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { ...contact.properties, url: 'javascript:alert(1)' } }));
     const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p><a href="{{url}}">Quoted but unsafe URL</a></p>' });
-    error(await http('POST', `/v1/campaigns/${unsafeUrl.id}/review`, key.secret, { revision: unsafeUrl.revision }), 422, 'UNSAFE_HTML_URL');
+    const unsafeStart = ok(await http('POST', `/v1/campaigns/${unsafeUrl.id}/reviews`, key.secret, { revision: unsafeUrl.revision }), 202);
+    const unsafeReview = await poll(`/v1/campaigns/${unsafeUrl.id}/reviews/${unsafeStart.id}`, key.secret, row => row.status === 'failed');
+    assert.equal(unsafeReview.error.code, 'UNSAFE_HTML_URL');
     assert.equal(ok(await http('GET', `/v1/campaigns/${unsafeUrl.id}`, key.secret)).status, 'draft');
   });
 });
@@ -2310,16 +2252,16 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.equal(unchanged.status, 'draft');
     assert.equal(unchanged.revision, campaign.revision);
     assert.deepEqual(unchanged.draft, campaign.draft);
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, owner.secret, { revision: campaign.revision }));
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, owner.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, owner.secret, row => row.status === 'ready');
     ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, owner.secret, {
       revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
     }), 202);
     error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
     assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret)).status, 'scheduled');
-    const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret));
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].status, 'queued', 'Unauthorized cancellation must not touch already queued messages.');
-    assert.equal(messages[0].from, 'sender@example.com');
+    const unchangedScheduled = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
+    assert.equal(unchangedScheduled.expansion.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
   test('revoking the originating test send key stops its future scheduled job before simulation or SES acceptance', async t => {
@@ -2333,24 +2275,19 @@ describe('Campaign authorization and dispatch credentials', () => {
     // A persisted test key owns the campaign; a different persisted test key
     // originates the queued job. The bootstrap live identity never schedules it.
     const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, origin.secret, { revision: campaign.revision }));
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, origin.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, reader.secret, row => row.status === 'ready');
     const dueAt = Date.now() + 3_000;
     ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, origin.secret, {
       revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(dueAt).toISOString(),
     }), 202);
-    const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret));
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].status, 'queued');
-    assert.equal(messages[0].environment, 'test');
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
     ok(await http('POST', `/v1/api-keys/${origin.id}/revoke`, MANAGER), [200, 204]);
     assert.ok(Date.now() < dueAt, 'Revocation must finish before the scheduled job becomes due; otherwise this scenario cannot prove a dispatch-time credential check.');
-    const blocked = await poll(`/v1/emails/${messages[0].id}`, reader.secret, body => ['canceled', 'suppressed'].includes(body.status));
-    assert.equal(blocked.errorCode, 'ORIGIN_KEY_REVOKED');
-    assert.equal(blocked.providerId, null);
-    assert.equal(blocked.attemptStartedAt, null, 'Revoked credentials must be checked before attempting dispatch.');
-    assert.equal(blocked.simulated, true);
-    const events = page(await http('GET', `/v1/emails/${messages[0].id}/events`, reader.secret));
-    assert.ok(!events.some(event => ['accepted', 'send', 'sent', 'delivery', 'simulated'].includes(event.type)), 'Revoked-origin work must never reach SES acceptance or even a successful test simulation.');
+    const blocked = await poll(`/v1/campaigns/${campaign.id}`, reader.secret, body => body.status === 'canceled');
+    assert.equal(blocked.expansion.error.code, 'ORIGIN_KEY_REVOKED');
+    assert.equal(blocked.counts.total, 0, 'Revoked credentials must be checked before materializing or dispatching email.');
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).marketingConsent, 'subscribed', 'This failure must come from revocation, not a consent change.');
   });
 });
@@ -2366,14 +2303,14 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('unsubscribe') });
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
+    const source = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: email, kind: 'marketing', html: '<p>Capability source</p>' }), { 'x-forwarded-host': 'attacker.invalid' }), 202);
+    const content = ok(await http('GET', `/v1/emails/${source.id}/content`, key.secret));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    const review = ok(await http('POST', `/v1/campaigns/${campaign.id}/review`, key.secret, { revision: campaign.revision }));
+    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
+    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
     const dueAt = Date.now() + 5_000;
     ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(dueAt).toISOString() }, { 'x-forwarded-host': 'attacker.invalid' }), 202);
-    const queued = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
-    assert.equal(queued.length, 1);
-    assert.equal(queued[0].status, 'queued');
-    const content = ok(await http('GET', `/v1/emails/${queued[0].id}/content`, key.secret));
+    assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
     const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
     assert.ok(match, 'Marketing message must contain its configured unsubscribe URL.');
     const url = new URL(match[1]);
@@ -2384,7 +2321,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const path = `${url.pathname}${url.search}`;
     const token = url.pathname.split('/').at(-1)!;
     assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
-    const redacted = ok(await http('GET', `/v1/emails/${queued[0].id}/content`, reader.secret));
+    const redacted = ok(await http('GET', `/v1/emails/${source.id}/content`, reader.secret));
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
     assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');
@@ -2415,10 +2352,12 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const unknown = error(await http('GET', `/unsubscribe/u_${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`), 404, 'NOT_FOUND');
     assert.equal(invalid.message, unknown.message, 'Tampered and nonexistent tokens must have indistinguishable public errors.');
     assert.ok(!JSON.stringify(invalid).includes(email) && !JSON.stringify(unknown).includes(email));
-    const blocked = await poll(`/v1/emails/${queued[0].id}`, key.secret, body => body.status === 'suppressed');
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, body => body.counts?.byStatus?.suppressed === 1);
+    const [blocked] = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    assert.equal(blocked.status, 'suppressed');
     assert.equal(blocked.providerId, null);
     assert.equal(blocked.simulated, true);
-    const campaignEvents = page(await http('GET', `/v1/emails/${queued[0].id}/events`, key.secret));
+    const campaignEvents = page(await http('GET', `/v1/emails/${blocked.id}/events`, key.secret));
     assert.ok(campaignEvents.some(event => event.type === 'suppressed'));
     assert.ok(!campaignEvents.some(event => ['accepted', 'delivery', 'simulated'].includes(event.type)), 'Opt-out must be checked before even simulated marketing dispatch.');
     const transactional = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: email })), 202);

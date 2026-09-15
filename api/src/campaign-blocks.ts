@@ -111,7 +111,7 @@ handlers, comments, and document wrappers (\`<!doctype>\`, \`<html>\`, \`<head>\
 Fetch a campaign with findCampaigns or a template with findTemplates to read the current
 block HTML, including edits made in the dashboard composer. Send the complete replacement
 \`html\` with saveCampaign or saveTemplate at the current revision; the dashboard reflects it
-live. Preview campaigns through reviewCampaign and templates through previewTemplate; neither
+live. Preview campaigns through previewCampaign and templates through previewTemplate; neither
 workflow requires browser automation.`;
 
 export class BlockContentError extends Error {}
