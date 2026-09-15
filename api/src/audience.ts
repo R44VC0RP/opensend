@@ -90,21 +90,8 @@ function counts(rows: Array<typeof contacts.$inferSelect>) {
 async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[], limit: number) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new ApiError(422, 'AUDIENCE_LIMIT_INVALID', 'Audience limits must be between 1 and 1000.');
   const rows = await db.select().from(contacts).where(and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)).orderBy(asc(contacts.id)).limit(limit + 1);
-  if (rows.length > limit) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', `This deployment supports at most ${limit} matching contacts per preview or campaign. Narrow the audience; no contacts were silently truncated.`);
+  if (rows.length > limit) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', `This preview supports at most ${limit} matching contacts. Narrow the audience; no contacts were silently truncated.`);
   return rows;
-}
-export interface AudienceResult { contacts: Array<{ id: string; email: string; name?: string; properties: Record<string, unknown> }>; matched: number; eligible: number; suppressed: number; unsubscribed: number; }
-export async function getAudience(runtime: Runtime, identity: Actor, spec: z.infer<typeof AudienceSpec>, limit = 1000, db: DbExecutor = runtime.db): Promise<AudienceResult> {
-  const parsed = AudienceSpec.safeParse(spec);
-  if (!parsed.success) throw new ApiError(422, 'INVALID_AUDIENCE', 'The audience specification is invalid.');
-  spec = parsed.data;
-  await findList(db, identity, spec.listId);
-  const conditions = [inList(identity, spec.listId)];
-  if (spec.segmentId) conditions.push(compileRule((await findSegment(db, identity, spec.segmentId)).rule));
-  for (const listId of spec.excludeListIds ?? []) { await findList(db, identity, listId); conditions.push(sql`NOT (${inList(identity, listId)})`); }
-  for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule((await findSegment(db, identity, segmentId)).rule)})`);
-  const rows = await boundedContacts(db, identity, conditions, limit);
-  return { ...counts(rows), contacts: rows.filter(c => !c.suppressed && c.marketingConsent === 'subscribed').map(c => ({ id: c.id, email: c.email, ...(c.name ? { name: c.name } : {}), properties: c.properties })) };
 }
 // One INSERT ... SELECT captures membership, consent and only referenced personalization values.
 // Keyset-paging the live audience across transactions would not be a review snapshot.

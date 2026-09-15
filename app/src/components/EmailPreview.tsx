@@ -35,15 +35,13 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
   const needed = useMemo(() => cidImageSources(html), [html]);
   useEffect(() => {
     const controller = new AbortController();
-    let release: (() => void) | undefined;
     setError('');
     loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split('\0') : [], needed, controller.signal).then(result => {
-      if (controller.signal.aborted) { result.release(); return; }
-      release = result.release;
+      if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
       if (result.sources.size < needed.size) setError('Some inline images could not be resolved from this message’s attachments.');
     }).catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Inline image preview is unavailable.'); });
-    return () => {controller.abort(); release?.();};
+    return () => controller.abort();
   }, [html, attachmentKey, attachmentApi, needed]);
   const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;
   const srcDoc = useMemo(() => {

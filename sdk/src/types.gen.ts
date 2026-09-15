@@ -515,7 +515,7 @@ export type CampaignExpansion = {
 } | null;
 
 /**
- * Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Legacy synchronous reviews retain their 16 MiB test/128 MiB live bounds; durable background campaign preparation is bounded separately.
+ * Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.
  */
 export type CampaignDraft = {
     name: string;
@@ -816,30 +816,11 @@ export type CampaignArchiveInput = {
     archived: boolean;
 };
 
-export type CampaignAudienceCounts = {
-    matched: number;
-    eligible: number;
-    suppressed: number;
-    unsubscribed: number;
-};
-
 export type CampaignTestInput = {
     to: string;
     data?: {
         [key: string]: string | number | boolean | null;
     };
-};
-
-export type CampaignReview = CampaignAudienceCounts & {
-    id: string;
-    campaignId: string;
-    revision: number;
-    contentHash: string;
-    createdAt: string;
-};
-
-export type CampaignRevisionInput = {
-    revision: number;
 };
 
 /**
@@ -861,6 +842,10 @@ export type CampaignReviewPreparation = {
         code: string;
         message: string;
     } | null;
+};
+
+export type CampaignRevisionInput = {
+    revision: number;
 };
 
 export type CampaignQueued = {
@@ -5929,69 +5914,6 @@ export type SetCampaignArchivedResponses = {
 
 export type SetCampaignArchivedResponse = SetCampaignArchivedResponses[keyof SetCampaignArchivedResponses];
 
-export type PreviewCampaignAudienceData = {
-    body?: never;
-    path: {
-        id: string;
-    };
-    query?: never;
-    url: '/v1/campaigns/{id}/audience-preview';
-};
-
-export type PreviewCampaignAudienceErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type PreviewCampaignAudienceError = PreviewCampaignAudienceErrors[keyof PreviewCampaignAudienceErrors];
-
-export type PreviewCampaignAudienceResponses = {
-    /**
-     * Success
-     */
-    200: CampaignAudienceCounts;
-};
-
-export type PreviewCampaignAudienceResponse = PreviewCampaignAudienceResponses[keyof PreviewCampaignAudienceResponses];
-
 export type TestCampaignData = {
     body: CampaignTestInput;
     path: {
@@ -6054,69 +5976,6 @@ export type TestCampaignResponses = {
 };
 
 export type TestCampaignResponse = TestCampaignResponses[keyof TestCampaignResponses];
-
-export type ReviewCampaignData = {
-    body: CampaignRevisionInput;
-    path: {
-        id: string;
-    };
-    query?: never;
-    url: '/v1/campaigns/{id}/review';
-};
-
-export type ReviewCampaignErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type ReviewCampaignError = ReviewCampaignErrors[keyof ReviewCampaignErrors];
-
-export type ReviewCampaignResponses = {
-    /**
-     * Success
-     */
-    200: CampaignReview;
-};
-
-export type ReviewCampaignResponse = ReviewCampaignResponses[keyof ReviewCampaignResponses];
 
 export type StartCampaignReviewData = {
     body: CampaignRevisionInput;

@@ -208,16 +208,6 @@ function pageOutput(): NonNullable<Tool['outputSchema']> {
   schema.anyOf[0].properties.response = { type: 'object', properties: { data: { type: 'array', items: {} }, nextCursor: { type: ['string', 'null'] } }, required: ['data', 'nextCursor'], additionalProperties: false };
   return schema as NonNullable<Tool['outputSchema']>;
 }
-const campaignReviewOutput: NonNullable<Tool['outputSchema']> = {
-  type: 'object', anyOf: [
-    { type: 'object', properties: { status: { type: 'integer' }, requestId: { type: ['string', 'null'] }, response: { type: 'object', properties: {
-      matched: { type: 'integer' }, eligible: { type: 'integer' }, suppressed: { type: 'integer' }, unsubscribed: { type: 'integer' },
-      preview: { type: 'object', properties: { html: { type: 'string' }, text: { type: 'string' } }, required: ['html', 'text'], additionalProperties: false },
-      visualPreview: { type: 'object', properties: { mimeType: { type: 'string', const: 'image/png' } }, required: ['mimeType'], additionalProperties: false },
-    }, required: ['matched', 'eligible', 'suppressed', 'unsubscribed', 'preview'], additionalProperties: false } }, required: ['status', 'requestId', 'response'], additionalProperties: false },
-    structuredClone((genericOutput as ObjectValue).anyOf[1]),
-  ],
-};
 const templatePreviewOutput: NonNullable<Tool['outputSchema']> = {
   type: 'object', anyOf: [
     { type: 'object', properties: { status: { type: 'integer' }, requestId: { type: ['string', 'null'] }, response: { type: 'object', properties: {
@@ -328,16 +318,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('publishTemplate', 'Publish the current revision of a global campaign template so it can create independent campaigns.', 'publishCampaignTemplate');
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
-  const previewCampaign = need('previewCampaign', raw), previewImage = need('renderCampaignPreviewImage', raw), reviewCampaign = need('reviewCampaign', raw);
-  const reviewInput = structuredClone(reviewCampaign.tool.inputSchema) as ObjectValue;
-  reviewInput.properties = { ...(reviewInput.properties ?? {}), visualPreview: { type: 'boolean', default: false, description: 'Also return a rendered PNG image of the saved campaign draft.' } };
-  add(custom('reviewCampaign', `Render and validate a campaign revision (up to 1,000 matches), returning its message preview and eligible audience counts. Delivery performs its own durable preparation automatically. Set visualPreview=true to also receive a PNG image of the email. ${EMAIL_SEND_CONFIRMATION}`, reviewInput as Tool['inputSchema'], true, args => {
-    const reviewArgs = { ...args }; delete reviewArgs.visualPreview;
-    return {
-      steps: [{ operation: previewCampaign, args: { id: args.id } }, { operation: reviewCampaign, args: reviewArgs }, ...(args.visualPreview === true ? [{ operation: previewImage, args: { id: args.id } }] : [])],
-      combine: ([preview, review, visual]) => ({ ...review, response: { matched: review.response.matched, eligible: review.response.eligible, suppressed: review.response.suppressed, unsubscribed: review.response.unsubscribed, preview: preview.response, ...(visual ? { visualPreview: { mimeType: visual.response.mimeType } } : {}) }, ...(visual ? { image: { data: visual.response.data, mimeType: visual.response.mimeType } } : {}) }),
-    };
-  }, campaignReviewOutput));
+  direct('previewCampaign', 'Render the saved campaign draft as complete HTML and plain text without preparing or sending its audience.', 'previewCampaign');
   add(actionTool('deliverCampaign', `Test, send, schedule or cancel campaign delivery. Send and schedule snapshot and validate the current revision automatically; supply revision only. ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: withoutBodyProperty(need('sendCampaign', raw), 'reviewId'), schedule: withoutBodyProperty(need('scheduleCampaign', raw), 'reviewId'), cancel: need('cancelCampaign', raw) }, 'mode'));
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
@@ -408,7 +389,6 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
-  if (result.size !== 41) invalid(`Curated catalog must contain exactly 41 tools, got ${result.size}.`);
   return result;
 }
 export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {

@@ -18,17 +18,16 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
   const owned = useRef(new Set<string>())
   const known = useRef(new Map<string, Attachment>())
   const [busy, setBusy] = useState(false)
-  const metadata = useApiQuery(['attachments', attachmentApi === api.templateAssets ? 'templates' : 'campaigns', ids], async (_api, signal) => attachmentApi ? Promise.all(ids.map(id => attachmentApi.get(id, signal))) : [] as Attachment[])
+  const metadata = useApiQuery(['attachments', attachmentApi === api.templateAssets ? 'templates' : 'campaigns', ids], async (_api, signal) => Promise.all(ids.map(id => attachmentApi.get(id, signal))))
   useEffect(() => { metadata.data?.forEach(item => known.current.set(item.id, item)) }, [metadata.data])
   useEffect(() => { if (metadata.isError) toast(message(metadata.error), 'error') }, [metadata.isError, metadata.error, toast])
   useImperativeHandle(ref, () => ({ open() {
-    if (!attachmentApi) { toast('Attachments are unavailable for this connection.', 'error'); return }
     if (busy || disabled) return
     input.current?.click()
   } }))
 
   async function upload(file?: File) {
-    if (!file || busy || disabled || !attachmentApi) return
+    if (!file || busy || disabled) return
     if (metadata.isPending || metadata.isError) {
       toast(metadata.isError ? 'Attachment sizes could not be loaded. Retrying…' : 'Wait for attachment sizes to load before uploading.', 'error')
       if (metadata.isError) void metadata.refetch()
@@ -43,7 +42,7 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
     finally { setBusy(false); onBusy(false) }
   }
   async function remove(id: string) {
-    if (busy || disabled || !attachmentApi) return
+    if (busy || disabled) return
     setBusy(true); onBusy(true)
     try {
       if (owned.current.has(id) && !persisted.includes(id)) { await attachmentApi.remove(id); owned.current.delete(id) }
@@ -58,6 +57,6 @@ export const CampaignAttachments = forwardRef<CampaignAttachmentsRef, Props>(fun
       <IconButton label={`Remove ${item.filename}`} disabled={busy || disabled} onClick={() => void remove(item.id)}><X size={16} aria-hidden="true" /></IconButton>
     </li>)}</ul>}
     {busy && <span className="sr-only" role="status">Updating attachments…</span>}
-    <input ref={input} type="file" hidden aria-label="Upload attachment" disabled={busy || disabled || !attachmentApi} onChange={event => { void upload(event.target.files?.[0]); event.currentTarget.value = '' }} />
+    <input ref={input} type="file" hidden aria-label="Upload attachment" disabled={busy || disabled} onChange={event => { void upload(event.target.files?.[0]); event.currentTarget.value = '' }} />
   </>
 })

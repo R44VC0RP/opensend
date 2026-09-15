@@ -16,23 +16,22 @@ export function jobConcurrency(value: unknown, maximum = 8) {
   return Number.isInteger(number) && number >= 1 ? Math.min(number, maximum) : 2;
 }
 export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1, concurrency = 1, maxDurationMs = 20000) {
-  const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0, activeSends = 0, peakActiveSends = 0;
+  const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
   const laneJobs = Array<number>(effectiveConcurrency).fill(0);
   const freeLanes = new Set(laneJobs.map((_, index) => index));
   const active = new Set<Promise<void>>();
   const failures: unknown[] = [];
   let activeFeedback = 0;
-  // Spread short drains across the 16-turn cycle without a shared scheduler-row lock.
+  // Spread short drains across the 8-turn cycle without a shared scheduler-row lock.
   // Live/test and job-class fairness is approximate across invocations, not serialized.
-  const rotation = Math.floor(Math.random() * 16);
+  const rotation = Math.floor(Math.random() * 8);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const handle = async (job: { id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
-    if (job.type === 'email.dispatch') peakActiveSends = Math.max(peakActiveSends, ++activeSends);
     const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'));
     const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, environment: job.environment, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     try {
@@ -50,7 +49,6 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     } finally {
       activeJobs--;
-      if (job.type === 'email.dispatch') activeSends--;
     }
   };
   try {
@@ -65,7 +63,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const claimed = await runtime.db.execute<{
         id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
       }>(sql`WITH rotation AS (
-        SELECT ${(rotation + claimRequests) % 16}::int AS turn
+        SELECT ${(rotation + claimRequests) % 8}::int AS turn
       ), feedback AS (
         SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.workspace_id = ${runtime.config.workspaceId} AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
@@ -78,11 +76,9 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish') THEN 0
-            WHEN j.type = 'email.dispatch' AND j.payload->>'campaignId' IS NULL THEN 1
-            WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 2 WHEN j.type = 'email.dispatch' THEN 3 ELSE 0 END THEN 0 ELSE 1 END,
-          CASE WHEN j.type = 'campaign.finish' THEN 0 WHEN j.type = 'email.dispatch' THEN 1
-            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 2 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 3 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 4 ELSE 5 END,
+          CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
+          CASE WHEN j.type = 'campaign.finish' THEN 0
+            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM regular
@@ -117,7 +113,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   } finally {
     // The time budget stops new claims, not already leased work or persistence.
     await Promise.all(active);
-    log('info', { code: 'JOB_DRAIN', workspaceId: runtime.config.workspaceId, processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, peakActiveSends, laneJobs, budgetMs, durationMs: Date.now() - started });
+    log('info', { code: 'JOB_DRAIN', workspaceId: runtime.config.workspaceId, processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, laneJobs, budgetMs, durationMs: Date.now() - started });
   }
   if (failures.length) throw failures[0];
   return processed;
