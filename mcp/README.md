@@ -46,6 +46,8 @@ For example, call `findEmails` with either:
 
 Workflow tools compose API operations behind an explicit `action`, `mode`, or `include` selector: `saveCampaign`, `deliverCampaign`, `saveContact`, `importContacts`, `saveList`, `setListMembers`, `saveSegment`, `sendEmail`, `getAttachment`, `saveWebhook`, and `saveDomain`. The public HTTP API and generated SDK remain more granular; SES region/provisioning, long-lived API-key and workspace-setting operations are intentionally absent from hosted MCP.
 
+Sending guidance: use `sendEmail` for one-off sends to **50 or fewer people total across the requested send**. Use campaigns for shared announcements or outreach to **more than 50 people**; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume. This is MCP agent guidance, not a new API limit.
+
 Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `previewCampaign` renders the saved draft as HTML and plain text without preparing or sending its audience.
 
 After the required audience/content/time confirmation, use `deliverCampaign` send/schedule with the current campaign `revision`. OpenSend snapshots up to 1,000,000 matching contacts, validates them and starts delivery as one durable background workflow. MCP does not expose preparation IDs; its `202` result means recipient intents were accepted for validation/delivery, not sent or delivered.
