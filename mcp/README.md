@@ -48,11 +48,11 @@ Workflow tools compose API operations behind an explicit `action`, `mode`, or `i
 
 Sending guidance: use `sendEmail` for one-off sends to **50 or fewer people total across the requested send**. Use campaigns for shared announcements or outreach to **more than 50 people**; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume. This is MCP agent guidance, not a new API limit.
 
-Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `reviewCampaign` preserves synchronous review for audiences up to 1,000 matching contacts, returning both the rendered HTML/plaintext preview and the revision-bound audience review required for delivery.
+Campaign content remains **block HTML** shared with the dashboard composer. `saveCampaign` exposes the API's exact create/update schemas, and `previewCampaign` renders the saved draft as HTML and plain text without preparing or sending its audience.
 
-After the required audience/content/time confirmation, use `deliverCampaign` send/schedule with the current campaign `revision`. OpenSend snapshots up to 1,000,000 matching contacts, validates them and starts delivery as one durable background workflow. MCP does not expose preparation IDs; its `202` result means recipient intents were accepted for validation/delivery, not sent or delivered. `reviewCampaign` remains an optional preview for rendered content and audience counts up to 1,000 matches.
+After the required audience/content/time confirmation, use `deliverCampaign` send/schedule with the current campaign `revision`. OpenSend snapshots up to 1,000,000 matching contacts, validates them and starts delivery as one durable background workflow. MCP does not expose preparation IDs; its `202` result means recipient intents were accepted for validation/delivery, not sent or delivered.
 
-The full writable catalog has **31 tools**; read-only OAuth grants expose the nine read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
+The full writable catalog has **41 tools**; read-only OAuth grants expose 15 read tools. Existing hosted integrations must refresh their tool catalog after upgrading.
 
 ### Temporary script tokens
 

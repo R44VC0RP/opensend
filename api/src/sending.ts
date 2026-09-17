@@ -1,3 +1,4 @@
+import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -7,7 +8,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachment } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime, type Storage } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { AudienceSpec, getAudience, snapshotCampaignAudience } from './audience.js';
+import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
@@ -50,12 +51,6 @@ async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
   const [counts] = await db.select({ total: sql<number>`count(*)::int`, key: sql<number>`count(*) filter (where ${emails.actorKeyId} = ${a.keyId})::int` }).from(emails).where(and(scope(emails, a), isNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
   if (Number(counts!.total) + incoming > limits.pending || Number(counts!.key) + incoming > limits.keyPending) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the ${a.environment} outstanding email limit (${limits.pending} per environment, ${limits.keyPending} per key). Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
 }
-function campaignBytes(a: Actor, total: number, snapshot: EmailSnapshot) {
-  // Reserve footer/header space in reviews too, where unsubscribe tokens are not issued.
-  const next = total + Buffer.byteLength(JSON.stringify(snapshot), 'utf8') + 2048;
-  if (next > SENDING_LIMITS[a.environment].expandedCampaignBytes) throw new ApiError(413, 'EXPANDED_CAMPAIGN_TOO_LARGE', `Expanded campaign content exceeds the ${SENDING_LIMITS[a.environment].expandedCampaignBytes / 1024 / 1024} MiB ${a.environment} limit. Reduce the audience or personalized content.`);
-  return next;
-}
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
 const FromName = z.string().max(200).refine(v => !/[\x00-\x1f\x7f]/.test(v), 'Sender name cannot contain control characters.');
@@ -93,11 +88,6 @@ const attachmentTypes: Record<string, string> = {
   pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 };
-const starts = (bytes: Uint8Array, prefix: number[]) => prefix.every((value, index) => bytes[index] === value);
-function textAttachment(bytes: Uint8Array) {
-  try { const value = new TextDecoder('utf-8', { fatal: true }).decode(bytes); if (value.includes('\0')) throw new Error(); return value; }
-  catch { throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', 'Text attachments must contain valid UTF-8 without null bytes.'); }
-}
 function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
   const extension = metadata.filename.split('.').pop()?.toLowerCase();
   const expected = extension ? attachmentTypes[extension] : undefined;
@@ -109,28 +99,14 @@ function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes:
   const image = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension);
   if (metadata.disposition === 'inline' && (!image || !metadata.contentId)) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Only PNG, JPEG, GIF, and WebP images with a content ID may be inline.');
   if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'ATTACHMENT_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
-  let valid = true;
-  if (extension === 'png') valid = starts(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  else if (extension === 'jpg' || extension === 'jpeg') valid = starts(bytes, [0xff, 0xd8, 0xff]);
-  else if (extension === 'gif') valid = new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF87a' || new TextDecoder().decode(bytes.slice(0, 6)) === 'GIF89a';
-  else if (extension === 'webp') valid = new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP';
-  else if (extension === 'pdf') valid = new TextDecoder().decode(bytes.slice(0, 5)) === '%PDF-';
-  else if (extension === 'txt' || extension === 'csv') textAttachment(bytes);
-  else if (extension === 'json') { try { JSON.parse(textAttachment(bytes)); } catch { valid = false; } }
-  else if (extension === 'ics') { const text = textAttachment(bytes).replaceAll('\r\n', '\n').trim(); valid = text.startsWith('BEGIN:VCALENDAR\n') && text.endsWith('END:VCALENDAR'); }
-  else {
-    const content = new TextDecoder('latin1').decode(bytes);
-    const marker = extension === 'docx' ? 'word/' : extension === 'xlsx' ? 'xl/' : 'ppt/';
-    valid = starts(bytes, [0x50, 0x4b]) && content.includes('[Content_Types].xml') && content.includes(marker);
-  }
-  if (!valid) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
+  if (!attachmentContentMatches(extension, bytes)) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
   return { ...metadata, contentType: baseType === 'application/octet-stream' ? expected : metadata.contentType };
 }
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
 const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
-const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Legacy synchronous reviews retain their 16 MiB test/128 MiB live bounds; durable background campaign preparation is bounded separately.';
+const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
 const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
@@ -247,11 +223,6 @@ function readyCampaign(draft: CampaignDraft) {
     const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))];
     throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', `Complete these campaign fields before review: ${fields.join(', ')}.`, fields.join(', '));
   }
-  return parsed.data;
-}
-function campaignAudience(draft: CampaignDraft) {
-  const parsed = AudienceSpec.safeParse(draft.audience);
-  if (!parsed.success) throw new ApiError(422, 'CAMPAIGN_INCOMPLETE', 'Choose an audience list before previewing or reviewing this campaign.', 'audience.listId');
   return parsed.data;
 }
 function canonical(value: unknown): string {
@@ -824,30 +795,12 @@ export function registerSending(app: App) {
     await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, current.draft); editable(current); await db.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews r WHERE l.owner_type = 'review' AND l.owner_id = r.id AND l.workspace_id = r.workspace_id AND l.environment = r.environment AND r.workspace_id = ${a.workspaceId} AND r.environment = ${a.environment} AND r.campaign_id = ${campaignId}`); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/audience-preview', operationId: 'previewCampaignAudience', tags: ['Campaigns'], security, responses: { 200: response(AudienceCounts), ...errors }, request: { params: IdParams } }), async c => {
-    const a = actor(c); const row = await findCampaign(c.env.db, a, c.req.valid('param').id); const result = await getAudience(c.env, a, campaignAudience(row.draft), 1000); return c.json(AudienceCounts.parse(result), 200);
-  });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/review', operationId: 'reviewCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 200: response(Review), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => {
-      const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
-      const draft = readyCampaign(row.draft); sender(c.env, a, draft.from, draft.region);
-      const audience = await getAudience(c.env, a, draft.audience, 1000, db);
-      if (!audience.contacts.length) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
-      const lockedAttachments = await attachmentRows(db, a, row.draft.attachments, true);
-      let expandedBytes = 0;
-      for (const contact of audience.contacts) expandedBytes = campaignBytes(a, expandedBytes, await campaignMessage(c.env, db, a, row.draft, contact, false, true, lockedAttachments));
-      const reviewId = id('review'); const contentHash = await digest(canonical({ draft: row.draft, recipients: audience.contacts }));
-      const [review] = await db.insert(campaignReviews).values({ id: reviewId, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: audience.contacts, matched: audience.matched, eligible: audience.eligible, suppressed: audience.suppressed, unsubscribed: audience.unsubscribed, contentHash }).returning();
-      await db.update(campaigns).set({ status: 'reviewed', reviewId, preparingReviewId: null, updatedAt: now() }).where(campaignWhere(a, campaignId)); return Review.parse(review);
-    }); return c.json(Review.parse(result), 200);
-  });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Opt in to durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation. The existing /review endpoint remains synchronous.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
       const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
@@ -982,33 +935,19 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (row.reviewId !== reviewId || row.status !== 'reviewed') throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'Review the current campaign revision before sending.');
   const [review] = await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, reviewId), eq(campaignReviews.campaignId, campaignId), eq(campaignReviews.revision, row.revision)));
   if (!review) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'The selected review is no longer current.');
-  if (review.storageVersion === 2) {
-    if (review.status !== 'ready' || review.processed !== review.eligible) throw new ApiError(409, 'CAMPAIGN_REVIEW_NOT_READY', 'Wait for every reviewed recipient to finish preparation.');
-    sender(runtime, a, review.draft.from, review.draft.region);
-    await assertRegionEnabled(db, a.workspaceId, review.draft.region);
-    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing');
-    await checkCampaignCapacity(db, a, review.eligible);
-    await attachmentRows(db, a, review.draft.attachments, true);
-    await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId });
-    const status = input.scheduledAt ? 'scheduled' as const : 'sending' as const;
-    await db.update(campaigns).set({ status, scheduledAt: input.scheduledAt ?? null, updatedAt: now() }).where(campaignWhere(a, campaignId));
-    const jobId = await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId, cursor: 0, ...(requestId ? { requestId } : {}) } });
-    await db.update(campaignExpansions).set({ jobId }).where(eq(campaignExpansions.campaignId, campaignId));
-    return { id: campaignId, status, queued: review.eligible, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
-  }
-  if (review.contentHash !== await digest(canonical({ draft: review.draft, recipients: review.recipients }))) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'The reviewed content or recipients changed; review the campaign again.');
+  if (review.storageVersion !== 2) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'Prepare a new review for the current campaign revision.');
+  if (review.status !== 'ready' || review.processed !== review.eligible) throw new ApiError(409, 'CAMPAIGN_REVIEW_NOT_READY', 'Wait for every reviewed recipient to finish preparation.');
   sender(runtime, a, review.draft.from, review.draft.region);
-  await checkPending(db, a, review.recipients.length);
-  const lockedAttachments = await attachmentRows(db, a, review.draft.attachments, true);
-  const snapshots: EmailSnapshot[] = []; let expandedBytes = 0;
-  for (const contact of review.recipients) {
-    const snapshot = await campaignMessage(runtime, db, a, review.draft, contact, false, false, lockedAttachments);
-    expandedBytes = campaignBytes(a, expandedBytes, snapshot); snapshots.push(snapshot);
-  }
-  for (const snapshot of snapshots) await queueEmail(db, a, snapshot, campaignId, input.scheduledAt, requestId, lockedAttachments);
+  await assertRegionEnabled(db, a.workspaceId, review.draft.region);
+  if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing');
+  await checkCampaignCapacity(db, a, review.eligible);
+  await attachmentRows(db, a, review.draft.attachments, true);
+  await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId });
   const status = input.scheduledAt ? 'scheduled' as const : 'sending' as const;
   await db.update(campaigns).set({ status, scheduledAt: input.scheduledAt ?? null, updatedAt: now() }).where(campaignWhere(a, campaignId));
-  return { id: campaignId, status, queued: review.recipients.length, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
+  const jobId = await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId, cursor: 0, ...(requestId ? { requestId } : {}) } });
+  await db.update(campaignExpansions).set({ jobId }).where(eq(campaignExpansions.campaignId, campaignId));
+  return { id: campaignId, status, queued: review.eligible, scheduledAt: input.scheduledAt ?? null, simulated: a.environment === 'test' };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
 // Reuse fully verified bytes across invocations sharing the same bucket binding.

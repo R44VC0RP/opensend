@@ -150,16 +150,14 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const needed = cidImageSources(initialSnapshot.html)
     if (!needed.size) return
     const controller = new AbortController()
-    let release: (() => void) | undefined
     setHydrating(true)
     loadInlineAttachments(attachmentApi, initialSnapshot.attachmentIds, needed, controller.signal).then(result => {
-      if (controller.signal.aborted) { result.release(); return }
-      release = result.release
+      if (controller.signal.aborted) return
       cidBySource.current = new Map([...result.sources].map(([cid, url]) => [url, cid]))
       setContent(replaceEditorImageSources(blockHtmlToDocument(initialSnapshot.html), result.sources) as EditorNode)
       setHydrating(false); setReady(false); setGeneration(value => value + 1)
     }).catch(cause => { if (!controller.signal.aborted) { setError(cause instanceof Error ? cause.message : 'Inline images could not be loaded.'); setContent(blockHtmlToDocument(initialSnapshot.html)); setHydrating(false); setReady(false); setGeneration(value => value + 1) } })
-    return () => { controller.abort(); release?.() }
+    return () => controller.abort()
   }, [attachmentApi, initialSnapshot])
 
   async function prepareContent(): Promise<Draft> {
@@ -170,39 +168,37 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     let document = instance.getJSON() as EditorNode
     if (isBlockDocumentEmpty(document)) return { html: '', inlineAttachmentIds: [] }
     const currentInline: string[] = []
-    if (attachmentApi) {
-      const allIds = new Set(attachmentIds)
-      const metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
-      const inlineSources = inlineImageSources(document as Record<string, unknown>)
-      for (const source of inlineSources) {
-        const cached = uploadedInline.current.get(source)
-        if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
+    const allIds = new Set(attachmentIds)
+    const metadata = await Promise.all([...allIds].map(id => attachmentApi.get(id)))
+    const inlineSources = inlineImageSources(document as Record<string, unknown>)
+    for (const source of inlineSources) {
+      const cached = uploadedInline.current.get(source)
+      if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
+    }
+    let totalSize = metadata.reduce((total, item) => total + item.size, 0)
+    if (allIds.size > 20 || totalSize > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+    const sources = new Map<string, string>()
+    for (const source of inlineSources) {
+      let cid = cidBySource.current.get(source)
+      if (!cid) {
+        const match = /^data:(image\/(?:png|jpeg|gif|webp|avif));base64,(.+)$/i.exec(source)
+        if (!match) throw new Error('Unsupported inline image format.')
+        const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
+        if (allIds.size >= 20 || totalSize + bytes.length > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
+        const hash = await inlineImageHash(source)
+        const contentId = `opensend-${crypto.randomUUID()}`
+        const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
+        const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
+        cid = `cid:${contentId}`
+        cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
+        currentInline.push(item.id)
+      } else {
+        const owner = metadata.find(item => item.contentId && `cid:${item.contentId}` === cid)
+        if (owner) currentInline.push(owner.id)
       }
-      let totalSize = metadata.reduce((total, item) => total + item.size, 0)
-      if (allIds.size > 20 || totalSize > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
-      const sources = new Map<string, string>()
-      for (const source of inlineSources) {
-        let cid = cidBySource.current.get(source)
-        if (!cid) {
-          const match = /^data:(image\/(?:png|jpeg|gif|webp|avif));base64,(.+)$/i.exec(source)
-          if (!match) throw new Error('Unsupported inline image format.')
-          const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
-          if (allIds.size >= 20 || totalSize + bytes.length > 8 * 1024 * 1024) throw new Error('Use at most 20 attachments with a combined size of 8 MiB.')
-          const hash = await inlineImageHash(source)
-          const contentId = `opensend-${crypto.randomUUID()}`
-          const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
-          const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
-          cid = `cid:${contentId}`
-          cidBySource.current.set(source, cid); uploadedInline.current.set(source, item); allIds.add(item.id); totalSize += item.size
-          currentInline.push(item.id)
-        } else {
-          const owner = metadata.find(item => item.contentId && `cid:${item.contentId}` === cid)
-          if (owner) currentInline.push(owner.id)
-        }
-        sources.set(source, cid)
-      }
-      document = replaceEditorImageSources(document as Record<string, unknown>, sources) as EditorNode
-    } else if (api.mode !== 'demo' && inlineImageSources(document as Record<string, unknown>).length) throw new Error('Inline images cannot be saved without attachment support.')
+      sources.set(source, cid)
+    }
+    document = replaceEditorImageSources(document as Record<string, unknown>, sources) as EditorNode
     const html = documentToBlockHtml(document)
     if (html.length > 500_000) throw new Error('This email is too large. Remove an image or shorten the content before saving.')
     return { html, inlineAttachmentIds: currentInline }
