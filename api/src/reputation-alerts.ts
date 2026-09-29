@@ -15,19 +15,34 @@ type Metric = keyof typeof THRESHOLDS;
 type Level = typeof LEVELS[number];
 const JOB = 'reputation.alert';
 
-function levelFor(metric: Metric, value: number): Level {
+// Boundaries for each level above ok, lowest first.
+function boundaries(metric: Metric) {
   const { warning, risk } = THRESHOLDS[metric];
-  if (value >= risk) return 'at_risk';
-  if (value >= risk * NEAR) return 'near_risk';
-  if (value >= warning) return 'warning';
-  if (value >= warning * NEAR) return 'near_warning';
-  return 'ok';
+  return [warning * NEAR, warning, risk * NEAR, risk];
 }
+function levelFor(metric: Metric, value: number): Level {
+  return LEVELS[boundaries(metric).filter(boundary => value >= boundary).length]!;
+}
+// Anti-flapping: dropping a level requires falling 10% below that level's boundary.
+const HYSTERESIS = 0.9;
+function nextLevel(metric: Metric, value: number, previous: Level): Level {
+  const raw = levelFor(metric, value), from = LEVELS.indexOf(previous);
+  if (LEVELS.indexOf(raw) >= from) return raw;
+  const bounds = boundaries(metric);
+  let index = from;
+  while (index > 0 && value < bounds[index - 1]! * HYSTERESIS) index--;
+  return LEVELS[index]!;
+}
+// Escalations past the highest level alerted in the last 24 hours send immediately. Anything
+// else waits 6 hours after the previous message and never repeats a level sent in the last day.
+const COOLDOWN_MS = 6 * 3600_000;
+const DAY_MS = 24 * 3600_000;
 
 /**
  * Hourly: compares each region's latest SES reputation rates with the last alerted level and
- * queues one Slack alert per change. The alert jobs double as the dedupe ledger; completed
- * jobs expire after 30 days, so a sustained elevated level re-alerts at most monthly.
+ * queues one Slack alert per change. The alert jobs are the dedupe ledger; completed jobs expire
+ * after 30 days, so a sustained elevated level re-alerts at most monthly. A per-metric advisory
+ * lock keeps overlapping checks from queueing the same alert twice.
  */
 export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
   if (!runtime.config.reputationAlertUrl || !runtime.config.aws || !runtime.config.liveEnabled) return 0;
@@ -41,31 +56,53 @@ export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
       for (const metric of Object.keys(THRESHOLDS) as Metric[]) {
         const value = reputation[metric];
         if (value == null) continue;
-        const level = levelFor(metric, value);
-        const [last] = await runtime.db.select({ payload: jobs.payload }).from(jobs)
-          .where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, JOB), sql`${jobs.payload}->>'region' = ${region}`, sql`${jobs.payload}->>'metric' = ${metric}`))
-          .orderBy(desc(jobs.availableAt)).limit(1);
-        const previous = (LEVELS as readonly string[]).includes(String(last?.payload.level)) ? last!.payload.level as Level : 'ok';
-        if (level === previous) continue;
-        await enqueue(runtime.db, { type: JOB, workspaceId: runtime.config.workspaceId, environment: 'live', payload: { region, metric, level, previous, value } });
-        queued++;
+        if (await queueIfChanged(runtime, region, metric, value)) queued++;
       }
     } finally { cw.destroy(); }
   }
   return queued;
 }
 
-const names: Record<Metric, string> = { bounceRate: 'bounce rate', complaintRate: 'complaint rate' };
-const risingText: Record<Level, string> = { ok: 'is back to normal', near_warning: 'is nearing the warning threshold', warning: 'reached the warning threshold', near_risk: 'is nearing the at-risk threshold', at_risk: 'reached the at-risk threshold' };
-const fallingText: Record<Level, string> = { ok: 'is back to normal', near_warning: 'dropped below the warning threshold but is still close', warning: 'dropped below the at-risk range but is still past warning', near_risk: 'dropped below the at-risk threshold but is still close', at_risk: 'reached the at-risk threshold' };
+/** Pure alert decision. `history` is newest first. Returns null when no message should be sent. */
+export function decideAlert(metric: Metric, value: number, history: { level: Level; at: number }[], now: number): { level: Level; previous: Level } | null {
+  const previous = history[0]?.level ?? 'ok';
+  const next = nextLevel(metric, value, previous);
+  if (next === previous) return null;
+  const lastDay = history.filter(entry => now - entry.at < DAY_MS)
+  // Escalating past anything alerted in the last day always sends.
+  if (LEVELS.indexOf(next) > Math.max(-1, ...lastDay.map(entry => LEVELS.indexOf(entry.level)))) return { level: next, previous };
+  // Otherwise wait out the cooldown, and never repeat a level already sent in the last day.
+  if (history[0] && now - history[0].at < COOLDOWN_MS) return null;
+  if (lastDay.some(entry => entry.level === next)) return null;
+  return { level: next, previous };
+}
+
+async function queueIfChanged(runtime: Runtime, region: string, metric: Metric, value: number) {
+  const workspaceId = runtime.config.workspaceId;
+  return runtime.db.transaction(async tx => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${JOB}:${workspaceId}:${region}:${metric}`}))`);
+    const recent = await tx.select({ payload: jobs.payload, createdAt: jobs.createdAt }).from(jobs)
+      .where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, JOB), sql`${jobs.payload}->>'region' = ${region}`, sql`${jobs.payload}->>'metric' = ${metric}`))
+      .orderBy(desc(jobs.createdAt)).limit(24);
+    const history = recent.map(row => ({ level: (LEVELS as readonly string[]).includes(String(row.payload.level)) ? row.payload.level as Level : 'ok' as Level, at: Date.parse(row.createdAt) }));
+    const decision = decideAlert(metric, value, history, Date.now());
+    if (!decision) return false;
+    await enqueue(tx, { type: JOB, workspaceId, environment: 'live', payload: { region, metric, ...decision, value } });
+    return true;
+  });
+}
+
+const names: Record<Metric, string> = { bounceRate: 'Bounce rate', complaintRate: 'Complaint rate' };
+const risingText: Record<Level, string> = { ok: 'back to normal', near_warning: 'nearing warning', warning: 'at warning', near_risk: 'nearing at-risk', at_risk: 'at risk' };
+const fallingText: Record<Level, string> = { ok: 'back to normal', near_warning: 'below warning, still close', warning: 'below at-risk, still at warning', near_risk: 'below at-risk, still close', at_risk: 'at risk' };
 const emoji: Record<Level, string> = { ok: ':white_check_mark:', near_warning: ':large_yellow_circle:', warning: ':warning:', near_risk: ':red_circle:', at_risk: ':rotating_light:' };
-const percent = (value: number) => `${Number((value * 100).toFixed(3))}%`;
+const percent = (value: number) => `${Number((value * 100).toFixed(2))}%`;
 
 export function reputationAlertText(input: { region: string; metric: Metric; level: Level; previous: Level; value: number; publicUrl: string }) {
   const { warning, risk } = THRESHOLDS[input.metric];
   const rising = LEVELS.indexOf(input.level) > LEVELS.indexOf(input.previous);
-  const phrase = (rising ? risingText : fallingText)[input.level];
-  return `${emoji[input.level]} SES ${names[input.metric]} in ${input.region} ${phrase}: *${percent(input.value)}* (warning ${percent(warning)}, at risk ${percent(risk)}). <${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in OpenSend>`;
+  const title = `${emoji[input.level]} *${names[input.metric]} ${(rising ? risingText : fallingText)[input.level]}* · ${input.region}`;
+  return `${title}\n${percent(input.value)} now  ·  warning ${percent(warning)}  ·  at risk ${percent(risk)}\n<${input.publicUrl}/settings?region=${encodeURIComponent(input.region)}|View in OpenSend>`;
 }
 
 const deliver: JobHandler = async (runtime, payload) => {
