@@ -12,6 +12,23 @@ export function htmlToText(html: string): string {
   return (email.body.textContent ?? '').replace(/[\t ]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// Known open-tracking endpoints (ESP pixels, SES open tracking) and generic pixel paths.
+const TRACKING_URL = /(?:awstrack\.me|list-manage\.com\/track|\/wf\/open|sendgrid\.net\/wf|mandrillapp\.com\/track|pstmrk\.it|pmtrk|track\.customer\.io\/e\/o|mailgun\.[a-z]+\/o\/|emltrk\.com|sidekickopen|hubspotlinks|mixmax\.com\/api\/track|mailtrack\.io|getnotify\.com|bananatag|yesware)/i;
+// Generic pixel paths only count when the URL is not an ordinary image file (e.g. /tracking-logo.png).
+const TRACKING_PATH = /\/(?:track|tracking|open|opens|pixel|beacon)(?:[\/.?_-]|$)/i;
+const IMAGE_FILE = /\.(?:png|jpe?g|svg|webp|avif)(?:[?#]|$)/i;
+const px = (value: string | null | undefined) => { const match = value?.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/i); return match ? Number(match[1]) : null; };
+/** Tracking pixels: known tracker URLs, or remote images sized ≤2px (or zero in either dimension) or hidden by inline style. */
+export function isTrackingPixel(image: Element): boolean {
+  const source = image.getAttribute('src') ?? '';
+  if (TRACKING_URL.test(source) || (TRACKING_PATH.test(source) && !IMAGE_FILE.test(source))) return true;
+  const style = (image.getAttribute('style') ?? '').toLowerCase().replace(/\s+/g, '');
+  const styleSize = (name: string) => px(style.match(new RegExp(`(?:^|;)${name}:([\\d.]+(?:px)?)`))?.[1]);
+  const width = px(image.getAttribute('width')) ?? styleSize('width'), height = px(image.getAttribute('height')) ?? styleSize('height');
+  if (width === 0 || height === 0 || (width !== null && height !== null && width <= 2 && height <= 2)) return true;
+  return /(?:^|;)(?:display:none|visibility:hidden|opacity:0(?:;|$)|max-height:0)/.test(style);
+}
+
 export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean };
 export function EmailPreview({ html, title = 'Email preview', className, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false }: EmailPreviewProps) {
   const api = useApi();
@@ -61,12 +78,17 @@ export function EmailPreview({ html, title = 'Email preview', className, attachm
       const source = element.getAttribute('src') ?? '';
       const owned = element.tagName === 'IMG' ? sources?.get(source) : undefined;
       if (owned) element.setAttribute('src', owned);
+      else if (remoteImages && element.tagName === 'IMG' && /^https?:\/\//i.test(source) && isTrackingPixel(element)) element.remove();
       else if (element.tagName !== 'IMG' || !(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.removeAttribute('src');
     });
     const csp = email.createElement('meta');
     csp.httpEquiv = 'Content-Security-Policy';
     csp.content = `default-src 'none'; style-src 'unsafe-inline'; img-src data:${remoteImages ? ' https:' : ''}; font-src data:; script-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'`;
     email.head.prepend(csp);
+    const referrer = email.createElement('meta');
+    referrer.name = 'referrer';
+    referrer.content = 'no-referrer';
+    email.head.prepend(referrer);
     const tokens = getComputedStyle(document.documentElement);
     const style = email.createElement('style');
     // Reuse the browser's cached font files without opening network access inside the sandbox.
