@@ -8,6 +8,22 @@ import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
+const fqdn = (name: string) => name.endsWith('.') ? name : `${name}.`
+
+function downloadDnsRecords(domain: string, records: { type: string; name: string; value: string }[]) {
+  const lines = records.map(record => {
+    const value = record.type === 'TXT' ? `"${record.value.replace(/"/g, '\\"')}"`
+      : record.type === 'MX' ? record.value.replace(/(\S+)$/, target => fqdn(target))
+      : fqdn(record.value)
+    return `${fqdn(record.name)}\t3600\tIN\t${record.type}\t${value}`
+  })
+  const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${lines.join('\n')}\n`
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }))
+  const link = Object.assign(document.createElement('a'), { href: url, download: `${domain}-dns-records.txt` })
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function LiveDomainsPage() {
   const { regionId } = useRegion()
   const navigate = useNavigate()
@@ -78,7 +94,7 @@ function LiveDomainDetailPage() {
     <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom MAIL FROM · {current.mailFromDomain && <>{current.mailFromDomain} · </>}<StatusBadge status={label(current.mailFromStatus)} /></span></div>
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <section className="section stack">
-      <SectionHeader title="DNS records" />
+      <SectionHeader title="DNS records" actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
       <DataTable minRows={3} rows={current.records} rowKey={record => record.id} columns={[
         { ...settingsColumns.dns[0], render: record => record.type },
