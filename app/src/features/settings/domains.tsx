@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { label } from '../../lib/format'
+import type { DnsRecord } from '../../data/types'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
@@ -75,7 +76,7 @@ function LiveDomainDetailPage() {
   const [mailFromOpen, setMailFromOpen] = useState(false)
   const [mailFromDomain, setMailFromDomain] = useState('')
   const [mailFromInvalid, setMailFromInvalid] = useState('')
-  function openMailFrom() { configureMailFrom.reset(); setMailFromDomain(domain.data?.mailFromDomain ?? `email.${domain.data?.name ?? ''}`); setMailFromInvalid(''); setMailFromOpen(true) }
+  function openMailFrom() { configureMailFrom.reset(); setMailFromDomain(domain.data?.mailFromDomain ?? domain.data?.records.find(record => record.type !== 'CNAME')?.name ?? `email.${domain.data?.name ?? ''}`); setMailFromInvalid(''); setMailFromOpen(true) }
   async function submitMailFrom(event: FormEvent) {
     event.preventDefault()
     const current = domain.data, value = mailFromDomain.trim().toLowerCase()
@@ -86,23 +87,33 @@ function LiveDomainDetailPage() {
   if (domain.isPending) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
-  const pending = current.records.filter(record => record.status === 'pending').length
+  const dkimRecords = current.records.filter(record => record.type === 'CNAME')
+  const mailFromRecords = current.records.filter(record => record.type !== 'CNAME')
+  const mailFromName = current.mailFromDomain ?? mailFromRecords[0]?.name ?? null
+  const dkimStatus = current.dkimStatus ?? (current.status === 'verified' ? 'verified' : 'pending')
+  const sending = current.status === 'verified' ? { status: 'Ready', tone: 'success' as const } : current.status === 'issue' ? { status: 'Failed', tone: 'danger' as const } : { status: 'Waiting for DNS', tone: 'warning' as const }
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
-    <PageHeader title={current.name} backTo="/domains" actions={<div className="cluster"><a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a><Button variant="primary" onClick={openMailFrom}>{current.mailFromDomain ? 'Change MAIL FROM' : 'Add custom MAIL FROM'}</Button><Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></div>} />
+    <PageHeader title={current.name} backTo="/domains" actions={<><a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a><Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></>} />
     <MutationError error={verify.error} />
-    <div className="cluster"><StatusBadge status={label(current.status)} tone={current.status === 'issue' ? 'danger' : undefined} /><span className="muted">{current.regionId}</span><span>Custom MAIL FROM · {current.mailFromDomain && <>{current.mailFromDomain} · </>}<StatusBadge status={label(current.mailFromStatus)} /></span></div>
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
+    <dl className="settings-facts settings-account-summary">
+      <div><dt>Sending</dt><dd><StatusBadge status={sending.status} tone={sending.tone} /></dd></div>
+      <div><dt>DKIM</dt><dd><StatusBadge status={label(dkimStatus)} /></dd></div>
+      <div><dt>Custom MAIL FROM</dt><dd>{mailFromName ? <StatusBadge status={label(current.mailFromStatus)} /> : <span className="muted">Not configured</span>}</dd></div>
+      <div><dt>Region</dt><dd>{current.regionId}</dd></div>
+    </dl>
     <section className="section stack">
-      <SectionHeader title="DNS records" actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these records at your DNS provider, then verify. SES can take up to 72 hours to detect changes.</p></div>{current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>}</div>
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
-      <DataTable minRows={3} rows={current.records} rowKey={record => record.id} columns={[
-        { ...settingsColumns.dns[0], render: record => record.type },
-        { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code title={record.name}>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
-        { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
-        { ...settingsColumns.dns[3], render: record => <StatusBadge status={label(record.status)} /> },
-      ]} />
-      {pending > 0 ? <Alert tone="warning" title={`${pending} ${pending === 1 ? 'record' : 'records'} pending`} children={null} /> : <Alert tone="info">Individual DNS records are not independently verified.</Alert>}
+      {dkimRecords.length > 0 && <div className="stack settings-discovery-section">
+        <div className="ui-section-header"><div className="domain-group-title"><h3>DKIM</h3><p className="muted">Signs mail sent from {current.name}.</p></div></div>
+        <DnsRecordTable records={dkimRecords} />
+      </div>}
+      <div className="stack settings-discovery-section">
+        <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">{mailFromName ? 'Routes bounces through your subdomain and aligns SPF.' : 'Optional. Routes bounces through a subdomain you own and aligns SPF.'}</p></div><Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add custom MAIL FROM'}</Button></div>
+        {mailFromRecords.length > 0 && <DnsRecordTable records={mailFromRecords} />}
+      </div>
     </section>
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
@@ -112,6 +123,14 @@ function LiveDomainDetailPage() {
       </form>
     </Dialog>
   </div>
+}
+
+function DnsRecordTable({ records }: { records: DnsRecord[] }) {
+  return <DataTable rows={records} rowKey={record => record.id} columns={[
+    { ...settingsColumns.dns[0], render: record => record.type },
+    { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code title={record.name}>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
+    { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
+  ]} />
 }
 
 function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domains are managed in live mode only.</Alert></> }

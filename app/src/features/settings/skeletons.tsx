@@ -21,7 +21,6 @@ export const settingsColumns = {
     { key: 'type', label: 'Type', width: 80 },
     { key: 'name', label: 'Name', width: '30%', skeleton: <div className="settings-copy-cell"><SkeletonText width="75%" /><ControlSkeleton width={34} /></div> },
     { key: 'value', label: 'Value', skeleton: <div className="settings-copy-cell"><SkeletonText width="80%" /><ControlSkeleton width={34} /></div> },
-    { key: 'status', label: 'Status', width: 115 },
   ],
   regions: [
     { key: 'region', label: 'Region', width: '45%' },
@@ -94,9 +93,9 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
 
 export function DomainDetailSkeleton() {
   return <LoadingRegion className="stack" label="Loading domain">
-    <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<ControlSkeleton width={138} />} />
-    <div className="cluster"><Skeleton width={90} /><Skeleton width={100} /><span className="cluster">Custom mail from · <Skeleton width={90} /></span></div>
-    <section className="section stack"><SectionHeader title="DNS records" /><TableSkeleton columns={settingsColumns.dns} rows={3} /><div className="ui-alert" aria-hidden="true"><SkeletonText width={320} /></div></section>
+    <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
+    <dl className="settings-facts settings-account-summary">{['Sending', 'DKIM', 'Custom MAIL FROM', 'Region'].map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
+    <section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><SkeletonText width={420} /></div><ControlSkeleton width={120} /></div><div className="stack settings-discovery-section"><div className="ui-section-header"><div className="domain-group-title"><h3>DKIM</h3><SkeletonText width={220} /></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section>
   </LoadingRegion>
 }
 

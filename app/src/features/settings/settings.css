@@ -103,6 +103,8 @@
 .settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:hover { text-decoration-color: currentColor; }
+.domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 280px; }
+.ui-section-header:has(> .domain-group-title) { flex-wrap: wrap; }
 .settings-account-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .settings-aws-details { border-top: 1px solid var(--color-border); padding-top: var(--space-8); }
 .settings-aws-details > summary { width: fit-content; padding-block: var(--space-8); cursor: pointer; }
