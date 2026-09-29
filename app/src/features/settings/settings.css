@@ -54,7 +54,6 @@
 .settings-issues li + li { margin-top: var(--space-6); }
 .settings-job-state { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); font-size: var(--text-xs); }
 .settings-job-error { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-danger); font-size: var(--text-xs); }
-.settings-region-detail > .ui-alert { padding: 0; background: transparent; }
 .settings-choices {
   display: flex;
   flex-wrap: wrap;

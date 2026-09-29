@@ -13,13 +13,13 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 ::selection { background: var(--color-active-bg); color: var(--color-text); }
 .ui-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-6); height: var(--control-height); padding: 0 11px; border: 0; border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-bold); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration), color var(--motion-duration), opacity var(--motion-duration); }
 .ui-button svg { flex-shrink: 0; }
-.ui-button--primary { background: linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast); color: #FFFFFF; text-shadow: 0 .5px .5px rgb(0 0 0 / 30%); }
+.ui-button--primary { background: linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast); color: var(--color-on-contrast); text-shadow: var(--shadow-on-contrast); }
 .ui-button--danger { color: var(--color-danger); }
 .ui-button--ghost { background: var(--color-transparent); box-shadow: none; color: var(--color-muted); }
 .ui-button--sm { height: 24px; padding-inline: 9px; border-radius: 4px; font-size: var(--text-xs); }
 .ui-button--secondary:hover:not(:disabled), .ui-button--danger:hover:not(:disabled) { background: linear-gradient(var(--color-hover), var(--color-hover)), var(--color-surface); }
 .ui-button--ghost:hover:not(:disabled) { background: var(--color-hover); color: var(--color-text); }
-.ui-button--primary:hover:not(:disabled) { background: linear-gradient(rgb(255 255 255 / 12%), rgb(255 255 255 / 12%)), linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast); }
+.ui-button--primary:hover:not(:disabled) { background: linear-gradient(rgb(255 255 255 / 20%), transparent), var(--color-contrast-hover); }
 .ui-button:active:not(:disabled) { background-color: var(--color-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: 28px; }

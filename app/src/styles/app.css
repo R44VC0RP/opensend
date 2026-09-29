@@ -67,10 +67,10 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .chart-label { fill: var(--color-muted); font-family: var(--font-body); font-size: 12px; }
 .chart-grid { stroke: var(--color-border); stroke-dasharray: 3 5; }
 .chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.chart-line--sent { stroke: var(--color-accent); }
 .chart-line--bounces { stroke: var(--color-warning-marker); stroke-dasharray: 4 3; stroke-width: 1.5; }
 .chart-line--complaints { stroke: var(--color-complaint); stroke-width: 1.5; }
-.chart-fill { fill: color-mix(in srgb, var(--color-accent) 12%, var(--color-transparent)); }
+.chart-bar { fill: color-mix(in srgb, var(--color-accent) 70%, var(--color-transparent)); }
+.chart-bar--active { fill: var(--color-accent); }
 .chart-crosshair { stroke: var(--color-muted); stroke-dasharray: 3 4; pointer-events: none; }
 .chart-tooltip { position: absolute; right: var(--space-40); top: var(--space-8); display: flex; flex-direction: column; gap: var(--space-6); min-width: 200px; padding: var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: var(--shadow-popover); font-size: var(--text-xs); pointer-events: none; }
 .chart-tooltip span { display: flex; justify-content: space-between; gap: var(--space-24); }
@@ -116,8 +116,7 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .delivery-timeline ol { list-style: none; padding: 0; margin: 0; }
 .delivery-timeline li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: var(--space-12); padding-top: var(--space-20); }
 .delivery-timeline p { margin-top: var(--space-8); }
-.timeline-dot { display: block; width: 6px; height: 6px; border-radius: 50%; margin-top: 7px; background: var(--color-success-marker); }
-.timeline-dot--warning { background: var(--color-warning-marker); }
+.timeline-dot { display: block; width: 6px; height: 6px; border-radius: 50%; margin-top: 7px; background: var(--tone-marker); }
 .diagnostic { margin: var(--space-16) 0 0; font-size: var(--text-xs); line-height: var(--leading-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
 .email-preview-skeleton { height: 400px; padding: var(--space-24); display: flex; flex-direction: column; gap: var(--space-16); background: var(--color-email-surface); }
 .email-preview-skeleton .ui-skeleton-block { background: color-mix(in srgb, var(--color-email-text) 12%, var(--color-email-surface)); }

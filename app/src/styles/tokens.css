@@ -46,6 +46,9 @@
   --color-accent-hover: #3250DF;
   --color-active-bg: #F2F2F2;
   --color-contrast: #242424;
+  --color-contrast-hover: #3F3F3F;
+  --color-on-contrast: #FFFFFF;
+  --shadow-on-contrast: 0 .5px .5px rgb(0 0 0 / 30%);
   --color-success: #198B43;
   --color-success-marker: #2EAF5A;
   --color-success-bg: #E7F9EA;
@@ -128,7 +131,10 @@
   --color-accent: #A2BCFF;
   --color-accent-hover: #C3D4FD;
   --color-active-bg: #2E2E2E;
-  --color-contrast: #5C5C5C;
+  --color-contrast: #EDEDED;
+  --color-contrast-hover: #FFFFFF;
+  --color-on-contrast: #161616;
+  --shadow-on-contrast: none;
   --color-success: #6BD586;
   --color-success-marker: #49C970;
   --color-success-bg: #14361D;

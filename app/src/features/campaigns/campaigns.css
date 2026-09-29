@@ -1,5 +1,5 @@
 .campaign-search { max-width: 310px; }
-.campaign-row-name { display: flex; flex-direction: column; gap: var(--space-4); padding: 0; line-height: 18px; }
+.campaign-row-name { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 40px; padding: 0; line-height: 18px; }
 .campaign-audience-review-skeleton { display: contents; }
 .campaign-summary-line > .ui-skeleton-line { width: 45px; flex-shrink: 0; }
 .page-surface:has(.campaign-compose-page) { padding: var(--space-16); }
@@ -75,3 +75,4 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-progress-bar::-webkit-progress-bar { background: var(--color-border); }
 .campaign-progress-bar::-webkit-progress-value { background: var(--color-accent); }
 .campaign-progress-bar::-moz-progress-bar { background: var(--color-accent); }
+.campaign-activity { white-space: nowrap; }

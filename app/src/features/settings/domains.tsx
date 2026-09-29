@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { label } from '../../lib/format'
-import type { DnsRecord } from '../../data/types'
+import type { DnsRecord, Domain } from '../../data/types'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
@@ -23,6 +23,11 @@ function downloadDnsRecords(domain: string, records: { type: string; name: strin
   const link = Object.assign(document.createElement('a'), { href: url, download: `${domain}-dns-records.txt` })
   link.click()
   URL.revokeObjectURL(url)
+}
+
+function setupSummary(domain: Domain) {
+  const parts = [domain.dkimStatus && domain.dkimStatus !== 'verified' && `DKIM ${domain.dkimStatus}`, ['pending', 'failed'].includes(domain.mailFromStatus) && `MAIL FROM ${domain.mailFromStatus}`].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'Waiting for SES'
 }
 
 function LiveDomainsPage() {
@@ -51,7 +56,7 @@ function LiveDomainsPage() {
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.mailFromStatus === 'pending' && <div className="muted">Mail from pending</div>}</div> },
+        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.status !== 'verified' && <div className="muted">{setupSummary(row)}</div>}</div> },
         { ...settingsColumns.domains[2], render: row => row.regionId },
         { ...settingsColumns.domains[3], render: row => <Link to={`/domains/${row.id}`}>{row.status === 'verified' && row.mailFromStatus === 'verified' ? 'Manage' : 'Review records'}</Link> },
       ]} />

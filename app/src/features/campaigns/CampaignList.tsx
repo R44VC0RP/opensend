@@ -2,7 +2,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import { useApi, useApiQuery } from '../../data/context'
 import type { Campaign } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Input, PageHeader, Pagination, PaginationSkeleton, Tabs, StatusBadge } from '../../components/ui'
-import { date, number, percent, time } from '../../lib/format'
+import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 import './campaigns.css'
@@ -44,11 +44,11 @@ export function CampaignsPage() {
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row, api.environment))} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
-        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row, api.environment)} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject}</span></div> },
+        { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row, api.environment)} onClick={event => event.stopPropagation()}>{row.name}</Link>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted">{row.subject}</span>}</div> },
         { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
         { ...campaignColumns[2], render: row => number(row.recipients) },
         { ...campaignColumns[3], render: row => ['sent', 'completed'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
-        { ...campaignColumns[4], render: row => <span className="muted">{date(row.scheduledAt || row.updatedAt)} · {time(row.scheduledAt || row.updatedAt)} UTC</span> },
+        { ...campaignColumns[4], render: row => { const at = row.scheduledAt || row.updatedAt; return <span className="muted campaign-activity" title={`${date(at)} · ${time(at)} UTC`}>{shortDateTime(at)}</span> } },
         { ...campaignColumns[5], render: row => <CampaignArchiveButton campaign={row} compact onSuccess={() => filter('page', '')} /> },
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}

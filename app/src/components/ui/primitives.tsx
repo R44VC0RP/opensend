@@ -103,6 +103,7 @@ export function TableSkeleton({ columns, rows = 5, pagination = false, className
   return <><DataTable className={className} columns={columns.map(column => ({ ...column, render: () => null }))} rows={[]} rowKey={() => ''} loading skeletonRows={rows} />{pagination && <PaginationSkeleton />}</>;
 }
 export function Pagination({ page, pageSize, total, nextCursor, onPageChange }: { page: number; pageSize: number; total?: number; nextCursor?: string | null; onPageChange: (page: number) => void }) {
+  if (total === undefined && page <= 1 && !nextCursor) return null;
   if (total === undefined) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{pageSize} per page</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">{page} / {nextCursor ? `${page + 1}+` : page}</span><IconButton variant="secondary" label="Next page" disabled={!nextCursor} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
   return <NumberedPagination page={page} pageSize={pageSize} total={total} onPageChange={onPageChange} />
 }
@@ -111,6 +112,7 @@ function NumberedPagination({ page, pageSize, total, onPageChange }: { page: num
   const validPage = Math.min(pages, Math.max(1, page));
   useEffect(() => { if (page !== validPage) onPageChange(validPage); }, [page, validPage, onPageChange]);
   if (page !== validPage) return <nav className="ui-pagination" aria-label="Pagination"><span className="muted" role="status">Updating page…</span></nav>;
+  if (pages === 1) return null;
   return <nav className="ui-pagination" aria-label="Pagination"><span className="muted">{total === 0 ? '0 results' : `${((page - 1) * pageSize + 1).toLocaleString()}–${Math.min(page * pageSize, total).toLocaleString()} of ${total.toLocaleString()}`}</span><div className="cluster"><IconButton variant="secondary" label="Previous page" disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={14} /></IconButton><span aria-live="polite">{page} / {pages}</span><IconButton variant="secondary" label="Next page" disabled={page >= pages} onClick={() => onPageChange(page + 1)}><ChevronRight size={14} /></IconButton></div></nav>;
 }
 export function PageHeader({ title, actions, backTo }: { title: ReactNode; actions?: ReactNode; backTo?: string }) {

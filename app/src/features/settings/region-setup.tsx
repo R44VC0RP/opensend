@@ -128,13 +128,17 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   </section>
 }
 
+function IssueList({ issues }: { issues: { code: string; message: string }[] }) {
+  return issues.length === 1 ? <>{issues[0].message}</> : <ul className="settings-issues">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>
+}
+
 function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCatalogEntry}) {
   const {account, resources} = report
   const topic = resources.topic
   const blockers = report.blockers.filter(issue => issue.code !== 'SNS_CONFIRMATION_PENDING' || topic.subscription !== 'pending')
   return <>
-    {blockers.length > 0 && <Alert tone="warning" title="Needs attention"><ul className="settings-issues">{blockers.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></Alert>}
-    {report.warnings.length > 0 && <Alert tone="warning"><ul className="settings-issues">{report.warnings.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></Alert>}
+    {blockers.length > 0 && <Alert tone="warning" title="Needs attention"><IssueList issues={blockers} /></Alert>}
+    {report.warnings.length > 0 && <Alert tone="warning"><IssueList issues={report.warnings} /></Alert>}
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>

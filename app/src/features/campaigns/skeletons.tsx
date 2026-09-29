@@ -9,7 +9,7 @@ export const campaignColumns: SkeletonColumn[] = [
   { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} /> },
   { key: 'recipients', label: 'Recipients', skeleton: <SkeletonText width={45} /> },
   { key: 'delivered', label: 'Delivered', skeleton: <SkeletonText width={42} /> },
-  { key: 'updated', label: 'Last activity', skeleton: <SkeletonText width="90%" /> },
+  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" /> },
   { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span /> },
 ]
 
