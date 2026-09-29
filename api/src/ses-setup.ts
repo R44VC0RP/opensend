@@ -305,7 +305,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         topic.rawMessageDelivery = rawStates.includes(true) ? true : rawStates.length && rawStates.every(v => v === false) ? false : null;
         if (topic.subscription === 'pending') add(report, 'SNS_CONFIRMATION_PENDING', 'SNS is awaiting the signed HTTPS subscription confirmation. Check that the public feedback endpoint is reachable, then select the pending subscription in the SNS console and choose Request confirmation to resend.');
       }),
-      reputation(c, deadlineSignal).then(value => { report.reputation = value; }),
+      readReputation(c.cw, deadlineSignal).then(value => { report.reputation = value; }),
     ]);
     report.provisioned = report.resources.transactional.owned === true && report.resources.transactional.eventWired === true && report.resources.marketing.owned === true && report.resources.marketing.eventWired === true && topic.owned === true && topic.policyReady === true && topic.subscription === 'confirmed' && topic.rawMessageDelivery === false && !topic.subscriptionsTruncated && !report.blockers.some(b => b.code === 'SNS_SUBSCRIPTION_FILTERED' || b.code.startsWith('AWS_') || b.code === 'SNS_SUBSCRIPTION_UNKNOWN' || b.code === 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT');
     report.status = report.blockers.length ? 'blocked' : report.provisioned ? 'ready' : 'needs_provisioning';
@@ -316,11 +316,11 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
 
 // Reputation is informational: failures (usually a missing cloudwatch:GetMetricData grant)
 // are reported on the reputation object and never become readiness blockers.
-async function reputation(c: Clients, signal: AbortSignal): Promise<NonNullable<SesDiscovery['reputation']>> {
+export async function readReputation(cw: CloudWatchClient, signal: AbortSignal): Promise<NonNullable<SesDiscovery['reputation']>> {
   const end = new Date(), start = new Date(end.getTime() - 14 * 86400_000);
   const metric = (id: string, name: string, period: number) => ({ Id: id, ReturnData: true, MetricStat: { Metric: { Namespace: 'AWS/SES', MetricName: name }, Period: period, Stat: 'Average' } });
   try {
-    const result = await c.cw.send(new GetMetricDataCommand({ StartTime: start, EndTime: end, ScanBy: 'TimestampDescending', MetricDataQueries: [
+    const result = await cw.send(new GetMetricDataCommand({ StartTime: start, EndTime: end, ScanBy: 'TimestampDescending', MetricDataQueries: [
       metric('bounceLatest', 'Reputation.BounceRate', 3600), metric('complaintLatest', 'Reputation.ComplaintRate', 3600),
       metric('bounceSeries', 'Reputation.BounceRate', 21600), metric('complaintSeries', 'Reputation.ComplaintRate', 21600),
     ] }), { abortSignal: signal });

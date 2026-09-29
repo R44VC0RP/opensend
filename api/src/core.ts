@@ -44,6 +44,7 @@ export interface Config {
   awsAccountId?: string;
   snsTopicArns: string[];
   webhookAllowedHosts: string[];
+  reputationAlertUrl?: string;
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
   configurationSets: { transactional: string; marketing: string };
 }

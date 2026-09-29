@@ -7,6 +7,7 @@ import { r2Storage } from './adapters/storage.js';
 import { drainJobs } from './dispatch.js';
 import { jobConcurrency, nextWakeDelay } from './jobs.js';
 import { cleanup } from './maintenance.js';
+import { checkReputationAlerts } from './reputation-alerts.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
@@ -130,7 +131,11 @@ export default {
   },
   async scheduled(controller, env) {
     await withRuntime(env, async runtime => {
-      if (controller.cron === '7 * * * *') await cleanup(runtime);
+      if (controller.cron === '7 * * * *') {
+        await cleanup(runtime);
+        // Alerts are best-effort and must not stop the minute recovery work below.
+        try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
+      }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       const resolved = await resolveRegionRuntime(runtime);
       await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));

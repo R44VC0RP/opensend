@@ -27,6 +27,8 @@ const values = z.object({
   DISPATCH_TARGET_RATE: optional(z.coerce.number().int().min(1).max(100000)),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
   WEBHOOK_ALLOWED_HOSTS: z.string().default(''),
+  // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
+  REPUTATION_ALERT_SLACK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
 });
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
@@ -58,6 +60,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),
+    reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     configurationSets: { transactional: '', marketing: '' },
   };
 }
