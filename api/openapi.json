@@ -5135,6 +5135,72 @@
                 "message"
               ]
             }
+          },
+          "reputation": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "available": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "bounceRate": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "complaintRate": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "series": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "at": {
+                      "type": "string"
+                    },
+                    "bounceRate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "complaintRate": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "at",
+                    "bounceRate",
+                    "complaintRate"
+                  ]
+                }
+              }
+            },
+            "default": null,
+            "required": [
+              "available",
+              "reason",
+              "bounceRate",
+              "complaintRate",
+              "series"
+            ],
+            "description": "Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness."
           }
         },
         "required": [

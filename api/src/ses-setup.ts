@@ -7,6 +7,7 @@ import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListS
 import type { Subscription } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
+import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { ApiError, log } from './core.js';
 import type { Config, Runtime } from './core.js';
 
@@ -26,6 +27,11 @@ export const SesDiscoverySchema = z.object({
   }),
   feedbackUrl: z.string().nullable(), status: z.enum(['ready', 'needs_provisioning', 'blocked']), provisioned: z.boolean(),
   blockers: z.array(issue), warnings: z.array(issue),
+  reputation: z.object({
+    available: z.boolean(), reason: z.string().nullable(),
+    bounceRate: z.number().nullable(), complaintRate: z.number().nullable(),
+    series: z.array(z.object({ at: z.string(), bounceRate: z.number().nullable(), complaintRate: z.number().nullable() })),
+  }).nullable().default(null).describe('Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness.'),
 }).openapi('SesDiscovery');
 export type SesDiscovery = z.infer<typeof SesDiscoverySchema>;
 export type SesSetupOptions = { region: string; installationId: string };
@@ -128,7 +134,7 @@ function clients(runtime: Runtime, region: string, context: SetupContext) {
   if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'Configure AWS access credentials to discover or provision SES.');
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Use a valid AWS region.', 'region');
   const config = { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) };
-  const result = { ses: new SESv2Client(config), sns: new SNSClient(config), sts: new STSClient(config) };
+  const result = { ses: new SESv2Client(config), sns: new SNSClient(config), sts: new STSClient(config), cw: new CloudWatchClient(config) };
   const deadline = <Input extends object, Output>(next: (args: { input: Input }) => Promise<Output>) => async (args: { input: Input }) => {
     if (deadlineSignal.aborted) throw new ApiError(503, 'AWS_SETUP_TIMEOUT', 'The AWS setup time budget was exceeded. Retry later.', undefined, true);
     return next(args);
@@ -138,6 +144,7 @@ function clients(runtime: Runtime, region: string, context: SetupContext) {
   result.ses.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
   result.sns.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
   result.sts.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
+  result.cw.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
   return result;
 }
 type Clients = ReturnType<typeof clients>;
@@ -203,7 +210,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
   const report: SesDiscovery = {
     region: options.region, checkedAt: new Date().toISOString(), account: null, domains: [], identitiesTruncated: false,
     resources: { transactional: blankSet(names.transactional), marketing: blankSet(names.marketing), eventDestinationName: names.eventDestinationName, topic: { name: names.topicName, arn: null, exists: null, owned: null, policyReady: null, subscription: 'unknown', rawMessageDelivery: null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
-    feedbackUrl: null, status: 'blocked', provisioned: false, blockers: [], warnings: [],
+    feedbackUrl: null, status: 'blocked', provisioned: false, blockers: [], warnings: [], reputation: null,
   };
   try { report.feedbackUrl = feedbackUrl(runtime.config); } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
   const subscriptions: Subscription[] = [];
@@ -298,12 +305,43 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         topic.rawMessageDelivery = rawStates.includes(true) ? true : rawStates.length && rawStates.every(v => v === false) ? false : null;
         if (topic.subscription === 'pending') add(report, 'SNS_CONFIRMATION_PENDING', 'SNS is awaiting the signed HTTPS subscription confirmation. Check that the public feedback endpoint is reachable, then select the pending subscription in the SNS console and choose Request confirmation to resend.');
       }),
+      reputation(c, deadlineSignal).then(value => { report.reputation = value; }),
     ]);
     report.provisioned = report.resources.transactional.owned === true && report.resources.transactional.eventWired === true && report.resources.marketing.owned === true && report.resources.marketing.eventWired === true && topic.owned === true && topic.policyReady === true && topic.subscription === 'confirmed' && topic.rawMessageDelivery === false && !topic.subscriptionsTruncated && !report.blockers.some(b => b.code === 'SNS_SUBSCRIPTION_FILTERED' || b.code.startsWith('AWS_') || b.code === 'SNS_SUBSCRIPTION_UNKNOWN' || b.code === 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT');
     report.status = report.blockers.length ? 'blocked' : report.provisioned ? 'ready' : 'needs_provisioning';
   } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
-  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
   return { report, subscriptions };
+}
+
+// Reputation is informational: failures (usually a missing cloudwatch:GetMetricData grant)
+// are reported on the reputation object and never become readiness blockers.
+async function reputation(c: Clients, signal: AbortSignal): Promise<NonNullable<SesDiscovery['reputation']>> {
+  const end = new Date(), start = new Date(end.getTime() - 14 * 86400_000);
+  const metric = (id: string, name: string, period: number) => ({ Id: id, ReturnData: true, MetricStat: { Metric: { Namespace: 'AWS/SES', MetricName: name }, Period: period, Stat: 'Average' } });
+  try {
+    const result = await c.cw.send(new GetMetricDataCommand({ StartTime: start, EndTime: end, ScanBy: 'TimestampDescending', MetricDataQueries: [
+      metric('bounceLatest', 'Reputation.BounceRate', 3600), metric('complaintLatest', 'Reputation.ComplaintRate', 3600),
+      metric('bounceSeries', 'Reputation.BounceRate', 21600), metric('complaintSeries', 'Reputation.ComplaintRate', 21600),
+    ] }), { abortSignal: signal });
+    const byId = new Map((result.MetricDataResults ?? []).map(entry => [entry.Id, entry]));
+    const latest = (id: string) => { const value = byId.get(id)?.Values?.[0]; return typeof value === 'number' && Number.isFinite(value) ? value : null; };
+    const points = new Map<string, { at: string; bounceRate: number | null; complaintRate: number | null }>();
+    for (const [id, key] of [['bounceSeries', 'bounceRate'], ['complaintSeries', 'complaintRate']] as const) {
+      const entry = byId.get(id);
+      entry?.Timestamps?.forEach((at, index) => {
+        const iso = at.toISOString(), value = entry.Values?.[index];
+        const point = points.get(iso) ?? { at: iso, bounceRate: null, complaintRate: null };
+        point[key] = typeof value === 'number' && Number.isFinite(value) ? value : null;
+        points.set(iso, point);
+      });
+    }
+    return { available: true, reason: null, bounceRate: latest('bounceLatest'), complaintRate: latest('complaintLatest'), series: [...points.values()].sort((a, b) => a.at.localeCompare(b.at)) };
+  } catch (error) {
+    const name = errorName(error);
+    const reason = /AccessDenied|AuthorizationError|Unauthorized/.test(name) ? 'Add cloudwatch:GetMetricData to the AWS credentials to show reputation rates.' : awsError(error).message;
+    return { available: false, reason, bounceRate: null, complaintRate: null, series: [] };
+  }
 }
 
 /** AWS reads only. A resource is missing only after AWS explicitly reports NotFound. */
@@ -384,7 +422,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
       if (attrs.PendingConfirmation === 'false' && attrs.RawMessageDelivery !== 'false') await c.sns.send(new SetSubscriptionAttributesCommand({ SubscriptionArn: arn, AttributeName: 'RawMessageDelivery', AttributeValue: 'false' }), { abortSignal: deadlineSignal });
     }
   } catch (error) { throw awsError(error); }
-  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
   return (await inspect(runtime, options, context)).report;
 }
 
@@ -397,5 +435,5 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
     if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
     await c.ses.send(validationInput(name, mode), { abortSignal: context.signal });
   } catch (error) { throw awsError(error); }
-  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }

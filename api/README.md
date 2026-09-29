@@ -217,6 +217,7 @@ Review resource scopes and tag conditions for your account and generated regiona
 
 - Identity: STS `GetCallerIdentity` verifies the caller/account.
 - SES reads (`ses:`): `GetAccount`, `ListEmailIdentities`, `GetConfigurationSet`, `GetConfigurationSetEventDestinations`.
+- Reputation (`cloudwatch:`): `GetMetricData` reads the account-level `AWS/SES` `Reputation.BounceRate` and `Reputation.ComplaintRate` metrics. It does not support resource scoping. Without it, discovery still succeeds and the dashboard shows reputation rates as unavailable.
 - SNS reads (`sns:`): `GetTopicAttributes`, `ListTagsForResource`, `ListSubscriptionsByTopic`, `GetSubscriptionAttributes`.
 - SES provisioning (`ses:`): `CreateConfigurationSet`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, plus `TagResource` permission for creation tags.
 - SNS provisioning (`sns:`): `CreateTopic`, `SetTopicAttributes`, `Subscribe`, `SetSubscriptionAttributes`, plus `TagResource` permission for creation tags.

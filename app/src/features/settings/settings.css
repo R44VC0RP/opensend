@@ -108,10 +108,25 @@
 .settings-aws-details { border-top: 1px solid var(--color-border); padding-top: var(--space-8); }
 .settings-aws-details > summary { width: fit-content; padding-block: var(--space-8); cursor: pointer; }
 .settings-aws-details > .stack { padding-top: var(--space-20); }
+.reputation-heading { display: grid; gap: var(--space-4); }
+.reputation-fact { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
+.reputation-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-24); }
+.reputation-chart { display: grid; gap: var(--space-12); min-width: 0; margin: 0; }
+.reputation-chart figcaption { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8); }
+.reputation-chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.reputation-legend { display: flex; gap: var(--space-12); color: var(--color-muted); font-size: var(--text-xs); }
+.reputation-legend span { display: inline-flex; align-items: center; gap: var(--space-6); }
+.reputation-legend i { width: 10px; border-top: 2px dashed; }
+.reputation-key--warning, .reputation-line--warning { color: var(--color-warning-marker); stroke: var(--color-warning-marker); }
+.reputation-key--risk, .reputation-line--risk { color: var(--color-danger-marker); stroke: var(--color-danger-marker); }
+.reputation-line { stroke-width: 1.5; stroke-dasharray: 4 4; }
+.reputation-series { fill: none; stroke: var(--color-accent); stroke-width: 2; stroke-linejoin: round; }
+.reputation-empty { min-height: 120px; }
 @media (max-width: 900px) {
   .settings-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
+  .reputation-charts { grid-template-columns: 1fr; }
   .settings-account { flex-wrap: wrap; }
   .settings-account > :first-child { flex-basis: 100%; }
   .settings-facts { grid-template-columns: 1fr; }

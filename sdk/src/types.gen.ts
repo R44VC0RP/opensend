@@ -1164,6 +1164,20 @@ export type SesDiscovery = {
         code: string;
         message: string;
     }>;
+    /**
+     * Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness.
+     */
+    reputation?: {
+        available: boolean;
+        reason: string | null;
+        bounceRate: number | null;
+        complaintRate: number | null;
+        series: Array<{
+            at: string;
+            bounceRate: number | null;
+            complaintRate: number | null;
+        }>;
+    } | null;
 };
 
 export type RegionProvisionReceipt = {

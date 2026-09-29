@@ -8,6 +8,12 @@
       "Resource": "*"
     },
     {
+      "Sid": "ReadSesReputationMetrics",
+      "Effect": "Allow",
+      "Action": "cloudwatch:GetMetricData",
+      "Resource": "*"
+    },
+    {
       "Sid": "ManageSenderIdentities",
       "Effect": "Allow",
       "Action": [

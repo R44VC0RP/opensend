@@ -10,6 +10,7 @@ import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
 import { RegionDiscoverySkeleton, settingsColumns } from './skeletons'
 import { awaitingConfirmationOnly, SetupChecklist } from './setup-checklist'
+import { ReputationSection } from './reputation'
 
 const activeJob = (entry: RegionCatalogEntry) => entry.provisionStatus === 'pending' || entry.provisionStatus === 'running'
 const flag = (value: boolean | null | undefined, yes = 'Yes', no = 'No') => value == null ? 'Unknown' : value ? yes : no
@@ -142,6 +143,7 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>
+    <ReputationSection report={report} />
     {resources.transactional.owned && resources.marketing.owned && <EmailValidation report={report} />}
     <details className="settings-aws-details">
       <summary>AWS details</summary>

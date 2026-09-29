@@ -18,6 +18,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1128.0",
     "@aws-sdk/client-s3": "^3.1128.0",
     "@aws-sdk/client-sesv2": "^3.1128.0",
     "@aws-sdk/client-sns": "^3.1128.0",

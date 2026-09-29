@@ -29,7 +29,9 @@ export interface SesDiscovery {
   }
   feedbackUrl: string | null; status: 'ready' | 'needs_provisioning' | 'blocked'; provisioned: boolean
   blockers: { code: string; message: string }[]; warnings: { code: string; message: string }[]
+  reputation?: SesReputation | null
 }
+export interface SesReputation { available: boolean; reason: string | null; bounceRate: number | null; complaintRate: number | null; series: { at: string; bounceRate: number | null; complaintRate: number | null }[] }
 interface SesConfigurationSet { name: string; exists: boolean | null; owned: boolean | null; sendingEnabled: boolean | null; eventDestinationExists: boolean | null; eventWired: boolean | null; autoValidation: AutoValidationMode | null }
 export interface Workspace { id: string; name: string; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string }

@@ -40,7 +40,19 @@ function demoDiscovery(state: DemoState, region: string, resourcesReady: boolean
     resources: { transactional: set('transactional'), marketing: set('marketing'), eventDestinationName: 'opensend-demo-events', topic: { name: 'opensend-demo-feedback', arn: resourcesReady ? `arn:aws:sns:${region}:123456789012:opensend-demo-feedback` : null, exists: resourcesReady, owned: resourcesReady, policyReady: resourcesReady, subscription, rawMessageDelivery: subscription === 'confirmed' ? false : null, subscriptionsTruncated: false, staleSubscriptions: 0 } },
     feedbackUrl: 'https://demo.example.invalid/v1/events/ses', status: blockers.length ? 'blocked' : provisioned ? 'ready' : 'needs_provisioning', provisioned, blockers,
     warnings: [{ code: 'DEMO_SIMULATION', message: 'Simulated discovery only. No AWS resources, DNS records, subscriptions, or email are changed.' }],
+    reputation: demoReputation(region),
   }
+}
+// Deterministic 14-day series of 6-hour averages, shaped like CloudWatch AWS/SES reputation metrics.
+function demoReputation(region: string): NonNullable<SesDiscovery['reputation']> {
+  const seed = [...region].reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  const end = Math.floor(Date.now() / 21_600_000) * 21_600_000
+  const series = Array.from({ length: 56 }, (_, i) => {
+    const wave = Math.sin((i + seed) / 5)
+    return { at: new Date(end - (55 - i) * 21_600_000).toISOString(), bounceRate: Math.max(0, 0.0015 + wave * 0.0006), complaintRate: Math.max(0, 0.0002 + Math.cos((i + seed) / 7) * 0.00015) }
+  })
+  const last = series[series.length - 1]
+  return { available: true, reason: null, bounceRate: last.bounceRate, complaintRate: last.complaintRate, series }
 }
 function regionSetup(state: DemoState): NonNullable<DemoState['regionSetup']> {
   if (!state.regionSetup) {
