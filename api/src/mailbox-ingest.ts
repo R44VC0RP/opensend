@@ -135,7 +135,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
       }
     }
     if (!target) {
-      const threadId = await assignThread(tx, scope, { inReplyTo, references, subject, at: receivedAt });
+      const threadId = await assignThread(tx, scope, { inReplyTo, references, subject, at: receivedAt, messageId });
       const [row] = await tx.insert(mailMessages).values({
         id: messageRowId, ...scope, direction: 'inbound', threadId, region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
         fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: flatten(email?.bcc), replyTo: flatten(email?.replyTo),

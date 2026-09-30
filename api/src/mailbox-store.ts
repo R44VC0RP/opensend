@@ -113,9 +113,11 @@ export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: 
 }
 
 /** Finds the conversation for a message from In-Reply-To/References, or starts one. Serialized per workspace. */
-export async function assignThread(tx: DbExecutor, scope: Scope, input: { inReplyTo: string | null; references: string[]; subject: string; at: string }) {
+export async function assignThread(tx: DbExecutor, scope: Scope, input: { inReplyTo: string | null; references: string[]; subject: string; at: string; messageId?: string | null }) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mail_thread:${scope.workspaceId}`}))`);
-  const candidates = [...new Set([input.inReplyTo, ...[...input.references].reverse()].filter((value): value is string => !!value))].slice(0, 100);
+  // The message's own Message-ID comes last: it matches when one of our mailboxes sent it to another (internal delivery),
+  // so the recipient's copy joins the sender's conversation instead of starting a new one.
+  const candidates = [...new Set([input.inReplyTo, ...[...input.references].reverse(), input.messageId].filter((value): value is string => !!value))].slice(0, 101);
   let threadId: string | undefined;
   if (candidates.length) {
     const rows = await tx.select({ messageId: mailMessageIds.messageId, threadId: mailMessageIds.threadId }).from(mailMessageIds).where(and(eq(mailMessageIds.workspaceId, scope.workspaceId), eq(mailMessageIds.environment, scope.environment), inArray(mailMessageIds.messageId, candidates)));
