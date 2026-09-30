@@ -1,9 +1,9 @@
 import PostalMime, { type Address, type Email } from 'postal-mime';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue } from './jobs.js';
-import { mailAttachments, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
+import { mailAttachments, mailboxDomains, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents, recordEvents, type MailboxEventInput } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3, RAW_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { assignThread, attachToMailboxes, messageIdList, normalizeMessageId, rememberMessageIds, routeRecipients, snippetOf, type Scope } from './mailbox-store.js';
@@ -65,6 +65,15 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const [receipt] = await runtime.db.select().from(mailReceipts).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
   if (!receipt || receipt.status === 'processed') return;
   const notification = receipt.notification as ReceivedNotification;
+  // Only store mail addressed to a receiving domain. This skips SES's own setup notification
+  // (sent to recipient@example.com when a receipt rule is created) and anything else off-domain.
+  const domainNames = [...new Set(receipt.recipients.map(value => value.split('@')[1] ?? '').filter(Boolean))];
+  const receiving = domainNames.length ? await runtime.db.select({ name: mailboxDomains.name }).from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, scope.workspaceId), eq(mailboxDomains.environment, scope.environment), inArray(mailboxDomains.name, domainNames))) : [];
+  if (!receiving.length) {
+    await runtime.db.update(mailReceipts).set({ status: 'processed', error: 'NO_RECEIVING_DOMAIN', processedAt: new Date().toISOString() }).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
+    log('info', { code: 'MAILBOX_RECEIPT_SKIPPED', reason: 'NO_RECEIVING_DOMAIN' });
+    return;
+  }
   const s3 = mailboxS3(runtime, receipt.region);
   let raw: Uint8Array;
   try {
