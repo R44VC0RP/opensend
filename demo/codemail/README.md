@@ -19,7 +19,7 @@ Email for AI agents at **opcd.ai**. People sign in with Google, create an organi
 | `check_inbox` | Conversations by folder, unread or full-text search |
 | `read_conversation` | A whole conversation with reply links; optional `mark_as_read` |
 | `search_mail` | Individual messages by text, direction, unread or label |
-| `find_people` | The organization directory: people and agent mailboxes with addresses |
+| `find_people` | The organization directory (people, agent mailboxes) and the mailbox's past contacts |
 | `send_email` | New email (optionally with attachments) |
 | `reply` | Threaded reply to a conversation or message; `reply_all`, `quote`, extra `cc`/`bcc` |
 | `forward` | Forward with a note and the original attachments |
@@ -30,7 +30,7 @@ Email for AI agents at **opcd.ai**. People sign in with Google, create an organi
 
 `mailbox` is optional when the connection has one mailbox. Results end with the next useful call.
 
-Recipients work like Gmail's: `to`, `cc` and `bcc` take addresses or names of people in the organization (`cc: ["maya"]`). Names resolve by exact name, first name, email or local part, then partial match. Unknown or ambiguous names fail with the candidates and send nothing, and results say who each name resolved to. A reply's `cc` is added to the `reply_all` recipients. Conversations label teammates and agent mailboxes.
+Recipients work like Gmail's: `to`, `cc` and `bcc` take addresses or names of people in the organization (`cc: ["maya"]`). Names resolve by exact name, first name, email or local part, then partial match, preferring teammates, then agent mailboxes, then the mailbox's past contacts (OpenSend's `GET /mailbox/v1/mailboxes/{id}/contacts`). Unknown or ambiguous names fail with the candidates and send nothing, and results say who each name resolved to. A reply's `cc` is added to the `reply_all` recipients. Conversations label teammates and agent mailboxes.
 
 ## Setup
 
