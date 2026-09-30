@@ -4,7 +4,8 @@ import { z } from 'zod';
 import { conversationText, mailboxLine, messageLines, own, size, threadLines, who } from './format.js';
 import { OpenSend, OpenSendError, type AttachmentInput, type Mailbox } from './opensend.js';
 
-export type CodemailProps = { mailboxKey: string; keyPrefix: string; mailboxes: { id: string; address: string }[] };
+/** Stored encrypted in the OAuth grant. The mailbox key is minted for this grant alone. */
+export type CodemailProps = { mailboxKey: string; keyId: string; userId: string; organizationId: string; mailboxes: { id: string; address: string }[] };
 
 const INSTRUCTIONS = `codemail gives you real email mailboxes.
 
@@ -30,9 +31,9 @@ function explain(error: unknown) {
     MAILBOX_SEND_LIMIT: 'The mailbox hit its send limit. Wait before sending more; the limits exist to stop runaway agents.',
     RECIPIENT_SEND_LIMIT: 'Too many messages to this recipient recently. This guards against reply loops; wait before sending again.',
     THREAD_LOOP_SUSPECTED: 'Too many replies in this conversation in 10 minutes. Stop and check with the user before continuing.',
-    PERMISSION_DENIED: 'The connected mailbox key does not allow this action. Ask the user to reconnect with a key that has the needed permission (read, send or modify).',
+    PERMISSION_DENIED: 'This connection was not given that permission. Ask the user to reconnect codemail and allow it (send or organize mail).',
     NOT_FOUND: 'Not found in this mailbox. Check the ID with check_inbox or search_mail.',
-    AUTH_INVALID: 'The connected mailbox key was revoked. Ask the user to reconnect codemail.',
+    AUTH_INVALID: 'This connection was disconnected. Ask the user to reconnect codemail.',
   };
   return failure(`${error.message}${hints[error.code] ? `\n\n${hints[error.code]}` : ''} (${error.code})`);
 }

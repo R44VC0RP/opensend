@@ -1,3 +1,8 @@
 node_modules/
 .wrangler/
 .dev.vars*
+# Synced from ../../app by scripts/sync-design.mjs
+public/styles/
+public/fonts/
+public/theme.js
+public/favicon.svg

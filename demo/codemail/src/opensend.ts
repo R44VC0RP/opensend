@@ -17,23 +17,26 @@ export class OpenSendError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 
+/** One authenticated call to OpenSend. path starts at the API root (/mailbox/v1/…, /v1/…). */
+async function request<T>(baseUrl: string, key: string, method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch { throw new OpenSendError(503, 'OPENSEND_UNREACHABLE', 'OpenSend could not be reached. Try again shortly.'); }
+  const data = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
+  if (!response.ok) throw new OpenSendError(response.status, data?.error?.code ?? `HTTP_${response.status}`, data?.error?.message ?? `OpenSend returned HTTP ${response.status}.`);
+  return data as T;
+}
+
+/** Agent-side client: one mailbox key, scoped by OpenSend to its mailboxes and permissions. */
 export class OpenSend {
   private mailboxCache?: Promise<Mailbox[]>;
   constructor(private baseUrl: string, private key: string) {}
-
-  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl.replace(/\/$/, '')}/mailbox/v1${path}`, {
-        method,
-        headers: { Authorization: `Bearer ${this.key}`, Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch { throw new OpenSendError(503, 'OPENSEND_UNREACHABLE', 'OpenSend could not be reached. Try again shortly.'); }
-    const data = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
-    if (!response.ok) throw new OpenSendError(response.status, data?.error?.code ?? `HTTP_${response.status}`, data?.error?.message ?? `OpenSend returned HTTP ${response.status}.`);
-    return data as T;
-  }
+  private call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string) { return request<T>(this.baseUrl, this.key, method, `/mailbox/v1${path}`, body, idempotencyKey); }
 
   mailboxes() { return this.mailboxCache ??= this.call<{ data: Mailbox[] }>('GET', '/mailboxes?limit=100').then(result => result.data); }
   threads(mailboxId: string, query: { view: string; unread?: boolean; q?: string; limit: number; cursor?: string }) {
@@ -60,6 +63,42 @@ export class OpenSend {
   }
   attachment(mailboxId: string, attachmentId: string) { return this.call<Attachment & { messageId: string; url: string; expiresAt: string }>('GET', `/mailboxes/${enc(mailboxId)}/attachments/${enc(attachmentId)}`); }
   labels(mailboxId: string) { return this.call<{ data: { name: string; threads: number; messages: number; unreadMessages: number }[] }>('GET', `/mailboxes/${enc(mailboxId)}/labels`); }
+}
+
+export type Subdomain = { id: string; name: string; parentDomainId: string; status: 'active' | 'disabled'; catchAll: string; metadata: Record<string, unknown>; mx: { state: string; message: string } | null; mailboxCount: number; createdAt: string };
+export type MailboxKey = { id: string; name: string; prefix: string; mailboxIds: string[] | null; permissions: string[]; createdAt: string; lastUsedAt: string | null; revokedAt: string | null };
+export type Permission = 'read' | 'send' | 'modify';
+
+/** Product-side client: codemail's one live OpenSend API key (manage + send) for domains, mailboxes, keys and invites. */
+export class OpenSendAdmin {
+  private parentCache?: Promise<string>;
+  constructor(private baseUrl: string, private key: string, private mailDomain: string) {}
+  private call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string) { return request<T>(this.baseUrl, this.key, method, path, body, idempotencyKey); }
+
+  /** The OpenSend domain ID of the parent mail domain (opcd.ai), looked up once per isolate. */
+  parentDomainId() {
+    return this.parentCache ??= this.call<{ data: { id: string; name: string; status: string }[] }>('GET', '/mailbox/v1/domains').then(({ data }) => {
+      const domain = data.find(item => item.name === this.mailDomain);
+      if (!domain) throw new OpenSendError(500, 'MAIL_DOMAIN_MISSING', `${this.mailDomain} is not a domain in OpenSend.`);
+      return domain.id;
+    }).catch(error => { this.parentCache = undefined; throw error; });
+  }
+  async addSubdomain(label: string, metadata: Record<string, unknown>) { return this.call<Subdomain>('POST', `/mailbox/v1/domains/${enc(await this.parentDomainId())}/subdomains`, { name: label, metadata }); }
+  async removeSubdomain(subdomainId: string) { return this.call<Subdomain>('DELETE', `/mailbox/v1/domains/${enc(await this.parentDomainId())}/subdomains/${enc(subdomainId)}`); }
+  async updateSubdomain(subdomainId: string, metadata: Record<string, unknown>) { return this.call<Subdomain>('PATCH', `/mailbox/v1/domains/${enc(await this.parentDomainId())}/subdomains/${enc(subdomainId)}`, { metadata }); }
+  async subdomain(subdomainId: string) { return this.call<Subdomain>('GET', `/mailbox/v1/domains/${enc(await this.parentDomainId())}/subdomains/${enc(subdomainId)}`); }
+
+  mailboxes(host: string) { return this.call<{ data: Mailbox[] }>('GET', `/mailbox/v1/mailboxes?limit=100&domain=${enc(host)}`).then(result => result.data); }
+  mailbox(mailboxId: string) { return this.call<Mailbox>('GET', `/mailbox/v1/mailboxes/${enc(mailboxId)}`); }
+  createMailbox(input: { address: string; displayName?: string; metadata: Record<string, unknown> }) { return this.call<Mailbox>('POST', '/mailbox/v1/mailboxes', input); }
+  deleteMailbox(mailboxId: string) { return this.call<unknown>('DELETE', `/mailbox/v1/mailboxes/${enc(mailboxId)}`); }
+  threads(mailboxId: string, limit = 30) { return this.call<{ data: Thread[]; nextCursor: string | null }>('GET', `/mailbox/v1/mailboxes/${enc(mailboxId)}/threads?view=all&limit=${limit}`); }
+  thread(mailboxId: string, threadId: string) { return this.call<ThreadDetail>('GET', `/mailbox/v1/mailboxes/${enc(mailboxId)}/threads/${enc(threadId)}`); }
+
+  createKey(input: { name: string; mailboxIds: string[]; permissions: Permission[] }) { return this.call<MailboxKey & { secret: string }>('POST', '/mailbox/v1/keys', input); }
+  revokeKey(keyId: string) { return this.call<MailboxKey>('POST', `/mailbox/v1/keys/${enc(keyId)}/revoke`).catch(error => { if (error instanceof OpenSendError && error.status === 404) return null; throw error; }); }
+
+  sendEmail(input: { from: string; fromName?: string; to: string; subject: string; text: string; html?: string }, idempotencyKey?: string) { return this.call<{ id: string }>('POST', '/v1/emails/send', { ...input, kind: 'transactional' }, idempotencyKey); }
 }
 
 const enc = encodeURIComponent;

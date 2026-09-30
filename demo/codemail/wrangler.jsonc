@@ -7,11 +7,20 @@
   // global_fetch_strictly_public is required for OAuth Client ID Metadata Documents.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
-  "routes": [{ "pattern": "mail.opcd.ai", "custom_domain": true }],
+  "routes": [{ "pattern": "opcd.ai", "custom_domain": true }],
+  // OpenSend's design system (synced by scripts/sync-design.mjs) plus codemail.css and theme-toggle.js.
+  "assets": { "directory": "./public" },
   "vars": {
-    "PUBLIC_URL": "https://mail.opcd.ai",
-    "OPENSEND_URL": "https://opensend.anoma.ly"
+    "PUBLIC_URL": "https://opcd.ai",
+    "OPENSEND_URL": "https://opensend.anoma.ly",
+    "MAIL_DOMAIN": "opcd.ai",
+    "INVITE_FROM": "codemail <invites@opcd.ai>",
+    // Who may create organizations: comma-separated emails or @domains. Empty allows anyone.
+    "SIGNUP_ALLOWLIST": ""
   },
+  // Secrets (wrangler secret put): OPENSEND_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BETTER_AUTH_SECRET.
+  // The OpenSend database; codemail's tables live in its "codemail" schema.
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   // OAuth clients, grants and tokens. Tokens are stored as hashes; grant props (the mailbox key) are encrypted.
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }],
   "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }

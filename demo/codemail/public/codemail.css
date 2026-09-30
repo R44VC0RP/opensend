@@ -1,0 +1,60 @@
+/* codemail layout on top of OpenSend's tokens.css, ui.css and app.css. Only OpenSend tokens are used here. */
+.sidebar-context .org-switch { display: flex; flex-direction: column; gap: 2px; padding: var(--space-8); border-radius: var(--radius-sm); background: var(--color-layer-1); border: 1px solid var(--color-border); text-decoration: none; color: var(--color-text); }
+.sidebar-context .org-switch:hover { background: var(--color-hover); }
+.org-switch strong { font-weight: var(--font-weight-bold); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-switch span { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-account { display: flex; flex-direction: column; gap: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); overflow-wrap: anywhere; }
+.sidebar-account form { margin: 0; }
+.sidebar-account .ui-button { align-self: flex-start; margin-left: calc(-1 * var(--space-8)); }
+
+/* Signed-out and single-task pages: one raised surface, centered. */
+.solo-shell { min-height: 100dvh; display: flex; flex-direction: column; background: var(--color-deep); }
+.solo-top { position: relative; height: 56px; }
+.solo-top .wordmark { position: absolute; }
+.solo-top .theme-toggle { top: 14px; right: var(--space-16); }
+.solo-main { flex: 1; display: grid; place-items: start center; padding: var(--space-40) var(--space-16) var(--space-40); }
+.solo-surface { width: min(460px, 100%); padding: var(--space-24); background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); }
+.solo-surface h1 { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; }
+.solo-surface > .stack > p, .solo-surface .lead { color: var(--color-muted); }
+.solo-actions { display: flex; justify-content: flex-end; gap: var(--space-8); }
+.solo-actions .ui-button--block { flex: 1; }
+
+.facts { display: grid; gap: var(--space-8); margin: 0; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); border: 1px solid var(--color-border-muted); }
+.facts > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: var(--space-12); }
+.facts dt { color: var(--color-muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+.steps { margin: 0; padding-left: var(--space-20); color: var(--color-muted); display: grid; gap: var(--space-6); }
+.input-suffix { display: flex; align-items: center; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: var(--shadow-button); outline: 1px solid transparent; transition: outline-color var(--motion-duration); }
+.input-suffix:focus-within { outline-color: var(--color-focus); }
+.input-suffix .ui-input { box-shadow: none; background: transparent; outline: 0; }
+.input-suffix > span { padding-right: var(--space-8); color: var(--color-muted); white-space: nowrap; }
+.choice { display: flex; align-items: flex-start; gap: var(--space-8); min-height: var(--control-height); padding-block: var(--space-4); cursor: pointer; }
+.choice input { width: var(--space-16); height: var(--space-16); margin: 2px 0 0; accent-color: var(--color-accent); flex-shrink: 0; }
+.choice input:disabled + span { color: var(--color-muted); }
+.choice .muted { display: block; font-size: var(--text-xs); line-height: var(--leading-xs); }
+.choices { display: flex; flex-direction: column; }
+.org-pills { display: flex; flex-wrap: wrap; gap: var(--space-6); }
+.org-pills a { text-decoration: none; }
+.inline-form { display: flex; align-items: flex-end; gap: var(--space-12); flex-wrap: wrap; }
+.inline-form > .ui-field { flex: 1 1 200px; }
+.inline-form > .ui-field--narrow { flex: 0 1 160px; }
+.ui-table td form { margin: 0; }
+.ui-table .row-actions { width: 120px; text-align: right; }
+.unread-dot { display: inline-block; width: 6px; height: 6px; margin-right: var(--space-8); border-radius: 50%; background: var(--color-accent); vertical-align: middle; }
+.thread-message { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-20) 0; border-top: 1px solid var(--color-border); }
+.thread-message:first-child { border-top: 0; padding-top: 0; }
+.thread-message__meta { display: flex; justify-content: space-between; gap: var(--space-16); flex-wrap: wrap; }
+.thread-message__body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-body); line-height: 1.55; }
+.panel { padding: var(--space-16); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.danger-zone { border-color: var(--color-danger-border); }
+a.link { color: var(--color-accent); text-decoration: none; }
+a.link:hover { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 720px) {
+  .sidebar { position: static; width: auto; padding: 56px var(--space-8) var(--space-8); }
+  .page-surface { margin: 0 var(--space-8) var(--space-8); height: auto; }
+}
+/* Theme toggle icon follows data-theme (set by theme.js before paint). */
+[data-theme-toggle] [data-icon] { display: none; }
+:root:not([data-theme='dark']) [data-theme-toggle] [data-icon='moon'], :root[data-theme='dark'] [data-theme-toggle] [data-icon='sun'] { display: block; }
+.ui-table .col-primary { width: 40%; }
+.ui-table .col-primary code { overflow-wrap: anywhere; word-break: normal; }

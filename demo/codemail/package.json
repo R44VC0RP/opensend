@@ -3,19 +3,28 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "design": "node scripts/sync-design.mjs",
+    "predev": "node scripts/sync-design.mjs",
     "dev": "wrangler dev",
+    "predeploy": "node scripts/sync-design.mjs",
     "deploy": "wrangler deploy",
     "check": "tsc --noEmit",
     "types": "wrangler types"
   },
   "dependencies": {
+    "@better-auth/drizzle-adapter": "1.7.3",
     "@cloudflare/workers-oauth-provider": "1.2.1",
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "0.24.0",
-    "zod": "^4.6.5"
+    "better-auth": "^1.7.3",
+    "drizzle-orm": "^0.45.3",
+    "hono": "^4.13.12",
+    "pg": "^8.23.0",
+    "zod": "~4.5.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260930.2",
+    "@types/pg": "^8.23.1",
     "typescript": "^6.0.3",
     "wrangler": "^4.145.0"
   }
