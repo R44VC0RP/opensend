@@ -85,7 +85,13 @@ const DomainSchema = z.object({
   catchAll: z.enum(['create_mailbox', 'store']).describe('What happens to mail for an address with no mailbox: create_mailbox makes one automatically; store keeps it as unrouted.'),
   dns: z.array(MxRecord).describe('Records to publish for receiving.'), mx: MxReportSchema.nullable(), lastError: z.string().nullable(),
   enabledAt: z.string().nullable(), checkedAt: z.string().nullable(), mailboxCount: z.number().int(),
+  subdomains: z.object({ enabled: z.boolean().describe('Whether the receipt rule also matches every subdomain.'), count: z.number().int().describe('Receiving subdomains.'), dns: z.array(MxRecord).describe('The wildcard MX record subdomains need, published once.') }),
 }).openapi('MailboxDomain');
+const SubdomainSchema = z.object({
+  id: z.string().describe('Subdomain ID (mdom_…).'), name: z.string().describe('Full host, e.g. acme.example.com.'), parentDomainId: z.string().describe('OpenSend domain ID of the parent.'), parentName: z.string(),
+  status: z.enum(['active', 'disabled']), catchAll: z.enum(['create_mailbox', 'store']), metadata: z.record(z.string(), z.unknown()),
+  dns: z.array(MxRecord).describe('The parent’s wildcard MX record, which receives this subdomain.'), mx: MxReportSchema.nullable(), mailboxCount: z.number().int(), createdAt: z.string(), updatedAt: z.string(),
+}).openapi('MailboxSubdomain');
 const MailboxSchema = z.object({
   id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
@@ -125,12 +131,14 @@ const Ok = z.object({ ok: z.literal(true) }).openapi('MailboxOk');
 // ---------- views ----------
 async function domainViews(runtime: Runtime, rows: (typeof domains.$inferSelect)[]) {
   if (!rows.length) return [];
-  const inbound = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), eq(mailboxDomains.environment, LIVE), inArray(mailboxDomains.domainId, rows.map(row => row.id))));
+  const inbound = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), eq(mailboxDomains.environment, LIVE), isNull(mailboxDomains.parentId), inArray(mailboxDomains.domainId, rows.map(row => row.id))));
   const counts = inbound.length ? await runtime.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, inbound.map(row => row.id))).groupBy(mailboxes.domainId) : [];
+  const children = inbound.length ? await runtime.db.select({ parentId: mailboxDomains.parentId, count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(inArray(mailboxDomains.parentId, inbound.map(row => row.id)), eq(mailboxDomains.status, 'active'))).groupBy(mailboxDomains.parentId) : [];
   return rows.map(row => {
     const state = inbound.find(item => item.domainId === row.id);
     return { id: row.id, name: row.name, region: row.region, status: state?.status ?? 'off' as const, catchAll: state?.catchAll ?? 'create_mailbox' as const, dns: [expectedMx(row.name, row.region)], mx: state?.mx ?? null, lastError: state?.lastError ?? null,
-      enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), mailboxCount: counts.find(item => item.domainId === state?.id)?.count ?? 0 };
+      enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), mailboxCount: counts.find(item => item.domainId === state?.id)?.count ?? 0,
+      subdomains: { enabled: state?.acceptSubdomains ?? false, count: children.find(item => item.parentId === state?.id)?.count ?? 0, dns: [expectedMx(`*.${row.name}`, row.region)] } };
   });
 }
 async function operationDomain(c: Ctx, domainId: string) {
@@ -138,6 +146,25 @@ async function operationDomain(c: Ctx, domainId: string) {
   if (!row) throw new ApiError(404, 'NOT_FOUND', 'Domain was not found.');
   return row;
 }
+async function subdomainViews(runtime: Runtime, parent: typeof mailboxDomains.$inferSelect, rows: (typeof mailboxDomains.$inferSelect)[]) {
+  const counts = rows.length ? await runtime.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, rows.map(row => row.id))).groupBy(mailboxes.domainId) : [];
+  return rows.map(row => ({ id: row.id, name: row.name, parentDomainId: parent.domainId, parentName: parent.name, status: row.status === 'active' ? 'active' as const : 'disabled' as const, catchAll: row.catchAll, metadata: row.metadata,
+    dns: [expectedMx(`*.${parent.name}`, parent.region)], mx: row.mx ?? null, mailboxCount: counts.find(item => item.domainId === row.id)?.count ?? 0, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! }));
+}
+/** The receiving top-level row for an OpenSend domain, which subdomains hang off. */
+async function receivingParent(c: Ctx, domainId: string) {
+  const row = await operationDomain(c, domainId);
+  const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
+  if (!parent || !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${row.name} before adding subdomains.`);
+  return parent;
+}
+async function subdomainRow(c: Ctx, parent: typeof mailboxDomains.$inferSelect, subdomainId: string) {
+  const [row] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.parentId, parent.id), eq(mailboxDomains.id, subdomainId)));
+  if (!row) throw new ApiError(404, 'NOT_FOUND', 'Subdomain was not found.');
+  return row;
+}
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const Metadata = z.record(z.string(), z.unknown()).refine(value => JSON.stringify(value).length <= 4096, 'Metadata must be at most 4 KB.');
 async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSelect)[]) {
   if (!rows.length) return [];
   const ids = rows.map(row => row.id);
@@ -261,8 +288,8 @@ export function registerMailbox(app: App) {
   app.openapi(route({ method: 'post', path: '/domains/{id}/check', operationId: 'mailboxCheckDomain', tags: [TAG.domains], summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(DomainSchema), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     const mx = await checkMx(row.name, row.region);
-    await c.env.db.update(mailboxDomains).set({ mx, checkedAt: mx.checkedAt, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id)));
-    if (mx.state !== 'error') await c.env.db.update(mailboxDomains).set({ status: mx.state === 'active' ? 'active' : 'waiting_for_mx' }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id), inArray(mailboxDomains.status, ['waiting_for_mx', 'active'])));
+    await c.env.db.update(mailboxDomains).set({ mx, checkedAt: mx.checkedAt, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
+    if (mx.state !== 'error') await c.env.db.update(mailboxDomains).set({ status: mx.state === 'active' ? 'active' : 'waiting_for_mx' }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active'])));
     const [view] = await domainViews(c.env, [row]);
     return c.json({ ...view!, mx }, 200);
   });
@@ -276,7 +303,7 @@ export function registerMailbox(app: App) {
     const mx = await checkMx(row.name, row.region);
     if (mxBlocksEnable(mx) && !input.force) throw new ApiError(409, 'MX_CONFLICT', `${mx.message} Retry with force=true to continue anyway.`);
     await c.env.db.transaction(async tx => {
-      const [current] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.domainId, row.id))).for('update');
+      const [current] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId))).for('update');
       const now = new Date().toISOString();
       if (!current) await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: value.workspaceId, environment: LIVE, domainId: row.id, name: row.name, region: row.region, status: 'provisioning', catchAll: input.catchAll ?? 'create_mailbox', mx, checkedAt: mx.checkedAt });
       else await tx.update(mailboxDomains).set({ ...(['disabled', 'disabling', 'failed'].includes(current.status) ? { status: 'provisioning' as const, lastError: null } : {}), ...(input.catchAll ? { catchAll: input.catchAll } : {}), mx, checkedAt: mx.checkedAt, updatedAt: now }).where(eq(mailboxDomains.id, current.id));
@@ -288,16 +315,82 @@ export function registerMailbox(app: App) {
   app.openapi(route({ method: 'post', path: '/domains/{id}/disable', operationId: 'mailboxDisableDomain', tags: [TAG.domains], summary: 'Stop receiving for a domain', description: 'Removes the domain from the OpenSend receipt rule. Mailboxes and stored messages are kept.', request: { params: IdParam }, responses: { 202: response(DomainSchema), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     await c.env.db.transaction(async tx => {
-      const updated = await tx.update(mailboxDomains).set({ status: 'disabling', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active', 'failed']))).returning({ id: mailboxDomains.id });
+      const updated = await tx.update(mailboxDomains).set({ status: 'disabling', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active', 'failed']))).returning({ id: mailboxDomains.id });
       if (updated.length) await queueReconcile(tx, value.workspaceId, row.region);
     });
     return c.json((await domainViews(c.env, [row]))[0]!, 202);
   });
   app.openapi(route({ method: 'patch', path: '/domains/{id}', operationId: 'mailboxUpdateDomain', tags: [TAG.domains], request: { params: IdParam, body: json(z.object({ catchAll: z.enum(['create_mailbox', 'store']) }).strict().openapi('UpdateMailboxDomain')) }, responses: { 200: response(DomainSchema), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    const updated = await c.env.db.update(mailboxDomains).set({ catchAll: c.req.valid('json').catchAll, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id))).returning({ id: mailboxDomains.id });
+    const updated = await c.env.db.update(mailboxDomains).set({ catchAll: c.req.valid('json').catchAll, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId))).returning({ id: mailboxDomains.id });
     if (!updated.length) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', 'Enable receiving for this domain first.');
     return c.json((await domainViews(c.env, [row]))[0]!, 200);
+  });
+
+  // ---------- subdomains ----------
+  const SubParams = z.object({ id: z.string().min(1).max(120), subdomainId: z.string().min(1).max(120) });
+  app.openapi(route({ method: 'get', path: '/domains/{id}/subdomains', operationId: 'mailboxListSubdomains', tags: [TAG.domains], summary: 'List receiving subdomains',
+    request: { params: IdParam, query: z.object({ status: z.enum(['active', 'disabled', 'all']).default('active'), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(SubdomainSchema, 'MailboxSubdomainPage')), ...errors } }), async c => {
+    admin(c); const parent = await receivingParent(c, c.req.valid('param').id); const q = c.req.valid('query');
+    const rows = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.parentId, parent.id), q.status === 'all' ? undefined : q.status === 'active' ? eq(mailboxDomains.status, 'active') : sql`${mailboxDomains.status} <> 'active'`, q.cursor ? sql`${mailboxDomains.name} > ${q.cursor}` : undefined)).orderBy(asc(mailboxDomains.name)).limit(q.limit + 1);
+    return c.json({ data: await subdomainViews(c.env, parent, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.name : null }, 200);
+  });
+  app.openapi(route({ method: 'post', path: '/domains/{id}/subdomains', operationId: 'mailboxCreateSubdomain', tags: [TAG.domains], summary: 'Add a receiving subdomain',
+    description: 'Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule; publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.',
+    request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: z.enum(['create_mailbox', 'store']).default('store').describe('Mail for an address with no mailbox: store keeps it as unrouted (default); create_mailbox makes one.'), metadata: Metadata.default({}) }).strict().openapi('CreateMailboxSubdomain')) },
+    responses: { 201: response(SubdomainSchema), ...errors } }), async c => {
+    const value = admin(c); const parent = await receivingParent(c, c.req.valid('param').id); const input = c.req.valid('json');
+    const label = input.name.endsWith(`.${parent.name}`) ? input.name.slice(0, -(parent.name.length + 1)) : input.name;
+    if (!LABEL.test(label)) throw new ApiError(422, 'INVALID_SUBDOMAIN', `Use one DNS label of letters, digits and hyphens, e.g. acme for acme.${parent.name}.`, 'name');
+    const name = `${label}.${parent.name}`;
+    const mx = await checkMx(name, parent.region);
+    const row = await c.env.db.transaction(async tx => {
+      // One lock per parent keeps accept_subdomains consistent with its active subdomains.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_subdomains:${parent.id}`}))`);
+      const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, parent.id));
+      const [existing] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.name, name)));
+      if (existing && (existing.parentId !== parent.id || existing.status === 'active')) throw new ApiError(409, 'SUBDOMAIN_EXISTS', `${name} already receives mail.`, 'name');
+      const now = new Date().toISOString();
+      const [saved] = existing
+        ? await tx.update(mailboxDomains).set({ status: 'active', catchAll: input.catchAll, metadata: input.metadata, mx, checkedAt: mx.checkedAt, lastError: null, enabledAt: now, updatedAt: now }).where(eq(mailboxDomains.id, existing.id)).returning()
+        : await tx.insert(mailboxDomains).values({ id: id('mdom'), workspaceId: value.workspaceId, environment: LIVE, domainId: parent.domainId, parentId: parent.id, name, region: parent.region, status: 'active', catchAll: input.catchAll, metadata: input.metadata, mx, checkedAt: mx.checkedAt, enabledAt: now }).returning();
+      if (!fresh?.acceptSubdomains) {
+        await tx.update(mailboxDomains).set({ acceptSubdomains: true, updatedAt: now }).where(eq(mailboxDomains.id, parent.id));
+        await queueReconcile(tx, value.workspaceId, parent.region);
+      }
+      return saved!;
+    });
+    log('info', { code: 'MAILBOX_SUBDOMAIN_ADDED', region: parent.region, mx: mx.state });
+    return c.json((await subdomainViews(c.env, { ...parent, acceptSubdomains: true }, [row]))[0]!, 201);
+  });
+  app.openapi(route({ method: 'get', path: '/domains/{id}/subdomains/{subdomainId}', operationId: 'mailboxGetSubdomain', tags: [TAG.domains], request: { params: SubParams }, responses: { 200: response(SubdomainSchema), ...errors } }), async c => {
+    admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id);
+    return c.json((await subdomainViews(c.env, parent, [await subdomainRow(c, parent, params.subdomainId)]))[0]!, 200);
+  });
+  app.openapi(route({ method: 'patch', path: '/domains/{id}/subdomains/{subdomainId}', operationId: 'mailboxUpdateSubdomain', tags: [TAG.domains],
+    request: { params: SubParams, body: json(z.object({ catchAll: z.enum(['create_mailbox', 'store']).optional(), metadata: Metadata.optional() }).strict().openapi('UpdateMailboxSubdomain')) }, responses: { 200: response(SubdomainSchema), ...errors } }), async c => {
+    admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id); const input = c.req.valid('json');
+    const current = await subdomainRow(c, parent, params.subdomainId);
+    const [row] = await c.env.db.update(mailboxDomains).set({ ...(input.catchAll ? { catchAll: input.catchAll } : {}), ...(input.metadata ? { metadata: input.metadata } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+    return c.json((await subdomainViews(c.env, parent, [row!]))[0]!, 200);
+  });
+  app.openapi(route({ method: 'delete', path: '/domains/{id}/subdomains/{subdomainId}', operationId: 'mailboxRemoveSubdomain', tags: [TAG.domains], summary: 'Stop receiving for a subdomain',
+    description: 'New mail to the subdomain is dropped. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. Removing the last subdomain takes the wildcard recipient out of the receipt rule.', request: { params: SubParams }, responses: { 200: response(SubdomainSchema), ...errors } }), async c => {
+    const value = admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id);
+    const current = await subdomainRow(c, parent, params.subdomainId);
+    const row = await c.env.db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_subdomains:${parent.id}`}))`);
+      const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, parent.id));
+      const now = new Date().toISOString();
+      const [saved] = await tx.update(mailboxDomains).set({ status: 'disabled', updatedAt: now }).where(eq(mailboxDomains.id, current.id)).returning();
+      const [left] = await tx.select({ count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(eq(mailboxDomains.parentId, parent.id), eq(mailboxDomains.status, 'active')));
+      if (!left?.count && fresh?.acceptSubdomains) {
+        await tx.update(mailboxDomains).set({ acceptSubdomains: false, updatedAt: now }).where(eq(mailboxDomains.id, parent.id));
+        await queueReconcile(tx, value.workspaceId, parent.region);
+      }
+      return saved!;
+    });
+    return c.json((await subdomainViews(c.env, parent, [row]))[0]!, 200);
   });
 
   // ---------- mailboxes ----------

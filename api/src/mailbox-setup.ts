@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { SESClient, CreateReceiptRuleCommand, CreateReceiptRuleSetCommand, DeleteReceiptRuleCommand, DescribeActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, UpdateReceiptRuleCommand, type ReceiptRule } from '@aws-sdk/client-ses';
 import { S3Client, CreateBucketCommand, HeadBucketCommand, PutBucketLifecycleConfigurationCommand, PutBucketPolicyCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand } from '@aws-sdk/client-s3';
 import { SNSClient, CreateTopicCommand, ListSubscriptionsByTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, SubscribeCommand } from '@aws-sdk/client-sns';
@@ -171,7 +171,9 @@ export async function reconcileRegion(runtime: Runtime, region: string): Promise
     const resources = { ...await ensureRegion(runtime, region, settings.installationId, signal, clients), ses: clients.ses };
     const names = mailboxResources(settings.installationId, region);
     const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region)));
-    const desired = new Set(rows.filter(row => ['provisioning', 'waiting_for_mx', 'active'].includes(row.status)).map(row => row.name));
+    // Subdomain rows are covered by their parent's wildcard recipient (.example.com), not listed themselves.
+    const receiving = rows.filter(row => !row.parentId && ['provisioning', 'waiting_for_mx', 'active'].includes(row.status));
+    const desired = new Set(receiving.flatMap(row => row.acceptSubdomains ? [row.name, `.${row.name}`] : [row.name]));
     const ours = resources.rules.filter(rule => rule.Name?.startsWith(names.rulePrefix)).sort((a, b) => a.Name!.localeCompare(b.Name!));
     const current = new Set(ours.flatMap(rule => rule.Recipients ?? []));
     const pending = [...desired].filter(name => !current.has(name)).sort();
@@ -192,6 +194,7 @@ export async function reconcileRegion(runtime: Runtime, region: string): Promise
     const now = new Date().toISOString();
     await runtime.db.update(mailboxRegions).set({ ruleSetName: resources.ruleSetName, lastReconciledAt: now, lastError: null, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region)));
     for (const row of rows) {
+      if (row.parentId) continue;
       if (row.status === 'disabling') { await runtime.db.update(mailboxDomains).set({ status: 'disabled', lastError: null, updatedAt: now }).where(and(eq(mailboxDomains.id, row.id), eq(mailboxDomains.status, 'disabling'))); continue; }
       if (row.status !== 'provisioning') continue;
       const mx = await checkMx(row.name, region);
@@ -232,7 +235,7 @@ const reconcileJob: JobHandler = async (runtime, payload, job) => {
 
 /** Hourly: refresh MX state for receiving domains so status follows DNS changes. */
 export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
-  const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
+  const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
   for (const row of rows) {
     const mx = await checkMx(row.name, row.region);
     if (mx.state === 'error') continue;

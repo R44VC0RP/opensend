@@ -1,4 +1,5 @@
 import { bigint, bigserial, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import type { Mode } from '../core.js';
 
 export type MailAddress = { name: string | null; address: string };
@@ -31,8 +32,11 @@ export const mailboxDomains = pgTable('mailbox_domains', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), name: text('name').notNull(), region: text('region').notNull(),
   status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: text('catch_all').$type<CatchAll>().notNull().default('create_mailbox'),
   mx: jsonb('mx').$type<MxReport | null>(), lastError: text('last_error'), enabledAt: ts('enabled_at'), checkedAt: ts('checked_at'),
+  // Subdomains (acme.example.com) point at their receiving parent and share its SES domain.
+  parentId: text('parent_id'), acceptSubdomains: boolean('accept_subdomains').notNull().default(false),
+  metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
-}, t => [uniqueIndex('mailbox_domains_name').on(t.workspaceId, t.environment, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.environment, t.domainId), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
+}, t => [uniqueIndex('mailbox_domains_name').on(t.workspaceId, t.environment, t.name), uniqueIndex('mailbox_domains_domain').on(t.workspaceId, t.environment, t.domainId).where(sql`${t.parentId} IS NULL`), index('mailbox_domains_region').on(t.workspaceId, t.region, t.status)]);
 
 export const mailboxes = pgTable('mailboxes', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),

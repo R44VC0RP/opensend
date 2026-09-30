@@ -1230,6 +1230,25 @@ export type MailboxDomain = {
     enabledAt: string | null;
     checkedAt: string | null;
     mailboxCount: number;
+    subdomains: {
+        /**
+         * Whether the receipt rule also matches every subdomain.
+         */
+        enabled: boolean;
+        /**
+         * Receiving subdomains.
+         */
+        count: number;
+        /**
+         * The wildcard MX record subdomains need, published once.
+         */
+        dns: Array<{
+            type: 'MX';
+            name: string;
+            value: string;
+            priority: number;
+        }>;
+    };
 };
 
 export type MailboxMxReport = {
@@ -1257,6 +1276,66 @@ export type EnableMailboxDomain = {
 
 export type UpdateMailboxDomain = {
     catchAll: 'create_mailbox' | 'store';
+};
+
+export type MailboxSubdomainPage = {
+    data: Array<MailboxSubdomain>;
+    nextCursor: string | null;
+};
+
+export type MailboxSubdomain = {
+    /**
+     * Subdomain ID (mdom_…).
+     */
+    id: string;
+    /**
+     * Full host, e.g. acme.example.com.
+     */
+    name: string;
+    /**
+     * OpenSend domain ID of the parent.
+     */
+    parentDomainId: string;
+    parentName: string;
+    status: 'active' | 'disabled';
+    catchAll: 'create_mailbox' | 'store';
+    metadata: {
+        [key: string]: unknown;
+    };
+    /**
+     * The parent’s wildcard MX record, which receives this subdomain.
+     */
+    dns: Array<{
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    }>;
+    mx: MailboxMxReport;
+    mailboxCount: number;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type CreateMailboxSubdomain = {
+    /**
+     * A label (acme) or the full host (acme.example.com).
+     */
+    name: string;
+    /**
+     * Mail for an address with no mailbox: store keeps it as unrouted (default); create_mailbox makes one.
+     */
+    catchAll?: 'create_mailbox' | 'store';
+    metadata?: {
+        [key: string]: unknown;
+    };
+};
+
+export type UpdateMailboxSubdomain = {
+    catchAll?: 'create_mailbox' | 'store';
+    metadata?: {
+        [key: string]: unknown;
+    };
 };
 
 export type MailboxPage = {
@@ -9129,6 +9208,328 @@ export type MailboxDisableDomainResponses = {
 };
 
 export type MailboxDisableDomainResponse = MailboxDisableDomainResponses[keyof MailboxDisableDomainResponses];
+
+export type MailboxListSubdomainsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        status?: 'active' | 'disabled' | 'all';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/domains/{id}/subdomains';
+};
+
+export type MailboxListSubdomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListSubdomainsError = MailboxListSubdomainsErrors[keyof MailboxListSubdomainsErrors];
+
+export type MailboxListSubdomainsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxSubdomainPage;
+};
+
+export type MailboxListSubdomainsResponse = MailboxListSubdomainsResponses[keyof MailboxListSubdomainsResponses];
+
+export type MailboxCreateSubdomainData = {
+    body: CreateMailboxSubdomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/subdomains';
+};
+
+export type MailboxCreateSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxCreateSubdomainError = MailboxCreateSubdomainErrors[keyof MailboxCreateSubdomainErrors];
+
+export type MailboxCreateSubdomainResponses = {
+    /**
+     * Success
+     */
+    201: MailboxSubdomain;
+};
+
+export type MailboxCreateSubdomainResponse = MailboxCreateSubdomainResponses[keyof MailboxCreateSubdomainResponses];
+
+export type MailboxRemoveSubdomainData = {
+    body?: never;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type MailboxRemoveSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxRemoveSubdomainError = MailboxRemoveSubdomainErrors[keyof MailboxRemoveSubdomainErrors];
+
+export type MailboxRemoveSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxSubdomain;
+};
+
+export type MailboxRemoveSubdomainResponse = MailboxRemoveSubdomainResponses[keyof MailboxRemoveSubdomainResponses];
+
+export type MailboxGetSubdomainData = {
+    body?: never;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type MailboxGetSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetSubdomainError = MailboxGetSubdomainErrors[keyof MailboxGetSubdomainErrors];
+
+export type MailboxGetSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxSubdomain;
+};
+
+export type MailboxGetSubdomainResponse = MailboxGetSubdomainResponses[keyof MailboxGetSubdomainResponses];
+
+export type MailboxUpdateSubdomainData = {
+    body: UpdateMailboxSubdomain;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type MailboxUpdateSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateSubdomainError = MailboxUpdateSubdomainErrors[keyof MailboxUpdateSubdomainErrors];
+
+export type MailboxUpdateSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxSubdomain;
+};
+
+export type MailboxUpdateSubdomainResponse = MailboxUpdateSubdomainResponses[keyof MailboxUpdateSubdomainResponses];
 
 export type MailboxListData = {
     body?: never;
