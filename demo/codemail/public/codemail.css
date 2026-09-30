@@ -24,10 +24,12 @@
 .facts dt { color: var(--color-muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
 .steps { margin: 0; padding-left: var(--space-20); color: var(--color-muted); display: grid; gap: var(--space-6); }
-.input-suffix { display: flex; align-items: center; border-radius: var(--radius-sm); background: var(--color-surface); box-shadow: var(--shadow-button); outline: 1px solid transparent; transition: outline-color var(--motion-duration); }
-.input-suffix:focus-within { outline-color: var(--color-focus); }
-.input-suffix .ui-input { box-shadow: none; background: transparent; outline: 0; }
-.input-suffix > span { padding-right: var(--space-8); color: var(--color-muted); white-space: nowrap; }
+/* An input with a fixed suffix (@acme.opcd.ai) behaves as one ui-input: the wrapper owns background, hover and focus. */
+.input-suffix { display: flex; align-items: center; min-width: 0; height: var(--control-height); border-radius: var(--radius-sm); background: linear-gradient(rgb(255 255 255 / 2%), transparent), var(--color-surface); box-shadow: var(--shadow-button); outline: 1px solid transparent; cursor: text; transition: background var(--motion-duration), outline-color var(--motion-duration), box-shadow var(--motion-duration); }
+.input-suffix:hover:not(:focus-within) { background: linear-gradient(var(--color-hover), var(--color-hover)), var(--color-surface); }
+.input-suffix:focus-within { outline-color: var(--color-focus); box-shadow: none; }
+.input-suffix .ui-input, .input-suffix .ui-input:hover:not(:disabled):not([aria-invalid='true']):not(:focus), .input-suffix .ui-input:focus { flex: 1; height: 100%; background: transparent; box-shadow: none; outline: 0; }
+.input-suffix > span { flex-shrink: 0; padding-right: var(--space-8); color: var(--color-muted); white-space: nowrap; user-select: none; }
 .choice { display: flex; align-items: flex-start; gap: var(--space-8); min-height: var(--control-height); padding-block: var(--space-4); cursor: pointer; }
 .choice input { width: var(--space-16); height: var(--space-16); margin: 2px 0 0; accent-color: var(--color-accent); flex-shrink: 0; }
 .choice input:disabled + span { color: var(--color-muted); }
