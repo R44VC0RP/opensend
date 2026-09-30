@@ -169,14 +169,16 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
     if (!SLUG.test(slug) || slug.includes('--')) return retry('Use 3–32 lowercase letters, digits or single hyphens, starting and ending with a letter or digit.');
     if (RESERVED_SLUGS.has(slug)) return retry(`${slug}.${c.env.MAIL_DOMAIN} is reserved. Choose another.`);
     const [taken] = await c.var.db.select({ id: organization.id }).from(organization).where(eq(organization.slug, slug));
-    const [retired] = await c.var.db.select({ slug: retiredSlug.slug }).from(retiredSlug).where(eq(retiredSlug.slug, slug));
-    if (taken || retired) return retry(`${slug}.${c.env.MAIL_DOMAIN} is taken. Choose another.`, 409);
+    const [retired] = await c.var.db.select().from(retiredSlug).where(eq(retiredSlug.slug, slug));
+    // A deleted organization's name stays blocked, except for the people who were in it.
+    const reclaim = !!retired && retired.formerMemberEmails.includes(viewer.user.email.toLowerCase());
+    if (taken || (retired && !reclaim)) return retry(`${slug}.${c.env.MAIL_DOMAIN} is taken. Choose another.`, 409);
     // Reserve the mail subdomain first, so an organization never exists without its address.
     let subdomain;
     try { subdomain = await c.var.admin.addSubdomain(slug, { product: 'codemail' }); }
     catch (error) { return retry(error instanceof OpenSendError && error.code === 'SUBDOMAIN_EXISTS' ? `${slug}.${c.env.MAIL_DOMAIN} is taken. Choose another.` : `Couldn’t set up email for ${slug}.${c.env.MAIL_DOMAIN}: ${errorText(error)}`, 409); }
-    // OpenSend restores a removed subdomain with its old ID; never give someone else an address that was used before.
-    if (subdomain.mailboxCount > 0 || Date.now() - Date.parse(subdomain.createdAt) > 5 * 60_000) {
+    // OpenSend restores a removed subdomain with its old ID; only former members may take back an address that was used before.
+    if (!reclaim && (subdomain.mailboxCount > 0 || Date.now() - Date.parse(subdomain.createdAt) > 5 * 60_000)) {
       await c.var.admin.removeSubdomain(subdomain.id).catch(() => {});
       return retry(`${slug}.${c.env.MAIL_DOMAIN} was used before. Choose another.`, 409);
     }
@@ -184,6 +186,7 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
       const created = await c.var.auth.api.createOrganization({ body: { name, slug, metadata: { subdomainId: subdomain.id } }, headers: c.req.raw.headers });
       if (!created) throw new Error('Organization was not created.');
       await c.var.admin.updateSubdomain(subdomain.id, { product: 'codemail', organizationId: created.id }).catch(() => {});
+      if (reclaim) await c.var.db.delete(retiredSlug).where(eq(retiredSlug.slug, slug));
       return redirect(`/o/${slug}?ok=${encodeURIComponent(`${name} is ready. Create your first agent mailbox.`)}`);
     } catch (error) {
       await c.var.admin.removeSubdomain(subdomain.id).catch(() => {});
@@ -396,7 +399,7 @@ ${grants.length ? table([{ label: 'App' }, { label: 'Mailboxes', className: 'col
     const { org, role } = ctx.membership;
     return inShell(c, ctx, 'settings', `${org.name} settings`, html`${pageHeader('Settings')}${notices(c)}
 <dl class="facts"><div><dt>Name</dt><dd>${org.name}</dd></div><div><dt>Email address</dt><dd><code class="identifier">@${orgHost(c.env, org)}</code></dd></div><div><dt>Your role</dt><dd>${role}</dd></div><div><dt>Created</dt><dd>${day(org.createdAt)}</dd></div></dl>
-${role === 'owner' ? html`<section class="section section--bordered">${sectionHeader('Delete organization')}<div class="panel danger-zone stack"><p class="muted">Deletes every mailbox, disconnects all agents and removes all members. <code>@${orgHost(c.env, org)}</code> stops receiving mail and is never reused.</p>
+${role === 'owner' ? html`<section class="section section--bordered">${sectionHeader('Delete organization')}<div class="panel danger-zone stack"><p class="muted">Deletes every mailbox, disconnects all agents and removes all members. <code>@${orgHost(c.env, org)}</code> stops receiving mail. Only current members can create an organization with this name again.</p>
 <form method="post" action="/o/${org.slug}/delete" autocomplete="off" class="inline-form">${field('Type the organization’s address to confirm', input(html`id="confirm" name="confirm" type="text" required spellcheck="false" placeholder="${org.slug}"`), { id: 'confirm' })}${button('Delete organization', { variant: 'danger' })}</form></div></section>` : ''}`);
   });
   app.post('/o/:slug/delete', async c => {
@@ -410,7 +413,10 @@ ${role === 'owner' ? html`<section class="section section--bordered">${sectionHe
       const { subdomainId } = orgMeta(org);
       // The subdomain stays registered (disabled) with OpenSend, so the slug is never handed to someone else with old mail.
       if (subdomainId) await c.var.admin.removeSubdomain(subdomainId);
-      await c.var.db.insert(retiredSlug).values({ slug: org.slug }).onConflictDoNothing();
+      const former = await c.var.db.select({ email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, org.id));
+      const formerMemberEmails = [...new Set(former.map(row => row.email.toLowerCase()))];
+      await c.var.db.insert(retiredSlug).values({ slug: org.slug, formerMemberEmails, subdomainId: subdomainId ?? null })
+        .onConflictDoUpdate({ target: retiredSlug.slug, set: { formerMemberEmails, subdomainId: subdomainId ?? null, retiredAt: new Date() } });
       await c.var.auth.api.deleteOrganization({ body: { organizationId: org.id }, headers: c.req.raw.headers });
       return redirect('/app');
     } catch (error) { return back(path, 'error', errorText(error)); }

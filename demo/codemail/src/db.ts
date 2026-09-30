@@ -51,7 +51,11 @@ export const invitation = schema.table('invitation', {
   inviterId: text('inviter_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
 }, t => [index('invitation_org_idx').on(t.organizationId), index('invitation_email_idx').on(t.email)]);
 
-export const retiredSlug = schema.table('retired_slug', { slug: text('slug').primaryKey(), retiredAt: ts('retired_at').notNull().defaultNow() });
+// Deleted organizations' slugs. Only former members (by Google email) may recreate one.
+export const retiredSlug = schema.table('retired_slug', {
+  slug: text('slug').primaryKey(), retiredAt: ts('retired_at').notNull().defaultNow(),
+  formerMemberEmails: text('former_member_emails').array().notNull().default([]), subdomainId: text('subdomain_id'),
+});
 
 export const authSchema = { user, session, account, verification, organization, member, invitation };
 
