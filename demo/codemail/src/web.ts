@@ -2,7 +2,7 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { createAuth, MEMBER_LIMIT, type Auth } from './better-auth.js';
 import { consentRoutes } from './consent.js';
-import { connect, invitation, member, organization, retiredSlug, user, type Db } from './db.js';
+import { account, connect, invitation, member, organization, retiredSlug, user, type Db } from './db.js';
 import { mayCreateOrganizations, origin, type Env } from './env.js';
 import { action, ago, alert, button, caption, day, empty, field, html, linkButton, pageHeader, raw, sectionHeader, shell, solo, status, table, type Html, type ShellNav, type Viewer } from './html.js';
 import { OpenSendAdmin, OpenSendError, type Mailbox } from './opensend.js';
@@ -36,6 +36,23 @@ export async function membershipFor(db: Db, userId: string, slug: string): Promi
   return row ?? null;
 }
 const isAdmin = (role: string) => role === 'owner' || role === 'admin';
+/** The email-domain label for an organization name (same rule as public/new-org.js). */
+export const slugify = (value: string) => value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/g, '');
+
+/**
+ * Suggests an organization from the Google Workspace domain (the ID token's hd claim, e.g. anoma.ly →
+ * "Anoma" / anoma). Google doesn't share the company's display name, so it comes from the domain.
+ * Personal Gmail accounts have no hd and get an empty form.
+ */
+export async function workspaceSuggestion(db: Db, userId: string): Promise<{ name?: string; slug?: string }> {
+  const [row] = await db.select({ idToken: account.idToken }).from(account).where(and(eq(account.userId, userId), eq(account.providerId, 'google')));
+  let hd: unknown;
+  try { hd = row?.idToken ? JSON.parse(atob(row.idToken.split('.')[1]!.replace(/-/g, '+').replace(/_/g, '/'))).hd : undefined; } catch { return {}; }
+  if (typeof hd !== 'string' || !/^[a-z0-9.-]+$/i.test(hd)) return {};
+  const label = hd.toLowerCase().split('.')[0]!;
+  const name = label.split('-').filter(Boolean).map(part => part[0]!.toUpperCase() + part.slice(1)).join(' ');
+  return { name, slug: slugify(label) };
+}
 const orgMeta = (org: { metadata: string | null }) => { try { return JSON.parse(org.metadata ?? '{}') as { subdomainId?: string }; } catch { return {}; } };
 
 /** Mailboxes belong to an organization by address: anything @<slug>.<mail domain>. */
@@ -81,20 +98,19 @@ export function createWeb() {
   app.on(['GET', 'POST'], '/api/auth/*', c => c.var.auth.handler(c.req.raw));
 
   // ---------- sign-in ----------
-  app.get('/', async c => {
-    if (await viewerOf(c)) return redirect('/app');
-    return solo('Email for AI agents', html`<h1>Email for AI agents</h1>
+  // The root page is the sign-in page: one step to Google.
+  const signInPage = (c: Ctx, next: string) => {
+    const failed = c.req.query('error');
+    return solo('Sign in', html`<h1>Email for AI agents</h1>
 <p>Give your agents real mailboxes at <strong>@yourteam.${c.env.MAIL_DOMAIN}</strong>. Over MCP they read, reply in-thread, send and wait for new mail.</p>
-<ol class="steps"><li>Sign in with Google and name your organization.</li><li>Create a mailbox for each agent, like <code>support@yourteam.${c.env.MAIL_DOMAIN}</code>.</li><li>Connect your MCP client to <code>${origin(c.env)}/mcp</code> and pick the mailboxes it may use.</li></ol>
-<div class="solo-actions">${linkButton('Get started', '/sign-in', { variant: 'primary' })}</div>`);
-  });
+${failed ? alert('danger', `Google sign-in didn’t complete (${failed}). Try again.`) : ''}
+<form method="post" action="/sign-in/google"><input type="hidden" name="next" value="${next}"><div class="solo-actions">${button('Continue with Google', { variant: 'primary', block: true })}</div></form>
+<p class="muted">Signing in the first time creates your account.</p>`);
+  };
+  app.get('/', async c => (await viewerOf(c)) ? redirect('/app') : signInPage(c, '/app'));
   app.get('/sign-in', async c => {
     const next = safeNext(c.req.query('next'));
-    if (await viewerOf(c)) return redirect(next);
-    const failed = c.req.query('error');
-    return solo('Sign in', html`<h1>Sign in to codemail</h1><p>Use your Google account. Signing in the first time creates your account.</p>
-${failed ? alert('danger', `Google sign-in didn’t complete (${failed}). Try again.`) : ''}
-<form method="post" action="/sign-in/google"><input type="hidden" name="next" value="${next}"><div class="solo-actions">${button('Continue with Google', { variant: 'primary', block: true })}</div></form>`);
+    return (await viewerOf(c)) ? redirect(next) : signInPage(c, next);
   });
   app.post('/sign-in/google', async c => {
     const form = await c.req.formData();
@@ -124,19 +140,21 @@ ${orgs.length ? table([{ label: 'Organization' }, { label: 'Role', className: 'r
 ${mayCreateOrganizations(c.env, viewer.user.email) ? html`<div class="solo-actions">${linkButton('New organization', '/app/new')}</div>` : ''}`, { viewer: viewerView(viewer) });
   });
 
-  const newOrgPage = (c: Ctx, viewer: NonNullable<Awaited<ReturnType<typeof viewerOf>>>, values: { name?: string; slug?: string } = {}, error?: string, statusCode = 200) => {
+  const newOrgPage = (c: Ctx, viewer: NonNullable<Awaited<ReturnType<typeof viewerOf>>>, values: { name?: string; slug?: string; slugEdited?: boolean; firstOrganization?: boolean } = {}, error?: string, statusCode = 200) => {
     if (!mayCreateOrganizations(c.env, viewer.user.email)) return solo('Invite only', html`<h1>codemail is invite-only for now</h1><p>Ask someone in an organization to invite ${viewer.user.email}, then open the link from their email.</p>`, { viewer: viewerView(viewer) });
-    return solo('New organization', html`<h1>Name your organization</h1><p>Your agents’ mailboxes live at your organization’s address.</p>
+    return solo('New organization', html`<h1>Name your organization</h1><p>Your agents’ mailboxes live at your organization’s email domain.</p>
 ${error ? alert('danger', error) : ''}
 <form method="post" action="/app/orgs" autocomplete="off" class="stack">
 ${field('Organization name', input(html`id="name" name="name" type="text" required maxlength="80" value="${values.name ?? ''}" placeholder="Acme Inc." autofocus`), { id: 'name' })}
-${field('Email address', html`<div class="input-suffix">${input(html`id="slug" name="slug" type="text" required minlength="3" maxlength="32" pattern="[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]" value="${values.slug ?? ''}" placeholder="acme" spellcheck="false" autocapitalize="off"`)}<span>.${c.env.MAIL_DOMAIN}</span></div>`, { id: 'slug', hint: html`3–32 lowercase letters, digits or hyphens. Mailboxes look like <code>agent@${values.slug || 'acme'}.${c.env.MAIL_DOMAIN}</code>. This can’t be changed later.` })}
-<div class="solo-actions">${linkButton('Cancel', '/app?switch')}${button('Create organization', { variant: 'primary' })}</div></form>`, { status: statusCode, viewer: viewerView(viewer) });
+${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" name="slug" type="text" required minlength="3" maxlength="32" pattern="[a-z0-9][a-z0-9\\-]{1,30}[a-z0-9]" value="${values.slug ?? ''}" placeholder="acme" spellcheck="false" autocapitalize="off" data-slug-from="name"${values.slugEdited ? raw(' data-edited') : ''}`)}<span>.${c.env.MAIL_DOMAIN}</span></div>`, { id: 'slug', hint: html`Filled in from the name. 3–32 lowercase letters, digits or hyphens. Mailboxes look like <code>agent@<span data-slug-preview>${values.slug || 'acme'}</span>.${c.env.MAIL_DOMAIN}</code>. This can’t be changed later.` })}
+<div class="solo-actions">${values.firstOrganization ? '' : linkButton('Cancel', '/app?switch')}${button('Create organization', { variant: 'primary', block: values.firstOrganization })}</div></form>
+<script src="/new-org.js" defer></script>`, { status: statusCode, viewer: viewerView(viewer) });
   };
   app.get('/app/new', async c => {
     const viewer = await viewerOf(c);
     if (!viewer) return redirect('/sign-in?next=/app/new');
-    return newOrgPage(c, viewer);
+    const firstOrganization = !(await memberships(c.var.db, viewer.user.id)).length;
+    return newOrgPage(c, viewer, { ...await workspaceSuggestion(c.var.db, viewer.user.id), firstOrganization });
   });
   app.post('/app/orgs', async c => {
     const viewer = await viewerOf(c);
@@ -144,7 +162,8 @@ ${field('Email address', html`<div class="input-suffix">${input(html`id="slug" n
     const form = await c.req.formData();
     const name = String(form.get('name') ?? '').trim().replace(/\s+/g, ' ');
     const slug = String(form.get('slug') ?? '').trim().toLowerCase();
-    const retry = (message: string, statusCode = 422) => newOrgPage(c, viewer, { name, slug }, message, statusCode);
+    const firstOrganization = !(await memberships(c.var.db, viewer.user.id)).length;
+    const retry = (message: string, statusCode = 422) => newOrgPage(c, viewer, { name, slug, slugEdited: slug !== slugify(name), firstOrganization }, message, statusCode);
     if (!mayCreateOrganizations(c.env, viewer.user.email)) return retry('Your account can’t create organizations yet.', 403);
     if (!name || name.length > 80) return retry('Enter an organization name of up to 80 characters.');
     if (!SLUG.test(slug) || slug.includes('--')) return retry('Use 3–32 lowercase letters, digits or single hyphens, starting and ending with a letter or digit.');

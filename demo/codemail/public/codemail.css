@@ -12,7 +12,7 @@
 .solo-top { position: relative; height: 56px; }
 .solo-top .wordmark { position: absolute; }
 .solo-top .theme-toggle { top: 14px; right: var(--space-16); }
-.solo-main { flex: 1; display: grid; place-items: start center; padding: var(--space-40) var(--space-16) var(--space-40); }
+.solo-main { flex: 1; display: grid; place-items: start center; align-content: start; padding: var(--space-40) var(--space-16) var(--space-40); }
 .solo-surface { width: min(460px, 100%); padding: var(--space-24); background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); }
 .solo-surface h1 { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; }
 .solo-surface > .stack > p, .solo-surface .lead { color: var(--color-muted); }
