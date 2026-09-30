@@ -35,7 +35,10 @@ const mcpApi = {
       directory = {
         orgName: rows[0]!.orgName, host,
         people: rows.map(({ name, email, role }) => ({ name, email, role })),
-        agents: () => agents ??= admin.mailboxes(host).then(list => list.map(({ address, displayName }) => ({ address, displayName }))),
+        agents: () => agents ??= admin.mailboxes(host).then(list => list.map(({ address, displayName, metadata }) => {
+          const owner = typeof metadata?.personalFor === 'string' ? metadata.personalFor : null;
+          return { address, displayName, personalOf: owner ? (rows.find(row => row.userId === owner)?.name || 'a former member') : null };
+        })),
       };
     }
     // Loaded lazily: with Better Auth in the bundle, esbuild wraps zod in a lazy initializer that the

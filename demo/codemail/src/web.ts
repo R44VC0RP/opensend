@@ -61,6 +61,50 @@ export async function orgMailbox(c: Ctx, org: { slug: string }, mailboxId: strin
   return mailbox && mailbox.address.endsWith(`@${orgHost(c.env, org)}`) ? mailbox : null;
 }
 
+/** Candidate local parts for someone's own mailbox: their Google username, then first.last, then numbered. */
+function personalLocals(email: string, name: string) {
+  const clean = (value: string) => value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\+.*$/, '')
+    .replace(/[^a-z0-9._-]+/g, '.').replace(/[._-]{2,}/g, '.').replace(/^[._-]+|[._-]+$/g, '').slice(0, 60).replace(/[._-]+$/g, '');
+  const base = clean(email.split('@')[0] ?? '');
+  const full = clean(name.trim().split(/\s+/).join('.'));
+  return [...new Set([base, full, ...[2, 3, 4, 5].map(n => base ? `${base}${n}` : '')])].filter(local => local && LOCAL.test(local) && !RESERVED_LOCAL.has(local));
+}
+export const personalOwner = (mailbox: Mailbox) => typeof mailbox.metadata?.personalFor === 'string' ? mailbox.metadata.personalFor : null;
+
+/** Each member gets a mailbox of their own in the organization, named after their Google username. Idempotent. */
+export async function ensurePersonalMailbox(c: Ctx, org: { id: string; slug: string }, person: { id: string; email: string; name: string }): Promise<Mailbox | null> {
+  const host = orgHost(c.env, org);
+  const existing = await c.var.admin.mailboxes(host);
+  const mine = existing.find(mailbox => personalOwner(mailbox) === person.id);
+  if (mine) return mine;
+  if (existing.length >= MAILBOX_LIMIT) return null;
+  const taken = new Set(existing.flatMap(mailbox => [mailbox.address, ...mailbox.aliases]));
+  for (const local of personalLocals(person.email, person.name)) {
+    const address = `${local}@${host}`;
+    if (taken.has(address)) continue;
+    try { return await c.var.admin.createMailbox({ address, ...(person.name ? { displayName: person.name } : {}), metadata: { product: 'codemail', organizationId: org.id, createdBy: person.id, personalFor: person.id } }); }
+    catch (error) { if (error instanceof OpenSendError && error.status === 409) continue; throw error; }
+  }
+  return null;
+}
+
+/** A prompt to paste into an agent so it installs and tests the codemail MCP server itself. */
+export function agentPrompt(env: Env, org: { name: string }, viewer: { email: string }, personal: Mailbox | null) {
+  const url = `${origin(env)}/mcp`;
+  return `Set up codemail for me. It's an MCP server that gives you a real email mailbox for ${org.name}.
+
+1. Add a remote MCP server named "codemail" with the URL ${url} (streamable HTTP; it signs in with OAuth). Use your client's normal way to add one, for example:
+   - Claude Code: claude mcp add --transport http codemail ${url}
+   - OpenCode: in opencode.json, under "mcp", add "codemail": { "type": "remote", "url": "${url}" }
+   - Cursor: in ~/.cursor/mcp.json, under "mcpServers", add "codemail": { "url": "${url}" }
+   - Anything else: add it as a remote MCP server with that URL.
+2. Connect it. A browser window opens where I sign in with Google and choose which mailboxes you may use${personal ? ` (mine is ${personal.address})` : ''}. Tell me when to do this if it doesn't open by itself.
+3. Once connected, call list_mailboxes and find_people and tell me what you can see.
+4. Then send one test email${personal ? ` from ${personal.address}` : ''} to me at ${viewer.email} with the subject "codemail is connected".
+
+Only send email when I ask you to. Automated senders are protected from replies; don't override that unless I say so.`;
+}
+
 /** Connected agents (OAuth grants) in an organization, across its members. */
 export async function orgGrants(c: Ctx, orgId: string) {
   const people = await c.var.db.select({ userId: member.userId, email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, orgId));
@@ -187,7 +231,8 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
       if (!created) throw new Error('Organization was not created.');
       await c.var.admin.updateSubdomain(subdomain.id, { product: 'codemail', organizationId: created.id }).catch(() => {});
       if (reclaim) await c.var.db.delete(retiredSlug).where(eq(retiredSlug.slug, slug));
-      return redirect(`/o/${slug}?ok=${encodeURIComponent(`${name} is ready. Create your first agent mailbox.`)}`);
+      const personal = await ensurePersonalMailbox(c, { id: created.id, slug }, viewer.user).catch(() => null);
+      return redirect(`/o/${slug}?ok=${encodeURIComponent(personal ? `${name} is ready. Your mailbox is ${personal.address}. Copy the setup prompt below into your agent to connect it.` : `${name} is ready. Create your first agent mailbox.`)}`);
     } catch (error) {
       await c.var.admin.removeSubdomain(subdomain.id).catch(() => {});
       return retry(errorText(error), 409);
@@ -212,8 +257,12 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
     let list: Mailbox[] = []; let loadError: string | null = null;
     try { list = await c.var.admin.mailboxes(host); } catch (error) { loadError = errorText(error); }
     list.sort((a, b) => a.address.localeCompare(b.address));
+    const mine = list.find(mailbox => personalOwner(mailbox) === ctx.viewer.user.id) ?? null;
+    const names = new Map((await c.var.db.select({ id: user.id, name: user.name, email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, org.id))).map(row => [row.id, row.name || row.email]));
+    const describe = (mailbox: Mailbox) => { const owner = personalOwner(mailbox); if (!owner) return mailbox.displayName; return owner === ctx.viewer.user.id ? 'Your mailbox' : `${names.get(owner) ?? 'Former member'}’s mailbox`; };
+    const prompt = agentPrompt(c.env, org, ctx.viewer.user, mine);
     const rows = list.map(mailbox => [
-      html`<a class="link" href="/o/${org.slug}/m/${mailbox.id}">${mailbox.stats.unreadThreads ? raw('<span class="unread-dot" aria-hidden="true"></span>') : ''}<code class="identifier">${mailbox.address}</code></a>${mailbox.displayName ? caption(mailbox.displayName) : ''}`,
+      html`<a class="link" href="/o/${org.slug}/m/${mailbox.id}">${mailbox.stats.unreadThreads ? raw('<span class="unread-dot" aria-hidden="true"></span>') : ''}<code class="identifier">${mailbox.address}</code></a>${describe(mailbox) ? caption(describe(mailbox)!) : ''}`,
       html`${mailbox.stats.threads}`,
       mailbox.stats.unreadThreads ? status('info', `${mailbox.stats.unreadThreads} unread`) : html`<span class="muted">—</span>`,
       html`<span class="muted">${mailbox.stats.lastMessageAt ? ago(mailbox.stats.lastMessageAt) : 'No mail yet'}</span>`,
@@ -221,13 +270,17 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
     ]);
     return inShell(c, ctx, 'mailboxes', org.name, html`${pageHeader('Mailboxes')}${notices(c)}
 ${loadError ? alert('danger', loadError, 'Couldn’t load mailboxes') : ''}
+${!mine && !loadError && list.length < MAILBOX_LIMIT ? html`<div class="ui-alert ui-tone--info"><div>You don’t have a mailbox of your own in ${org.name} yet.</div><form method="post" action="/o/${org.slug}/mailboxes/personal">${button('Create my mailbox', { size: 'sm' })}</form></div>` : ''}
 ${list.length ? table([{ label: 'Address', className: 'col-primary' }, { label: 'Conversations' }, { label: 'Unread' }, { label: 'Last mail' }, { label: '', className: 'row-actions' }], rows) : loadError ? '' : empty('No mailboxes yet', 'Create one for your first agent below.')}
 <section class="section section--bordered">${list.length < MAILBOX_LIMIT ? html`${sectionHeader('New mailbox')}<form method="post" action="/o/${org.slug}/mailboxes" autocomplete="off" class="inline-form">
 ${field('Address', html`<div class="input-suffix">${input(html`id="local" name="local" type="text" required maxlength="64" placeholder="support" spellcheck="false" autocapitalize="off"`)}<span>@${host}</span></div>`, { id: 'local' })}
 ${field('Display name', input(html`id="display" name="display" type="text" maxlength="100" placeholder="Support agent"`), { id: 'display' })}
 ${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="muted">This organization has the maximum of ${MAILBOX_LIMIT} mailboxes.</p>`}</section>
-<section class="section section--bordered">${sectionHeader('Connect an agent')}<div class="stack"><p class="muted">Add codemail to any MCP client (Claude, Cursor, OpenCode and others) with this URL. You’ll sign in and choose which mailboxes the agent may use.</p>
-<p><code class="identifier">${origin(c.env)}/mcp</code></p><p class="muted">Connected agents are listed under <a class="link" href="/o/${org.slug}/agents">Agents</a>.</p></div></section>`);
+<section class="section section--bordered">${sectionHeader('Connect an agent', html`<button type="button" class="ui-button ui-button--primary ui-button--sm" data-copy="#agent-prompt">Copy setup prompt</button>`)}<div class="stack">
+<p class="muted">Paste this into Claude Code, OpenCode, Cursor or any agent with MCP support. It adds codemail, has you sign in and pick mailboxes, then sends you a test email.</p>
+<pre class="prompt" id="agent-prompt">${prompt}</pre>
+<p class="muted">MCP URL: <code class="identifier">${origin(c.env)}/mcp</code>. Connected agents are listed under <a class="link" href="/o/${org.slug}/agents">Agents</a>.</p></div></section>
+<script src="/copy.js" defer></script>`);
   });
   app.post('/o/:slug/mailboxes', async c => {
     const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
@@ -242,6 +295,14 @@ ${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="mut
     try {
       const created = await c.var.admin.createMailbox({ address: `${local}@${host}`, ...(displayName ? { displayName } : {}), metadata: { product: 'codemail', organizationId: org.id, createdBy: ctx.viewer.user.id } });
       return back(path, 'ok', `Created ${created.address}.`);
+    } catch (error) { return back(path, 'error', errorText(error)); }
+  });
+  app.post('/o/:slug/mailboxes/personal', async c => {
+    const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
+    const { org } = ctx.membership; const path = `/o/${org.slug}`;
+    try {
+      const personal = await ensurePersonalMailbox(c, org, ctx.viewer.user);
+      return personal ? back(path, 'ok', `Your mailbox is ${personal.address}.`) : back(path, 'error', `Couldn’t create your mailbox: the organization has ${MAILBOX_LIMIT} mailboxes, or no address based on your name is free. Create one below instead.`);
     } catch (error) { return back(path, 'error', errorText(error)); }
   });
   app.post('/o/:slug/mailboxes/:id/delete', async c => {
@@ -360,8 +421,10 @@ ${invites.length ? html`<section class="section">${sectionHeader('Pending invita
     try {
       if (form.get('decision') !== 'accept') { await c.var.auth.api.rejectInvitation({ body: { invitationId: c.req.param('id') }, headers: c.req.raw.headers }); return redirect('/app'); }
       const accepted = await c.var.auth.api.acceptInvitation({ body: { invitationId: c.req.param('id') }, headers: c.req.raw.headers });
-      const [org] = await c.var.db.select({ slug: organization.slug, name: organization.name }).from(organization).where(eq(organization.id, accepted?.invitation.organizationId ?? ''));
-      return redirect(org ? `/o/${org.slug}?ok=${encodeURIComponent(`Welcome to ${org.name}.`)}` : '/app');
+      const [org] = await c.var.db.select({ id: organization.id, slug: organization.slug, name: organization.name }).from(organization).where(eq(organization.id, accepted?.invitation.organizationId ?? ''));
+      if (!org) return redirect('/app');
+      const personal = await ensurePersonalMailbox(c, org, viewer.user).catch(() => null);
+      return redirect(`/o/${org.slug}?ok=${encodeURIComponent(`Welcome to ${org.name}.${personal ? ` Your mailbox is ${personal.address}.` : ''}`)}`);
     } catch (error) { return solo('Invitation', html`<h1>Couldn’t accept the invitation</h1>${alert('danger', errorText(error))}`, { status: 400, viewer: viewerView(viewer) }); }
   });
 

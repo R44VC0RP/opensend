@@ -1,7 +1,7 @@
 // A small typed client for the OpenSend mailbox API (/mailbox/v1), authenticated with one mailbox key.
 
 export type Address = { name: string | null; address: string };
-export type Mailbox = { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; stats: { threads: number; unreadThreads: number; lastMessageAt: string | null } };
+export type Mailbox = { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; metadata?: Record<string, unknown>; stats: { threads: number; unreadThreads: number; lastMessageAt: string | null } };
 export type Thread = { id: string; mailboxId: string; subject: string; snippet: string; participants: Address[]; messageCount: number; unreadCount: number; lastMessageAt: string; archived: boolean; starred: boolean; spam: boolean; trashed: boolean; labels: string[] };
 export type Attachment = { id: string; filename: string; contentType: string; size: number; disposition: 'attachment' | 'inline' };
 export type Message = {

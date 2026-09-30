@@ -5,7 +5,8 @@ import { ago } from './format.js';
 import { OpenSendError, type Contact } from './opensend.js';
 
 export type Person = { name: string; email: string; role: string };
-export type AgentMailbox = { address: string; displayName: string | null };
+/** personalOf: the member whose own mailbox this is, if any. */
+export type AgentMailbox = { address: string; displayName: string | null; personalOf?: string | null };
 export type Directory = {
   orgName: string;
   /** The organization's email domain, e.g. acme.opcd.ai. */
@@ -31,12 +32,12 @@ async function entries(directory: Directory | undefined, contacts: ContactSource
   const [agents, past] = await Promise.all([directory?.agents().catch(() => []) ?? [], contacts?.load(query).catch(() => []) ?? []]);
   const org: Entry[] = [
     ...(directory?.people ?? []).map(person => ({ address: person.email.toLowerCase(), name: person.name, kind: 'teammate' as const, detail: person.role })),
-    ...agents.map(agent => ({ address: agent.address.toLowerCase(), name: agent.displayName ?? '', kind: 'agent' as const, detail: 'agent mailbox' })),
+    ...agents.map(agent => ({ address: agent.address.toLowerCase(), name: agent.displayName ?? '', kind: 'agent' as const, detail: agent.personalOf ? `${agent.personalOf}’s mailbox` : 'agent' })),
   ];
   const known = new Set(org.map(entry => entry.address));
   return [...org, ...past.filter(contact => !known.has(contact.address)).map(contact => ({ address: contact.address, name: contact.name ?? '', kind: 'contact' as const, detail: contactDetail(contact) }))];
 }
-const label = (entry: Entry) => `${entry.name ? `${entry.name} <${entry.address}>` : entry.address} (${entry.kind === 'agent' ? 'agent' : entry.kind === 'contact' ? `contact: ${entry.detail}` : entry.detail})`;
+const label = (entry: Entry) => `${entry.name ? `${entry.name} <${entry.address}>` : entry.address} (${entry.kind === 'contact' ? `contact: ${entry.detail}` : entry.detail})`;
 
 /** Labels addresses that belong to the organization (with their name when the message lacks one), for conversation output. */
 export function tagger(directory: Directory | undefined): (address: string) => { kind: string; name: string | null } | null {
@@ -90,7 +91,7 @@ export async function directoryText(directory: Directory | undefined, contacts: 
   const section = (title: string, list: Entry[]) => ['', `${title} (${list.length}):`, ...(list.length ? list.map(entry => `- ${label(entry)}`) : ['- none'])];
   const lines = [
     `${directory ? `${directory.orgName} (@${directory.host})` : 'Contacts'}${q ? ` matching "${query}"` : ''}`,
-    ...(directory ? [...section('People', people), ...section('Agent mailboxes', agents)] : []),
+    ...(directory ? [...section('People', people), ...section('Mailboxes', agents)] : []),
     ...(contacts ? section(`Recent contacts of ${contacts.mailbox}`, past) : []),
     '', 'Put names or addresses in to, cc or bcc of send_email, reply and forward, e.g. cc=["maya"]. Names resolve to these addresses, teammates first.',
   ];
