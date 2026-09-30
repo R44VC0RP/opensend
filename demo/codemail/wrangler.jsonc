@@ -16,7 +16,7 @@
     "MAIL_DOMAIN": "opcd.ai",
     "INVITE_FROM": "codemail <invites@opcd.ai>",
     // Who may create organizations: comma-separated emails or @domains. Empty allows anyone.
-    "SIGNUP_ALLOWLIST": ""
+    "SIGNUP_ALLOWLIST": "@anoma.ly,@vogel.dev"
   },
   // Secrets (wrangler secret put): OPENSEND_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BETTER_AUTH_SECRET.
   // The OpenSend database; codemail's tables live in its "codemail" schema.
