@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, MailboxDomain, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
-import { createSeed, demoMailboxes, demoReceived } from './seed'
+import { createSeed, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
@@ -818,6 +818,43 @@ export function createMockApi(): OpenSendApi {
         return Object.assign(rows.map(({ text: _t, replyText: _r, html: _h, headers: _hd, attachments: _a, verdicts: _v, bcc: _b, replyTo: _rt, messageId: _m, inReplyTo: _i, references: _rf, bodyTruncated: _bt, sesMessageId: _s, sizeBytes: _sz, rawUrl: _raw, linksExpireAt: _l, ...summary }) => summary), { nextCursor: null })
       }),
       receivedEmail: (messageId, signal) => run(signal, false, () => find(demoReceived(), messageId, 'Message')),
+      get: (mailboxId, signal) => run(signal, false, s => find(s.mailboxes ??= demoMailboxes().mailboxes, mailboxId, 'Mailbox')),
+      threads: (mailboxId, input, signal) => run(signal, false, s => {
+        const search = input.search?.trim().toLowerCase()
+        const rows = (s.mailboxThreads ??= demoMailboxThreads()).filter(row => row.mailboxId === mailboxId && (input.view === 'trash' ? row.trashed : !row.trashed)
+          && (input.view === 'inbox' ? !row.archived && !row.spam : input.view === 'archive' ? row.archived : input.view === 'starred' ? row.starred : input.view === 'spam' ? row.spam : true)
+          && (!input.unread || row.unreadCount > 0) && (!search || `${row.subject} ${row.messages.map(m => `${m.from.address} ${m.from.name} ${m.text}`).join(' ')}`.toLowerCase().includes(search)))
+          .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)).map(({ messages: _m, ...summary }) => summary)
+        return Object.assign(rows, { nextCursor: null })
+      }),
+      thread: (mailboxId, threadId, signal) => run(signal, false, s => { const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread'); if (row.mailboxId !== mailboxId) throw new ApiError('Thread was not found in this mailbox.', 'NOT_FOUND'); return row }),
+      updateThread: (mailboxId, threadId, patch, signal) => run(signal, true, s => {
+        const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread')
+        if (patch.read === true) row.messages.forEach(m => { m.read = true })
+        if (patch.read === false) { const latest = [...row.messages].reverse().find(m => m.direction === 'inbound'); if (latest) latest.read = false }
+        row.unreadCount = row.messages.filter(m => !m.read && m.direction === 'inbound').length
+        if (patch.archived !== undefined) row.archived = patch.archived
+        if (patch.starred !== undefined) row.starred = patch.starred
+        if (patch.spam !== undefined) row.spam = patch.spam
+        if (patch.trashed !== undefined) row.trashed = patch.trashed
+        row.labels = [...new Set([...row.labels.filter(label => !patch.removeLabels?.includes(label)), ...(patch.addLabels ?? [])])]
+        void mailboxId
+        const { messages: _m, ...summary } = row
+        return summary
+      }),
+      reply: (mailboxId, messageId, input, signal) => run(signal, true, s => {
+        const row = (s.mailboxThreads ??= demoMailboxThreads()).find(item => item.messages.some(m => m.id === messageId))
+        const original = row?.messages.find(m => m.id === messageId)
+        if (!row || !original) throw new ApiError('Message was not found in this mailbox.', 'NOT_FOUND')
+        const mailbox = find(s.mailboxes ??= demoMailboxes().mailboxes, mailboxId, 'Mailbox')
+        // Deterministic simulation only: no email is sent.
+        const reply = { ...original, id: id('msg'), direction: 'outbound' as const, status: 'delivered', read: true, labels: [], from: { name: mailbox.displayName, address: mailbox.address }, to: original.direction === 'inbound' ? [original.from] : original.to,
+          cc: input.replyAll ? original.cc : [], subject: original.subject.startsWith('Re:') ? original.subject : `Re: ${original.subject}`, text: input.text, replyText: input.text, snippet: input.text.slice(0, 200), html: null, attachments: [], attachmentCount: 0,
+          sentAt: now(), receivedAt: now(), inReplyTo: original.messageId, references: [...original.references, ...(original.messageId ? [original.messageId] : [])], messageId: `${id('demo')}@mail.example.net`, verdicts: {} }
+        row.messages.push(reply); row.messageCount++; row.lastMessageAt = reply.receivedAt; row.snippet = reply.snippet
+        return reply
+      }),
+      attachmentUrl: (_mailboxId, attachmentId, signal) => run(signal, false, () => { throw new ApiError(`Attachment downloads are unavailable in demo mode (${attachmentId}).`, 'UNSUPPORTED_OPERATION') }),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks),

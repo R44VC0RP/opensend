@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -25,6 +25,7 @@ export interface DemoState {
   webhooks: Webhook[]
   mailboxes?: Mailbox[]
   mailboxDomains?: MailboxDomain[]
+  mailboxThreads?: MailboxThreadDetail[]
 }
 
 export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailboxDomains: MailboxDomain[] } {
@@ -40,6 +41,39 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
     ],
     mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), mailboxCount: 4 }],
   }
+}
+
+export function demoMailboxThreads(now = Date.now()): MailboxThreadDetail[] {
+  const at = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
+  const support = { name: 'Support agent', address: 'support@mail.acme.com' }
+  const pass = { spf: 'PASS', dkim: 'PASS', dmarc: 'PASS', spam: 'PASS', virus: 'PASS' }
+  const message = (threadId: string, id: string, hours: number, direction: MailboxMessage['direction'], from: { name: string | null; address: string }, to: { name: string | null; address: string }, subject: string, replyText: string, extra: Partial<MailboxMessage> = {}): MailboxMessage => ({
+    id, threadId, mailboxId: 'mbx_support', direction, status: direction === 'outbound' ? 'delivered' : 'received', errorCode: null, read: true, labels: [], from, to: [to], cc: [], bcc: [], replyTo: [], subject, snippet: replyText.replace(/\s+/g, ' ').slice(0, 200),
+    sentAt: at(hours), receivedAt: at(hours), attachmentCount: 0, spam: false, automated: false, messageId: `${id}@mail.example.net`, inReplyTo: null, references: [], text: replyText, replyText, html: null, bodyTruncated: false, attachments: [], verdicts: direction === 'inbound' ? pass : {}, ...extra,
+  })
+  const thread = (id: string, subject: string, messages: MailboxMessage[], extra: Partial<MailboxThreadDetail> = {}): MailboxThreadDetail => {
+    const participants = [...new Map(messages.flatMap(m => [m.from, ...m.to]).map(p => [p.address, p])).values()]
+    const last = messages.at(-1)!
+    return { id, mailboxId: 'mbx_support', subject, snippet: last.snippet, participants, messageCount: messages.length, unreadCount: messages.filter(m => !m.read).length, lastMessageAt: last.receivedAt, lastInboundAt: [...messages].reverse().find(m => m.direction === 'inbound')?.receivedAt ?? null, archived: false, starred: false, spam: false, trashed: false, labels: [], messages, ...extra }
+  }
+  const maya = { name: 'Maya Chen', address: 'maya@northwind.example' }, leo = { name: 'Leo Park', address: 'leo@contoso.example' }, ana = { name: 'Ana Ruiz', address: 'ana@fabrikam.example' }
+  const invoice = [
+    message('thr_invoice', 'msg_inv_1', 5, 'inbound', maya, support, 'Where is my invoice?', 'Hi team,\nI can’t find the invoice for September. Could you resend it?\n\nThanks,\nMaya', { attachmentCount: 1, attachments: [{ id: 'matt_demo_order', filename: 'order-4821.pdf', contentType: 'application/pdf', size: 48_213, contentId: null, disposition: 'attachment' }] }),
+    message('thr_invoice', 'msg_inv_2', 4.5, 'outbound', support, maya, 'Re: Where is my invoice?', 'Hi Maya,\nI’ve resent the September invoice to this address. It should arrive in a few minutes.\n\nSupport', { inReplyTo: 'msg_inv_1@mail.example.net', references: ['msg_inv_1@mail.example.net'] }),
+    message('thr_invoice', 'msg_inv_3', 0.2, 'inbound', maya, support, 'Re: Where is my invoice?', 'Got it, thank you! One more question: can future invoices go to billing@northwind.example?', { read: false, inReplyTo: 'msg_inv_2@mail.example.net', references: ['msg_inv_1@mail.example.net', 'msg_inv_2@mail.example.net'], text: 'Got it, thank you! One more question: can future invoices go to billing@northwind.example?\n\nOn Tue, Support agent <support@mail.acme.com> wrote:\n> Hi Maya,\n> I’ve resent the September invoice to this address.' }),
+  ]
+  const refund = [
+    message('thr_refund', 'msg_ref_1', 27, 'inbound', leo, support, 'Refund request', 'Hello,\nI was charged twice this month. Please refund the duplicate payment.'),
+    message('thr_refund', 'msg_ref_2', 26, 'outbound', support, leo, 'Re: Refund request', 'Hi Leo,\nSorry about that. The duplicate charge is refunded and should appear in 3–5 business days.', { inReplyTo: 'msg_ref_1@mail.example.net', references: ['msg_ref_1@mail.example.net'] }),
+  ]
+  const plan = [message('thr_plan', 'msg_plan_1', 1.5, 'inbound', ana, support, 'Can I change my plan?', 'Hi! We’d like to move from the monthly to the annual plan. Is that possible mid-cycle?', { read: false })]
+  const welcome = [message('thr_welcome', 'msg_wel_1', 72, 'outbound', support, ana, 'Welcome aboard', 'Hi Ana,\nWelcome to Acme! Reply to this email any time you need help.')]
+  return [
+    thread('thr_invoice', 'Where is my invoice?', invoice, { labels: ['billing'] }),
+    thread('thr_plan', 'Can I change my plan?', plan, { starred: true }),
+    thread('thr_refund', 'Refund request', refund, { labels: ['billing'] }),
+    thread('thr_welcome', 'Welcome aboard', welcome, { archived: true }),
+  ]
 }
 
 export function demoReceived(now = Date.now()): ReceivedEmailDetail[] {

@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type ReceivedEmail, type ReceivedEmailDetail, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type MailboxMessage, type MailboxThread, type MailboxThreadDetail, type ReceivedEmail, type ReceivedEmailDetail, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -236,6 +236,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       checkDomain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
       received: async (input, signal) => { const query = new URLSearchParams({ direction: 'inbound', limit: String(Math.min(100, input.pageSize ?? 50)), ...(input.regionId ? { region: input.regionId } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: ReceivedEmail[]; nextCursor: string | null }>(`/messages?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       receivedEmail: (id, signal) => mailboxCall<ReceivedEmailDetail>(`/messages/${idPath(id)}`, 'GET', undefined, signal),
+      get: (id, signal) => mailboxCall<Mailbox>(`/mailboxes/${idPath(id)}`, 'GET', undefined, signal),
+      threads: async (id, input, signal) => { const query = new URLSearchParams({ view: input.view, limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.unread ? { unread: 'true' } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: MailboxThread[]; nextCursor: string | null }>(`/mailboxes/${idPath(id)}/threads?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      thread: (id, threadId, signal) => mailboxCall<MailboxThreadDetail>(`/mailboxes/${idPath(id)}/threads/${idPath(threadId)}?includeHtml=true`, 'GET', undefined, signal),
+      updateThread: (id, threadId, patch, signal) => mailboxCall<MailboxThread>(`/mailboxes/${idPath(id)}/threads/${idPath(threadId)}`, 'PATCH', patch, signal),
+      reply: (id, messageId, input, signal) => request<MailboxMessage>(`/mailbox/v1/mailboxes/${idPath(id)}/messages/${idPath(messageId)}/reply`, { method: 'POST', body: { text: input.text, replyAll: input.replyAll ?? false, allowAutomated: input.allowAutomated ?? false }, signal, idempotencyKey: input.idempotencyKey ?? crypto.randomUUID() }),
+      attachmentUrl: (id, attachmentId, signal) => mailboxCall<{ url: string }>(`/mailboxes/${idPath(id)}/attachments/${idPath(attachmentId)}`, 'GET', undefined, signal),
     },
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
