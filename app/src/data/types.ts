@@ -70,6 +70,14 @@ export interface MailboxDomain {
 }
 export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null } }
 export interface MailAddress { name: string | null; address: string }
+export type MailboxPermission = 'read' | 'send' | 'modify'
+export const mailboxEventTypes = ['message.received', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const
+export type MailboxEventType = typeof mailboxEventTypes[number]
+export interface MailboxKey { id: string; name: string; prefix: string; mailboxIds: string[] | null; permissions: MailboxPermission[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
+export interface MailboxKeyInput { name: string; mailboxIds: string[] | null; permissions: MailboxPermission[] }
+export interface MailboxWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; mailboxIds: string[] | null; paused: boolean; createdAt: ISODate; updatedAt: ISODate }
+export interface MailboxWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; mailboxIds: string[] | null }
+export interface MailboxWebhookDelivery { id: string; webhookId: string; eventId: string; status: 'pending' | 'delivered' | 'failed'; attemptCount: number; lastStatusCode: number | null; lastError: string | null; createdAt: ISODate; updatedAt: ISODate }
 export type MailboxThreadView = 'inbox' | 'starred' | 'archive' | 'spam' | 'trash' | 'all'
 export interface MailboxThread {
   id: string; mailboxId: string; subject: string; snippet: string; participants: MailAddress[]; messageCount: number; unreadCount: number
@@ -139,7 +147,17 @@ export interface OpenSendApi {
     thread(id: string, threadId: string, signal?: AbortSignal): Promise<MailboxThreadDetail>
     updateThread(id: string, threadId: string, patch: MailboxThreadPatch, signal?: AbortSignal): Promise<MailboxThread>
     reply(id: string, messageId: string, input: MailboxReplyInput, signal?: AbortSignal): Promise<MailboxMessage>
-    attachmentUrl(id: string, attachmentId: string, signal?: AbortSignal): Promise<{ url: string }> }
+    attachmentUrl(id: string, attachmentId: string, signal?: AbortSignal): Promise<{ url: string }>
+    keys(includeRevoked: boolean, signal?: AbortSignal): Promise<MailboxKey[]>
+    createKey(input: MailboxKeyInput, signal?: AbortSignal): Promise<{ key: MailboxKey; secret: string }>
+    revokeKey(id: string, signal?: AbortSignal): Promise<void>
+    webhooks(signal?: AbortSignal): Promise<MailboxWebhook[]>
+    webhook(id: string, signal?: AbortSignal): Promise<MailboxWebhook>
+    createWebhook(input: MailboxWebhookInput, signal?: AbortSignal): Promise<{ webhook: MailboxWebhook; secret: string }>
+    updateWebhook(id: string, patch: Partial<MailboxWebhookInput> & { paused?: boolean }, signal?: AbortSignal): Promise<MailboxWebhook>
+    deleteWebhook(id: string, signal?: AbortSignal): Promise<void>
+    rotateWebhookSecret(id: string, signal?: AbortSignal): Promise<{ secret: string }>
+    webhookDeliveries(id: string, cursor?: string, signal?: AbortSignal): Promise<CursorItems<MailboxWebhookDelivery>> }
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 

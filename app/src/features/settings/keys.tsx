@@ -6,6 +6,7 @@ import type { AgentTokenSummary, ApiKey, ApiKeyInput, McpConnection, PageRequest
 import { date } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
+import { MailboxKeysSection } from './mailbox-keys'
 import { settingsColumns } from './skeletons'
 
 export function ApiKeysPage() {
@@ -74,6 +75,7 @@ export function ApiKeysPage() {
     ]} />}
     {keys.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
     </section>
+    {api.environment !== 'test' && <MailboxKeysSection showRevoked={showRevoked} />}
     <section className="section stack"><SectionHeader title="Agent tokens" />
       {agentTokens.error ? <ErrorState error={agentTokens.error} onRetry={() => void agentTokens.refetch()} /> : <DataTable loading={agentTokens.isPending} skeletonRows={1} rows={agentTokens.data ?? []} rowKey={row => row.id} empty={<EmptyState title={showRevoked ? 'No agent tokens' : 'No active agent tokens'} />} columns={[
         {key: 'purpose', label: 'Purpose', width: '28%', render: row => <>{row.purpose}<div className="muted">{row.environment}</div></>},

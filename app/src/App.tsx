@@ -36,6 +36,8 @@ const DeveloperPage = lazy(() => loadDeveloper().then(m => ({ default: m.Develop
 const DocsPage = lazy(() => loadDocs().then(m => ({ default: m.DocsPage })))
 const MailboxesPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxesPage })))
 const MailboxDetailPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxDetailPage })))
+const MailboxWebhooksPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxWebhooksPage })))
+const MailboxWebhookDetailPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxWebhookDetailPage })))
 
 const initialPath = window.location.pathname
 if (initialPath === '/') void loadOverview()
@@ -58,7 +60,7 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
-    <Route path="mailboxes" element={<MailboxesPage />} /><Route path="mailboxes/:id" element={<MailboxDetailPage />} />
+    <Route path="mailboxes" element={<MailboxesPage />} /><Route path="mailboxes/webhooks" element={<MailboxWebhooksPage />} /><Route path="mailboxes/webhooks/:id" element={<MailboxWebhookDetailPage />} /><Route path="mailboxes/:id" element={<MailboxDetailPage />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateEditorPage />} />
     <Route path="contacts" element={<ContactsPage />} /><Route path="contacts/:id" element={<ContactDetailPage />} />

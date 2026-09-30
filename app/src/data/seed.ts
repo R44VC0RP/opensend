@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, MailboxKey, MailboxWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -26,6 +26,8 @@ export interface DemoState {
   mailboxes?: Mailbox[]
   mailboxDomains?: MailboxDomain[]
   mailboxThreads?: MailboxThreadDetail[]
+  mailboxKeys?: MailboxKey[]
+  mailboxWebhooks?: (MailboxWebhook & { deliveries: MailboxWebhookDelivery[] })[]
 }
 
 export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailboxDomains: MailboxDomain[] } {
@@ -41,6 +43,20 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
     ],
     mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), mailboxCount: 4 }],
   }
+}
+
+export function demoMailboxAccess(now = Date.now()) {
+  const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
+  const keys: MailboxKey[] = [
+    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'os_mbx_4f2a91', mailboxIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
+    { id: 'mbk_triage', name: 'Triage reader', prefix: 'os_mbx_8c1d07', mailboxIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
+  ]
+  const delivery = (id: string, hours: number, status: MailboxWebhookDelivery['status'], code: number | null, attempts = 1): MailboxWebhookDelivery => ({ id, webhookId: 'mwh_agent', eventId: `mev_${id}`, status, attemptCount: attempts, lastStatusCode: code, lastError: status === 'failed' ? 'WEBHOOK_HTTP_ERROR' : null, createdAt: ago(hours), updatedAt: ago(hours) })
+  const webhooks = [
+    { id: 'mwh_agent', url: 'https://agents.acme.com/hooks/mail', description: 'Support agent runtime', eventTypes: ['message.received', 'message.bounced'] as MailboxWebhook['eventTypes'], mailboxIds: ['mbx_support'], paused: false, createdAt: ago(20 * 24), updatedAt: ago(48), deliveries: [delivery('d1', 0.2, 'delivered', 200), delivery('d2', 1.5, 'delivered', 200), delivery('d3', 5, 'failed', 503, 6), delivery('d4', 27, 'delivered', 204)] },
+    { id: 'mwh_audit', url: 'https://audit.acme.com/mail-events', description: 'Audit log', eventTypes: ['message.received', 'message.sent', 'message.delivered', 'thread.updated'] as MailboxWebhook['eventTypes'], mailboxIds: null, paused: true, createdAt: ago(9 * 24), updatedAt: ago(9 * 24), deliveries: [] },
+  ]
+  return { keys, webhooks }
 }
 
 export function demoMailboxThreads(now = Date.now()): MailboxThreadDetail[] {

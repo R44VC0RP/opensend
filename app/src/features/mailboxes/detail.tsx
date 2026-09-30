@@ -30,9 +30,10 @@ function ThreadRow({ thread, own, selected, onSelect }: { thread: MailboxThread;
   const unread = thread.unreadCount > 0
   return <li><button type="button" className="mailbox-thread-row" data-selected={selected || undefined} data-unread={unread || undefined} onClick={onSelect} aria-current={selected || undefined}>
     <span className="mailbox-thread-row__top">
-      <span className="mailbox-thread-row__people">{unread && <span className="mailbox-unread-dot" aria-label="Unread" />}{people.slice(0, 2).map(nameOf).join(', ')}{people.length > 2 && ` +${people.length - 2}`}</span>
-      {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
+      {unread && <span className="mailbox-unread-dot" aria-label="Unread" />}
+      <span className="mailbox-thread-row__people">{people.slice(0, 2).map(nameOf).join(', ')}{people.length > 2 && ` +${people.length - 2}`}</span>
       {thread.starred && <Star size={12} className="mailbox-star" aria-label="Starred" />}
+      {thread.messageCount > 1 && <span className="mailbox-thread-row__count" aria-label={`${thread.messageCount} messages`}>{thread.messageCount}</span>}
       <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt}>{when(thread.lastMessageAt)}</time>
     </span>
     <span className="mailbox-thread-row__subject">{thread.subject || '(no subject)'}</span>
@@ -57,17 +58,19 @@ function MessageCard({ mailboxId, message, parent, expanded, onToggle, own }: { 
     <span className="mailbox-message__node" aria-hidden="true" />
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
-        <span className="mailbox-message__from"><strong>{outbound ? 'You' : nameOf(message.from)}</strong><span className="muted">{outbound ? message.from.address : message.from.address}</span></span>
+        <span className="mailbox-message__from"><strong>{outbound ? 'You' : nameOf(message.from)}</strong><span className="muted">{message.from.address}</span></span>
         <span className="mailbox-message__meta">
           {!message.read && <StatusBadge status="New" tone="info" />}
           {outbound && <StatusBadge status={label(message.status)} tone={statusTone(message.status)} />}
           <time dateTime={message.receivedAt} title={`${date(message.receivedAt)} ${time(message.receivedAt)} UTC`}>{when(message.receivedAt)}</time>
         </span>
       </button>
-      {parent && <p className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' || own.has(parent.from.address) ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</p>}
-      {!parent && message.inReplyTo && <p className="mailbox-message__reply-to muted"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message not in this mailbox</p>}
+      <p className="mailbox-message__context">
+        <span title={recipients.map(full).join(', ')}>to {recipients.map(person => own.has(person.address) ? 'you' : nameOf(person)).join(', ') || '—'}</span>
+        {parent ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Replying to <a href={`#message-${parent.id}`} onClick={event => { event.preventDefault(); document.getElementById(`message-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }) }}>{parent.direction === 'outbound' || own.has(parent.from.address) ? 'your message' : nameOf(parent.from)}</a> · {when(parent.receivedAt)}</span>
+          : message.inReplyTo ? <span className="mailbox-message__reply-to"><Undo2 size={12} aria-hidden="true" />Reply to an earlier message</span> : null}
+      </p>
       {expanded ? <>
-        <p className="mailbox-message__to muted">to {recipients.map(full).join(', ') || '—'}</p>
         {message.errorCode && <Alert tone="danger">Delivery failed: {message.errorCode}</Alert>}
         {formatted && message.html ? <EmailPreview html={message.html} title={`Message from ${nameOf(message.from)}`} remoteImages className="mailbox-message__html" />
           : <div className="mailbox-message__body">{(showQuoted ? message.text : message.replyText || message.text) || <span className="muted">(no text)</span>}</div>}
@@ -135,9 +138,9 @@ function Composer({ mailbox, thread, own }: { mailbox: Mailbox; thread: MailboxT
     try { await send.mutateAsync({ allowAutomated }); setText(''); key.current = crypto.randomUUID() }
     catch (error) { if (error instanceof ApiError && ['REPLY_TO_AUTOMATED', 'REPLY_TO_NO_REPLY'].includes(error.code)) { send.reset(); setAutomated(error.message.replace(/\s*\[[A-Z_]+\].*$/, '')) } }
   }
-  return <form className="mailbox-composer" onSubmit={submit}>
+  return <form className="mailbox-composer" data-filled={text ? true : undefined} onSubmit={submit}>
     <label className="mailbox-composer__to" htmlFor="mailbox-reply">Reply to {recipient ? full(recipient) : 'this conversation'}{replyAll && others.length > 0 && <span className="muted"> and {others.map(nameOf).join(', ')}</span>}</label>
-    <Textarea id="mailbox-reply" rows={4} value={text} onChange={event => setText(event.target.value)} placeholder={`Write a reply as ${mailbox.address}`} disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
+    <Textarea id="mailbox-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder={`Write a reply as ${mailbox.address}`} disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
     {send.error && <Alert tone="danger">{send.error instanceof Error ? send.error.message : 'The reply could not be sent.'}</Alert>}
     <div className="mailbox-composer__actions">
       {others.length > 0 ? <Checkbox label={`Reply all (${others.length + 1})`} checked={replyAll} onCheckedChange={setReplyAll} disabled={send.isPending} /> : <span />}

@@ -27,7 +27,7 @@ function LiveMailboxesPage() {
   const mailboxes = useApiQuery(['mailboxes', search, cursor], (api, signal) => api.mailboxes.list({ search: search.trim() || undefined, cursor }, signal))
   const domains = useApiQuery(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal))
   return <div className="stack">
-    <PageHeader title="Mailboxes" />
+    <PageHeader title="Mailboxes" actions={<><Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Mailbox keys</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/mailboxes/webhooks">Webhooks</Link></>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : domains.isPending ? <SkeletonText width={260} /> : <ReceivingDomains domains={domains.data} />}
     <div className="data-toolbar"><Input className="audience-search" aria-label="Search mailboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
     {mailboxes.error ? <ErrorState error={mailboxes.error} onRetry={() => void mailboxes.refetch()} /> : <>
@@ -46,6 +46,7 @@ function LiveMailboxesPage() {
 }
 
 export { MailboxDetailPage } from './detail'
+export { MailboxWebhookDetailPage, MailboxWebhooksPage } from './webhooks'
 
 export function MailboxesPage() {
   return useApi().environment === 'test' ? <><PageHeader title="Mailboxes" /><Alert tone="info">Mailboxes receive real mail, so they are managed in live mode only.</Alert></> : <LiveMailboxesPage />

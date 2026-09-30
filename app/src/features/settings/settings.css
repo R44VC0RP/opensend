@@ -134,3 +134,7 @@
   .settings-account > :first-child { flex-basis: 100%; }
   .settings-facts { grid-template-columns: 1fr; }
 }
+
+.settings-section-note { margin: 0; font-size: var(--text-sm); }
+.mailbox-key-permissions { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
+.mailbox-key-permissions legend { margin-bottom: var(--space-8); padding: 0; }

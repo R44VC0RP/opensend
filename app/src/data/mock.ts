@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, MailboxDomain, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
-import { createSeed, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
+import { createSeed, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
@@ -855,6 +855,28 @@ export function createMockApi(): OpenSendApi {
         return reply
       }),
       attachmentUrl: (_mailboxId, attachmentId, signal) => run(signal, false, () => { throw new ApiError(`Attachment downloads are unavailable in demo mode (${attachmentId}).`, 'UNSUPPORTED_OPERATION') }),
+      keys: (includeRevoked, signal) => run(signal, false, s => (s.mailboxKeys ??= demoMailboxAccess().keys).filter(key => includeRevoked || !key.revokedAt)),
+      createKey: (input, signal) => run(signal, true, s => {
+        if (!input.name.trim()) invalid('name', 'Enter a name for this key.')
+        const secret = `os_mbx_demo_${id('secret').slice(-12)}`
+        const key = { id: id('mbk'), name: input.name.trim(), prefix: secret.slice(0, 14), mailboxIds: input.mailboxIds, permissions: input.permissions, createdAt: now(), lastUsedAt: null, revokedAt: null }
+        ;(s.mailboxKeys ??= demoMailboxAccess().keys).unshift(key)
+        return { key, secret }
+      }),
+      revokeKey: (keyId, signal) => run(signal, true, s => { find(s.mailboxKeys ??= demoMailboxAccess().keys, keyId, 'Key').revokedAt = now() }),
+      webhooks: signal => run(signal, false, s => (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(({ deliveries: _d, ...webhook }) => webhook)),
+      webhook: (webhookId, signal) => run(signal, false, s => { const { deliveries: _d, ...webhook } = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return webhook }),
+      createWebhook: (input, signal) => run(signal, true, s => {
+        try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
+        const webhook = { id: id('mwh'), ...input, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
+        ;(s.mailboxWebhooks ??= demoMailboxAccess().webhooks).unshift(webhook)
+        const { deliveries: _d, ...view } = webhook
+        return { webhook: view, secret: `whsec_demo${id('s').slice(-16)}` }
+      }),
+      updateWebhook: (webhookId, patch, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, { updatedAt: now() }); const { deliveries: _d, ...view } = row; return view }),
+      deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
+      rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
+      webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks),
