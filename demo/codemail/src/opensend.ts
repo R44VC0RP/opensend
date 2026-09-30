@@ -10,6 +10,7 @@ export type Message = {
   messageId?: string | null; inReplyTo?: string | null; text?: string; replyText?: string; attachments?: Attachment[];
 };
 export type ThreadDetail = Thread & { messages: Message[] };
+export type Contact = { address: string; name: string | null; sentCount: number; receivedCount: number; copiedCount: number; firstContactAt: string; lastContactAt: string; automated: boolean };
 export type MailEvent = { id: string; cursor: string; type: string; createdAt: string; mailboxId: string | null; threadId: string | null; messageId: string | null; data: Record<string, unknown> };
 export type AttachmentInput = { filename: string; content: string; contentType?: string } | { id: string };
 
@@ -63,6 +64,10 @@ export class OpenSend {
     return this.call<{ data: MailEvent[]; cursor: string }>('GET', `/mailboxes/${enc(mailboxId)}/events?${params}`);
   }
   attachment(mailboxId: string, attachmentId: string) { return this.call<Attachment & { messageId: string; url: string; expiresAt: string }>('GET', `/mailboxes/${enc(mailboxId)}/attachments/${enc(attachmentId)}`); }
+  contacts(mailboxId: string, query: { q?: string; sort?: 'recent' | 'frequent'; limit?: number; includeAutomated?: boolean } = {}) {
+    const params = new URLSearchParams({ limit: String(query.limit ?? 100), sort: query.sort ?? 'recent', ...(query.q ? { q: query.q } : {}), ...(query.includeAutomated ? { includeAutomated: 'true' } : {}) });
+    return this.call<{ data: Contact[]; nextCursor: string | null }>('GET', `/mailboxes/${enc(mailboxId)}/contacts?${params}`);
+  }
   labels(mailboxId: string) { return this.call<{ data: { name: string; threads: number; messages: number; unreadMessages: number }[] }>('GET', `/mailboxes/${enc(mailboxId)}/labels`); }
 }
 

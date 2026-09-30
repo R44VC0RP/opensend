@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { getMcpAuthContext } from 'agents/mcp/server';
 import { z } from 'zod';
 import { conversationText, mailboxLine, messageLines, own, size, threadLines, who } from './format.js';
-import { directoryText, resolveRecipients, tagger, type Directory } from './directory.js';
+import { directoryText, resolveRecipients, tagger, type ContactSource, type Directory } from './directory.js';
 import { OpenSend, OpenSendError, type AttachmentInput, type Mailbox, type Message } from './opensend.js';
 
 /** Stored encrypted in the OAuth grant. The mailbox key is minted for this grant alone. */
@@ -18,7 +18,7 @@ Typical loop: check_inbox → read_conversation → reply (or update_conversatio
 - send_email, reply and forward send real email to real people. Only send when the user asked for it or clearly intends it.
 - Automated senders (no-reply addresses, bounces, mailing lists) are protected from replies; set allow_automated only if the user explicitly wants to reply anyway.
 - Reading does not mark mail read. Pass mark_as_read=true to read_conversation, or use update_conversations, when you have handled a conversation.
-- Your organization's people and agent mailboxes are listed by find_people. In to, cc and bcc you can write a teammate's name (cc=["maya"]) instead of their address; codemail resolves it and tells you who it picked. Conversations mark teammates and agents.`;
+- find_people lists your organization's people and agent mailboxes, and everyone this mailbox has emailed or heard from (its contacts). In to, cc and bcc you can write a name (cc=["maya"]) instead of an address; codemail resolves it, teammates first, then agent mailboxes, then past contacts, and tells you who it picked. Conversations mark teammates and agents.`;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
 const text = (value: string, structured?: Record<string, unknown>) => ({ content: [{ type: 'text' as const, text: value }] as Content[], ...(structured ? { structuredContent: structured } : {}) });
@@ -78,6 +78,11 @@ const attachmentsArg = z.array(z.union([
 ])).max(20).optional().describe('Up to 20 files, 8 MiB combined: PDF, text, CSV, JSON, images, ICS and Office documents.');
 const toAttachments = (items?: z.infer<typeof attachmentsArg>): AttachmentInput[] => (items ?? []).map(item => 'attachment_id' in item ? { id: item.attachment_id } : { filename: item.filename, content: item.content_base64, ...(item.content_type ? { contentType: item.content_type } : {}) });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
+/** The mailbox's past contacts for name resolution, fetched once per tool call. */
+function contactsOf(client: OpenSend, mailbox: Mailbox): ContactSource {
+  let all: Promise<import('./opensend.js').Contact[]> | undefined;
+  return { mailbox: mailbox.address, load: query => query ? client.contacts(mailbox.id, { q: query, limit: 50 }).then(result => result.data) : all ??= client.contacts(mailbox.id, { limit: 100 }).then(result => result.data) };
+}
 
 export function createServer(openSendUrl: string, directory?: Directory) {
   const tag = tagger(directory);
@@ -174,7 +179,8 @@ export function createServer(openSendUrl: string, directory?: Directory) {
       }), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const [to, cc, bcc] = await Promise.all([resolveRecipients(directory, args.to), resolveRecipients(directory, args.cc ?? []), resolveRecipients(directory, args.bcc ?? [])]);
+      const contacts = contactsOf(client, mailbox);
+      const [to, cc, bcc] = await Promise.all([resolveRecipients(directory, args.to, contacts), resolveRecipients(directory, args.cc ?? [], contacts), resolveRecipients(directory, args.bcc ?? [], contacts)]);
       const sent = await client.send(mailbox.id, { to: to.addresses, cc: cc.addresses, bcc: bcc.addresses, subject: args.subject, text: args.body, ...(args.html ? { html: args.html } : {}), ...(args.from ? { from: args.from } : {}), attachments: toAttachments(args.attachments) }, args.idempotency_key);
       return text(`Queued ${sent.id} from ${sent.from.address} to ${sent.to.map(value => value.address).join(', ')}${sent.cc.length ? `, cc ${sent.cc.map(value => value.address).join(', ')}` : ''} (conversation ${sent.threadId}).${resolved([...to.resolved, ...cc.resolved, ...bcc.resolved])}\nDelivery status appears in read_conversation; replies arrive in the same conversation.`, { message: sent });
     }));
@@ -198,7 +204,8 @@ export function createServer(openSendUrl: string, directory?: Directory) {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const [extraCc, bcc] = await Promise.all([resolveRecipients(directory, args.cc ?? []), resolveRecipients(directory, args.bcc ?? [])]);
+      const contacts = contactsOf(client, mailbox);
+      const [extraCc, bcc] = await Promise.all([resolveRecipients(directory, args.cc ?? [], contacts), resolveRecipients(directory, args.bcc ?? [], contacts)]);
       // OpenSend treats cc as the full list, so keep the reply_all recipients when adding people.
       let cc: string[] | undefined;
       if (extraCc.addresses.length) cc = [...new Set([...(args.reply_all ? await replyAllCc(client, mailbox, args.thread_id, args.message_id) : []), ...extraCc.addresses])];
@@ -220,7 +227,8 @@ export function createServer(openSendUrl: string, directory?: Directory) {
       }), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const [to, cc] = await Promise.all([resolveRecipients(directory, args.to), resolveRecipients(directory, args.cc ?? [])]);
+      const contacts = contactsOf(client, mailbox);
+      const [to, cc] = await Promise.all([resolveRecipients(directory, args.to, contacts), resolveRecipients(directory, args.cc ?? [], contacts)]);
       const sent = await client.forward(mailbox.id, args.message_id, { to: to.addresses, cc: cc.addresses, ...(args.note ? { text: args.note } : {}), includeAttachments: args.include_attachments }, args.idempotency_key);
       return text(`Forwarded as ${sent.id} to ${sent.to.map(value => value.address).join(', ')} ("${sent.subject}", ${sent.attachmentCount} attachment${sent.attachmentCount === 1 ? '' : 's'}).${resolved([...to.resolved, ...cc.resolved])}`, { message: sent });
     }));
@@ -291,12 +299,12 @@ export function createServer(openSendUrl: string, directory?: Directory) {
 
     server.registerTool('find_people', {
       title: 'Find people',
-      description: 'List the people in your organization and its other agent mailboxes, with their addresses, like a company directory. Use it to cc or forward to a teammate. Names also work directly in to, cc and bcc.',
-      inputSchema: z.object({ query: z.string().max(100).optional().describe('Filter by name or address, e.g. "maya" or "ops".') }), annotations: readOnly,
-    }, run(async (_client, args) => {
-      if (!directory) return failure('This connection is not part of an organization.');
-      const result = await directoryText(directory, args.query);
-      return text(result.text, { people: result.people, agents: result.agents });
+      description: 'Who you can email: your organization\'s people and agent mailboxes, plus this mailbox\'s contacts (everyone it has emailed or heard from, most recent first, with how often). Use it to cc a teammate or find someone you wrote to before. Names also work directly in to, cc and bcc.',
+      inputSchema: z.object({ query: z.string().max(100).optional().describe('Filter by name or address, e.g. "maya" or "acme.com".'), mailbox: mailboxArg }), annotations: readOnly,
+    }, run(async (client, args) => {
+      const mailbox = await pickMailbox(client, args.mailbox);
+      const result = await directoryText(directory, contactsOf(client, mailbox), args.query);
+      return text(result.text, { people: result.people, agents: result.agents, contacts: result.contacts });
     }));
 
     server.registerTool('list_labels', {
