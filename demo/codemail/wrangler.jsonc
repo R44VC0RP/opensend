@@ -22,6 +22,6 @@
   // The OpenSend database; codemail's tables live in its "codemail" schema.
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   // OAuth clients, grants and tokens. Tokens are stored as hashes; grant props (the mailbox key) are encrypted.
-  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "9c50d5e69a8b4442af37cbe6b1b34a56" }],
   "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
 }
