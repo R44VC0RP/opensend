@@ -14,6 +14,7 @@ export type MxReport = {
 export type MailboxDomainStatus = 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
 export type CatchAll = 'create_mailbox' | 'store';
 export type MailboxPermission = 'read' | 'send' | 'modify';
+export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
 export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
 
 const scope = () => ({ workspaceId: text('workspace_id').notNull(), environment: text('environment').$type<Mode>().notNull() });
@@ -37,6 +38,7 @@ export const mailboxes = pgTable('mailboxes', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), address: text('address').notNull(), displayName: text('display_name'),
   rules: jsonb('rules').$type<string[]>().notNull().default([]), metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   origin: text('origin').$type<'api' | 'auto'>().notNull().default('api'),
+  sendLimits: jsonb('send_limits').$type<Partial<SendLimits>>().notNull().default({}),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 }, t => [index('mailboxes_page').on(t.workspaceId, t.environment, t.id), index('mailboxes_domain').on(t.workspaceId, t.environment, t.domainId)]);
 
@@ -63,6 +65,7 @@ export const mailMessages = pgTable('mail_messages', {
   headers: jsonb('headers').$type<MailHeader[]>().notNull().default([]), attachmentCount: integer('attachment_count').notNull().default(0), sizeBytes: integer('size_bytes'),
   rawBucket: text('raw_bucket'), rawKey: text('raw_key'), verdicts: jsonb('verdicts').$type<Verdicts>().notNull().default({}),
   spam: boolean('spam').notNull().default(false), automated: boolean('automated').notNull().default(false), status: text('status').notNull().default('received'),
+  senderMailboxId: text('sender_mailbox_id'), errorCode: text('error_code'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
@@ -77,6 +80,7 @@ export const mailUnrouted = pgTable('mail_unrouted', {
 export const mailboxMessages = pgTable('mailbox_messages', {
   mailboxId: text('mailbox_id').notNull(), messageId: text('message_id').notNull(), ...scope(), threadId: text('thread_id').notNull(),
   direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), read: boolean('read').notNull().default(false), receivedAt: ts('received_at').notNull(),
+  labels: text('labels').array().notNull().default([]),
 }, t => [primaryKey({ columns: [t.mailboxId, t.messageId] })]);
 
 export const mailboxThreads = pgTable('mailbox_threads', {

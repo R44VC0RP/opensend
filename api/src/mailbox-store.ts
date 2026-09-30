@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { ApiError, id, type DbExecutor, type Mode } from './core.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailMessageIds, mailMessages, mailThreads, type MailAddress } from './db/mailbox.js';
+import { emails } from './db/sending.js';
+import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailMessageIds, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 
 export type Scope = { workspaceId: string; environment: Mode };
 export const ADDRESS = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -67,7 +68,7 @@ export function validateRule(rule: string, domain: string) {
 }
 
 /** Creates a mailbox with its primary address and aliases. Addresses are unique across mailboxes. */
-export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto' }) {
+export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits> }) {
   const address = input.address.trim().toLowerCase();
   const aliases = [...new Set((input.aliases ?? []).map(value => value.trim().toLowerCase()))].filter(value => value !== address);
   for (const value of [address, ...aliases]) if (!ADDRESS.test(value) || !value.endsWith(`@${input.domainName}`)) throw new ApiError(422, 'ADDRESS_DOMAIN_MISMATCH', `Addresses must be valid and end in @${input.domainName}.`, 'address');
@@ -76,7 +77,7 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   const taken = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, all)));
   if (taken.length) throw new ApiError(409, 'ADDRESS_TAKEN', `${taken[0]!.address} already belongs to a mailbox.`, 'address');
   const mailboxId = id('mbx');
-  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin }).returning();
+  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin, sendLimits: input.sendLimits ?? {} }).returning();
   await tx.insert(mailboxAddresses).values(all.map((value, index) => ({ ...scope, address: value, mailboxId, kind: index === 0 ? 'primary' as const : 'alias' as const })));
   return row!;
 }
@@ -119,6 +120,16 @@ export async function assignThread(tx: DbExecutor, scope: Scope, input: { inRepl
   if (candidates.length) {
     const rows = await tx.select({ messageId: mailMessageIds.messageId, threadId: mailMessageIds.threadId }).from(mailMessageIds).where(and(eq(mailMessageIds.workspaceId, scope.workspaceId), eq(mailMessageIds.environment, scope.environment), inArray(mailMessageIds.messageId, candidates)));
     threadId = candidates.map(candidate => rows.find(row => row.messageId === candidate)?.threadId).find(Boolean);
+    // Replies can arrive before the outbound sync records SES's Message-ID; match the SES provider ID directly.
+    const providerIds = candidates.map(candidate => candidate.match(/^([^@]+)@(?:[a-z0-9-]+\.)?amazonses\.com$/i)?.[1]).filter((value): value is string => !!value);
+    if (!threadId && providerIds.length) {
+      const sent = await tx.select({ sesMessageId: mailMessages.sesMessageId, threadId: mailMessages.threadId }).from(mailMessages).where(and(eq(mailMessages.workspaceId, scope.workspaceId), eq(mailMessages.environment, scope.environment), eq(mailMessages.direction, 'outbound'), inArray(mailMessages.sesMessageId, providerIds)));
+      threadId = providerIds.map(value => sent.find(row => row.sesMessageId === value)?.threadId).find(Boolean);
+      if (!threadId) {
+        const [pending] = await tx.select({ threadId: mailMessages.threadId }).from(mailMessages).innerJoin(emails, and(eq(emails.id, mailMessages.sendingEmailId), eq(emails.workspaceId, mailMessages.workspaceId))).where(and(eq(mailMessages.workspaceId, scope.workspaceId), eq(mailMessages.environment, scope.environment), inArray(emails.providerId, providerIds))).limit(1);
+        threadId = pending?.threadId;
+      }
+    }
   }
   if (!threadId) {
     threadId = id('thr');

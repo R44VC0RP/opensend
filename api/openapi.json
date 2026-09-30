@@ -5639,6 +5639,30 @@
               "unreadThreads",
               "lastMessageAt"
             ]
+          },
+          "sendLimits": {
+            "type": "object",
+            "properties": {
+              "perHour": {
+                "type": "integer"
+              },
+              "perDay": {
+                "type": "integer"
+              },
+              "perRecipientPerHour": {
+                "type": "integer"
+              },
+              "perThreadPer10Minutes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "perHour",
+              "perDay",
+              "perRecipientPerHour",
+              "perThreadPer10Minutes"
+            ],
+            "description": "Outbound limits that guard against runaway agents and reply loops."
           }
         },
         "required": [
@@ -5652,7 +5676,8 @@
           "origin",
           "createdAt",
           "updatedAt",
-          "stats"
+          "stats",
+          "sendLimits"
         ]
       },
       "CreateMailbox": {
@@ -5694,6 +5719,33 @@
             "type": "object",
             "additionalProperties": {},
             "default": {}
+          },
+          "sendLimits": {
+            "type": "object",
+            "properties": {
+              "perHour": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "perDay": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "perRecipientPerHour": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "perThreadPer10Minutes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            },
+            "additionalProperties": false,
+            "description": "Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending."
           }
         },
         "required": [
@@ -5735,6 +5787,33 @@
             "type": "object",
             "additionalProperties": {},
             "default": {}
+          },
+          "sendLimits": {
+            "type": "object",
+            "properties": {
+              "perHour": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              },
+              "perDay": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100000
+              },
+              "perRecipientPerHour": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "perThreadPer10Minutes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            },
+            "additionalProperties": false,
+            "description": "Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending."
           }
         },
         "additionalProperties": false
@@ -6059,10 +6138,25 @@
             ]
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled."
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an outbound message failed."
           },
           "read": {
             "type": "boolean"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Message labels (tags) in this mailbox."
           },
           "from": {
             "$ref": "#/components/schemas/MailboxAddress"
@@ -6110,7 +6204,9 @@
           "mailboxId",
           "direction",
           "status",
+          "errorCode",
           "read",
+          "labels",
           "from",
           "to",
           "cc",
@@ -6227,12 +6323,100 @@
         "properties": {
           "read": {
             "type": "boolean"
+          },
+          "addLabels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9 _.:/-]*$"
+            },
+            "maxItems": 20
+          },
+          "removeLabels": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9 _.:/-]*$"
+            },
+            "maxItems": 20
+          }
+        },
+        "additionalProperties": false
+      },
+      "MailboxMessageList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailboxMessageSummary"
+            }
           }
         },
         "required": [
-          "read"
+          "data"
+        ]
+      },
+      "UpdateMailboxMessages": {
+        "type": "object",
+        "properties": {
+          "messageIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "minItems": 1,
+            "maxItems": 100
+          },
+          "changes": {
+            "$ref": "#/components/schemas/UpdateMailboxMessage"
+          }
+        },
+        "required": [
+          "messageIds",
+          "changes"
         ],
         "additionalProperties": false
+      },
+      "MailboxLabelList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "threads": {
+                  "type": "integer"
+                },
+                "messages": {
+                  "type": "integer"
+                },
+                "unreadMessages": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "threads",
+                "messages",
+                "unreadMessages"
+              ]
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
       },
       "MailboxDownload": {
         "type": "object",
@@ -6275,6 +6459,494 @@
           }
         ]
       },
+      "MailboxUploadedAttachment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "contentType": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "attachment",
+              "inline"
+            ]
+          },
+          "contentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "contentType",
+          "size",
+          "disposition",
+          "contentId"
+        ]
+      },
+      "MailboxAttachmentUpload": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[^\\x00-\\x1f\\x7f/\\\\]+$"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 11200000
+          },
+          "contentType": {
+            "type": "string",
+            "maxLength": 100,
+            "default": "application/octet-stream"
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "attachment",
+              "inline"
+            ],
+            "default": "attachment"
+          },
+          "contentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[a-zA-Z0-9_.@-]+$"
+          }
+        },
+        "required": [
+          "filename",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "MailboxSendInput": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+            "description": "Send as the primary address (default) or one of the mailbox aliases."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "html": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailboxAttachmentInput"
+            },
+            "maxItems": 20,
+            "default": [],
+            "description": "Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents."
+          },
+          "replyTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 900,
+                  "pattern": "^[ -~]+$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ]
+            },
+            "maxItems": 10,
+            "default": []
+          },
+          "autoSubmitted": {
+            "type": "string",
+            "enum": [
+              "auto-generated",
+              "auto-replied"
+            ],
+            "description": "Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message."
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998
+          }
+        },
+        "required": [
+          "to",
+          "subject"
+        ],
+        "additionalProperties": false
+      },
+      "MailboxAttachmentInput": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "filename": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^[^\\x00-\\x1f\\x7f/\\\\]+$"
+              },
+              "content": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 11200000,
+                "description": "Standard padded base64."
+              },
+              "contentType": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "disposition": {
+                "type": "string",
+                "enum": [
+                  "attachment",
+                  "inline"
+                ]
+              },
+              "contentId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[a-zA-Z0-9_.@-]+$"
+              }
+            },
+            "required": [
+              "filename",
+              "content"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…)."
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "MailboxReplyInput": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+            "description": "Send as the primary address (default) or one of the mailbox aliases."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "html": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailboxAttachmentInput"
+            },
+            "maxItems": 20,
+            "default": [],
+            "description": "Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents."
+          },
+          "replyTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 900,
+                  "pattern": "^[ -~]+$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ]
+            },
+            "maxItems": 10,
+            "default": []
+          },
+          "autoSubmitted": {
+            "type": "string",
+            "enum": [
+              "auto-generated",
+              "auto-replied"
+            ],
+            "description": "Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message."
+          },
+          "replyAll": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also copy everyone else on the original message."
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "description": "Override the computed recipients."
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998,
+            "description": "Defaults to \"Re: <original subject>\"."
+          },
+          "quote": {
+            "type": "boolean",
+            "default": false,
+            "description": "Append the original message as quoted text."
+          },
+          "allowAutomated": {
+            "type": "boolean",
+            "default": false,
+            "description": "Reply even when the original is automated or the recipient is a no-reply address."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MailboxForwardInput": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+            "description": "Send as the primary address (default) or one of the mailbox aliases."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "html": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailboxAttachmentInput"
+            },
+            "maxItems": 20,
+            "default": [],
+            "description": "Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents."
+          },
+          "replyTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 900,
+                  "pattern": "^[ -~]+$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ]
+            },
+            "maxItems": 10,
+            "default": []
+          },
+          "autoSubmitted": {
+            "type": "string",
+            "enum": [
+              "auto-generated",
+              "auto-replied"
+            ],
+            "description": "Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message."
+          },
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "minItems": 1,
+            "maxItems": 50
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+            },
+            "maxItems": 50,
+            "default": []
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998,
+            "description": "Defaults to \"Fwd: <original subject>\"."
+          },
+          "includeAttachments": {
+            "type": "boolean",
+            "default": true,
+            "description": "Attach the original attachments (8 MiB combined)."
+          }
+        },
+        "required": [
+          "to"
+        ],
+        "additionalProperties": false
+      },
       "MailboxEventPage": {
         "type": "object",
         "properties": {
@@ -6307,10 +6979,14 @@
             "type": "string",
             "enum": [
               "message.received",
+              "message.queued",
               "message.sent",
               "message.delivered",
+              "message.delayed",
               "message.bounced",
               "message.complained",
+              "message.failed",
+              "message.updated",
               "thread.updated",
               "mailbox.created",
               "mailbox.deleted"
@@ -6529,10 +7205,14 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.queued",
                 "message.sent",
                 "message.delivered",
+                "message.delayed",
                 "message.bounced",
                 "message.complained",
+                "message.failed",
+                "message.updated",
                 "thread.updated",
                 "mailbox.created",
                 "mailbox.deleted"
@@ -6588,17 +7268,21 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.queued",
                 "message.sent",
                 "message.delivered",
+                "message.delayed",
                 "message.bounced",
                 "message.complained",
+                "message.failed",
+                "message.updated",
                 "thread.updated",
                 "mailbox.created",
                 "mailbox.deleted"
               ]
             },
             "minItems": 1,
-            "maxItems": 8,
+            "maxItems": 12,
             "default": [
               "message.received"
             ]
@@ -6661,17 +7345,21 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.queued",
                 "message.sent",
                 "message.delivered",
+                "message.delayed",
                 "message.bounced",
                 "message.complained",
+                "message.failed",
+                "message.updated",
                 "thread.updated",
                 "mailbox.created",
                 "mailbox.deleted"
               ]
             },
             "minItems": 1,
-            "maxItems": 8,
+            "maxItems": 12,
             "default": [
               "message.received"
             ]
@@ -6822,7 +7510,15 @@
             ]
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled."
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an outbound message failed."
           },
           "from": {
             "$ref": "#/components/schemas/MailboxAddress"
@@ -6907,6 +7603,7 @@
           "threadId",
           "direction",
           "status",
+          "errorCode",
           "from",
           "to",
           "cc",
@@ -6940,7 +7637,15 @@
             ]
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled."
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an outbound message failed."
           },
           "from": {
             "$ref": "#/components/schemas/MailboxAddress"
@@ -7153,6 +7858,7 @@
           "threadId",
           "direction",
           "status",
+          "errorCode",
           "from",
           "to",
           "cc",
@@ -7222,7 +7928,15 @@
             ]
           },
           "status": {
-            "type": "string"
+            "type": "string",
+            "description": "received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled."
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an outbound message failed."
           },
           "from": {
             "$ref": "#/components/schemas/MailboxAddress"
@@ -7272,6 +7986,7 @@
           "threadId",
           "direction",
           "status",
+          "errorCode",
           "from",
           "to",
           "cc",
@@ -28085,6 +28800,17 @@
           {
             "schema": {
               "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9 _.:/-]*$"
+            },
+            "required": false,
+            "name": "label",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "maxLength": 120
             },
             "required": false,
@@ -28264,6 +28990,178 @@
             "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
           }
         ]
+      },
+      "post": {
+        "operationId": "mailboxSendMessage",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "Send a new message",
+        "description": "Starts a new conversation. Sent through OpenSend’s transactional pipeline (suppression, SES configuration set, delivery tracking) with open/click tracking off. Supports the Idempotency-Key header. Per-mailbox limits apply (see sendLimits).",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxSendInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/MailboxMessage"
+                    },
+                    {
+                      "description": "The stored outbound message. status starts as queued; follow message.sent and message.delivered events or re-read it."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxSendMessage } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxSendMessage({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\"\n  },\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"to\": [\n      \"recipient@example.com\"\n    ],\n    \"cc\": [],\n    \"bcc\": [],\n    \"subject\": \"Hello from OpenSend\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"to\": [\n    \"recipient@example.com\"\n  ],\n  \"cc\": [],\n  \"bcc\": [],\n  \"subject\": \"Hello from OpenSend\"\n}'"
+          }
+        ]
       }
     },
     "/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}": {
@@ -28437,6 +29335,7 @@
         "tags": [
           "Mailbox messages"
         ],
+        "summary": "Mark a message read/unread or change its labels",
         "security": [
           {
             "bearerAuth": []
@@ -28596,12 +29495,335 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateMessage } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateMessage({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\",\n    \"messageId\": \"message_123\"\n  },\n  body: {\n    \"read\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateMessage } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateMessage({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\",\n    \"messageId\": \"message_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages/message_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"read\": false\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages/message_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/messages/batch": {
+      "post": {
+        "operationId": "mailboxUpdateMessages",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "Update up to 100 messages at once",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMailboxMessages"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxMessageList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateMessages } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateMessages({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\"\n  },\n  body: {\n    \"messageIds\": [\n      \"message_123\"\n    ],\n    \"changes\": {}\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages/batch' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"messageIds\": [\n    \"message_123\"\n  ],\n  \"changes\": {}\n}'"
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/labels": {
+      "get": {
+        "operationId": "mailboxListLabels",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "List labels in use",
+        "description": "Every label on this mailbox’s threads or messages, with counts. Labels are created by applying them.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxLabelList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxListLabels } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxListLabels({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/labels' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
           }
         ]
       }
@@ -28936,6 +30158,725 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/attachments/attachment_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/attachments": {
+      "post": {
+        "operationId": "mailboxUploadAttachment",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "Upload an attachment to send later",
+        "description": "Stores a file (base64, 8 MiB) and returns an attachment_… ID for the attachments field of send, reply and forward. Unused uploads are deleted after 30 days.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxAttachmentUpload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxUploadedAttachment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUploadAttachment } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUploadAttachment({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\"\n  },\n  body: {\n    \"filename\": \"Example\",\n    \"content\": \"example\",\n    \"contentType\": \"application/octet-stream\",\n    \"disposition\": \"attachment\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/attachments' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"filename\": \"Example\",\n  \"content\": \"example\",\n  \"contentType\": \"application/octet-stream\",\n  \"disposition\": \"attachment\"\n}'"
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/reply": {
+      "post": {
+        "operationId": "mailboxReplyToMessage",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "Reply to a message",
+        "description": "Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "messageId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxReplyInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/MailboxMessage"
+                    },
+                    {
+                      "description": "The stored outbound message. status starts as queued; follow message.sent and message.delivered events or re-read it."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxReplyToMessage } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxReplyToMessage({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\",\n    \"messageId\": \"message_123\"\n  },\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"replyAll\": false,\n    \"bcc\": [],\n    \"quote\": false,\n    \"allowAutomated\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages/message_123/reply' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"replyAll\": false,\n  \"bcc\": [],\n  \"quote\": false,\n  \"allowAutomated\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}/reply": {
+      "post": {
+        "operationId": "mailboxReplyToThread",
+        "tags": [
+          "Mailbox threads"
+        ],
+        "summary": "Reply to a conversation",
+        "description": "Replies to the newest inbound message in the conversation (or the newest message if none is inbound). Same options as replying to a message.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "threadId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxReplyInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/MailboxMessage"
+                    },
+                    {
+                      "description": "The stored outbound message. status starts as queued; follow message.sent and message.delivered events or re-read it."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxReplyToThread } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxReplyToThread({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\",\n    \"threadId\": \"thread_123\"\n  },\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"replyAll\": false,\n    \"bcc\": [],\n    \"quote\": false,\n    \"allowAutomated\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/threads/thread_123/reply' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"replyAll\": false,\n  \"bcc\": [],\n  \"quote\": false,\n  \"allowAutomated\": false\n}'"
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/forward": {
+      "post": {
+        "operationId": "mailboxForwardMessage",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "Forward a message",
+        "description": "Sends the original message with its headers summarized under an optional note, in the same conversation. Original attachments are included by default. Supports Idempotency-Key.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "messageId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailboxForwardInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/MailboxMessage"
+                    },
+                    {
+                      "description": "The stored outbound message. status starts as queued; follow message.sent and message.delivered events or re-read it."
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxForwardMessage } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxForwardMessage({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\",\n    \"messageId\": \"message_123\"\n  },\n  body: {\n    \"attachments\": [],\n    \"replyTo\": [],\n    \"headers\": [],\n    \"to\": [\n      \"recipient@example.com\"\n    ],\n    \"cc\": [],\n    \"bcc\": [],\n    \"includeAttachments\": true\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/messages/message_123/forward' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"attachments\": [],\n  \"replyTo\": [],\n  \"headers\": [],\n  \"to\": [\n    \"recipient@example.com\"\n  ],\n  \"cc\": [],\n  \"bcc\": [],\n  \"includeAttachments\": true\n}'"
           }
         ]
       }

@@ -9,6 +9,7 @@ import { jobConcurrency, nextWakeDelay } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { mailboxHourly } from './mailbox-ingest.js';
+import { syncOutboundMessages } from './mailbox-send.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
@@ -140,6 +141,8 @@ export default {
       }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       const resolved = await resolveRegionRuntime(runtime);
+      // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
+      try { await syncOutboundMessages(resolved); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
       const concurrency = workerConcurrency(env);
       // Minute cron: recover orchestration jobs whose wake was coalesced or lost.

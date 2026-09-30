@@ -5,7 +5,7 @@ import { mailboxEvents, mailboxWebhookDeliveries, mailboxWebhooks } from './db/m
 import { MAX_ATTEMPTS } from './jobs.js';
 import { decrypt, hmac, webhookUrl } from './operations.js';
 
-export const mailboxEventTypes = ['message.received', 'message.sent', 'message.delivered', 'message.bounced', 'message.complained', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const;
+export const mailboxEventTypes = ['message.received', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const;
 export type MailboxEventType = typeof mailboxEventTypes[number];
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 export type MailboxEvent = { id: string; cursor: string; type: MailboxEventType; createdAt: string; mailboxId: string | null; threadId: string | null; messageId: string | null; data: Record<string, unknown> };

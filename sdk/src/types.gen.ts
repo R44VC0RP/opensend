@@ -1282,6 +1282,15 @@ export type Mailbox = {
         unreadThreads: number;
         lastMessageAt: string | null;
     };
+    /**
+     * Outbound limits that guard against runaway agents and reply loops.
+     */
+    sendLimits: {
+        perHour: number;
+        perDay: number;
+        perRecipientPerHour: number;
+        perThreadPer10Minutes: number;
+    };
 };
 
 export type CreateMailbox = {
@@ -1295,6 +1304,15 @@ export type CreateMailbox = {
     metadata?: {
         [key: string]: unknown;
     };
+    /**
+     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     */
+    sendLimits?: {
+        perHour?: number;
+        perDay?: number;
+        perRecipientPerHour?: number;
+        perThreadPer10Minutes?: number;
+    };
 };
 
 export type UpdateMailbox = {
@@ -1306,6 +1324,15 @@ export type UpdateMailbox = {
     rules?: Array<string>;
     metadata?: {
         [key: string]: unknown;
+    };
+    /**
+     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     */
+    sendLimits?: {
+        perHour?: number;
+        perDay?: number;
+        perRecipientPerHour?: number;
+        perThreadPer10Minutes?: number;
     };
 };
 
@@ -1388,8 +1415,19 @@ export type MailboxMessageSummary = {
     threadId: string;
     mailboxId: string;
     direction: 'inbound' | 'outbound';
+    /**
+     * received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled.
+     */
     status: string;
+    /**
+     * Why an outbound message failed.
+     */
+    errorCode: string | null;
     read: boolean;
+    /**
+     * Message labels (tags) in this mailbox.
+     */
+    labels: Array<string>;
     from: MailboxAddress;
     to: Array<MailboxAddress>;
     cc: Array<MailboxAddress>;
@@ -1427,7 +1465,27 @@ export type MailboxMessagePage = {
 };
 
 export type UpdateMailboxMessage = {
-    read: boolean;
+    read?: boolean;
+    addLabels?: Array<string>;
+    removeLabels?: Array<string>;
+};
+
+export type MailboxMessageList = {
+    data: Array<MailboxMessageSummary>;
+};
+
+export type UpdateMailboxMessages = {
+    messageIds: Array<string>;
+    changes: UpdateMailboxMessage;
+};
+
+export type MailboxLabelList = {
+    data: Array<{
+        name: string;
+        threads: number;
+        messages: number;
+        unreadMessages: number;
+    }>;
 };
 
 export type MailboxDownload = {
@@ -1441,6 +1499,142 @@ export type MailboxAttachmentDownload = MailboxAttachment & {
     expiresAt: string;
 };
 
+export type MailboxUploadedAttachment = {
+    id: string;
+    filename: string;
+    contentType: string;
+    size: number;
+    disposition: 'attachment' | 'inline';
+    contentId: string | null;
+};
+
+export type MailboxAttachmentUpload = {
+    filename: string;
+    content: string;
+    contentType?: string;
+    disposition?: 'attachment' | 'inline';
+    contentId?: string;
+};
+
+export type MailboxSendInput = {
+    /**
+     * Send as the primary address (default) or one of the mailbox aliases.
+     */
+    from?: string;
+    text?: string;
+    html?: string;
+    /**
+     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     */
+    attachments?: Array<MailboxAttachmentInput>;
+    replyTo?: Array<string>;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.
+     */
+    autoSubmitted?: 'auto-generated' | 'auto-replied';
+    to: Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    subject: string;
+};
+
+export type MailboxAttachmentInput = {
+    filename: string;
+    /**
+     * Standard padded base64.
+     */
+    content: string;
+    contentType?: string;
+    disposition?: 'attachment' | 'inline';
+    contentId?: string;
+} | {
+    /**
+     * A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).
+     */
+    id: string;
+};
+
+export type MailboxReplyInput = {
+    /**
+     * Send as the primary address (default) or one of the mailbox aliases.
+     */
+    from?: string;
+    text?: string;
+    html?: string;
+    /**
+     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     */
+    attachments?: Array<MailboxAttachmentInput>;
+    replyTo?: Array<string>;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.
+     */
+    autoSubmitted?: 'auto-generated' | 'auto-replied';
+    /**
+     * Also copy everyone else on the original message.
+     */
+    replyAll?: boolean;
+    /**
+     * Override the computed recipients.
+     */
+    to?: Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    /**
+     * Defaults to "Re: <original subject>".
+     */
+    subject?: string;
+    /**
+     * Append the original message as quoted text.
+     */
+    quote?: boolean;
+    /**
+     * Reply even when the original is automated or the recipient is a no-reply address.
+     */
+    allowAutomated?: boolean;
+};
+
+export type MailboxForwardInput = {
+    /**
+     * Send as the primary address (default) or one of the mailbox aliases.
+     */
+    from?: string;
+    text?: string;
+    html?: string;
+    /**
+     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     */
+    attachments?: Array<MailboxAttachmentInput>;
+    replyTo?: Array<string>;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.
+     */
+    autoSubmitted?: 'auto-generated' | 'auto-replied';
+    to: Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    /**
+     * Defaults to "Fwd: <original subject>".
+     */
+    subject?: string;
+    /**
+     * Attach the original attachments (8 MiB combined).
+     */
+    includeAttachments?: boolean;
+};
+
 export type MailboxEventPage = {
     data: Array<MailboxEvent>;
     /**
@@ -1452,7 +1646,7 @@ export type MailboxEventPage = {
 export type MailboxEvent = {
     id: string;
     cursor: string;
-    type: 'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
+    type: 'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
     createdAt: string;
     mailboxId: string | null;
     threadId: string | null;
@@ -1496,7 +1690,7 @@ export type MailboxWebhook = {
     id: string;
     url: string;
     description: string;
-    eventTypes: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     mailboxIds: Array<string> | null;
     paused: boolean;
     createdAt: string;
@@ -1506,7 +1700,7 @@ export type MailboxWebhook = {
 export type CreateMailboxWebhook = {
     url: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
@@ -1521,7 +1715,7 @@ export type MailboxWebhookList = {
 export type UpdateMailboxWebhook = {
     url?: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
@@ -1559,7 +1753,14 @@ export type StoredMessageSummary = {
     id: string;
     threadId: string;
     direction: 'inbound' | 'outbound';
+    /**
+     * received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled.
+     */
     status: string;
+    /**
+     * Why an outbound message failed.
+     */
+    errorCode: string | null;
     from: MailboxAddress;
     to: Array<MailboxAddress>;
     cc: Array<MailboxAddress>;
@@ -1589,7 +1790,14 @@ export type StoredMessage = {
     id: string;
     threadId: string;
     direction: 'inbound' | 'outbound';
+    /**
+     * received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled.
+     */
     status: string;
+    /**
+     * Why an outbound message failed.
+     */
+    errorCode: string | null;
     from: MailboxAddress;
     to: Array<MailboxAddress>;
     cc: Array<MailboxAddress>;
@@ -1651,7 +1859,14 @@ export type MailboxUnroutedMessage = {
     id: string;
     threadId: string;
     direction: 'inbound' | 'outbound';
+    /**
+     * received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled.
+     */
     status: string;
+    /**
+     * Why an outbound message failed.
+     */
+    errorCode: string | null;
     from: MailboxAddress;
     to: Array<MailboxAddress>;
     cc: Array<MailboxAddress>;
@@ -9567,6 +9782,7 @@ export type MailboxListMessagesData = {
     query?: {
         direction?: 'inbound' | 'outbound';
         unread?: 'true' | 'false';
+        label?: string;
         threadId?: string;
         q?: string;
         since?: string;
@@ -9630,6 +9846,69 @@ export type MailboxListMessagesResponses = {
 };
 
 export type MailboxListMessagesResponse = MailboxListMessagesResponses[keyof MailboxListMessagesResponses];
+
+export type MailboxSendMessageData = {
+    body: MailboxSendInput;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages';
+};
+
+export type MailboxSendMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxSendMessageError = MailboxSendMessageErrors[keyof MailboxSendMessageErrors];
+
+export type MailboxSendMessageResponses = {
+    /**
+     * Success
+     */
+    202: MailboxMessage & unknown;
+};
+
+export type MailboxSendMessageResponse = MailboxSendMessageResponses[keyof MailboxSendMessageResponses];
 
 export type MailboxGetMessageData = {
     body?: never;
@@ -9759,6 +10038,132 @@ export type MailboxUpdateMessageResponses = {
 
 export type MailboxUpdateMessageResponse = MailboxUpdateMessageResponses[keyof MailboxUpdateMessageResponses];
 
+export type MailboxUpdateMessagesData = {
+    body: UpdateMailboxMessages;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/batch';
+};
+
+export type MailboxUpdateMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateMessagesError = MailboxUpdateMessagesErrors[keyof MailboxUpdateMessagesErrors];
+
+export type MailboxUpdateMessagesResponses = {
+    /**
+     * Success
+     */
+    200: MailboxMessageList;
+};
+
+export type MailboxUpdateMessagesResponse = MailboxUpdateMessagesResponses[keyof MailboxUpdateMessagesResponses];
+
+export type MailboxListLabelsData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/labels';
+};
+
+export type MailboxListLabelsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListLabelsError = MailboxListLabelsErrors[keyof MailboxListLabelsErrors];
+
+export type MailboxListLabelsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxLabelList;
+};
+
+export type MailboxListLabelsResponse = MailboxListLabelsResponses[keyof MailboxListLabelsResponses];
+
 export type MailboxGetRawMessageData = {
     body?: never;
     path: {
@@ -9886,6 +10291,261 @@ export type MailboxGetAttachmentResponses = {
 };
 
 export type MailboxGetAttachmentResponse = MailboxGetAttachmentResponses[keyof MailboxGetAttachmentResponses];
+
+export type MailboxUploadAttachmentData = {
+    body: MailboxAttachmentUpload;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/attachments';
+};
+
+export type MailboxUploadAttachmentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUploadAttachmentError = MailboxUploadAttachmentErrors[keyof MailboxUploadAttachmentErrors];
+
+export type MailboxUploadAttachmentResponses = {
+    /**
+     * Success
+     */
+    201: MailboxUploadedAttachment;
+};
+
+export type MailboxUploadAttachmentResponse = MailboxUploadAttachmentResponses[keyof MailboxUploadAttachmentResponses];
+
+export type MailboxReplyToMessageData = {
+    body: MailboxReplyInput;
+    path: {
+        mailboxId: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/reply';
+};
+
+export type MailboxReplyToMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxReplyToMessageError = MailboxReplyToMessageErrors[keyof MailboxReplyToMessageErrors];
+
+export type MailboxReplyToMessageResponses = {
+    /**
+     * Success
+     */
+    202: MailboxMessage & unknown;
+};
+
+export type MailboxReplyToMessageResponse = MailboxReplyToMessageResponses[keyof MailboxReplyToMessageResponses];
+
+export type MailboxReplyToThreadData = {
+    body: MailboxReplyInput;
+    path: {
+        mailboxId: string;
+        threadId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}/reply';
+};
+
+export type MailboxReplyToThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxReplyToThreadError = MailboxReplyToThreadErrors[keyof MailboxReplyToThreadErrors];
+
+export type MailboxReplyToThreadResponses = {
+    /**
+     * Success
+     */
+    202: MailboxMessage & unknown;
+};
+
+export type MailboxReplyToThreadResponse = MailboxReplyToThreadResponses[keyof MailboxReplyToThreadResponses];
+
+export type MailboxForwardMessageData = {
+    body: MailboxForwardInput;
+    path: {
+        mailboxId: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/forward';
+};
+
+export type MailboxForwardMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxForwardMessageError = MailboxForwardMessageErrors[keyof MailboxForwardMessageErrors];
+
+export type MailboxForwardMessageResponses = {
+    /**
+     * Success
+     */
+    202: MailboxMessage & unknown;
+};
+
+export type MailboxForwardMessageResponse = MailboxForwardMessageResponses[keyof MailboxForwardMessageResponses];
 
 export type MailboxListEventsData = {
     body?: never;

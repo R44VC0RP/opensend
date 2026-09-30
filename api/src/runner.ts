@@ -6,12 +6,13 @@ import { jobConcurrency } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { mailboxHourly } from './mailbox-ingest.js';
+import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log } from './core.js';
 try {
   const { runtime, close } = nodeRuntime(process.env);
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
-  let stopped = false; let lastCleanup = 0;
+  let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0;
   // In-process pacing state per environment/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
@@ -25,6 +26,10 @@ try {
           await cleanup(runtime); lastCleanup = Date.now();
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
           await mailboxHourly(runtime);
+        }
+        if (Date.now() - lastOutboundSync > 15000) {
+          lastOutboundSync = Date.now();
+          try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates);
         if (!count) await setTimeout(1000);

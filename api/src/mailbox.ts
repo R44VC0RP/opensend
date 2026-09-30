@@ -3,7 +3,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, or, sql, type SQL }
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
-import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, type App, type Ctx, type MailboxAccess, type Runtime } from './core.js';
+import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, type Actor, type App, type Ctx, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate } from './auth.js';
 import { domains } from './db/operations.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
@@ -12,6 +12,8 @@ import { eventView, latestCursor, mailboxEventTypes, readEvents, recordEvents, w
 import { mailboxS3, queueReconcile } from './mailbox-setup.js';
 import { attachToMailboxes, createMailbox, htmlToPlain, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
+import { idempotent, storeAttachmentBytes } from './sending.js';
+import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyRecipients, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 
 const BASE = '/mailbox/v1';
@@ -88,6 +90,7 @@ const MailboxSchema = z.object({
   id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
   stats: z.object({ threads: z.number().int(), unreadThreads: z.number().int(), lastMessageAt: z.string().nullable() }),
+  sendLimits: z.object({ perHour: z.number().int(), perDay: z.number().int(), perRecipientPerHour: z.number().int(), perThreadPer10Minutes: z.number().int() }).describe('Outbound limits that guard against runaway agents and reply loops.'),
 }).openapi('Mailbox');
 const ThreadSchema = z.object({
   id: z.string(), mailboxId: z.string(), subject: z.string(), snippet: z.string(), participants: z.array(Address), messageCount: z.number().int(), unreadCount: z.number().int(),
@@ -95,7 +98,9 @@ const ThreadSchema = z.object({
 }).openapi('MailboxThread');
 const AttachmentSchema = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), contentId: z.string().nullable(), disposition: z.enum(['attachment', 'inline']) }).openapi('MailboxAttachment');
 const MessageSummary = z.object({
-  id: z.string(), threadId: z.string(), mailboxId: z.string(), direction: z.enum(['inbound', 'outbound']), status: z.string(), read: z.boolean(),
+  id: z.string(), threadId: z.string(), mailboxId: z.string(), direction: z.enum(['inbound', 'outbound']),
+  status: z.string().describe('received for inbound mail. Outbound: queued, attempting, sent, delivered, delayed, bounced, complained, rejected, suppressed or canceled.'), errorCode: z.string().nullable().describe('Why an outbound message failed.'),
+  read: z.boolean(), labels: z.array(z.string()).describe('Message labels (tags) in this mailbox.'),
   from: Address, to: z.array(Address), cc: z.array(Address), subject: z.string(), snippet: z.string(), sentAt: z.string().nullable(), receivedAt: z.string(),
   attachmentCount: z.number().int(), spam: z.boolean(), automated: z.boolean(),
 }).openapi('MailboxMessageSummary');
@@ -146,20 +151,20 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
     const stat = stats.find(item => item.mailboxId === row.id);
     return { id: row.id, address: row.address, displayName: row.displayName, domain: domainRows.find(item => item.id === row.domainId)?.name ?? row.address.split('@')[1]!,
       aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
-      createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) } };
+      createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row) };
   });
 }
 const threadView = (row: typeof mailboxThreads.$inferSelect) => ({ id: row.threadId, mailboxId: row.mailboxId, subject: row.subject, snippet: row.snippet, participants: row.participants, messageCount: row.messageCount, unreadCount: row.unreadCount,
   lastMessageAt: iso(row.lastMessageAt)!, lastInboundAt: iso(row.lastInboundAt), archived: row.archived, starred: row.starred, spam: row.spam, trashed: !!row.trashedAt, labels: row.labels });
 type MessageRow = typeof mailMessages.$inferSelect;
-const summaryView = (row: MessageRow, mailboxId: string, read: boolean) => ({ id: row.id, threadId: row.threadId, mailboxId, direction: row.direction, status: row.status, read,
+const summaryView = (row: MessageRow, mailboxId: string, read: boolean, labels: string[] = []) => ({ id: row.id, threadId: row.threadId, mailboxId, direction: row.direction, status: row.status, errorCode: row.errorCode, read, labels,
   from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, subject: row.subject, snippet: row.snippet, sentAt: iso(row.sentAt), receivedAt: iso(row.receivedAt)!,
   attachmentCount: row.attachmentCount, spam: row.spam, automated: row.automated });
-async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolean }[], mailboxId: string, options: { html: boolean; headers: boolean }) {
-  const files = rows.length ? await runtime.db.select().from(mailAttachments).where(inArray(mailAttachments.messageId, rows.map(item => item.row.id))).orderBy(asc(mailAttachments.id)) : [];
-  return rows.map(({ row, read }) => {
+async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolean; labels?: string[] }[], mailboxId: string, options: { html: boolean; headers: boolean }, db: Pick<Runtime['db'], 'select'> = runtime.db) {
+  const files = rows.length ? await db.select().from(mailAttachments).where(inArray(mailAttachments.messageId, rows.map(item => item.row.id))).orderBy(asc(mailAttachments.id)) : [];
+  return rows.map(({ row, read, labels }) => {
     const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
-    return { ...summaryView(row, mailboxId, read), bcc: row.bcc, replyTo: row.replyTo, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references,
+    return { ...summaryView(row, mailboxId, read, labels), bcc: row.bcc, replyTo: row.replyTo, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references,
       text, replyText: replyText(text), html: options.html ? row.html : null, bodyTruncated: row.bodyTruncated, ...(options.headers ? { headers: row.headers } : {}),
       attachments: files.filter(file => file.messageId === row.id).map(file => ({ id: file.id, filename: file.filename, contentType: file.contentType, size: file.sizeBytes, contentId: file.contentId, disposition: file.disposition })), verdicts: row.verdicts };
   });
@@ -205,6 +210,25 @@ async function patchThreads(c: Ctx, mailboxId: string, threadIds: string[], patc
   if (runnable) try { await c.env.wake?.(runnable); } catch { /* Webhook jobs are durable. */ }
   const updated = await c.env.db.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), inArray(mailboxThreads.threadId, threadIds)));
   return updated.map(threadView);
+}
+
+const MessagePatch = z.object({ read: z.boolean().optional(), addLabels: z.array(labelName).max(20).optional(), removeLabels: z.array(labelName).max(20).optional() })
+  .strict().refine(value => Object.values(value).some(item => item !== undefined), 'Change at least one field.').openapi('UpdateMailboxMessage');
+async function patchMessages(c: Ctx, mailboxId: string, messageIds: string[], patch: z.infer<typeof MessagePatch>) {
+  const { scope } = await mailboxFor(c, mailboxId, 'modify');
+  const runnable = await c.env.db.transaction(async tx => {
+    const rows = await tx.select().from(mailboxMessages).where(and(eq(mailboxMessages.mailboxId, mailboxId), inArray(mailboxMessages.messageId, messageIds))).for('update');
+    if (rows.length !== messageIds.length) throw new ApiError(404, 'NOT_FOUND', 'Message was not found in this mailbox.');
+    for (const row of rows) {
+      const labels = [...new Set([...row.labels.filter(label => !patch.removeLabels?.includes(label)), ...(patch.addLabels ?? [])])].slice(0, 50);
+      await tx.update(mailboxMessages).set({ labels, ...(patch.read !== undefined ? { read: patch.read } : {}) }).where(and(eq(mailboxMessages.mailboxId, mailboxId), eq(mailboxMessages.messageId, row.messageId)));
+    }
+    if (patch.read !== undefined) for (const threadId of new Set(rows.map(row => row.threadId))) await refreshThread(tx, mailboxId, threadId);
+    return recordEvents(tx, scope.workspaceId, scope.environment, rows.map(row => ({ type: 'message.updated' as const, mailboxId, threadId: row.threadId, messageId: row.messageId, data: { changes: patch } })));
+  });
+  if (runnable) try { await c.env.wake?.(runnable); } catch { /* Webhook jobs are durable. */ }
+  const updated = await c.env.db.select({ row: mailMessages, read: mailboxMessages.read, labels: mailboxMessages.labels }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailboxId), inArray(mailboxMessages.messageId, messageIds)));
+  return updated.map(item => summaryView(item.row, mailboxId, item.read, item.labels));
 }
 
 /** Links earlier stored mail for newly claimed addresses and rules to a mailbox. */
@@ -281,6 +305,8 @@ export function registerMailbox(app: App) {
     address: z.string().trim().toLowerCase().max(254).regex(ADDRESS, 'Use a valid email address.'), displayName: z.string().trim().max(200).nullable().optional(),
     aliases: z.array(z.string().trim().toLowerCase().max(254).regex(ADDRESS)).max(50).default([]), rules: z.array(z.string().max(254)).max(20).default([]).describe('Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.'),
     metadata: z.record(z.string(), z.unknown()).default({}).refine(value => JSON.stringify(value).length <= 16384, 'Metadata must be at most 16 KB.'),
+    sendLimits: z.object({ perHour: z.number().int().min(0).max(10000), perDay: z.number().int().min(0).max(100000), perRecipientPerHour: z.number().int().min(0).max(1000), perThreadPer10Minutes: z.number().int().min(0).max(1000) }).partial().strict().optional()
+      .describe(`Override outbound limits. Defaults: ${Object.entries(DEFAULT_SEND_LIMITS).map(([key, value]) => `${key} ${value}`).join(', ')}. 0 blocks sending.`),
   }).strict().openapi('CreateMailbox');
   app.openapi(route({ method: 'get', path: '/mailboxes', operationId: 'mailboxList', tags: [TAG.mailboxes], summary: 'List mailboxes', description: 'Mailbox keys see only the mailboxes they are scoped to.',
     request: { query: z.object({ domain: z.string().max(253).optional(), origin: z.enum(['api', 'auto']).optional(), q: z.string().max(200).optional(), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(MailboxSchema, 'MailboxPage')), ...errors } }), async c => {
@@ -298,7 +324,7 @@ export function registerMailbox(app: App) {
     if (!domain || ['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${host} before creating mailboxes on it.`, 'address');
     const { row, runnable } = await c.env.db.transaction(async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_address:${value.workspaceId}:${input.address}`}))`);
-      const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api' });
+      const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api', sendLimits: input.sendLimits });
       await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
       return { row: created, runnable: await recordEvents(tx, scope.workspaceId, scope.environment, [{ type: 'mailbox.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]) };
     });
@@ -315,7 +341,7 @@ export function registerMailbox(app: App) {
     const domain = mailbox.address.split('@')[1]!;
     await c.env.db.transaction(async tx => {
       const rules = input.rules ? [...new Set(input.rules.map(rule => validateRule(rule, domain)))] : undefined;
-      const [updated] = await tx.update(mailboxes).set({ ...(input.displayName !== undefined ? { displayName: input.displayName } : {}), ...(rules ? { rules } : {}), ...(input.metadata ? { metadata: input.metadata } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxes.id, mailbox.id)).returning();
+      const [updated] = await tx.update(mailboxes).set({ ...(input.displayName !== undefined ? { displayName: input.displayName } : {}), ...(rules ? { rules } : {}), ...(input.metadata ? { metadata: input.metadata } : {}), ...(input.sendLimits ? { sendLimits: { ...mailbox.sendLimits, ...input.sendLimits } } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxes.id, mailbox.id)).returning();
       let added: string[] = [];
       if (input.aliases) {
         const aliases = [...new Set(input.aliases)].filter(alias => alias !== mailbox.address);
@@ -369,7 +395,7 @@ export function registerMailbox(app: App) {
     const p = c.req.valid('param'); const { mailbox } = await mailboxFor(c, p.mailboxId);
     const [thread] = await c.env.db.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailbox.id), eq(mailboxThreads.threadId, p.threadId)));
     if (!thread) throw new ApiError(404, 'NOT_FOUND', 'Thread was not found in this mailbox.');
-    const rows = await c.env.db.select({ row: mailMessages, read: mailboxMessages.read }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.threadId, p.threadId))).orderBy(asc(mailboxMessages.receivedAt)).limit(200);
+    const rows = await c.env.db.select({ row: mailMessages, read: mailboxMessages.read, labels: mailboxMessages.labels }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.threadId, p.threadId))).orderBy(asc(mailboxMessages.receivedAt)).limit(200);
     return c.json({ ...threadView(thread), messages: await fullViews(c.env, rows, mailbox.id, { html: c.req.valid('query').includeHtml === 'true', headers: false }) }, 200);
   });
   app.openapi(route({ method: 'patch', path: '/mailboxes/{mailboxId}/threads/{threadId}', operationId: 'mailboxUpdateThread', tags: [TAG.threads], summary: 'Mark read/unread, archive, star, trash, spam or label', description: 'read=false marks the latest inbound message unread.', request: { params: ThreadParams, body: json(ThreadPatch) }, responses: { 200: response(ThreadSchema), ...errors } }), async c => {
@@ -392,19 +418,19 @@ export function registerMailbox(app: App) {
 
   // ---------- messages ----------
   app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/messages', operationId: 'mailboxListMessages', tags: [TAG.messages], summary: 'List messages', description: 'Newest first, without bodies.',
-    request: { params: MailboxParams, query: z.object({ direction: z.enum(['inbound', 'outbound']).optional(), unread: z.enum(['true', 'false']).optional(), threadId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), since: z.string().datetime({ offset: true }).optional(), until: z.string().datetime({ offset: true }).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
+    request: { params: MailboxParams, query: z.object({ direction: z.enum(['inbound', 'outbound']).optional(), unread: z.enum(['true', 'false']).optional(), label: labelName.optional(), threadId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), since: z.string().datetime({ offset: true }).optional(), until: z.string().datetime({ offset: true }).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
     responses: { 200: response(pageOf(MessageSummary, 'MailboxMessagePage')), ...errors } }), async c => {
     const { mailbox } = await mailboxFor(c, c.req.valid('param').mailboxId); const q = c.req.valid('query'); const mm = mailboxMessages, cursor = decodeCursor(q.cursor);
-    const rows = await c.env.db.select({ row: mailMessages, read: mm.read, receivedAt: mm.receivedAt }).from(mm).innerJoin(mailMessages, eq(mailMessages.id, mm.messageId)).where(and(eq(mm.mailboxId, mailbox.id),
-      q.direction ? eq(mm.direction, q.direction) : undefined, q.unread === 'true' ? eq(mm.read, false) : q.unread === 'false' ? eq(mm.read, true) : undefined, q.threadId ? eq(mm.threadId, q.threadId) : undefined,
+    const rows = await c.env.db.select({ row: mailMessages, read: mm.read, labels: mm.labels, receivedAt: mm.receivedAt }).from(mm).innerJoin(mailMessages, eq(mailMessages.id, mm.messageId)).where(and(eq(mm.mailboxId, mailbox.id),
+      q.direction ? eq(mm.direction, q.direction) : undefined, q.unread === 'true' ? eq(mm.read, false) : q.unread === 'false' ? eq(mm.read, true) : undefined, q.threadId ? eq(mm.threadId, q.threadId) : undefined, q.label ? sql`${mm.labels} @> ARRAY[${q.label}]::text[]` : undefined,
       q.q ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.q})` : undefined, q.since ? sql`${mm.receivedAt} >= ${q.since}::timestamptz` : undefined, q.until ? sql`${mm.receivedAt} < ${q.until}::timestamptz` : undefined,
       cursor ? sql`(${mm.receivedAt}, ${mm.messageId}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(mm.receivedAt), desc(mm.messageId)).limit(q.limit + 1);
     const last = rows[q.limit - 1];
-    return c.json({ data: rows.slice(0, q.limit).map(item => summaryView(item.row, mailbox.id, item.read)), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.receivedAt), last.row.id]) : null }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(item => summaryView(item.row, mailbox.id, item.read, item.labels)), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.receivedAt), last.row.id]) : null }, 200);
   });
   const messageFor = async (c: Ctx, mailboxId: string, messageId: string, permission: MailboxPermission = 'read') => {
     const { mailbox, scope } = await mailboxFor(c, mailboxId, permission);
-    const [item] = await c.env.db.select({ row: mailMessages, read: mailboxMessages.read }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.messageId, messageId)));
+    const [item] = await c.env.db.select({ row: mailMessages, read: mailboxMessages.read, labels: mailboxMessages.labels }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.messageId, messageId)));
     if (!item) throw new ApiError(404, 'NOT_FOUND', 'Message was not found in this mailbox.');
     return { mailbox, scope, ...item };
   };
@@ -412,13 +438,20 @@ export function registerMailbox(app: App) {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId);
     return c.json((await fullViews(c.env, [item], item.mailbox.id, { html: true, headers: true }))[0]!, 200);
   });
-  app.openapi(route({ method: 'patch', path: '/mailboxes/{mailboxId}/messages/{messageId}', operationId: 'mailboxUpdateMessage', tags: [TAG.messages], request: { params: MessageParams, body: json(z.object({ read: z.boolean() }).strict().openapi('UpdateMailboxMessage')) }, responses: { 200: response(MessageSummary), ...errors } }), async c => {
-    const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId, 'modify'); const { read } = c.req.valid('json');
-    await c.env.db.transaction(async tx => {
-      await tx.update(mailboxMessages).set({ read }).where(and(eq(mailboxMessages.mailboxId, item.mailbox.id), eq(mailboxMessages.messageId, item.row.id)));
-      await refreshThread(tx, item.mailbox.id, item.row.threadId);
-    });
-    return c.json(summaryView(item.row, item.mailbox.id, read), 200);
+  app.openapi(route({ method: 'patch', path: '/mailboxes/{mailboxId}/messages/{messageId}', operationId: 'mailboxUpdateMessage', tags: [TAG.messages], summary: 'Mark a message read/unread or change its labels', request: { params: MessageParams, body: json(MessagePatch) }, responses: { 200: response(MessageSummary), ...errors } }), async c => {
+    const p = c.req.valid('param');
+    return c.json((await patchMessages(c, p.mailboxId, [p.messageId], c.req.valid('json')))[0]!, 200);
+  });
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages/batch', operationId: 'mailboxUpdateMessages', tags: [TAG.messages], summary: 'Update up to 100 messages at once', request: { params: MailboxParams, body: json(z.object({ messageIds: z.array(z.string().min(1).max(120)).min(1).max(100), changes: MessagePatch }).strict().openapi('UpdateMailboxMessages')) }, responses: { 200: response(z.object({ data: z.array(MessageSummary) }).openapi('MailboxMessageList')), ...errors } }), async c => {
+    const body = c.req.valid('json');
+    return c.json({ data: await patchMessages(c, c.req.valid('param').mailboxId, [...new Set(body.messageIds)], body.changes) }, 200);
+  });
+  app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/labels', operationId: 'mailboxListLabels', tags: [TAG.messages], summary: 'List labels in use', description: 'Every label on this mailbox’s threads or messages, with counts. Labels are created by applying them.', request: { params: MailboxParams }, responses: { 200: response(z.object({ data: z.array(z.object({ name: z.string(), threads: z.number().int(), messages: z.number().int(), unreadMessages: z.number().int() })) }).openapi('MailboxLabelList')), ...errors } }), async c => {
+    const { mailbox } = await mailboxFor(c, c.req.valid('param').mailboxId);
+    const result = await c.env.db.execute<{ name: string; threads: number; messages: number; unread: number }>(sql`WITH t AS (SELECT unnest(labels) AS name, count(*)::int AS threads FROM mailbox_threads WHERE mailbox_id = ${mailbox.id} AND trashed_at IS NULL GROUP BY 1),
+      m AS (SELECT unnest(labels) AS name, count(*)::int AS messages, count(*) FILTER (WHERE NOT read)::int AS unread FROM mailbox_messages WHERE mailbox_id = ${mailbox.id} GROUP BY 1)
+      SELECT coalesce(t.name, m.name) AS name, coalesce(t.threads, 0) AS threads, coalesce(m.messages, 0) AS messages, coalesce(m.unread, 0) AS unread FROM t FULL JOIN m ON m.name = t.name ORDER BY 1 LIMIT 500`);
+    return c.json({ data: result.rows.map(row => ({ name: row.name, threads: row.threads, messages: row.messages, unreadMessages: row.unread })) }, 200);
   });
   app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/messages/{messageId}/raw', operationId: 'mailboxGetRawMessage', tags: [TAG.messages], summary: 'Download the original MIME', description: 'Returns a short-lived S3 link to the original .eml. Raw messages are kept for 90 days.', request: { params: MessageParams }, responses: { 200: response(z.object({ url: z.string(), expiresAt: z.string() }).openapi('MailboxDownload')), ...errors } }), async c => {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId);
@@ -431,6 +464,123 @@ export function registerMailbox(app: App) {
     if (!file?.region) throw new ApiError(404, 'NOT_FOUND', 'Attachment was not found in this mailbox.');
     const link = await signedUrl(c.env, file.region, file.file.bucket, file.file.storageKey, file.file.filename);
     return c.json({ id: file.file.id, messageId: file.file.messageId, filename: file.file.filename, contentType: file.file.contentType, size: file.file.sizeBytes, contentId: file.file.contentId, disposition: file.file.disposition, ...link }, 200);
+  });
+
+  // ---------- sending ----------
+  const Address = z.string().trim().toLowerCase().max(254).regex(ADDRESS, 'Use a valid email address.');
+  const Recipients = z.array(Address).max(50);
+  const AttachmentItem = z.union([
+    z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), content: z.string().min(4).max(11_200_000).describe('Standard padded base64.'), contentType: z.string().max(100).optional(), disposition: z.enum(['attachment', 'inline']).optional(), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict(),
+    z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).') }).strict(),
+  ]).openapi('MailboxAttachmentInput');
+  const Compose = {
+    from: Address.optional().describe('Send as the primary address (default) or one of the mailbox aliases.'),
+    text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
+    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.'),
+    replyTo: Recipients.max(10).default([]),
+    headers: z.array(z.object({ name: z.string().regex(/^X-[A-Za-z0-9-]{1,120}$/, 'Custom headers must start with X-.'), value: z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be printable ASCII.') })).max(10).default([]),
+    autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),
+  };
+  const needsBody = (value: { text?: string; html?: string }) => !!value.text || !!value.html;
+  const SendBody = z.object({ ...Compose, to: Recipients.min(1), cc: Recipients.default([]), bcc: Recipients.default([]), subject: z.string().trim().min(1).max(998).refine(value => !/[\r\n]/.test(value), 'Subject cannot contain line breaks.') })
+    .strict().refine(needsBody, 'Provide text or html.').openapi('MailboxSendInput');
+  const ReplyBody = z.object({ ...Compose,
+    replyAll: z.boolean().default(false).describe('Also copy everyone else on the original message.'),
+    to: Recipients.optional().describe('Override the computed recipients.'), cc: Recipients.optional(), bcc: Recipients.default([]),
+    subject: z.string().trim().min(1).max(998).optional().describe('Defaults to "Re: <original subject>".'),
+    quote: z.boolean().default(false).describe('Append the original message as quoted text.'),
+    allowAutomated: z.boolean().default(false).describe('Reply even when the original is automated or the recipient is a no-reply address.'),
+  }).strict().refine(needsBody, 'Provide text or html.').openapi('MailboxReplyInput');
+  const ForwardBody = z.object({ ...Compose, to: Recipients.min(1), cc: Recipients.default([]), bcc: Recipients.default([]),
+    subject: z.string().trim().min(1).max(998).optional().describe('Defaults to "Fwd: <original subject>".'),
+    includeAttachments: z.boolean().default(true).describe('Attach the original attachments (8 MiB combined).'),
+  }).strict().openapi('MailboxForwardInput');
+  const Sent = MessageSchema.describe('The stored outbound message. status starts as queued; follow message.sent and message.delivered events or re-read it.');
+  function sendActor(c: Ctx, access: MailboxAccess): Actor {
+    const actor = c.get('actor');
+    if (access.keyId.startsWith('mbk_') || !actor) return { keyId: access.keyId, workspaceId: access.workspaceId, environment: LIVE, permissions: ['send'], domains: [], credential: 'apiKey' };
+    return { ...actor, environment: LIVE };
+  }
+  async function senderAddress(c: Ctx, mailbox: typeof mailboxes.$inferSelect, from?: string) {
+    if (!from || from === mailbox.address) return mailbox.address;
+    const [alias] = await c.env.db.select().from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), eq(mailboxAddresses.address, from)));
+    if (!alias) throw new ApiError(422, 'FROM_NOT_ALLOWED', 'Send from the mailbox address or one of its aliases.', 'from');
+    return from;
+  }
+  async function dispatch(c: Ctx, mailbox: typeof mailboxes.$inferSelect, scope: Scope, access: MailboxAccess, body: unknown, build: () => Promise<Omit<OutgoingMessage, 'mailbox' | 'actor' | 'scope'>>) {
+    const actor = sendActor(c, access);
+    const outgoing = await build();
+    const result = await idempotent(c, actor, body, async tx => {
+      const { message, runnable } = await sendFromMailbox(c.env, tx, { ...outgoing, mailbox, actor, scope });
+      const view = (await fullViews(c.env, [{ row: message, read: true, labels: [] }], mailbox.id, { html: true, headers: true }, tx))[0]!;
+      return { ...view, runnable };
+    });
+    const { runnable, ...view } = result as typeof result & { runnable: number };
+    for (const target of actor.dispatchTargets ?? []) { const [environment, region] = target.split(':') as ['live', string]; try { await c.env.dispatch?.(environment, region); } catch { /* The dispatcher polls queued mail. */ } }
+    actor.dispatchTargets?.clear();
+    if (runnable) try { await c.env.wake?.(runnable); } catch { /* durable */ }
+    return view;
+  }
+  const quoted = (original: MessageRow) => {
+    const who = original.fromName ? `${original.fromName} <${original.fromAddress}>` : original.fromAddress;
+    const intro = `On ${new Date(original.sentAt ?? original.receivedAt).toUTCString()}, ${who} wrote:`;
+    const text = original.text ?? (original.html ? htmlToPlain(original.html) : '');
+    return { text: `\n\n${intro}\n${text.split('\n').map(line => `> ${line}`).join('\n')}`, html: `<br><br><div>${intro.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</div><blockquote style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">${original.html ? safeForwardHtml(original.html) : `<pre>${text.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</pre>`}</blockquote>` };
+  };
+  async function reply(c: Ctx, mailboxId: string, target: (mailbox: typeof mailboxes.$inferSelect) => Promise<MessageRow | undefined>) {
+    const { mailbox, scope, access: value } = await mailboxFor(c, mailboxId, 'send'); const body = c.req.valid('json' as never) as z.infer<typeof ReplyBody>;
+    const original = await target(mailbox);
+    if (!original) throw new ApiError(404, 'NOT_FOUND', 'There is no message to reply to in this conversation.');
+    const own = (await c.env.db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address);
+    const computed = replyRecipients(original, own, body.replyAll);
+    const to = body.to ?? computed.to, cc = body.cc ?? computed.cc;
+    assertReplyable(original, to, body.allowAutomated);
+    const quote = body.quote ? quoted(original) : null;
+    return dispatch(c, mailbox, scope, value, { ...body, target: original.id }, async () => ({
+      from: await senderAddress(c, mailbox, body.from), to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
+      text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments), threadId: original.threadId,
+      inReplyTo: original.messageId, references: [...original.references, ...(original.messageId ? [original.messageId] : [])], autoSubmitted: body.autoSubmitted, headers: body.headers,
+    }));
+  }
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/attachments', operationId: 'mailboxUploadAttachment', tags: [TAG.messages], summary: 'Upload an attachment to send later', description: 'Stores a file (base64, 8 MiB) and returns an attachment_… ID for the attachments field of send, reply and forward. Unused uploads are deleted after 30 days.',
+    request: { params: MailboxParams, body: json(z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), content: z.string().min(4).max(11_200_000), contentType: z.string().max(100).default('application/octet-stream'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().openapi('MailboxAttachmentUpload')) },
+    responses: { 201: response(z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable() }).openapi('MailboxUploadedAttachment')), ...errors } }), async c => {
+    const { access: value } = await mailboxFor(c, c.req.valid('param').mailboxId, 'send'); const input = c.req.valid('json');
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(input.content) || input.content.length % 4) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', 'content must be standard padded base64.', 'content');
+    const actor = sendActor(c, value);
+    const row = await c.env.db.transaction(tx => storeAttachmentBytes(c.env, tx, actor, { filename: input.filename, contentType: input.contentType, disposition: input.disposition, ...(input.contentId ? { contentId: input.contentId } : {}) }, new Uint8Array(Buffer.from(input.content, 'base64'))));
+    return c.json({ id: row.id, filename: row.filename, contentType: row.contentType, size: row.size, disposition: row.disposition as 'attachment' | 'inline', contentId: row.contentId }, 201);
+  });
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages', operationId: 'mailboxSendMessage', tags: [TAG.messages], summary: 'Send a new message', description: 'Starts a new conversation. Sent through OpenSend’s transactional pipeline (suppression, SES configuration set, delivery tracking) with open/click tracking off. Supports the Idempotency-Key header. Per-mailbox limits apply (see sendLimits).',
+    request: { params: MailboxParams, body: json(SendBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    const { mailbox, scope, access: value } = await mailboxFor(c, c.req.valid('param').mailboxId, 'send'); const body = c.req.valid('json');
+    const view = await dispatch(c, mailbox, scope, value, body, async () => ({ from: await senderAddress(c, mailbox, body.from), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers }));
+    return c.json(view, 202);
+  });
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages/{messageId}/reply', operationId: 'mailboxReplyToMessage', tags: [TAG.messages], summary: 'Reply to a message',
+    description: 'Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.',
+    request: { params: MessageParams, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    const p = c.req.valid('param');
+    return c.json(await reply(c, p.mailboxId, async mailbox => (await c.env.db.select({ row: mailMessages }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.messageId, p.messageId))))[0]?.row), 202);
+  });
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/threads/{threadId}/reply', operationId: 'mailboxReplyToThread', tags: [TAG.threads], summary: 'Reply to a conversation', description: 'Replies to the newest inbound message in the conversation (or the newest message if none is inbound). Same options as replying to a message.',
+    request: { params: ThreadParams, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    const p = c.req.valid('param');
+    return c.json(await reply(c, p.mailboxId, mailbox => latestReplyTarget(c.env.db, mailbox.id, p.threadId)), 202);
+  });
+  app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages/{messageId}/forward', operationId: 'mailboxForwardMessage', tags: [TAG.messages], summary: 'Forward a message', description: 'Sends the original message with its headers summarized under an optional note, in the same conversation. Original attachments are included by default. Supports Idempotency-Key.',
+    request: { params: MessageParams, body: json(ForwardBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId, 'send'); const body = c.req.valid('json');
+    const content = forwardBody(item.row, { text: body.text, html: body.html });
+    const originals = body.includeAttachments ? (await c.env.db.select({ id: mailAttachments.id }).from(mailAttachments).where(eq(mailAttachments.messageId, item.row.id))).map(row => ({ id: row.id })) : [];
+    const view = await dispatch(c, item.mailbox, item.scope, access(c, 'send'), { ...body, target: item.row.id }, async () => ({
+      from: await senderAddress(c, item.mailbox, body.from), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(item.row.subject, 'Fwd'), text: content.text, html: content.html,
+      attachments: await resolveAttachments(c.env, item.mailbox, [...originals, ...body.attachments]), threadId: item.row.threadId, inReplyTo: null,
+      references: [...item.row.references, ...(item.row.messageId ? [item.row.messageId] : [])], autoSubmitted: body.autoSubmitted, headers: body.headers,
+    }));
+    return c.json(view, 202);
   });
 
   // ---------- events ----------
@@ -532,7 +682,7 @@ export function registerMailbox(app: App) {
   });
 
   // ---------- all stored messages (admin; powers dashboard logs) ----------
-  const StoredSummary = MessageSummary.omit({ mailboxId: true, read: true }).extend({
+  const StoredSummary = MessageSummary.omit({ mailboxId: true, read: true, labels: true }).extend({
     region: z.string().nullable(), envelopeTo: z.array(z.string()).describe('Recipients SES accepted this message for.'),
     mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()).describe('Recipients that matched no mailbox.'),
   }).openapi('StoredMessageSummary');
@@ -543,7 +693,7 @@ export function registerMailbox(app: App) {
       runtime.db.select({ messageId: mailboxMessages.messageId, id: mailboxes.id, address: mailboxes.address }).from(mailboxMessages).innerJoin(mailboxes, eq(mailboxes.id, mailboxMessages.mailboxId)).where(inArray(mailboxMessages.messageId, ids)),
       runtime.db.select({ messageId: mailUnrouted.messageId, address: mailUnrouted.address }).from(mailUnrouted).where(inArray(mailUnrouted.messageId, ids)),
     ]);
-    return rows.map(row => { const { mailboxId: _m, read: _r, ...summary } = summaryView(row, '', false); return { ...summary, region: row.region, envelopeTo: row.envelopeTo,
+    return rows.map(row => { const { mailboxId: _m, read: _r, labels: _l, ...summary } = summaryView(row, '', false); return { ...summary, region: row.region, envelopeTo: row.envelopeTo,
       mailboxes: links.filter(link => link.messageId === row.id).map(({ id, address }) => ({ id, address })), unrouted: unrouted.filter(item => item.messageId === row.id).map(item => item.address) }; });
   }
   app.openapi(route({ method: 'get', path: '/messages', operationId: 'mailboxListStoredMessages', tags: [TAG.messages], summary: 'List every stored message', description: 'All received (or sent) messages across every mailbox, including unrouted mail. Newest first, without bodies.',
@@ -558,7 +708,7 @@ export function registerMailbox(app: App) {
     return c.json({ data: await storedSummaries(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.receivedAt), last.id]) : null }, 200);
   });
   app.openapi(route({ method: 'get', path: '/messages/{id}', operationId: 'mailboxGetStoredMessage', tags: [TAG.messages], summary: 'Read any stored message', description: 'Full message with headers, the mailboxes it belongs to, and short-lived download links for attachments and the original MIME.',
-    request: { params: IdParam }, responses: { 200: response(MessageSchema.omit({ mailboxId: true, read: true }).extend({
+    request: { params: IdParam }, responses: { 200: response(MessageSchema.omit({ mailboxId: true, read: true, labels: true }).extend({
       region: z.string().nullable(), envelopeTo: z.array(z.string()), sesMessageId: z.string().nullable(), sizeBytes: z.number().int().nullable(),
       mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()),
       attachments: z.array(AttachmentSchema.extend({ url: z.string().nullable() })), rawUrl: z.string().nullable(), linksExpireAt: z.string(),
@@ -568,7 +718,7 @@ export function registerMailbox(app: App) {
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const [[full], [summary], files] = await Promise.all([fullViews(c.env, [{ row, read: false }], '', { html: true, headers: true }), storedSummaries(c.env, [row]), c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId, row.id)).orderBy(asc(mailAttachments.id))]);
     const link = async (bucket: string | null, key: string | null, filename?: string) => bucket && key && row.region ? (await signedUrl(c.env, row.region, bucket, key, filename)).url : null;
-    const { mailboxId: _m, read: _r, ...message } = full!;
+    const { mailboxId: _m, read: _r, labels: _l, ...message } = full!;
     return c.json({ ...message, region: row.region, envelopeTo: row.envelopeTo, sesMessageId: row.sesMessageId, sizeBytes: row.sizeBytes, mailboxes: summary!.mailboxes, unrouted: summary!.unrouted,
       attachments: await Promise.all(files.map(async file => ({ id: file.id, filename: file.filename, contentType: file.contentType, size: file.sizeBytes, contentId: file.contentId, disposition: file.disposition, url: await link(file.bucket, file.storageKey, file.filename) }))),
       rawUrl: await link(row.rawBucket, row.rawKey, `${row.id}.eml`), linksExpireAt: new Date(Date.now() + 300_000).toISOString() }, 200);
@@ -576,12 +726,12 @@ export function registerMailbox(app: App) {
 
   // ---------- unrouted ----------
   app.openapi(route({ method: 'get', path: '/unrouted', operationId: 'mailboxListUnrouted', tags: [TAG.messages], summary: 'Stored mail that matched no mailbox', description: 'Mail for addresses on a domain whose catch-all is set to store. Creating a mailbox for the address claims it.',
-    request: { query: z.object({ address: z.string().trim().toLowerCase().max(254).optional(), cursor: z.string().max(300).optional(), limit: Limit }) }, responses: { 200: response(pageOf(MessageSummary.omit({ mailboxId: true, read: true }).extend({ address: z.string() }).openapi('MailboxUnroutedMessage'), 'MailboxUnroutedPage')), ...errors } }), async c => {
+    request: { query: z.object({ address: z.string().trim().toLowerCase().max(254).optional(), cursor: z.string().max(300).optional(), limit: Limit }) }, responses: { 200: response(pageOf(MessageSummary.omit({ mailboxId: true, read: true, labels: true }).extend({ address: z.string() }).openapi('MailboxUnroutedMessage'), 'MailboxUnroutedPage')), ...errors } }), async c => {
     const value = admin(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor);
     const rows = await c.env.db.select({ row: mailMessages, address: mailUnrouted.address }).from(mailUnrouted).innerJoin(mailMessages, eq(mailMessages.id, mailUnrouted.messageId)).where(and(eq(mailUnrouted.workspaceId, value.workspaceId), eq(mailUnrouted.environment, LIVE),
       q.address ? eq(mailUnrouted.address, q.address) : undefined, cursor ? sql`(${mailMessages.receivedAt}, ${mailMessages.id}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(mailMessages.receivedAt), desc(mailMessages.id)).limit(q.limit + 1);
     const last = rows[q.limit - 1];
-    return c.json({ data: rows.slice(0, q.limit).map(item => { const { mailboxId: _m, read: _r, ...summary } = summaryView(item.row, '', false); return { ...summary, address: item.address }; }), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.row.receivedAt), last.row.id]) : null }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(item => { const { mailboxId: _m, read: _r, labels: _l, ...summary } = summaryView(item.row, '', false); return { ...summary, address: item.address }; }), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.row.receivedAt), last.row.id]) : null }, 200);
   });
 }
 

@@ -13,6 +13,7 @@ import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
+import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
@@ -230,7 +231,7 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
-async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>): Promise<T> {
+export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>): Promise<T> {
   const key = c.req.header('Idempotency-Key');
   if (key === undefined) return c.env.db.transaction(work);
   if (key.length > 200 || !/^[\x21-\x7e]+$/.test(key)) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
@@ -524,17 +525,37 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: z.infer<typeof Attachm
   if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
   const input = validateAttachment(metadata, bytes);
   const checksum = await bytesDigest(bytes);
-  return idempotent(c, a, { ...input, size: bytes.length, checksum }, async db => {
-    await lockAdmission(db, a);
-    const [usage] = await db.select({ bytes: sql<string>`coalesce(sum(${attachments.size}), 0)` }).from(attachments).where(scope(attachments, a));
-    if (Number(usage!.bytes) + bytes.length > SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413, 'STORED_ATTACHMENT_LIMIT_EXCEEDED', `Stored attachments exceed the ${SENDING_LIMITS[a.environment].storedAttachmentBytes / 1024 / 1024} MiB ${a.environment} limit. Delete unused attachments before uploading more.`);
-    const attachmentId = id('attachment'); const storageKey = `${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
-    await c.env.storage.put(storageKey, bytes, input.contentType);
-    try {
-      const [row] = await db.insert(attachments).values({ id: attachmentId, workspaceId: a.workspaceId, environment: a.environment, ...input, size: bytes.length, contentId: input.contentId ?? null, storageKey, checksum }).returning();
-      return AttachmentInfo.parse(row);
-    } catch (error) { await c.env.storage.delete(storageKey).catch(() => undefined); throw error; }
-  });
+  return idempotent(c, a, { ...input, size: bytes.length, checksum }, async db => AttachmentInfo.parse(await storeValidatedAttachment(c.env, db, a, input, bytes, checksum)));
+}
+async function storeValidatedAttachment(runtime: Runtime, db: DbExecutor, a: Actor, input: ReturnType<typeof validateAttachment>, bytes: Uint8Array, checksum: string) {
+  await lockAdmission(db, a);
+  const [usage] = await db.select({ bytes: sql<string>`coalesce(sum(${attachments.size}), 0)` }).from(attachments).where(scope(attachments, a));
+  if (Number(usage!.bytes) + bytes.length > SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413, 'STORED_ATTACHMENT_LIMIT_EXCEEDED', `Stored attachments exceed the ${SENDING_LIMITS[a.environment].storedAttachmentBytes / 1024 / 1024} MiB ${a.environment} limit. Delete unused attachments before uploading more.`);
+  const attachmentId = id('attachment'); const storageKey = `${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
+  await runtime.storage.put(storageKey, bytes, input.contentType);
+  try {
+    const [row] = await db.insert(attachments).values({ id: attachmentId, workspaceId: a.workspaceId, environment: a.environment, ...input, size: bytes.length, contentId: input.contentId ?? null, storageKey, checksum }).returning();
+    return row!;
+  } catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }
+}
+/** Validates and stores sending attachment bytes inside the caller's transaction (mailbox sends, forwards). */
+export async function storeAttachmentBytes(runtime: Runtime, db: DbExecutor, a: Actor, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array) {
+  if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most 8 MiB decoded.`);
+  const parsed = AttachmentMetadata.safeParse({ filename: metadata.filename, contentType: metadata.contentType, disposition: metadata.disposition ?? 'attachment', ...(metadata.contentId ? { contentId: metadata.contentId } : {}) });
+  if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
+  return storeValidatedAttachment(runtime, db, a, validateAttachment(parsed.data, bytes), bytes, await bytesDigest(bytes));
+}
+export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string; subject: string; html?: string; text?: string; attachments: string[]; headers: { Name: string; Value: string }[] };
+/** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
+export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest) {
+  const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: false });
+  if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
+  for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
+  await checkPending(db, a, 1);
+  const snapshot = await prepare(runtime, db, a, parsed.data);
+  snapshot.headers = [...snapshot.headers, ...request.headers];
+  const receipt = await queueEmail(db, a, snapshot);
+  return { emailId: receipt.id, snapshot };
 }
 function editable(row: typeof campaigns.$inferSelect, revision?: number) {
   if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before editing, reviewing or sending it.');
@@ -1151,6 +1172,13 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
   // Re-check its current allowlist approval under the same transaction lock as the attempt claim.
   if (mail.actorKeyId.startsWith('user_')) return mail.workspaceId === runtime.config.workspaceId && (mail.environment === 'live' || mail.environment === 'test') && await isApprovedUser(runtime, mail.actorKeyId.slice(5), db);
+  if (mail.actorKeyId.startsWith('mbk_')) {
+    // Mailbox keys may send only as an address of a mailbox they are scoped to.
+    const [key] = await db.select().from(mailboxKeys).where(and(eq(mailboxKeys.id, mail.actorKeyId), eq(mailboxKeys.workspaceId, mail.workspaceId))).for('share');
+    if (!key || key.revokedAt || mail.environment !== 'live' || !key.permissions.includes('send')) return false;
+    const [owner] = await db.select({ mailboxId: mailboxAddresses.mailboxId }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, mail.workspaceId), eq(mailboxAddresses.environment, 'live'), eq(mailboxAddresses.address, mail.snapshot.from.toLowerCase())));
+    return !!owner && (!key.mailboxIds || key.mailboxIds.includes(owner.mailboxId));
+  }
   if (mail.actorKeyId.startsWith('mcp_')) {
     const grant = await getMcpGrantActor(runtime, mail.actorKeyId, db);
     return !!grant && grant.workspaceId === mail.workspaceId && (mail.environment === 'test' || grant.environment === mail.environment) &&

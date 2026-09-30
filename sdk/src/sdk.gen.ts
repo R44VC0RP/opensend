@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignReviewData, GetCampaignReviewErrors, GetCampaignReviewResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, MailboxCheckDomainData, MailboxCheckDomainErrors, MailboxCheckDomainResponses, MailboxCreateData, MailboxCreateErrors, MailboxCreateKeyData, MailboxCreateKeyErrors, MailboxCreateKeyResponses, MailboxCreateResponses, MailboxCreateWebhookData, MailboxCreateWebhookErrors, MailboxCreateWebhookResponses, MailboxDeleteData, MailboxDeleteErrors, MailboxDeleteResponses, MailboxDeleteThreadData, MailboxDeleteThreadErrors, MailboxDeleteThreadResponses, MailboxDeleteWebhookData, MailboxDeleteWebhookErrors, MailboxDeleteWebhookResponses, MailboxDisableDomainData, MailboxDisableDomainErrors, MailboxDisableDomainResponses, MailboxEnableDomainData, MailboxEnableDomainErrors, MailboxEnableDomainResponses, MailboxGetAttachmentData, MailboxGetAttachmentErrors, MailboxGetAttachmentResponses, MailboxGetData, MailboxGetDomainData, MailboxGetDomainErrors, MailboxGetDomainResponses, MailboxGetErrors, MailboxGetMessageData, MailboxGetMessageErrors, MailboxGetMessageResponses, MailboxGetRawMessageData, MailboxGetRawMessageErrors, MailboxGetRawMessageResponses, MailboxGetResponses, MailboxGetStoredMessageData, MailboxGetStoredMessageErrors, MailboxGetStoredMessageResponses, MailboxGetThreadData, MailboxGetThreadErrors, MailboxGetThreadResponses, MailboxGetWebhookData, MailboxGetWebhookErrors, MailboxGetWebhookResponses, MailboxListAllEventsData, MailboxListAllEventsErrors, MailboxListAllEventsResponses, MailboxListData, MailboxListDomainsData, MailboxListDomainsErrors, MailboxListDomainsResponses, MailboxListErrors, MailboxListEventsData, MailboxListEventsErrors, MailboxListEventsResponses, MailboxListKeysData, MailboxListKeysErrors, MailboxListKeysResponses, MailboxListMessagesData, MailboxListMessagesErrors, MailboxListMessagesResponses, MailboxListResponses, MailboxListStoredMessagesData, MailboxListStoredMessagesErrors, MailboxListStoredMessagesResponses, MailboxListThreadsData, MailboxListThreadsErrors, MailboxListThreadsResponses, MailboxListUnroutedData, MailboxListUnroutedErrors, MailboxListUnroutedResponses, MailboxListWebhookDeliveriesData, MailboxListWebhookDeliveriesErrors, MailboxListWebhookDeliveriesResponses, MailboxListWebhooksData, MailboxListWebhooksErrors, MailboxListWebhooksResponses, MailboxRevokeKeyData, MailboxRevokeKeyErrors, MailboxRevokeKeyResponses, MailboxRotateWebhookSecretData, MailboxRotateWebhookSecretErrors, MailboxRotateWebhookSecretResponses, MailboxUpdateData, MailboxUpdateDomainData, MailboxUpdateDomainErrors, MailboxUpdateDomainResponses, MailboxUpdateErrors, MailboxUpdateMessageData, MailboxUpdateMessageErrors, MailboxUpdateMessageResponses, MailboxUpdateResponses, MailboxUpdateThreadData, MailboxUpdateThreadErrors, MailboxUpdateThreadResponses, MailboxUpdateThreadsData, MailboxUpdateThreadsErrors, MailboxUpdateThreadsResponses, MailboxUpdateWebhookData, MailboxUpdateWebhookErrors, MailboxUpdateWebhookResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, StartCampaignReviewData, StartCampaignReviewErrors, StartCampaignReviewResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignReviewData, GetCampaignReviewErrors, GetCampaignReviewResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, MailboxCheckDomainData, MailboxCheckDomainErrors, MailboxCheckDomainResponses, MailboxCreateData, MailboxCreateErrors, MailboxCreateKeyData, MailboxCreateKeyErrors, MailboxCreateKeyResponses, MailboxCreateResponses, MailboxCreateWebhookData, MailboxCreateWebhookErrors, MailboxCreateWebhookResponses, MailboxDeleteData, MailboxDeleteErrors, MailboxDeleteResponses, MailboxDeleteThreadData, MailboxDeleteThreadErrors, MailboxDeleteThreadResponses, MailboxDeleteWebhookData, MailboxDeleteWebhookErrors, MailboxDeleteWebhookResponses, MailboxDisableDomainData, MailboxDisableDomainErrors, MailboxDisableDomainResponses, MailboxEnableDomainData, MailboxEnableDomainErrors, MailboxEnableDomainResponses, MailboxForwardMessageData, MailboxForwardMessageErrors, MailboxForwardMessageResponses, MailboxGetAttachmentData, MailboxGetAttachmentErrors, MailboxGetAttachmentResponses, MailboxGetData, MailboxGetDomainData, MailboxGetDomainErrors, MailboxGetDomainResponses, MailboxGetErrors, MailboxGetMessageData, MailboxGetMessageErrors, MailboxGetMessageResponses, MailboxGetRawMessageData, MailboxGetRawMessageErrors, MailboxGetRawMessageResponses, MailboxGetResponses, MailboxGetStoredMessageData, MailboxGetStoredMessageErrors, MailboxGetStoredMessageResponses, MailboxGetThreadData, MailboxGetThreadErrors, MailboxGetThreadResponses, MailboxGetWebhookData, MailboxGetWebhookErrors, MailboxGetWebhookResponses, MailboxListAllEventsData, MailboxListAllEventsErrors, MailboxListAllEventsResponses, MailboxListData, MailboxListDomainsData, MailboxListDomainsErrors, MailboxListDomainsResponses, MailboxListErrors, MailboxListEventsData, MailboxListEventsErrors, MailboxListEventsResponses, MailboxListKeysData, MailboxListKeysErrors, MailboxListKeysResponses, MailboxListLabelsData, MailboxListLabelsErrors, MailboxListLabelsResponses, MailboxListMessagesData, MailboxListMessagesErrors, MailboxListMessagesResponses, MailboxListResponses, MailboxListStoredMessagesData, MailboxListStoredMessagesErrors, MailboxListStoredMessagesResponses, MailboxListThreadsData, MailboxListThreadsErrors, MailboxListThreadsResponses, MailboxListUnroutedData, MailboxListUnroutedErrors, MailboxListUnroutedResponses, MailboxListWebhookDeliveriesData, MailboxListWebhookDeliveriesErrors, MailboxListWebhookDeliveriesResponses, MailboxListWebhooksData, MailboxListWebhooksErrors, MailboxListWebhooksResponses, MailboxReplyToMessageData, MailboxReplyToMessageErrors, MailboxReplyToMessageResponses, MailboxReplyToThreadData, MailboxReplyToThreadErrors, MailboxReplyToThreadResponses, MailboxRevokeKeyData, MailboxRevokeKeyErrors, MailboxRevokeKeyResponses, MailboxRotateWebhookSecretData, MailboxRotateWebhookSecretErrors, MailboxRotateWebhookSecretResponses, MailboxSendMessageData, MailboxSendMessageErrors, MailboxSendMessageResponses, MailboxUpdateData, MailboxUpdateDomainData, MailboxUpdateDomainErrors, MailboxUpdateDomainResponses, MailboxUpdateErrors, MailboxUpdateMessageData, MailboxUpdateMessageErrors, MailboxUpdateMessageResponses, MailboxUpdateMessagesData, MailboxUpdateMessagesErrors, MailboxUpdateMessagesResponses, MailboxUpdateResponses, MailboxUpdateThreadData, MailboxUpdateThreadErrors, MailboxUpdateThreadResponses, MailboxUpdateThreadsData, MailboxUpdateThreadsErrors, MailboxUpdateThreadsResponses, MailboxUpdateWebhookData, MailboxUpdateWebhookErrors, MailboxUpdateWebhookResponses, MailboxUploadAttachmentData, MailboxUploadAttachmentErrors, MailboxUploadAttachmentResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, StartCampaignReviewData, StartCampaignReviewErrors, StartCampaignReviewResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -2534,6 +2534,33 @@ export const mailboxListMessages = <ThrowOnError extends boolean = false>(option
 });
 
 /**
+ * Send a new message
+ *
+ * Starts a new conversation. Sent through OpenSend’s transactional pipeline (suppression, SES configuration set, delivery tracking) with open/click tracking off. Supports the Idempotency-Key header. Per-mailbox limits apply (see sendLimits).
+ */
+export const mailboxSendMessage = <ThrowOnError extends boolean = false>(options: Options<MailboxSendMessageData, ThrowOnError>): RequestResult<MailboxSendMessageResponses, MailboxSendMessageErrors, ThrowOnError> => (options.client ?? client).post<MailboxSendMessageResponses, MailboxSendMessageErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Read a message
  *
  * Full message with HTML, headers and attachment metadata. Reading does not mark it read; PATCH read=true does.
@@ -2556,6 +2583,9 @@ export const mailboxGetMessage = <ThrowOnError extends boolean = false>(options:
     ...options
 });
 
+/**
+ * Mark a message read/unread or change its labels
+ */
 export const mailboxUpdateMessage = <ThrowOnError extends boolean = false>(options: Options<MailboxUpdateMessageData, ThrowOnError>): RequestResult<MailboxUpdateMessageResponses, MailboxUpdateMessageErrors, ThrowOnError> => (options.client ?? client).patch<MailboxUpdateMessageResponses, MailboxUpdateMessageErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -2576,6 +2606,54 @@ export const mailboxUpdateMessage = <ThrowOnError extends boolean = false>(optio
         'Content-Type': 'application/json',
         ...options.headers
     }
+});
+
+/**
+ * Update up to 100 messages at once
+ */
+export const mailboxUpdateMessages = <ThrowOnError extends boolean = false>(options: Options<MailboxUpdateMessagesData, ThrowOnError>): RequestResult<MailboxUpdateMessagesResponses, MailboxUpdateMessagesErrors, ThrowOnError> => (options.client ?? client).post<MailboxUpdateMessagesResponses, MailboxUpdateMessagesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/batch',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List labels in use
+ *
+ * Every label on this mailbox’s threads or messages, with counts. Labels are created by applying them.
+ */
+export const mailboxListLabels = <ThrowOnError extends boolean = false>(options: Options<MailboxListLabelsData, ThrowOnError>): RequestResult<MailboxListLabelsResponses, MailboxListLabelsErrors, ThrowOnError> => (options.client ?? client).get<MailboxListLabelsResponses, MailboxListLabelsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/labels',
+    ...options
 });
 
 /**
@@ -2622,6 +2700,114 @@ export const mailboxGetAttachment = <ThrowOnError extends boolean = false>(optio
     ],
     url: '/mailbox/v1/mailboxes/{mailboxId}/attachments/{attachmentId}',
     ...options
+});
+
+/**
+ * Upload an attachment to send later
+ *
+ * Stores a file (base64, 8 MiB) and returns an attachment_… ID for the attachments field of send, reply and forward. Unused uploads are deleted after 30 days.
+ */
+export const mailboxUploadAttachment = <ThrowOnError extends boolean = false>(options: Options<MailboxUploadAttachmentData, ThrowOnError>): RequestResult<MailboxUploadAttachmentResponses, MailboxUploadAttachmentErrors, ThrowOnError> => (options.client ?? client).post<MailboxUploadAttachmentResponses, MailboxUploadAttachmentErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/attachments',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Reply to a message
+ *
+ * Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.
+ */
+export const mailboxReplyToMessage = <ThrowOnError extends boolean = false>(options: Options<MailboxReplyToMessageData, ThrowOnError>): RequestResult<MailboxReplyToMessageResponses, MailboxReplyToMessageErrors, ThrowOnError> => (options.client ?? client).post<MailboxReplyToMessageResponses, MailboxReplyToMessageErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/reply',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Reply to a conversation
+ *
+ * Replies to the newest inbound message in the conversation (or the newest message if none is inbound). Same options as replying to a message.
+ */
+export const mailboxReplyToThread = <ThrowOnError extends boolean = false>(options: Options<MailboxReplyToThreadData, ThrowOnError>): RequestResult<MailboxReplyToThreadResponses, MailboxReplyToThreadErrors, ThrowOnError> => (options.client ?? client).post<MailboxReplyToThreadResponses, MailboxReplyToThreadErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}/reply',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Forward a message
+ *
+ * Sends the original message with its headers summarized under an optional note, in the same conversation. Original attachments are included by default. Supports Idempotency-Key.
+ */
+export const mailboxForwardMessage = <ThrowOnError extends boolean = false>(options: Options<MailboxForwardMessageData, ThrowOnError>): RequestResult<MailboxForwardMessageResponses, MailboxForwardMessageErrors, ThrowOnError> => (options.client ?? client).post<MailboxForwardMessageResponses, MailboxForwardMessageErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/forward',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
