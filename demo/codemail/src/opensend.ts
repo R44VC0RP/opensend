@@ -44,6 +44,7 @@ export class OpenSend {
     return this.call<{ data: Thread[]; nextCursor: string | null }>('GET', `/mailboxes/${enc(mailboxId)}/threads?${params}`);
   }
   thread(mailboxId: string, threadId: string) { return this.call<ThreadDetail>('GET', `/mailboxes/${enc(mailboxId)}/threads/${enc(threadId)}`); }
+  message(mailboxId: string, messageId: string) { return this.call<Message>('GET', `/mailboxes/${enc(mailboxId)}/messages/${enc(messageId)}`); }
   updateThreads(mailboxId: string, threadIds: string[], changes: Record<string, unknown>) {
     return threadIds.length === 1
       ? this.call<Thread>('PATCH', `/mailboxes/${enc(mailboxId)}/threads/${enc(threadIds[0]!)}`, changes).then(thread => [thread])

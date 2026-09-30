@@ -35,10 +35,10 @@ export function threadLines(mailbox: Mailbox, threads: Thread[]) {
   }).join('\n');
 }
 
-export function conversationText(mailbox: Mailbox, thread: ThreadDetail, includeQuoted: boolean) {
+export function conversationText(mailbox: Mailbox, thread: ThreadDetail, includeQuoted: boolean, tag: (address: string) => { kind: string; name: string | null } | null = () => null) {
   const mine = own(mailbox);
   const index = new Map(thread.messages.map((message, position) => [message.messageId ?? '', position + 1]));
-  const person = (value: Address) => mine.has(value.address.toLowerCase()) ? `you (${value.address})` : who(value);
+  const person = (value: Address) => { if (mine.has(value.address.toLowerCase())) return `you (${value.address})`; const known = tag(value.address); return known ? `${who({ name: value.name || known.name, address: value.address })} (${known.kind})` : who(value); };
   const parts = thread.messages.map((message, position) => {
     const parent = message.inReplyTo ? index.get(message.inReplyTo) : undefined;
     const meta = [

@@ -2,7 +2,8 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { getMcpAuthContext } from 'agents/mcp/server';
 import { z } from 'zod';
 import { conversationText, mailboxLine, messageLines, own, size, threadLines, who } from './format.js';
-import { OpenSend, OpenSendError, type AttachmentInput, type Mailbox } from './opensend.js';
+import { directoryText, resolveRecipients, tagger, type Directory } from './directory.js';
+import { OpenSend, OpenSendError, type AttachmentInput, type Mailbox, type Message } from './opensend.js';
 
 /** Stored encrypted in the OAuth grant. The mailbox key is minted for this grant alone. */
 export type CodemailProps = { mailboxKey: string; keyId: string; userId: string; organizationId: string; mailboxes: { id: string; address: string }[] };
@@ -16,7 +17,8 @@ Typical loop: check_inbox → read_conversation → reply (or update_conversatio
 - To react to new mail, call wait_for_mail (it blocks up to 30s) and pass back the cursor it returns, instead of calling check_inbox in a loop.
 - send_email, reply and forward send real email to real people. Only send when the user asked for it or clearly intends it.
 - Automated senders (no-reply addresses, bounces, mailing lists) are protected from replies; set allow_automated only if the user explicitly wants to reply anyway.
-- Reading does not mark mail read. Pass mark_as_read=true to read_conversation, or use update_conversations, when you have handled a conversation.`;
+- Reading does not mark mail read. Pass mark_as_read=true to read_conversation, or use update_conversations, when you have handled a conversation.
+- Your organization's people and agent mailboxes are listed by find_people. In to, cc and bcc you can write a teammate's name (cc=["maya"]) instead of their address; codemail resolves it and tells you who it picked. Conversations mark teammates and agents.`;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
 const text = (value: string, structured?: Record<string, unknown>) => ({ content: [{ type: 'text' as const, text: value }] as Content[], ...(structured ? { structuredContent: structured } : {}) });
@@ -34,6 +36,7 @@ function explain(error: unknown) {
     PERMISSION_DENIED: 'This connection was not given that permission. Ask the user to reconnect codemail and allow it (send or organize mail).',
     NOT_FOUND: 'Not found in this mailbox. Check the ID with check_inbox or search_mail.',
     AUTH_INVALID: 'This connection was disconnected. Ask the user to reconnect codemail.',
+    RECIPIENT_UNRESOLVED: 'Nothing was sent. Use exact addresses, or call find_people to see who is in the organization.',
   };
   return failure(`${error.message}${hints[error.code] ? `\n\n${hints[error.code]}` : ''} (${error.code})`);
 }
@@ -51,8 +54,24 @@ async function pickMailbox(client: OpenSend, requested?: string): Promise<Mailbo
   return match;
 }
 
+/** The cc list OpenSend's reply_all would compute, so extra people can be added to it. */
+async function replyAllCc(client: OpenSend, mailbox: Mailbox, threadId?: string, messageId?: string) {
+  const mine = own(mailbox);
+  let target: Message | undefined;
+  if (threadId) {
+    const thread = await client.thread(mailbox.id, threadId);
+    target = [...thread.messages].reverse().find(message => message.direction === 'inbound') ?? thread.messages.at(-1);
+  } else target = await client.message(mailbox.id, messageId!);
+  if (!target) return [];
+  const to = new Set((target.direction === 'outbound' ? target.to : [target.from]).map(value => value.address.toLowerCase()));
+  const candidates = target.direction === 'outbound' ? target.cc : [...target.to, ...target.cc];
+  return [...new Set(candidates.map(value => value.address.toLowerCase()).filter(address => !mine.has(address) && !to.has(address)))];
+}
+
 const mailboxArg = z.string().max(254).optional().describe('Mailbox address (or ID). Optional when the connection has a single mailbox.');
-const recipients = z.union([z.string().email(), z.array(z.string().email()).max(50)]).transform(value => Array.isArray(value) ? value : [value]);
+const recipient = z.string().trim().min(1).max(254);
+const recipients = z.union([recipient, z.array(recipient).max(50)]).transform(value => Array.isArray(value) ? value : [value])
+  .describe('Email addresses, or names of people in your organization (see find_people), e.g. ["maya", "ops@acme.com"].');
 const attachmentsArg = z.array(z.union([
   z.object({ filename: z.string().min(1).max(200), content_base64: z.string().min(4).describe('File bytes, standard base64.'), content_type: z.string().max(100).optional() }),
   z.object({ attachment_id: z.string().describe('Reuse a received attachment (matt_…) from this mailbox.') }),
@@ -60,7 +79,9 @@ const attachmentsArg = z.array(z.union([
 const toAttachments = (items?: z.infer<typeof attachmentsArg>): AttachmentInput[] => (items ?? []).map(item => 'attachment_id' in item ? { id: item.attachment_id } : { filename: item.filename, content: item.content_base64, ...(item.content_type ? { contentType: item.content_type } : {}) });
 const readOnly = { readOnlyHint: true, openWorldHint: false };
 
-export function createServer(openSendUrl: string) {
+export function createServer(openSendUrl: string, directory?: Directory) {
+  const tag = tagger(directory);
+  const resolved = (lines: string[]) => lines.length ? `\nResolved: ${lines.join('; ')}.` : '';
   return () => {
     const props = getMcpAuthContext()?.props as CodemailProps | undefined;
     const server = new McpServer({ name: 'codemail', version: '0.1.0' }, { instructions: INSTRUCTIONS });
@@ -115,7 +136,7 @@ export function createServer(openSendUrl: string) {
       const latestInbound = [...thread.messages].reverse().find(message => message.direction === 'inbound');
       const header = `"${thread.subject || '(no subject)'}" · ${mailbox.address} · ${thread.id} · ${thread.messageCount} message${thread.messageCount === 1 ? '' : 's'}${thread.labels.length ? ` · labels: ${thread.labels.join(', ')}` : ''}${args.mark_as_read && thread.unreadCount ? ' · marked read' : thread.unreadCount ? ` · ${thread.unreadCount} unread` : ''}`;
       const next = latestInbound ? `Next: reply(thread_id="${thread.id}", body="…") answers [${thread.messages.indexOf(latestInbound) + 1}] from ${who(latestInbound.from)}${latestInbound.automated ? ' (automated sender, so replies are blocked by default)' : ''}.` : `Next: reply(thread_id="${thread.id}", body="…") follows up on your own message.`;
-      return text(`${header}\n\n${conversationText(mailbox, thread, args.include_quoted)}\n\n${next}`, { mailbox: mailbox.address, thread });
+      return text(`${header}\n\n${conversationText(mailbox, thread, args.include_quoted, tag)}\n\n${next}`, { mailbox: mailbox.address, thread });
     }));
 
     server.registerTool('search_mail', {
@@ -141,7 +162,7 @@ export function createServer(openSendUrl: string) {
       title: 'Send email',
       description: 'Send a new email from a mailbox, starting a new conversation. This sends real email: only use it when the user asked. To answer an existing email use reply instead, so it stays threaded.',
       inputSchema: z.object({
-        to: recipients.describe('Recipient address, or a list of addresses.'),
+        to: recipients,
         subject: z.string().min(1).max(998),
         body: z.string().min(1).max(500_000).describe('Plain-text body.'),
         html: z.string().max(500_000).optional().describe('Optional HTML version of the body.'),
@@ -153,18 +174,21 @@ export function createServer(openSendUrl: string) {
       }), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const sent = await client.send(mailbox.id, { to: args.to, cc: args.cc ?? [], bcc: args.bcc ?? [], subject: args.subject, text: args.body, ...(args.html ? { html: args.html } : {}), ...(args.from ? { from: args.from } : {}), attachments: toAttachments(args.attachments) }, args.idempotency_key);
-      return text(`Queued ${sent.id} from ${sent.from.address} to ${sent.to.map(value => value.address).join(', ')} (conversation ${sent.threadId}).\nDelivery status appears in read_conversation; replies arrive in the same conversation.`, { message: sent });
+      const [to, cc, bcc] = await Promise.all([resolveRecipients(directory, args.to), resolveRecipients(directory, args.cc ?? []), resolveRecipients(directory, args.bcc ?? [])]);
+      const sent = await client.send(mailbox.id, { to: to.addresses, cc: cc.addresses, bcc: bcc.addresses, subject: args.subject, text: args.body, ...(args.html ? { html: args.html } : {}), ...(args.from ? { from: args.from } : {}), attachments: toAttachments(args.attachments) }, args.idempotency_key);
+      return text(`Queued ${sent.id} from ${sent.from.address} to ${sent.to.map(value => value.address).join(', ')}${sent.cc.length ? `, cc ${sent.cc.map(value => value.address).join(', ')}` : ''} (conversation ${sent.threadId}).${resolved([...to.resolved, ...cc.resolved, ...bcc.resolved])}\nDelivery status appears in read_conversation; replies arrive in the same conversation.`, { message: sent });
     }));
 
     server.registerTool('reply', {
       title: 'Reply',
-      description: 'Reply in an existing conversation, threaded with the right email headers. Pass thread_id to answer the newest received message, or message_id to answer a specific one. Replies go to the sender (Reply-To if set); reply_all also copies everyone else.',
+      description: 'Reply in an existing conversation, threaded with the right email headers. Pass thread_id to answer the newest received message, or message_id to answer a specific one. Replies go to the sender (Reply-To if set); reply_all also copies everyone else. Use cc to loop in teammates (by name or address) on top of that.',
       inputSchema: z.object({
         thread_id: z.string().max(120).optional(), message_id: z.string().max(120).optional(),
         body: z.string().min(1).max(500_000).describe('Plain-text reply. Do not include the quoted original; set quote=true instead.'),
         html: z.string().max(500_000).optional(),
         reply_all: z.boolean().default(false),
+        cc: recipients.optional().describe('Also copy these people, e.g. ["maya"] to loop in a teammate. Added to the reply_all recipients, not instead of them.'),
+        bcc: recipients.optional(),
         quote: z.boolean().default(false).describe('Append the original message as quoted text.'),
         mailbox: mailboxArg,
         attachments: attachmentsArg,
@@ -174,9 +198,13 @@ export function createServer(openSendUrl: string) {
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const body = { text: args.body, ...(args.html ? { html: args.html } : {}), replyAll: args.reply_all, quote: args.quote, allowAutomated: args.allow_automated, attachments: toAttachments(args.attachments) };
+      const [extraCc, bcc] = await Promise.all([resolveRecipients(directory, args.cc ?? []), resolveRecipients(directory, args.bcc ?? [])]);
+      // OpenSend treats cc as the full list, so keep the reply_all recipients when adding people.
+      let cc: string[] | undefined;
+      if (extraCc.addresses.length) cc = [...new Set([...(args.reply_all ? await replyAllCc(client, mailbox, args.thread_id, args.message_id) : []), ...extraCc.addresses])];
+      const body = { text: args.body, ...(args.html ? { html: args.html } : {}), replyAll: args.reply_all, quote: args.quote, allowAutomated: args.allow_automated, attachments: toAttachments(args.attachments), ...(cc ? { cc } : {}), ...(bcc.addresses.length ? { bcc: bcc.addresses } : {}) };
       const sent = args.thread_id ? await client.replyToThread(mailbox.id, args.thread_id, body, args.idempotency_key) : await client.replyToMessage(mailbox.id, args.message_id!, body, args.idempotency_key);
-      return text(`Reply ${sent.id} queued to ${[...sent.to, ...sent.cc].map(value => value.address).join(', ')} in conversation ${sent.threadId} ("${sent.subject}").`, { message: sent });
+      return text(`Reply ${sent.id} queued to ${sent.to.map(value => value.address).join(', ')}${sent.cc.length ? `, cc ${sent.cc.map(value => value.address).join(', ')}` : ''} in conversation ${sent.threadId} ("${sent.subject}").${resolved([...extraCc.resolved, ...bcc.resolved])}`, { message: sent });
     }));
 
     server.registerTool('forward', {
@@ -192,8 +220,9 @@ export function createServer(openSendUrl: string) {
       }), annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     }, run(async (client, args) => {
       const mailbox = await pickMailbox(client, args.mailbox);
-      const sent = await client.forward(mailbox.id, args.message_id, { to: args.to, cc: args.cc ?? [], ...(args.note ? { text: args.note } : {}), includeAttachments: args.include_attachments }, args.idempotency_key);
-      return text(`Forwarded as ${sent.id} to ${sent.to.map(value => value.address).join(', ')} ("${sent.subject}", ${sent.attachmentCount} attachment${sent.attachmentCount === 1 ? '' : 's'}).`, { message: sent });
+      const [to, cc] = await Promise.all([resolveRecipients(directory, args.to), resolveRecipients(directory, args.cc ?? [])]);
+      const sent = await client.forward(mailbox.id, args.message_id, { to: to.addresses, cc: cc.addresses, ...(args.note ? { text: args.note } : {}), includeAttachments: args.include_attachments }, args.idempotency_key);
+      return text(`Forwarded as ${sent.id} to ${sent.to.map(value => value.address).join(', ')} ("${sent.subject}", ${sent.attachmentCount} attachment${sent.attachmentCount === 1 ? '' : 's'}).${resolved([...to.resolved, ...cc.resolved])}`, { message: sent });
     }));
 
     server.registerTool('update_conversations', {
@@ -258,6 +287,16 @@ export function createServer(openSendUrl: string) {
         }
       }
       return text(`${file.filename} (${file.contentType}, ${size(file.size)}) cannot be shown inline. Download link, valid until ${file.expiresAt}:\n${file.url}`, { attachment: file });
+    }));
+
+    server.registerTool('find_people', {
+      title: 'Find people',
+      description: 'List the people in your organization and its other agent mailboxes, with their addresses, like a company directory. Use it to cc or forward to a teammate. Names also work directly in to, cc and bcc.',
+      inputSchema: z.object({ query: z.string().max(100).optional().describe('Filter by name or address, e.g. "maya" or "ops".') }), annotations: readOnly,
+    }, run(async (_client, args) => {
+      if (!directory) return failure('This connection is not part of an organization.');
+      const result = await directoryText(directory, args.query);
+      return text(result.text, { people: result.people, agents: result.agents });
     }));
 
     server.registerTool('list_labels', {
