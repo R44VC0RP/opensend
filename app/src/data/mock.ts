@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, MailboxDomain, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
-import { createSeed, demoMailboxes } from './seed'
+import { createSeed, demoMailboxes, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
@@ -812,6 +812,12 @@ export function createMockApi(): OpenSendApi {
         return row
       }),
       checkDomain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
+      received: (input, signal) => run(signal, false, () => {
+        const search = input.search?.trim().toLowerCase()
+        const rows = demoReceived().filter(row => (!input.regionId || row.region === input.regionId) && (!search || `${row.subject} ${row.from.address} ${row.from.name} ${row.text}`.toLowerCase().includes(search)))
+        return Object.assign(rows.map(({ text: _t, replyText: _r, html: _h, headers: _hd, attachments: _a, verdicts: _v, bcc: _b, replyTo: _rt, messageId: _m, inReplyTo: _i, references: _rf, bodyTruncated: _bt, sesMessageId: _s, sizeBytes: _sz, rawUrl: _raw, linksExpireAt: _l, ...summary }) => summary), { nextCursor: null })
+      }),
+      receivedEmail: (messageId, signal) => run(signal, false, () => find(demoReceived(), messageId, 'Message')),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks),

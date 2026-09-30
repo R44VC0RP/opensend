@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -40,6 +40,25 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
     ],
     mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), mailboxCount: 4 }],
   }
+}
+
+export function demoReceived(now = Date.now()): ReceivedEmailDetail[] {
+  const at = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
+  const pass = { spf: 'PASS', dkim: 'PASS', dmarc: 'PASS', spam: 'PASS', virus: 'PASS' }
+  const item = (id: string, hours: number, from: { name: string; address: string }, to: string, mailbox: { id: string; address: string } | null, subject: string, text: string, extra: Partial<ReceivedEmailDetail> = {}): ReceivedEmailDetail => ({
+    id, threadId: `thr_${id}`, status: 'received', from, to: [{ name: null, address: to }], cc: [], bcc: [], replyTo: [], subject, snippet: text.split('\n')[0]!.slice(0, 200), sentAt: at(hours + 0.01), receivedAt: at(hours),
+    attachmentCount: 0, spam: false, automated: false, region: 'us-east-1', envelopeTo: [to], mailboxes: mailbox ? [mailbox] : [], unrouted: mailbox ? [] : [to],
+    messageId: `${id}@mail.example.net`, inReplyTo: null, references: [], text, replyText: text, html: null, bodyTruncated: false, headers: [{ name: 'From', value: `${from.name} <${from.address}>` }, { name: 'To', value: to }, { name: 'Subject', value: subject }],
+    attachments: [], verdicts: pass, sesMessageId: `demo${id}`, sizeBytes: 4_200, rawUrl: null, linksExpireAt: at(-0.08), ...extra,
+  })
+  const support = { id: 'mbx_support', address: 'support@mail.acme.com' }, billing = { id: 'mbx_billing', address: 'billing@mail.acme.com' }
+  return [
+    item('msg_demo_invoice', 0.2, { name: 'Maya Chen', address: 'maya@northwind.example' }, 'support@mail.acme.com', support, 'Where is my invoice?', 'Hi team,\nI can’t find the invoice for September. Could you resend it?\n\nThanks,\nMaya',
+      { attachmentCount: 1, attachments: [{ id: 'matt_demo_1', filename: 'order-4821.pdf', contentType: 'application/pdf', size: 48_213, contentId: null, disposition: 'attachment', url: null }], html: '<p>Hi team,</p><p>I can’t find the invoice for September. Could you resend it?</p><p>Thanks,<br>Maya</p>' }),
+    item('msg_demo_refund', 3, { name: 'Leo Park', address: 'leo@contoso.example' }, 'billing@mail.acme.com', billing, 'Refund request', 'Hello,\nI was charged twice this month. Please refund the duplicate payment.'),
+    item('msg_demo_press', 26, { name: 'Press desk', address: 'news@press.example' }, 'press@mail.acme.com', null, 'Interview request', 'Would someone from Acme be available for a short interview next week?'),
+    item('msg_demo_spam', 40, { name: 'Prize Center', address: 'winner@lottery.example' }, 'jordan@mail.acme.com', { id: 'mbx_jordan', address: 'jordan@mail.acme.com' }, 'You won!!!', 'Claim your prize now.', { spam: true, verdicts: { ...pass, spam: 'FAIL' } }),
+  ]
 }
 
 export function createSeed(now = Date.now()): DemoState {

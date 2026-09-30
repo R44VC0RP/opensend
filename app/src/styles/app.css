@@ -123,6 +123,18 @@ button svg, .ui-button svg { width: var(--space-16); height: var(--space-16); st
 .plain-text-preview { flex: 1; min-height: 400px; margin: 0; padding: var(--space-24); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--color-email-surface); color: var(--color-email-text); font-family: var(--font-email); line-height: 1.5; }
 .message-source { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 360px; overflow: auto; margin: 0; padding-top: var(--space-16); line-height: var(--leading-sm); }
 .message-identifiers { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--space-12); padding-top: var(--space-20); border-top: 1px solid var(--color-border); font-size: var(--text-xs); color: var(--color-muted); }
+.received-subject { display: inline-flex; align-items: center; gap: var(--space-6); max-width: 100%; }
+.received-subject svg { flex: none; color: var(--color-muted); }
+.received-details { display: flex; flex-direction: column; gap: var(--space-20); }
+.received-group { display: grid; gap: var(--space-12); }
+.received-heading { margin: 0; font-size: var(--text-sm); font-weight: 500; }
+.received-facts { display: grid; gap: var(--space-12); margin: 0; }
+.received-facts > div { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
+.received-facts dt { color: var(--color-muted); font-size: var(--text-xs); }
+.received-facts dd { margin: 0; overflow-wrap: anywhere; }
+.received-attachments { display: grid; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
+.received-attachments li > :nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .identifier { color: var(--color-text); }
 @media (max-width: 1200px) {
   .page-surface { padding-inline: var(--space-24); }

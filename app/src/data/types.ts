@@ -69,6 +69,19 @@ export interface MailboxDomain {
   lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; mailboxCount: number
 }
 export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null } }
+export interface MailAddress { name: string | null; address: string }
+export interface ReceivedEmail {
+  id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; cc: MailAddress[]; subject: string; snippet: string
+  sentAt: ISODate | null; receivedAt: ISODate; attachmentCount: number; spam: boolean; automated: boolean; region: RegionId | null
+  envelopeTo: string[]; mailboxes: { id: string; address: string }[]; unrouted: string[]
+}
+export interface ReceivedEmailDetail extends ReceivedEmail {
+  bcc: MailAddress[]; replyTo: MailAddress[]; messageId: string | null; inReplyTo: string | null; references: string[]
+  text: string; replyText: string; html: string | null; bodyTruncated: boolean; headers?: { name: string; value: string }[]
+  attachments: { id: string; filename: string; contentType: string; size: number; contentId: string | null; disposition: 'attachment' | 'inline'; url: string | null }[]
+  verdicts: { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string }
+  sesMessageId: string | null; sizeBytes: number | null; rawUrl: string | null; linksExpireAt: ISODate
+}
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; deliveries: WebhookDelivery[]; nextCursor?: string | null }
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'regionIds' | 'events'> & { id?: string }
@@ -104,7 +117,7 @@ export interface OpenSendApi {
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void> }
   domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain> }
-  mailboxes: { list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Mailbox>>; domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain> }
+  mailboxes: { list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Mailbox>>; domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; received(input: { regionId?: string; search?: string; cursor?: string; pageSize?: number }, signal?: AbortSignal): Promise<CursorItems<ReceivedEmail>>; receivedEmail(id: string, signal?: AbortSignal): Promise<ReceivedEmailDetail> }
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 

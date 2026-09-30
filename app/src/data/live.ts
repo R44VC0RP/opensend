@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type ReceivedEmail, type ReceivedEmailDetail, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -234,6 +234,8 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       enableDomain: (id, input, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/enable`, 'POST', { force: input.force ?? false }, signal),
       disableDomain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
       checkDomain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
+      received: async (input, signal) => { const query = new URLSearchParams({ direction: 'inbound', limit: String(Math.min(100, input.pageSize ?? 50)), ...(input.regionId ? { region: input.regionId } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: ReceivedEmail[]; nextCursor: string | null }>(`/messages?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      receivedEmail: (id, signal) => mailboxCall<ReceivedEmailDetail>(`/messages/${idPath(id)}`, 'GET', undefined, signal),
     },
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},

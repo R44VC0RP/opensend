@@ -14,6 +14,7 @@ const loadMailboxes = () => import('./features/mailboxes')
 const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
 const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
+const ReceivedEmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.ReceivedEmailDetailPage })))
 const CampaignsPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignsPage })))
 const CampaignEditorPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignEditorPage })))
 const CampaignReviewPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignReviewPage })))
@@ -55,7 +56,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
 export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
     <Route index element={<OverviewPage />} />
-    <Route path="logs" element={<LogsPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
+    <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
     <Route path="mailboxes" element={<MailboxesPage />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateEditorPage />} />

@@ -531,6 +531,49 @@ export function registerMailbox(app: App) {
     return c.json({ data: rows.slice(0, q.limit).map(item => ({ id: item.id, webhookId: item.webhookId, eventId: String(item.payload.id), status: item.status, attemptCount: item.attemptCount, lastStatusCode: item.lastStatusCode, lastError: item.lastError, createdAt: iso(item.createdAt)!, updatedAt: iso(item.updatedAt)! })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
 
+  // ---------- all stored messages (admin; powers dashboard logs) ----------
+  const StoredSummary = MessageSummary.omit({ mailboxId: true, read: true }).extend({
+    region: z.string().nullable(), envelopeTo: z.array(z.string()).describe('Recipients SES accepted this message for.'),
+    mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()).describe('Recipients that matched no mailbox.'),
+  }).openapi('StoredMessageSummary');
+  async function storedSummaries(runtime: Runtime, rows: MessageRow[]) {
+    if (!rows.length) return [];
+    const ids = rows.map(row => row.id);
+    const [links, unrouted] = await Promise.all([
+      runtime.db.select({ messageId: mailboxMessages.messageId, id: mailboxes.id, address: mailboxes.address }).from(mailboxMessages).innerJoin(mailboxes, eq(mailboxes.id, mailboxMessages.mailboxId)).where(inArray(mailboxMessages.messageId, ids)),
+      runtime.db.select({ messageId: mailUnrouted.messageId, address: mailUnrouted.address }).from(mailUnrouted).where(inArray(mailUnrouted.messageId, ids)),
+    ]);
+    return rows.map(row => { const { mailboxId: _m, read: _r, ...summary } = summaryView(row, '', false); return { ...summary, region: row.region, envelopeTo: row.envelopeTo,
+      mailboxes: links.filter(link => link.messageId === row.id).map(({ id, address }) => ({ id, address })), unrouted: unrouted.filter(item => item.messageId === row.id).map(item => item.address) }; });
+  }
+  app.openapi(route({ method: 'get', path: '/messages', operationId: 'mailboxListStoredMessages', tags: [TAG.messages], summary: 'List every stored message', description: 'All received (or sent) messages across every mailbox, including unrouted mail. Newest first, without bodies.',
+    request: { query: z.object({ direction: z.enum(['inbound', 'outbound']).default('inbound'), region: z.string().max(40).optional(), mailboxId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
+    responses: { 200: response(pageOf(StoredSummary, 'StoredMessagePage')), ...errors } }), async c => {
+    const value = admin(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor); const m = mailMessages;
+    const rows = await c.env.db.select().from(m).where(and(eq(m.workspaceId, value.workspaceId), eq(m.environment, LIVE), eq(m.direction, q.direction), q.region ? eq(m.region, q.region) : undefined,
+      q.mailboxId ? sql`EXISTS (SELECT 1 FROM mailbox_messages mm WHERE mm.message_id = ${m.id} AND mm.mailbox_id = ${q.mailboxId})` : undefined,
+      q.q ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.q})` : undefined,
+      cursor ? sql`(${m.receivedAt}, ${m.id}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(m.receivedAt), desc(m.id)).limit(q.limit + 1);
+    const last = rows[q.limit - 1];
+    return c.json({ data: await storedSummaries(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit && last ? encodeCursor([exact(last.receivedAt), last.id]) : null }, 200);
+  });
+  app.openapi(route({ method: 'get', path: '/messages/{id}', operationId: 'mailboxGetStoredMessage', tags: [TAG.messages], summary: 'Read any stored message', description: 'Full message with headers, the mailboxes it belongs to, and short-lived download links for attachments and the original MIME.',
+    request: { params: IdParam }, responses: { 200: response(MessageSchema.omit({ mailboxId: true, read: true }).extend({
+      region: z.string().nullable(), envelopeTo: z.array(z.string()), sesMessageId: z.string().nullable(), sizeBytes: z.number().int().nullable(),
+      mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()),
+      attachments: z.array(AttachmentSchema.extend({ url: z.string().nullable() })), rawUrl: z.string().nullable(), linksExpireAt: z.string(),
+    }).openapi('StoredMessage')), ...errors } }), async c => {
+    const value = admin(c);
+    const [row] = await c.env.db.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, value.workspaceId), eq(mailMessages.environment, LIVE), eq(mailMessages.id, c.req.valid('param').id)));
+    if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
+    const [[full], [summary], files] = await Promise.all([fullViews(c.env, [{ row, read: false }], '', { html: true, headers: true }), storedSummaries(c.env, [row]), c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId, row.id)).orderBy(asc(mailAttachments.id))]);
+    const link = async (bucket: string | null, key: string | null, filename?: string) => bucket && key && row.region ? (await signedUrl(c.env, row.region, bucket, key, filename)).url : null;
+    const { mailboxId: _m, read: _r, ...message } = full!;
+    return c.json({ ...message, region: row.region, envelopeTo: row.envelopeTo, sesMessageId: row.sesMessageId, sizeBytes: row.sizeBytes, mailboxes: summary!.mailboxes, unrouted: summary!.unrouted,
+      attachments: await Promise.all(files.map(async file => ({ id: file.id, filename: file.filename, contentType: file.contentType, size: file.sizeBytes, contentId: file.contentId, disposition: file.disposition, url: await link(file.bucket, file.storageKey, file.filename) }))),
+      rawUrl: await link(row.rawBucket, row.rawKey, `${row.id}.eml`), linksExpireAt: new Date(Date.now() + 300_000).toISOString() }, 200);
+  });
+
   // ---------- unrouted ----------
   app.openapi(route({ method: 'get', path: '/unrouted', operationId: 'mailboxListUnrouted', tags: [TAG.messages], summary: 'Stored mail that matched no mailbox', description: 'Mail for addresses on a domain whose catch-all is set to store. Creating a mailbox for the address claims it.',
     request: { query: z.object({ address: z.string().trim().toLowerCase().max(254).optional(), cursor: z.string().max(300).optional(), limit: Limit }) }, responses: { 200: response(pageOf(MessageSummary.omit({ mailboxId: true, read: true }).extend({ address: z.string() }).openapi('MailboxUnroutedMessage'), 'MailboxUnroutedPage')), ...errors } }), async c => {

@@ -1550,6 +1550,98 @@ export type MailboxWebhookDelivery = {
     updatedAt: string;
 };
 
+export type StoredMessagePage = {
+    data: Array<StoredMessageSummary>;
+    nextCursor: string | null;
+};
+
+export type StoredMessageSummary = {
+    id: string;
+    threadId: string;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    from: MailboxAddress;
+    to: Array<MailboxAddress>;
+    cc: Array<MailboxAddress>;
+    subject: string;
+    snippet: string;
+    sentAt: string | null;
+    receivedAt: string;
+    attachmentCount: number;
+    spam: boolean;
+    automated: boolean;
+    region: string | null;
+    /**
+     * Recipients SES accepted this message for.
+     */
+    envelopeTo: Array<string>;
+    mailboxes: Array<{
+        id: string;
+        address: string;
+    }>;
+    /**
+     * Recipients that matched no mailbox.
+     */
+    unrouted: Array<string>;
+};
+
+export type StoredMessage = {
+    id: string;
+    threadId: string;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    from: MailboxAddress;
+    to: Array<MailboxAddress>;
+    cc: Array<MailboxAddress>;
+    subject: string;
+    snippet: string;
+    sentAt: string | null;
+    receivedAt: string;
+    attachmentCount: number;
+    spam: boolean;
+    automated: boolean;
+    bcc: Array<MailboxAddress>;
+    replyTo: Array<MailboxAddress>;
+    messageId: string | null;
+    inReplyTo: string | null;
+    references: Array<string>;
+    /**
+     * Plain text body; derived from HTML when the message has no text part.
+     */
+    text: string;
+    /**
+     * Text without quoted history.
+     */
+    replyText: string;
+    html: string | null;
+    bodyTruncated: boolean;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    attachments: Array<MailboxAttachment & {
+        url: string | null;
+    }>;
+    verdicts: {
+        spf?: string;
+        dkim?: string;
+        dmarc?: string;
+        spam?: string;
+        virus?: string;
+    };
+    region: string | null;
+    envelopeTo: Array<string>;
+    sesMessageId: string | null;
+    sizeBytes: number | null;
+    mailboxes: Array<{
+        id: string;
+        address: string;
+    }>;
+    unrouted: Array<string>;
+    rawUrl: string | null;
+    linksExpireAt: string;
+};
+
 export type MailboxUnroutedPage = {
     data: Array<MailboxUnroutedMessage>;
     nextCursor: string | null;
@@ -10579,6 +10671,137 @@ export type MailboxListWebhookDeliveriesResponses = {
 };
 
 export type MailboxListWebhookDeliveriesResponse = MailboxListWebhookDeliveriesResponses[keyof MailboxListWebhookDeliveriesResponses];
+
+export type MailboxListStoredMessagesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        direction?: 'inbound' | 'outbound';
+        region?: string;
+        mailboxId?: string;
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/messages';
+};
+
+export type MailboxListStoredMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListStoredMessagesError = MailboxListStoredMessagesErrors[keyof MailboxListStoredMessagesErrors];
+
+export type MailboxListStoredMessagesResponses = {
+    /**
+     * Success
+     */
+    200: StoredMessagePage;
+};
+
+export type MailboxListStoredMessagesResponse = MailboxListStoredMessagesResponses[keyof MailboxListStoredMessagesResponses];
+
+export type MailboxGetStoredMessageData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/messages/{id}';
+};
+
+export type MailboxGetStoredMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetStoredMessageError = MailboxGetStoredMessageErrors[keyof MailboxGetStoredMessageErrors];
+
+export type MailboxGetStoredMessageResponses = {
+    /**
+     * Success
+     */
+    200: StoredMessage;
+};
+
+export type MailboxGetStoredMessageResponse = MailboxGetStoredMessageResponses[keyof MailboxGetStoredMessageResponses];
 
 export type MailboxListUnroutedData = {
     body?: never;
