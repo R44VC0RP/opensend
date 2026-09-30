@@ -5592,11 +5592,12 @@
               "create_mailbox",
               "store"
             ]
+          },
+          "acceptSubdomains": {
+            "type": "boolean",
+            "description": "Whether the receipt rule also matches every subdomain (.example.com). Turned on by the first subdomain and kept on after that."
           }
         },
-        "required": [
-          "catchAll"
-        ],
         "additionalProperties": false
       },
       "MailboxSubdomainPage": {
@@ -26794,12 +26795,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateDomain } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateDomain({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"catchAll\": \"create_mailbox\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateDomain } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateDomain({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/domains/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"catchAll\": \"create_mailbox\"\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/domains/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }
@@ -27480,7 +27481,7 @@
           "Mailbox domains"
         ],
         "summary": "Add a receiving subdomain",
-        "description": "Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule; publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.",
+        "description": "Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute; later ones are live immediately. Publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.",
         "security": [
           {
             "bearerAuth": []
@@ -27983,7 +27984,7 @@
           "Mailbox domains"
         ],
         "summary": "Stop receiving for a subdomain",
-        "description": "New mail to the subdomain is dropped. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. Removing the last subdomain takes the wildcard recipient out of the receipt rule.",
+        "description": "New mail to the subdomain is dropped at ingest. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. The parent keeps its wildcard recipient, so adding subdomains later is instant; turn it off with PATCH /domains/{id} acceptSubdomains=false.",
         "security": [
           {
             "bearerAuth": []

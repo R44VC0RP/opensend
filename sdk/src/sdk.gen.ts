@@ -2301,7 +2301,7 @@ export const mailboxListSubdomains = <ThrowOnError extends boolean = false>(opti
 /**
  * Add a receiving subdomain
  *
- * Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule; publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.
+ * Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute; later ones are live immediately. Publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.
  */
 export const mailboxCreateSubdomain = <ThrowOnError extends boolean = false>(options: Options<MailboxCreateSubdomainData, ThrowOnError>): RequestResult<MailboxCreateSubdomainResponses, MailboxCreateSubdomainErrors, ThrowOnError> => (options.client ?? client).post<MailboxCreateSubdomainResponses, MailboxCreateSubdomainErrors, ThrowOnError>({
     security: [
@@ -2328,7 +2328,7 @@ export const mailboxCreateSubdomain = <ThrowOnError extends boolean = false>(opt
 /**
  * Stop receiving for a subdomain
  *
- * New mail to the subdomain is dropped. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. Removing the last subdomain takes the wildcard recipient out of the receipt rule.
+ * New mail to the subdomain is dropped at ingest. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. The parent keeps its wildcard recipient, so adding subdomains later is instant; turn it off with PATCH /domains/{id} acceptSubdomains=false.
  */
 export const mailboxRemoveSubdomain = <ThrowOnError extends boolean = false>(options: Options<MailboxRemoveSubdomainData, ThrowOnError>): RequestResult<MailboxRemoveSubdomainResponses, MailboxRemoveSubdomainErrors, ThrowOnError> => (options.client ?? client).delete<MailboxRemoveSubdomainResponses, MailboxRemoveSubdomainErrors, ThrowOnError>({
     security: [

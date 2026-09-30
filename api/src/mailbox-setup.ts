@@ -159,10 +159,12 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
 export async function reconcileRegion(runtime: Runtime, region: string): Promise<void> {
   const workspaceId = runtime.config.workspaceId;
   await runtime.db.insert(mailboxRegions).values({ workspaceId, region }).onConflictDoNothing();
-  const [lease] = await runtime.db.update(mailboxRegions).set({ reconcileLeaseUntil: sql`now() + interval '5 minutes'` })
+  // The lease must expire before the job's own lease (3 minutes), so a retry of a run that died can take over
+  // instead of failing as busy. A normal run takes seconds; the abort below keeps a live run inside the lease.
+  const [lease] = await runtime.db.update(mailboxRegions).set({ reconcileLeaseUntil: sql`now() + interval '2 minutes'` })
     .where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region), sql`(${mailboxRegions.reconcileLeaseUntil} IS NULL OR ${mailboxRegions.reconcileLeaseUntil} < now())`)).returning({ region: mailboxRegions.region });
   if (!lease) throw new ApiError(503, 'MAILBOX_RECONCILE_BUSY', 'Another mailbox setup run owns this region; retrying.', undefined, true);
-  const signal = AbortSignal.timeout(240000);
+  const signal = AbortSignal.timeout(100000);
   const config = awsConfig(runtime, region);
   const sesClient = new SESClient(config);
   const clients = { sts: new STSClient(config), s3: new S3Client(config), sns: new SNSClient(config), ses: pacedSes(sesClient, signal) };

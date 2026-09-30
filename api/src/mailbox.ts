@@ -320,9 +320,16 @@ export function registerMailbox(app: App) {
     });
     return c.json((await domainViews(c.env, [row]))[0]!, 202);
   });
-  app.openapi(route({ method: 'patch', path: '/domains/{id}', operationId: 'mailboxUpdateDomain', tags: [TAG.domains], request: { params: IdParam, body: json(z.object({ catchAll: z.enum(['create_mailbox', 'store']) }).strict().openapi('UpdateMailboxDomain')) }, responses: { 200: response(DomainSchema), ...errors } }), async c => {
-    const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    const updated = await c.env.db.update(mailboxDomains).set({ catchAll: c.req.valid('json').catchAll, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId))).returning({ id: mailboxDomains.id });
+  app.openapi(route({ method: 'patch', path: '/domains/{id}', operationId: 'mailboxUpdateDomain', tags: [TAG.domains],
+    request: { params: IdParam, body: json(z.object({ catchAll: z.enum(['create_mailbox', 'store']).optional(), acceptSubdomains: z.boolean().optional().describe('Whether the receipt rule also matches every subdomain (.example.com). Turned on by the first subdomain and kept on after that.') }).strict().refine(value => value.catchAll !== undefined || value.acceptSubdomains !== undefined, 'Set catchAll or acceptSubdomains.').openapi('UpdateMailboxDomain')) }, responses: { 200: response(DomainSchema), ...errors } }), async c => {
+    const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id); const input = c.req.valid('json');
+    const updated = await c.env.db.transaction(async tx => {
+      const [before] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId))).for('update');
+      if (!before) return [];
+      const saved = await tx.update(mailboxDomains).set({ ...(input.catchAll ? { catchAll: input.catchAll } : {}), ...(input.acceptSubdomains !== undefined ? { acceptSubdomains: input.acceptSubdomains } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, before.id)).returning({ id: mailboxDomains.id });
+      if (input.acceptSubdomains !== undefined && input.acceptSubdomains !== before.acceptSubdomains) await queueReconcile(tx, value.workspaceId, before.region);
+      return saved;
+    });
     if (!updated.length) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', 'Enable receiving for this domain first.');
     return c.json((await domainViews(c.env, [row]))[0]!, 200);
   });
@@ -336,7 +343,7 @@ export function registerMailbox(app: App) {
     return c.json({ data: await subdomainViews(c.env, parent, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.name : null }, 200);
   });
   app.openapi(route({ method: 'post', path: '/domains/{id}/subdomains', operationId: 'mailboxCreateSubdomain', tags: [TAG.domains], summary: 'Add a receiving subdomain',
-    description: 'Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule; publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.',
+    description: 'Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute; later ones are live immediately. Publish the returned *.example.com MX record once. Mailboxes can then be created on the subdomain. Re-adding a removed subdomain restores it.',
     request: { params: IdParam, body: json(z.object({ name: z.string().trim().toLowerCase().max(253).describe('A label (acme) or the full host (acme.example.com).'), catchAll: z.enum(['create_mailbox', 'store']).default('store').describe('Mail for an address with no mailbox: store keeps it as unrouted (default); create_mailbox makes one.'), metadata: Metadata.default({}) }).strict().openapi('CreateMailboxSubdomain')) },
     responses: { 201: response(SubdomainSchema), ...errors } }), async c => {
     const value = admin(c); const parent = await receivingParent(c, c.req.valid('param').id); const input = c.req.valid('json');
@@ -375,22 +382,11 @@ export function registerMailbox(app: App) {
     return c.json((await subdomainViews(c.env, parent, [row!]))[0]!, 200);
   });
   app.openapi(route({ method: 'delete', path: '/domains/{id}/subdomains/{subdomainId}', operationId: 'mailboxRemoveSubdomain', tags: [TAG.domains], summary: 'Stop receiving for a subdomain',
-    description: 'New mail to the subdomain is dropped. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. Removing the last subdomain takes the wildcard recipient out of the receipt rule.', request: { params: SubParams }, responses: { 200: response(SubdomainSchema), ...errors } }), async c => {
-    const value = admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id);
+    description: 'New mail to the subdomain is dropped at ingest. Its mailboxes and stored messages are kept, and adding the subdomain again restores it. The parent keeps its wildcard recipient, so adding subdomains later is instant; turn it off with PATCH /domains/{id} acceptSubdomains=false.', request: { params: SubParams }, responses: { 200: response(SubdomainSchema), ...errors } }), async c => {
+    admin(c); const params = c.req.valid('param'); const parent = await receivingParent(c, params.id);
     const current = await subdomainRow(c, parent, params.subdomainId);
-    const row = await c.env.db.transaction(async tx => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_subdomains:${parent.id}`}))`);
-      const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, parent.id));
-      const now = new Date().toISOString();
-      const [saved] = await tx.update(mailboxDomains).set({ status: 'disabled', updatedAt: now }).where(eq(mailboxDomains.id, current.id)).returning();
-      const [left] = await tx.select({ count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(eq(mailboxDomains.parentId, parent.id), eq(mailboxDomains.status, 'active')));
-      if (!left?.count && fresh?.acceptSubdomains) {
-        await tx.update(mailboxDomains).set({ acceptSubdomains: false, updatedAt: now }).where(eq(mailboxDomains.id, parent.id));
-        await queueReconcile(tx, value.workspaceId, parent.region);
-      }
-      return saved!;
-    });
-    return c.json((await subdomainViews(c.env, parent, [row]))[0]!, 200);
+    const [row] = await c.env.db.update(mailboxDomains).set({ status: 'disabled', updatedAt: new Date().toISOString() }).where(eq(mailboxDomains.id, current.id)).returning();
+    return c.json((await subdomainViews(c.env, parent, [row!]))[0]!, 200);
   });
 
   // ---------- mailboxes ----------

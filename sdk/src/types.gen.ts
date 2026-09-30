@@ -1275,7 +1275,11 @@ export type EnableMailboxDomain = {
 };
 
 export type UpdateMailboxDomain = {
-    catchAll: 'create_mailbox' | 'store';
+    catchAll?: 'create_mailbox' | 'store';
+    /**
+     * Whether the receipt rule also matches every subdomain (.example.com). Turned on by the first subdomain and kept on after that.
+     */
+    acceptSubdomains?: boolean;
 };
 
 export type MailboxSubdomainPage = {
