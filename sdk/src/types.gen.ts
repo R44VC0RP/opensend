@@ -1200,6 +1200,379 @@ export type ConfigureSesAutoValidation = {
     confirm: true;
 };
 
+export type MailboxDomainList = {
+    data: Array<MailboxDomain>;
+};
+
+export type MailboxDomain = {
+    /**
+     * OpenSend domain ID.
+     */
+    id: string;
+    name: string;
+    region: string;
+    status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+    /**
+     * What happens to mail for an address with no mailbox: create_mailbox makes one automatically; store keeps it as unrouted.
+     */
+    catchAll: 'create_mailbox' | 'store';
+    /**
+     * Records to publish for receiving.
+     */
+    dns: Array<{
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    }>;
+    mx: MailboxMxReport;
+    lastError: string | null;
+    enabledAt: string | null;
+    checkedAt: string | null;
+    mailboxCount: number;
+};
+
+export type MailboxMxReport = {
+    state: 'active' | 'missing' | 'conflict' | 'mixed' | 'wrong_region' | 'null_mx' | 'cname' | 'error';
+    expected: {
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    };
+    records: Array<{
+        priority: number;
+        host: string;
+        provider: string | null;
+    }>;
+    providers: Array<string>;
+    message: string;
+    checkedAt: string;
+} | null;
+
+export type EnableMailboxDomain = {
+    catchAll?: 'create_mailbox' | 'store';
+    force?: boolean;
+};
+
+export type UpdateMailboxDomain = {
+    catchAll: 'create_mailbox' | 'store';
+};
+
+export type MailboxPage = {
+    data: Array<Mailbox>;
+    nextCursor: string | null;
+};
+
+export type Mailbox = {
+    id: string;
+    address: string;
+    displayName: string | null;
+    domain: string;
+    aliases: Array<string>;
+    rules: Array<string>;
+    metadata: {
+        [key: string]: unknown;
+    };
+    origin: 'api' | 'auto';
+    createdAt: string;
+    updatedAt: string;
+    stats: {
+        threads: number;
+        unreadThreads: number;
+        lastMessageAt: string | null;
+    };
+};
+
+export type CreateMailbox = {
+    address: string;
+    displayName?: string | null;
+    aliases?: Array<string>;
+    /**
+     * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
+     */
+    rules?: Array<string>;
+    metadata?: {
+        [key: string]: unknown;
+    };
+};
+
+export type UpdateMailbox = {
+    displayName?: string | null;
+    aliases?: Array<string>;
+    /**
+     * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
+     */
+    rules?: Array<string>;
+    metadata?: {
+        [key: string]: unknown;
+    };
+};
+
+export type MailboxOk = {
+    ok: true;
+};
+
+export type MailboxThreadPage = {
+    data: Array<MailboxThread>;
+    nextCursor: string | null;
+};
+
+export type MailboxThread = {
+    id: string;
+    mailboxId: string;
+    subject: string;
+    snippet: string;
+    participants: Array<MailboxAddress>;
+    messageCount: number;
+    unreadCount: number;
+    lastMessageAt: string;
+    lastInboundAt: string | null;
+    archived: boolean;
+    starred: boolean;
+    spam: boolean;
+    trashed: boolean;
+    labels: Array<string>;
+};
+
+export type MailboxAddress = {
+    name: string | null;
+    address: string;
+};
+
+export type MailboxThreadDetail = MailboxThread & {
+    messages: Array<MailboxMessage>;
+};
+
+export type MailboxMessage = MailboxMessageSummary & {
+    bcc: Array<MailboxAddress>;
+    replyTo: Array<MailboxAddress>;
+    messageId: string | null;
+    inReplyTo: string | null;
+    references: Array<string>;
+    /**
+     * Plain text body; derived from HTML when the message has no text part.
+     */
+    text: string;
+    /**
+     * Text without quoted history.
+     */
+    replyText: string;
+    html: string | null;
+    bodyTruncated: boolean;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    attachments: Array<MailboxAttachment>;
+    verdicts: {
+        spf?: string;
+        dkim?: string;
+        dmarc?: string;
+        spam?: string;
+        virus?: string;
+    };
+};
+
+export type MailboxAttachment = {
+    id: string;
+    filename: string;
+    contentType: string;
+    size: number;
+    contentId: string | null;
+    disposition: 'attachment' | 'inline';
+};
+
+export type MailboxMessageSummary = {
+    id: string;
+    threadId: string;
+    mailboxId: string;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    read: boolean;
+    from: MailboxAddress;
+    to: Array<MailboxAddress>;
+    cc: Array<MailboxAddress>;
+    subject: string;
+    snippet: string;
+    sentAt: string | null;
+    receivedAt: string;
+    attachmentCount: number;
+    spam: boolean;
+    automated: boolean;
+};
+
+export type UpdateMailboxThread = {
+    read?: boolean;
+    archived?: boolean;
+    starred?: boolean;
+    trashed?: boolean;
+    spam?: boolean;
+    addLabels?: Array<string>;
+    removeLabels?: Array<string>;
+};
+
+export type MailboxThreadList = {
+    data: Array<MailboxThread>;
+};
+
+export type UpdateMailboxThreads = {
+    threadIds: Array<string>;
+    changes: UpdateMailboxThread;
+};
+
+export type MailboxMessagePage = {
+    data: Array<MailboxMessageSummary>;
+    nextCursor: string | null;
+};
+
+export type UpdateMailboxMessage = {
+    read: boolean;
+};
+
+export type MailboxDownload = {
+    url: string;
+    expiresAt: string;
+};
+
+export type MailboxAttachmentDownload = MailboxAttachment & {
+    messageId: string;
+    url: string;
+    expiresAt: string;
+};
+
+export type MailboxEventPage = {
+    data: Array<MailboxEvent>;
+    /**
+     * Pass as after on the next call.
+     */
+    cursor: string;
+};
+
+export type MailboxEvent = {
+    id: string;
+    cursor: string;
+    type: 'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
+    createdAt: string;
+    mailboxId: string | null;
+    threadId: string | null;
+    messageId: string | null;
+    data: {
+        [key: string]: unknown;
+    };
+};
+
+export type MailboxKeySecret = MailboxKey & {
+    secret: string;
+};
+
+export type MailboxKey = {
+    id: string;
+    name: string;
+    prefix: string;
+    mailboxIds: Array<string> | null;
+    permissions: Array<'read' | 'send' | 'modify'>;
+    createdAt: string;
+    lastUsedAt: string | null;
+    revokedAt: string | null;
+};
+
+export type CreateMailboxKey = {
+    name: string;
+    mailboxIds?: Array<string>;
+    permissions?: Array<'read' | 'send' | 'modify'>;
+};
+
+export type MailboxKeyPage = {
+    data: Array<MailboxKey>;
+    nextCursor: string | null;
+};
+
+export type MailboxWebhookSecret = MailboxWebhook & {
+    secret: string;
+};
+
+export type MailboxWebhook = {
+    id: string;
+    url: string;
+    description: string;
+    eventTypes: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    mailboxIds: Array<string> | null;
+    paused: boolean;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type CreateMailboxWebhook = {
+    url: string;
+    description?: string;
+    eventTypes?: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    /**
+     * Only events for these mailboxes; null for all.
+     */
+    mailboxIds?: Array<string> | null;
+    paused?: boolean;
+};
+
+export type MailboxWebhookList = {
+    data: Array<MailboxWebhook>;
+};
+
+export type UpdateMailboxWebhook = {
+    url?: string;
+    description?: string;
+    eventTypes?: Array<'message.received' | 'message.sent' | 'message.delivered' | 'message.bounced' | 'message.complained' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    /**
+     * Only events for these mailboxes; null for all.
+     */
+    mailboxIds?: Array<string> | null;
+    paused?: boolean;
+};
+
+export type MailboxWebhookRotatedSecret = {
+    secret: string;
+};
+
+export type MailboxWebhookDeliveryPage = {
+    data: Array<MailboxWebhookDelivery>;
+    nextCursor: string | null;
+};
+
+export type MailboxWebhookDelivery = {
+    id: string;
+    webhookId: string;
+    eventId: string;
+    status: 'pending' | 'delivered' | 'failed';
+    attemptCount: number;
+    lastStatusCode: number | null;
+    lastError: string | null;
+    createdAt: string;
+    updatedAt: string;
+};
+
+export type MailboxUnroutedPage = {
+    data: Array<MailboxUnroutedMessage>;
+    nextCursor: string | null;
+};
+
+export type MailboxUnroutedMessage = {
+    id: string;
+    threadId: string;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    from: MailboxAddress;
+    to: Array<MailboxAddress>;
+    cc: Array<MailboxAddress>;
+    subject: string;
+    snippet: string;
+    sentAt: string | null;
+    receivedAt: string;
+    attachmentCount: number;
+    spam: boolean;
+    automated: boolean;
+    address: string;
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -8073,3 +8446,2201 @@ export type ConfigureRegionAutoValidationResponses = {
 };
 
 export type ConfigureRegionAutoValidationResponse = ConfigureRegionAutoValidationResponses[keyof ConfigureRegionAutoValidationResponses];
+
+export type MailboxListDomainsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/mailbox/v1/domains';
+};
+
+export type MailboxListDomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListDomainsError = MailboxListDomainsErrors[keyof MailboxListDomainsErrors];
+
+export type MailboxListDomainsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxDomainList;
+};
+
+export type MailboxListDomainsResponse = MailboxListDomainsResponses[keyof MailboxListDomainsResponses];
+
+export type MailboxGetDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}';
+};
+
+export type MailboxGetDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetDomainError = MailboxGetDomainErrors[keyof MailboxGetDomainErrors];
+
+export type MailboxGetDomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxDomain;
+};
+
+export type MailboxGetDomainResponse = MailboxGetDomainResponses[keyof MailboxGetDomainResponses];
+
+export type MailboxUpdateDomainData = {
+    body: UpdateMailboxDomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}';
+};
+
+export type MailboxUpdateDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateDomainError = MailboxUpdateDomainErrors[keyof MailboxUpdateDomainErrors];
+
+export type MailboxUpdateDomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxDomain;
+};
+
+export type MailboxUpdateDomainResponse = MailboxUpdateDomainResponses[keyof MailboxUpdateDomainResponses];
+
+export type MailboxCheckDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/check';
+};
+
+export type MailboxCheckDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxCheckDomainError = MailboxCheckDomainErrors[keyof MailboxCheckDomainErrors];
+
+export type MailboxCheckDomainResponses = {
+    /**
+     * Success
+     */
+    200: MailboxDomain;
+};
+
+export type MailboxCheckDomainResponse = MailboxCheckDomainResponses[keyof MailboxCheckDomainResponses];
+
+export type MailboxEnableDomainData = {
+    body: EnableMailboxDomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/enable';
+};
+
+export type MailboxEnableDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxEnableDomainError = MailboxEnableDomainErrors[keyof MailboxEnableDomainErrors];
+
+export type MailboxEnableDomainResponses = {
+    /**
+     * Success
+     */
+    202: MailboxDomain;
+};
+
+export type MailboxEnableDomainResponse = MailboxEnableDomainResponses[keyof MailboxEnableDomainResponses];
+
+export type MailboxDisableDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/domains/{id}/disable';
+};
+
+export type MailboxDisableDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxDisableDomainError = MailboxDisableDomainErrors[keyof MailboxDisableDomainErrors];
+
+export type MailboxDisableDomainResponses = {
+    /**
+     * Success
+     */
+    202: MailboxDomain;
+};
+
+export type MailboxDisableDomainResponse = MailboxDisableDomainResponses[keyof MailboxDisableDomainResponses];
+
+export type MailboxListData = {
+    body?: never;
+    path?: never;
+    query?: {
+        domain?: string;
+        origin?: 'api' | 'auto';
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/mailboxes';
+};
+
+export type MailboxListErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListError = MailboxListErrors[keyof MailboxListErrors];
+
+export type MailboxListResponses = {
+    /**
+     * Success
+     */
+    200: MailboxPage;
+};
+
+export type MailboxListResponse = MailboxListResponses[keyof MailboxListResponses];
+
+export type MailboxCreateData = {
+    body: CreateMailbox;
+    path?: never;
+    query?: never;
+    url: '/mailbox/v1/mailboxes';
+};
+
+export type MailboxCreateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxCreateError = MailboxCreateErrors[keyof MailboxCreateErrors];
+
+export type MailboxCreateResponses = {
+    /**
+     * Success
+     */
+    201: Mailbox;
+};
+
+export type MailboxCreateResponse = MailboxCreateResponses[keyof MailboxCreateResponses];
+
+export type MailboxDeleteData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}';
+};
+
+export type MailboxDeleteErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxDeleteError = MailboxDeleteErrors[keyof MailboxDeleteErrors];
+
+export type MailboxDeleteResponses = {
+    /**
+     * Success
+     */
+    200: MailboxOk;
+};
+
+export type MailboxDeleteResponse = MailboxDeleteResponses[keyof MailboxDeleteResponses];
+
+export type MailboxGetData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}';
+};
+
+export type MailboxGetErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetError = MailboxGetErrors[keyof MailboxGetErrors];
+
+export type MailboxGetResponses = {
+    /**
+     * Success
+     */
+    200: Mailbox;
+};
+
+export type MailboxGetResponse = MailboxGetResponses[keyof MailboxGetResponses];
+
+export type MailboxUpdateData = {
+    body: UpdateMailbox;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}';
+};
+
+export type MailboxUpdateErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateError = MailboxUpdateErrors[keyof MailboxUpdateErrors];
+
+export type MailboxUpdateResponses = {
+    /**
+     * Success
+     */
+    200: Mailbox;
+};
+
+export type MailboxUpdateResponse = MailboxUpdateResponses[keyof MailboxUpdateResponses];
+
+export type MailboxListThreadsData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: {
+        view?: 'inbox' | 'archive' | 'starred' | 'trash' | 'spam' | 'all';
+        unread?: 'true' | 'false';
+        label?: string;
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads';
+};
+
+export type MailboxListThreadsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListThreadsError = MailboxListThreadsErrors[keyof MailboxListThreadsErrors];
+
+export type MailboxListThreadsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxThreadPage;
+};
+
+export type MailboxListThreadsResponse = MailboxListThreadsResponses[keyof MailboxListThreadsResponses];
+
+export type MailboxDeleteThreadData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+        threadId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}';
+};
+
+export type MailboxDeleteThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxDeleteThreadError = MailboxDeleteThreadErrors[keyof MailboxDeleteThreadErrors];
+
+export type MailboxDeleteThreadResponses = {
+    /**
+     * Success
+     */
+    200: MailboxOk;
+};
+
+export type MailboxDeleteThreadResponse = MailboxDeleteThreadResponses[keyof MailboxDeleteThreadResponses];
+
+export type MailboxGetThreadData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+        threadId: string;
+    };
+    query?: {
+        includeHtml?: 'true' | 'false';
+    };
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}';
+};
+
+export type MailboxGetThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetThreadError = MailboxGetThreadErrors[keyof MailboxGetThreadErrors];
+
+export type MailboxGetThreadResponses = {
+    /**
+     * Success
+     */
+    200: MailboxThreadDetail;
+};
+
+export type MailboxGetThreadResponse = MailboxGetThreadResponses[keyof MailboxGetThreadResponses];
+
+export type MailboxUpdateThreadData = {
+    body: UpdateMailboxThread;
+    path: {
+        mailboxId: string;
+        threadId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/{threadId}';
+};
+
+export type MailboxUpdateThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateThreadError = MailboxUpdateThreadErrors[keyof MailboxUpdateThreadErrors];
+
+export type MailboxUpdateThreadResponses = {
+    /**
+     * Success
+     */
+    200: MailboxThread;
+};
+
+export type MailboxUpdateThreadResponse = MailboxUpdateThreadResponses[keyof MailboxUpdateThreadResponses];
+
+export type MailboxUpdateThreadsData = {
+    body: UpdateMailboxThreads;
+    path: {
+        mailboxId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/threads/batch';
+};
+
+export type MailboxUpdateThreadsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateThreadsError = MailboxUpdateThreadsErrors[keyof MailboxUpdateThreadsErrors];
+
+export type MailboxUpdateThreadsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxThreadList;
+};
+
+export type MailboxUpdateThreadsResponse = MailboxUpdateThreadsResponses[keyof MailboxUpdateThreadsResponses];
+
+export type MailboxListMessagesData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: {
+        direction?: 'inbound' | 'outbound';
+        unread?: 'true' | 'false';
+        threadId?: string;
+        q?: string;
+        since?: string;
+        until?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages';
+};
+
+export type MailboxListMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListMessagesError = MailboxListMessagesErrors[keyof MailboxListMessagesErrors];
+
+export type MailboxListMessagesResponses = {
+    /**
+     * Success
+     */
+    200: MailboxMessagePage;
+};
+
+export type MailboxListMessagesResponse = MailboxListMessagesResponses[keyof MailboxListMessagesResponses];
+
+export type MailboxGetMessageData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}';
+};
+
+export type MailboxGetMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetMessageError = MailboxGetMessageErrors[keyof MailboxGetMessageErrors];
+
+export type MailboxGetMessageResponses = {
+    /**
+     * Success
+     */
+    200: MailboxMessage;
+};
+
+export type MailboxGetMessageResponse = MailboxGetMessageResponses[keyof MailboxGetMessageResponses];
+
+export type MailboxUpdateMessageData = {
+    body: UpdateMailboxMessage;
+    path: {
+        mailboxId: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}';
+};
+
+export type MailboxUpdateMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateMessageError = MailboxUpdateMessageErrors[keyof MailboxUpdateMessageErrors];
+
+export type MailboxUpdateMessageResponses = {
+    /**
+     * Success
+     */
+    200: MailboxMessageSummary;
+};
+
+export type MailboxUpdateMessageResponse = MailboxUpdateMessageResponses[keyof MailboxUpdateMessageResponses];
+
+export type MailboxGetRawMessageData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+        messageId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/messages/{messageId}/raw';
+};
+
+export type MailboxGetRawMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetRawMessageError = MailboxGetRawMessageErrors[keyof MailboxGetRawMessageErrors];
+
+export type MailboxGetRawMessageResponses = {
+    /**
+     * Success
+     */
+    200: MailboxDownload;
+};
+
+export type MailboxGetRawMessageResponse = MailboxGetRawMessageResponses[keyof MailboxGetRawMessageResponses];
+
+export type MailboxGetAttachmentData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+        attachmentId: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/mailboxes/{mailboxId}/attachments/{attachmentId}';
+};
+
+export type MailboxGetAttachmentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetAttachmentError = MailboxGetAttachmentErrors[keyof MailboxGetAttachmentErrors];
+
+export type MailboxGetAttachmentResponses = {
+    /**
+     * Success
+     */
+    200: MailboxAttachmentDownload;
+};
+
+export type MailboxGetAttachmentResponse = MailboxGetAttachmentResponses[keyof MailboxGetAttachmentResponses];
+
+export type MailboxListEventsData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: {
+        /**
+         * Cursor from a previous response. Omit to start at the current end of the log.
+         */
+        after?: string;
+        /**
+         * Seconds to wait for new events when none are ready (long-poll).
+         */
+        wait?: number | null;
+        /**
+         * Comma-separated event types.
+         */
+        types?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/mailboxes/{mailboxId}/events';
+};
+
+export type MailboxListEventsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListEventsError = MailboxListEventsErrors[keyof MailboxListEventsErrors];
+
+export type MailboxListEventsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxEventPage;
+};
+
+export type MailboxListEventsResponse = MailboxListEventsResponses[keyof MailboxListEventsResponses];
+
+export type MailboxListAllEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Cursor from a previous response. Omit to start at the current end of the log.
+         */
+        after?: string;
+        /**
+         * Seconds to wait for new events when none are ready (long-poll).
+         */
+        wait?: number | null;
+        /**
+         * Comma-separated event types.
+         */
+        types?: string;
+        limit?: number;
+        /**
+         * Comma-separated mailbox IDs to include.
+         */
+        mailboxIds?: string;
+    };
+    url: '/mailbox/v1/events';
+};
+
+export type MailboxListAllEventsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListAllEventsError = MailboxListAllEventsErrors[keyof MailboxListAllEventsErrors];
+
+export type MailboxListAllEventsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxEventPage;
+};
+
+export type MailboxListAllEventsResponse = MailboxListAllEventsResponses[keyof MailboxListAllEventsResponses];
+
+export type MailboxListKeysData = {
+    body?: never;
+    path?: never;
+    query?: {
+        includeRevoked?: 'true' | 'false';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/keys';
+};
+
+export type MailboxListKeysErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListKeysError = MailboxListKeysErrors[keyof MailboxListKeysErrors];
+
+export type MailboxListKeysResponses = {
+    /**
+     * Success
+     */
+    200: MailboxKeyPage;
+};
+
+export type MailboxListKeysResponse = MailboxListKeysResponses[keyof MailboxListKeysResponses];
+
+export type MailboxCreateKeyData = {
+    body: CreateMailboxKey;
+    path?: never;
+    query?: never;
+    url: '/mailbox/v1/keys';
+};
+
+export type MailboxCreateKeyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxCreateKeyError = MailboxCreateKeyErrors[keyof MailboxCreateKeyErrors];
+
+export type MailboxCreateKeyResponses = {
+    /**
+     * Success
+     */
+    201: MailboxKeySecret;
+};
+
+export type MailboxCreateKeyResponse = MailboxCreateKeyResponses[keyof MailboxCreateKeyResponses];
+
+export type MailboxRevokeKeyData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/keys/{id}/revoke';
+};
+
+export type MailboxRevokeKeyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxRevokeKeyError = MailboxRevokeKeyErrors[keyof MailboxRevokeKeyErrors];
+
+export type MailboxRevokeKeyResponses = {
+    /**
+     * Success
+     */
+    200: MailboxKey;
+};
+
+export type MailboxRevokeKeyResponse = MailboxRevokeKeyResponses[keyof MailboxRevokeKeyResponses];
+
+export type MailboxListWebhooksData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/mailbox/v1/webhooks';
+};
+
+export type MailboxListWebhooksErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListWebhooksError = MailboxListWebhooksErrors[keyof MailboxListWebhooksErrors];
+
+export type MailboxListWebhooksResponses = {
+    /**
+     * Success
+     */
+    200: MailboxWebhookList;
+};
+
+export type MailboxListWebhooksResponse = MailboxListWebhooksResponses[keyof MailboxListWebhooksResponses];
+
+export type MailboxCreateWebhookData = {
+    body: CreateMailboxWebhook;
+    path?: never;
+    query?: never;
+    url: '/mailbox/v1/webhooks';
+};
+
+export type MailboxCreateWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxCreateWebhookError = MailboxCreateWebhookErrors[keyof MailboxCreateWebhookErrors];
+
+export type MailboxCreateWebhookResponses = {
+    /**
+     * Success
+     */
+    201: MailboxWebhookSecret;
+};
+
+export type MailboxCreateWebhookResponse = MailboxCreateWebhookResponses[keyof MailboxCreateWebhookResponses];
+
+export type MailboxDeleteWebhookData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/webhooks/{id}';
+};
+
+export type MailboxDeleteWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxDeleteWebhookError = MailboxDeleteWebhookErrors[keyof MailboxDeleteWebhookErrors];
+
+export type MailboxDeleteWebhookResponses = {
+    /**
+     * Success
+     */
+    200: MailboxOk;
+};
+
+export type MailboxDeleteWebhookResponse = MailboxDeleteWebhookResponses[keyof MailboxDeleteWebhookResponses];
+
+export type MailboxGetWebhookData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/webhooks/{id}';
+};
+
+export type MailboxGetWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxGetWebhookError = MailboxGetWebhookErrors[keyof MailboxGetWebhookErrors];
+
+export type MailboxGetWebhookResponses = {
+    /**
+     * Success
+     */
+    200: MailboxWebhook;
+};
+
+export type MailboxGetWebhookResponse = MailboxGetWebhookResponses[keyof MailboxGetWebhookResponses];
+
+export type MailboxUpdateWebhookData = {
+    body: UpdateMailboxWebhook;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/webhooks/{id}';
+};
+
+export type MailboxUpdateWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxUpdateWebhookError = MailboxUpdateWebhookErrors[keyof MailboxUpdateWebhookErrors];
+
+export type MailboxUpdateWebhookResponses = {
+    /**
+     * Success
+     */
+    200: MailboxWebhook;
+};
+
+export type MailboxUpdateWebhookResponse = MailboxUpdateWebhookResponses[keyof MailboxUpdateWebhookResponses];
+
+export type MailboxRotateWebhookSecretData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/mailbox/v1/webhooks/{id}/rotate-secret';
+};
+
+export type MailboxRotateWebhookSecretErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxRotateWebhookSecretError = MailboxRotateWebhookSecretErrors[keyof MailboxRotateWebhookSecretErrors];
+
+export type MailboxRotateWebhookSecretResponses = {
+    /**
+     * Success
+     */
+    200: MailboxWebhookRotatedSecret;
+};
+
+export type MailboxRotateWebhookSecretResponse = MailboxRotateWebhookSecretResponses[keyof MailboxRotateWebhookSecretResponses];
+
+export type MailboxListWebhookDeliveriesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/webhooks/{id}/deliveries';
+};
+
+export type MailboxListWebhookDeliveriesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListWebhookDeliveriesError = MailboxListWebhookDeliveriesErrors[keyof MailboxListWebhookDeliveriesErrors];
+
+export type MailboxListWebhookDeliveriesResponses = {
+    /**
+     * Success
+     */
+    200: MailboxWebhookDeliveryPage;
+};
+
+export type MailboxListWebhookDeliveriesResponse = MailboxListWebhookDeliveriesResponses[keyof MailboxListWebhookDeliveriesResponses];
+
+export type MailboxListUnroutedData = {
+    body?: never;
+    path?: never;
+    query?: {
+        address?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/unrouted';
+};
+
+export type MailboxListUnroutedErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListUnroutedError = MailboxListUnroutedErrors[keyof MailboxListUnroutedErrors];
+
+export type MailboxListUnroutedResponses = {
+    /**
+     * Success
+     */
+    200: MailboxUnroutedPage;
+};
+
+export type MailboxListUnroutedResponse = MailboxListUnroutedResponses[keyof MailboxListUnroutedResponses];
