@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -58,6 +58,8 @@ function regionCatalog(value: unknown): RegionCatalog {
 
 export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
   const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal, environment })
+  // The mailbox service is live-only and has its own path prefix.
+  const mailboxCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/mailbox/v1${path}`, { method, body, signal })
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
   const keyCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, {method, body, signal, environment: 'live'})
   const cursors = new Map<string, Map<number, string | undefined>>()
@@ -225,6 +227,14 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       preview: (id, published = false, signal) => call(`/templates/${idPath(id)}/preview?published=${published}`, 'GET', undefined, signal),
     },
     domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)) },
+    mailboxes: {
+      list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: Mailbox[]; nextCursor: string | null }>(`/mailboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      domains: async signal => (await mailboxCall<{ data: MailboxDomain[] }>('/domains', 'GET', undefined, signal)).data,
+      domain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}`, 'GET', undefined, signal),
+      enableDomain: (id, input, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/enable`, 'POST', { force: input.force ?? false }, signal),
+      disableDomain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
+      checkDomain: (id, signal) => mailboxCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
+    },
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
       get: async (id, signal) => { const [row, history] = await Promise.all([call(`/webhooks/${idPath(id)}`, 'GET', undefined, signal), deliveries(id)]); return {...mapWebhook(row), deliveries: history.items, nextCursor: history.nextCursor} },

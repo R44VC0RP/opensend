@@ -60,6 +60,40 @@
       "Resource": "arn:aws:ses:*:YOUR_AWS_ACCOUNT_ID:template/*"
     },
     {
+      "Sid": "ManageMailboxReceiptRules",
+      "Effect": "Allow",
+      "Action": [
+        "ses:DescribeActiveReceiptRuleSet",
+        "ses:DescribeReceiptRuleSet",
+        "ses:CreateReceiptRuleSet",
+        "ses:SetActiveReceiptRuleSet",
+        "ses:CreateReceiptRule",
+        "ses:UpdateReceiptRule",
+        "ses:DeleteReceiptRule"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ProvisionMailboxBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:ListBucket",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutBucketTagging",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketPolicy",
+        "s3:PutLifecycleConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::opensend-*-mail-*"
+    },
+    {
+      "Sid": "ReadWriteMailboxObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::opensend-*-mail-*/*"
+    },
+    {
       "Sid": "ProvisionOpenSendFeedbackTopics",
       "Effect": "Allow",
       "Action": [

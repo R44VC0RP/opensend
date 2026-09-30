@@ -13,6 +13,7 @@ import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
+import { acceptInboundNotification } from './mailbox-ingest.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -53,7 +54,7 @@ function metadata(row: typeof webhooks.$inferSelect) { const { encryptedSecret: 
 
 // Only administrator-controlled public DNS names belong in this exact-match allowlist.
 // It is the trust boundary against DNS rebinding: untrusted tenants cannot add hosts.
-function webhookUrl(runtime: Runtime, value: string) {
+export function webhookUrl(runtime: Runtime, value: string) {
   let url: URL; try { url = new URL(value); } catch { throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'A public HTTPS webhook URL is required.', 'url'); }
   const host = url.hostname.toLowerCase();
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || (url.port && url.port !== '443') || isIP(host.replace(/^\[|\]$/g, '')) || !host.includes('.') || /(^|\.)(localhost|local|internal|invalid|test|home|lan|arpa)$/.test(host) || host.endsWith('.')) throw new ApiError(422, 'INVALID_WEBHOOK_URL', 'Webhook endpoints must use public HTTPS DNS names without credentials, fragments or custom ports.', 'url');
@@ -67,12 +68,12 @@ async function encryptionKey(value: string) {
 }
 const hex = (value: Uint8Array) => Array.from(value, b => b.toString(16).padStart(2, '0')).join('');
 const unhex = (value: string) => Uint8Array.from(value.match(/../g) ?? [], h => parseInt(h, 16));
-async function encrypt(runtime: Pick<Runtime, 'config'>, secret: string, binding: string) {
+export async function encrypt(runtime: Pick<Runtime, 'config'>, secret: string, binding: string) {
   const current = await encryptionKey(runtime.config.encryptionKey), iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(binding) }, current.key, new TextEncoder().encode(secret));
   return `v1.${current.id}.${hex(iv)}.${hex(new Uint8Array(encrypted))}`;
 }
-async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: string, binding: string) {
+export async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: string, binding: string) {
   const parts = ciphertext.split('.'), versioned = parts.length === 4 && parts[0] === 'v1';
   const [iv, value] = versioned ? parts.slice(2) : parts;
   const rotationRequired = () => new ApiError(503, 'KEY_ROTATION_REQUIRED', 'The webhook secret cannot be decrypted with configured keys. Restore its encryption key or rotate the webhook secret.');
@@ -85,8 +86,8 @@ async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: string, bin
   }
   throw rotationRequired();
 }
-function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
-async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
+export function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
+export async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
 const secretBinding = (a: Pick<Actor, 'workspaceId' | 'environment'>, webhookId: string) => `${a.workspaceId}:${a.environment}:${webhookId}`;
 
 // Installer-only, resumable rewrapping; no webhook signing secret is rotated or returned.
@@ -354,6 +355,12 @@ function registerPublicEvents(app: App) {
       return c.json({ accepted: true }, 202);
     }
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
+    // Mailbox receipt notifications arrive on a separate OpenSend-owned topic and carry no sending account.
+    if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
+      const runnable = await acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
+      if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      return c.json({ accepted: true }, 202);
+    }
     verifySesAccount(c.env, message);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is

@@ -1,6 +1,6 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
-import { createSeed } from './seed'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, MailboxDomain, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import { createSeed, demoMailboxes } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
@@ -105,6 +105,11 @@ function domainName(value: unknown): string {
   const result = text(value, 'name', 253).toLowerCase()
   if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(result)) return invalid('name', 'Enter a valid domain name without a protocol or path.')
   return result
+}
+// Every live domain has a receiving state; domains that never enabled mailboxes report "off".
+function mailboxDomains(state: DemoState): MailboxDomain[] {
+  const enabled = state.mailboxDomains ??= demoMailboxes().mailboxDomains
+  return state.domains.map(domain => enabled.find(row => row.id === domain.id) ?? { id: domain.id, name: domain.name, region: domain.regionId, status: 'off', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: domain.name, value: `inbound-smtp.${domain.regionId}.amazonaws.com`, priority: 10 }], mx: null, lastError: null, enabledAt: null, checkedAt: null, mailboxCount: 0 })
 }
 function find<T extends { id: string }>(items: T[], value: string, label: string): T {
   const item = items.find(row => row.id === value)
@@ -785,6 +790,28 @@ export function createMockApi(): OpenSendApi {
         domain.records.forEach(record => { record.status = 'verified' })
         return domain
       }),
+    },
+    mailboxes: {
+      list: (input, signal) => run(signal, false, s => {
+        const search = input.search?.trim().toLowerCase()
+        const rows = (s.mailboxes ??= demoMailboxes().mailboxes).filter(row => !search || row.address.includes(search) || row.displayName?.toLowerCase().includes(search))
+        return Object.assign(rows, { nextCursor: null })
+      }),
+      domains: signal => run(signal, false, s => mailboxDomains(s)),
+      domain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
+      enableDomain: (domainId, _input, signal) => run(signal, true, s => {
+        const row = mailboxDomains(s).find(item => item.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')
+        // Deterministic simulation only: no DNS lookup or AWS call.
+        Object.assign(row, { status: 'waiting_for_mx', enabledAt: row.enabledAt ?? now(), lastError: null, mx: { state: 'missing', message: `No MX record yet. Add inbound-smtp.${row.region}.amazonaws.com (priority 10) to start receiving.`, providers: [], checkedAt: now() }, checkedAt: now() })
+        s.mailboxDomains = mailboxDomains(s).map(item => item.id === row.id ? row : item).filter(item => item.status !== 'off')
+        return row
+      }),
+      disableDomain: (domainId, signal) => run(signal, true, s => {
+        const row = mailboxDomains(s).find(item => item.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')
+        row.status = 'disabled'; s.mailboxDomains = mailboxDomains(s).map(item => item.id === row.id ? row : item).filter(item => item.status !== 'off')
+        return row
+      }),
+      checkDomain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
     },
     webhooks: {
       list: signal => run(signal, false, s => s.webhooks),

@@ -43,6 +43,8 @@ export interface Config {
   previousEncryptionKey?: string;
   awsAccountId?: string;
   snsTopicArns: string[];
+  // Subset of snsTopicArns that carries SES inbound receipt notifications for mailboxes.
+  inboundTopicArns?: string[];
   webhookAllowedHosts: string[];
   reputationAlertUrl?: string;
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -62,7 +64,8 @@ export interface Runtime {
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
 }
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[] } };
+export type MailboxAccess = { keyId: string; workspaceId: string; environment: Mode; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string; environment: Mode }) => Promise<void>;

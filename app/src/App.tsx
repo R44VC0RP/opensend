@@ -10,6 +10,7 @@ const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
 const loadDeveloper = () => import('./features/developer')
 const loadDocs = () => import('./features/docs')
+const loadMailboxes = () => import('./features/mailboxes')
 const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
 const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
@@ -32,6 +33,7 @@ const WebhooksPage = lazy(() => loadSettings().then(m => ({ default: m.WebhooksP
 const WebhookDetailPage = lazy(() => loadSettings().then(m => ({ default: m.WebhookDetailPage })))
 const DeveloperPage = lazy(() => loadDeveloper().then(m => ({ default: m.DeveloperPage })))
 const DocsPage = lazy(() => loadDocs().then(m => ({ default: m.DocsPage })))
+const MailboxesPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxesPage })))
 
 const initialPath = window.location.pathname
 if (initialPath === '/') void loadOverview()
@@ -42,6 +44,7 @@ else if (['/contacts', '/lists', '/segments'].some(path => initialPath.startsWit
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) void loadSettings()
 else if (initialPath.startsWith('/developer')) void loadDeveloper()
 else if (initialPath.startsWith('/docs')) void loadDocs()
+else if (initialPath.startsWith('/mailboxes')) void loadMailboxes()
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
@@ -53,6 +56,7 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
+    <Route path="mailboxes" element={<MailboxesPage />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateEditorPage />} />
     <Route path="contacts" element={<ContactsPage />} /><Route path="contacts/:id" element={<ContactDetailPage />} />

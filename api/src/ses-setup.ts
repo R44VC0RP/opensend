@@ -72,7 +72,7 @@ export function feedbackTarget(config: Pick<Config, 'publicUrl' | 'sesFeedbackUr
 }
 
 // Deliberately no DNS requests: URL validation is not proof of endpoint reachability.
-function feedbackUrl(config: Pick<Config, 'publicUrl' | 'sesFeedbackUrl'>): string {
+export function feedbackUrl(config: Pick<Config, 'publicUrl' | 'sesFeedbackUrl'>): string {
   const field = config.sesFeedbackUrl !== undefined ? 'SES_FEEDBACK_URL' : 'PUBLIC_URL';
   const fail = () => new ApiError(422, 'PUBLIC_URL_REQUIRED', 'Configure SES_FEEDBACK_URL as a public HTTPS URL ending in /v1/events/ses, or PUBLIC_URL as a public HTTPS origin, before provisioning SNS feedback.', field);
   let url: URL;
@@ -93,7 +93,7 @@ function feedbackUrl(config: Pick<Config, 'publicUrl' | 'sesFeedbackUrl'>): stri
 function errorName(error: unknown): string { return error instanceof Error ? error.name : ''; }
 function missing(error: unknown): boolean { return ['NotFoundException', 'NotFound', 'ResourceNotFoundException'].includes(errorName(error)); }
 function collision(error: unknown): boolean { return ['AlreadyExistsException', 'AlreadyExists'].includes(errorName(error)); }
-function awsError(error: unknown): ApiError {
+export function awsError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
   const name = errorName(error);
   if (/Abort|Timeout/.test(name)) return new ApiError(503, 'AWS_SETUP_TIMEOUT', 'AWS setup timed out. Retry later.', undefined, true);

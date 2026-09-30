@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, Domain, Email, Mailbox, MailboxDomain, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -23,6 +23,23 @@ export interface DemoState {
   agentTokens?: AgentTokenSummary[]
   mcpConnections?: McpConnection[]
   webhooks: Webhook[]
+  mailboxes?: Mailbox[]
+  mailboxDomains?: MailboxDomain[]
+}
+
+export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailboxDomains: MailboxDomain[] } {
+  const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
+  const mailbox = (id: string, address: string, displayName: string | null, threads: number, unreadThreads: number, hours: number | null, origin: Mailbox['origin'] = 'api', aliases: string[] = []): Mailbox =>
+    ({ id, address, displayName, domain: address.split('@')[1]!, aliases, rules: [], origin, createdAt: ago(20 * 24), updatedAt: ago(24), stats: { threads, unreadThreads, lastMessageAt: hours === null ? null : ago(hours) } })
+  return {
+    mailboxes: [
+      mailbox('mbx_support', 'support@mail.acme.com', 'Support agent', 128, 6, 0.2, 'api', ['help@mail.acme.com']),
+      mailbox('mbx_billing', 'billing@mail.acme.com', 'Billing agent', 42, 1, 3),
+      mailbox('mbx_sales', 'sales@mail.acme.com', 'Sales agent', 17, 0, 26),
+      mailbox('mbx_jordan', 'jordan@mail.acme.com', null, 3, 1, 50, 'auto'),
+    ],
+    mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), mailboxCount: 4 }],
+  }
 }
 
 export function createSeed(now = Date.now()): DemoState {
@@ -88,5 +105,5 @@ export function createSeed(now = Date.now()): DemoState {
     { id: 'wh_bounces', name: 'Bounce monitoring', url: 'https://monitor.example.com/events', regionIds: ['us-east-1'], events: ['bounced', 'complaint'], status: 'active', secretHint: 'demo_wh_…bounces', deliveries: [] },
     { id: 'wh_warehouse', name: 'Data warehouse', url: 'https://data.example.com/email-events', regionIds: ['eu-west-1'], events: ['delivered'], status: 'paused', secretHint: 'demo_wh_…warehouse', deliveries: [] },
   ]
-  return { version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, templates, templateAssets: [], domains, keys, agentTokens, mcpConnections, webhooks }
+  return { ...demoMailboxes(now), version: 1, workspace: { id: 'workspace_acme', name: 'Acme', accountId: 'demo_123456789012', role: 'Owner', members: [{ id: 'member_ryan', name: 'Ryan', email: 'ryan@example.com', role: 'Owner' }, { id: 'member_jordan', name: 'Jordan Wilson', email: 'jordan@example.com', role: 'Admin' }] }, regions, contacts, lists, segments, emails, campaigns, templates, templateAssets: [], domains, keys, agentTokens, mcpConnections, webhooks }
 }

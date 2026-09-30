@@ -8,6 +8,7 @@ import { drainJobs } from './dispatch.js';
 import { jobConcurrency, nextWakeDelay } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
+import { mailboxHourly } from './mailbox-ingest.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
 import type { Runtime } from './core.js';
 import { browserImageRenderer } from './adapters/browser-rendering.js';
@@ -135,6 +136,7 @@ export default {
         await cleanup(runtime);
         // Alerts are best-effort and must not stop the minute recovery work below.
         try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
+        await mailboxHourly(await resolveRegionRuntime(runtime));
       }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       const resolved = await resolveRegionRuntime(runtime);

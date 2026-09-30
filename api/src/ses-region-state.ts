@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { ApiError, digest, id, type Config, type Database, type DbExecutor, type Runtime } from './core.js';
 import { sesRegions, sesSettings } from './db/ses-regions.js';
+import { mailboxRegions } from './db/mailbox.js';
 import { campaigns, emails } from './db/sending.js';
 import { jobs } from './db/core.js';
 import { feedbackTarget, setupResources } from './ses-setup.js';
@@ -45,18 +46,23 @@ export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, re
   }
 }
 export async function resolveRegionRuntime(runtime: Runtime): Promise<Runtime> {
-  const [settings, trusted] = await Promise.all([
+  const [settings, trusted, inbound] = await Promise.all([
     getRegionSettings(runtime.db, runtime.config.workspaceId),
     runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
+    runtime.db.select({ region: mailboxRegions.region, account: mailboxRegions.accountId, arn: mailboxRegions.topicArn }).from(mailboxRegions).where(eq(mailboxRegions.workspaceId, runtime.config.workspaceId)),
   ]);
   const resources = setupResources(settings.installationId);
   const valid = trusted.filter(row => row.account && /^\d{12}$/.test(row.account) && row.arn === `arn:aws:sns:${row.region}:${row.account}:${resources.topicName}`);
   const accounts = new Set(valid.map(row => row.account!));
+  // Mailbox receipt topics are trusted only in the same single AWS account as the feedback topics.
+  const inboundName = resources.topicName.replace(/-feedback$/, '-inbound');
+  const inboundTopics = accounts.size === 1 ? inbound.filter(row => row.account === valid[0]!.account && row.arn === `arn:aws:sns:${row.region}:${row.account}:${inboundName}`).map(row => row.arn!) : [];
   return { ...runtime, config: { ...runtime.config,
     regions: [settings.defaultRegion, ...settings.enabledRegions.filter(region => region !== settings.defaultRegion)],
     configurationSets: { transactional: resources.transactional, marketing: resources.marketing },
     // A disabled sending region retains its authenticated feedback channel for historical mail.
-    snsTopicArns: accounts.size === 1 ? valid.map(row => row.arn!) : [],
+    snsTopicArns: accounts.size === 1 ? [...valid.map(row => row.arn!), ...inboundTopics] : [],
+    inboundTopicArns: inboundTopics,
     awsAccountId: accounts.size === 1 ? valid[0]!.account! : undefined,
   } };
 }

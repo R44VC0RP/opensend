@@ -206,7 +206,7 @@ The managed destinations enable `SEND`, `DELIVERY`, `BOUNCE`, `COMPLAINT`, `REJE
 
 ### Copyable IAM policy
 
-Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, custom MAIL FROM configuration, stored-template reads/rendering, and sending; it grants no IAM administration, resource deletion, or attachment-storage access.
+Use [`iam-policy.json`](iam-policy.json) for the dedicated OpenSend IAM user. Replace every `YOUR_AWS_ACCOUNT_ID` with your 12-digit AWS account ID, create a customer-managed policy in IAM, and attach it to that user. It covers discovery, provisioning, identity verification, custom MAIL FROM configuration, stored-template reads/rendering, and sending; it grants no IAM administration or resource deletion. The only storage access is to OpenSend's own `opensend-*-mail-*` mailbox buckets.
 
 Generate a personalized, gitignored copy with `npm run iam-policy:personal -- YOUR_12_DIGIT_ACCOUNT_ID`. This writes `iam-policy-personal.json` beside the canonical template for pasting into IAM.
 
@@ -222,6 +222,7 @@ Review resource scopes and tag conditions for your account and generated regiona
 - SNS reads (`sns:`): `GetTopicAttributes`, `ListTagsForResource`, `ListSubscriptionsByTopic`, `GetSubscriptionAttributes`.
 - SES provisioning (`ses:`): `CreateConfigurationSet`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, plus `TagResource` permission for creation tags.
 - SNS provisioning (`sns:`): `CreateTopic`, `SetTopicAttributes`, `Subscribe`, `SetSubscriptionAttributes`, plus `TagResource` permission for creation tags.
+- Mailboxes (`ses:`, `s3:`): enabling receiving on a domain ([`src/mailbox-setup.ts`](src/mailbox-setup.ts)) uses SES receipt-rule actions `DescribeActiveReceiptRuleSet`, `DescribeReceiptRuleSet`, `CreateReceiptRuleSet`, `SetActiveReceiptRuleSet` (only when no rule set is active), `CreateReceiptRule`, `UpdateReceiptRule` and `DeleteReceiptRule`, which do not support resource scoping. It creates an `opensend-*-mail-<region>` bucket (`CreateBucket`, `ListBucket`, `PutBucketOwnershipControls`, `PutBucketTagging`, `PutBucketPublicAccessBlock`, `PutBucketPolicy`, `PutLifecycleConfiguration`) and reads/writes raw messages and attachments in it (`GetObject`, `PutObject`, `DeleteObject`). It reuses the SNS statements above for its `opensend-*-inbound` topic and the `/v1/events/ses` subscription.
 
 When the Docker job worker starts with AWS credentials, it queues read-only discovery for enabled regions with missing or stale reports. Repeated starts reuse pending discovery jobs. This never queues provisioning. The dashboard shows discovery progress and polls for its results.
 

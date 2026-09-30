@@ -13,6 +13,7 @@ import { registerSending } from './sending.js';
 import { registerOperations } from './operations.js';
 import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
 import { registerMcp } from './mcp.js';
+import { registerMailbox } from './mailbox.js';
 import { registerMcpAuth } from './mcp-auth.js';
 import { createLlmsText, createMarkdownDocs, createOpenApiDocument } from './openapi-docs.js';
 
@@ -67,7 +68,7 @@ export function createApp() {
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
-  registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app);
+  registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app); registerMailbox(app);
   registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;
   app.get('/openapi.json', c => { openApiDocument ??= createOpenApiDocument(app); c.header('cache-control', 'public, max-age=300'); return c.json(openApiDocument); });

@@ -61,6 +61,14 @@ export interface CampaignTemplateSummary { id: string; url: string; revision: nu
 export interface AttachmentApi { upload(file: File, inline?: {contentId: string}): Promise<Attachment>; get(id: string, signal?: AbortSignal): Promise<Attachment>; content(id: string, signal?: AbortSignal): Promise<{id: string; filename: string; contentType: string; content: string}>; remove(id: string): Promise<void> }
 export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: string; value: string; status: 'verified' | 'pending' | 'not_checked' }
 export interface Domain { dnsStatus?: 'available' | 'unavailable'; dnsUnavailableReason?: string | null; id: string; regionId: RegionId; name: string; status: 'verified' | 'pending' | 'issue'; dkimStatus?: 'verified' | 'pending' | 'failed'; mailFromDomain?: string | null; mailFromStatus: 'verified' | 'pending' | 'not_configured' | 'failed'; records: DnsRecord[]; createdAt: ISODate }
+export type MailboxDomainStatus = 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed'
+export interface MailboxDomain {
+  id: string; name: string; region: RegionId; status: MailboxDomainStatus; catchAll: 'create_mailbox' | 'store'
+  dns: { type: 'MX'; name: string; value: string; priority: number }[]
+  mx: { state: 'active' | 'missing' | 'conflict' | 'mixed' | 'wrong_region' | 'null_mx' | 'cname' | 'error'; message: string; providers: string[]; checkedAt: ISODate } | null
+  lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; mailboxCount: number
+}
+export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null } }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; deliveries: WebhookDelivery[]; nextCursor?: string | null }
 export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'regionIds' | 'events'> & { id?: string }
@@ -96,6 +104,7 @@ export interface OpenSendApi {
   keys: { list(signal?: AbortSignal, cursor?: string, includeRevoked?: boolean): Promise<CursorItems<ApiKey>>; create(input: ApiKeyInput, signal?: AbortSignal): Promise<CreatedApiKey>; revoke(id: string, signal?: AbortSignal): Promise<void> }
   credentials: { agentTokens(includeInactive?: boolean, signal?: AbortSignal): Promise<AgentTokenSummary[]>; revokeAgentToken(id: string, signal?: AbortSignal): Promise<void>; mcpConnections(signal?: AbortSignal): Promise<McpConnection[]>; revokeMcpConnection(id: string, signal?: AbortSignal): Promise<void> }
   domains: { list(input: PageRequest & { refresh?: boolean }, signal?: AbortSignal): Promise<PageResult<Domain>>; get(id: string, signal?: AbortSignal): Promise<Domain>; create(input: { regionId: string; name: string }, signal?: AbortSignal): Promise<Domain>; configureMailFrom(id: string, mailFromDomain: string, signal?: AbortSignal): Promise<Domain>; verify(id: string, signal?: AbortSignal): Promise<Domain> }
+  mailboxes: { list(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<Mailbox>>; domains(signal?: AbortSignal): Promise<MailboxDomain[]>; domain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; enableDomain(id: string, input: { force?: boolean }, signal?: AbortSignal): Promise<MailboxDomain>; disableDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain>; checkDomain(id: string, signal?: AbortSignal): Promise<MailboxDomain> }
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 

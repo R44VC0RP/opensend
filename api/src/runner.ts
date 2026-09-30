@@ -5,6 +5,7 @@ import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
+import { mailboxHourly } from './mailbox-ingest.js';
 import { queueStartupDiscovery } from './ses-regions.js';
 import { ApiError, log } from './core.js';
 try {
@@ -23,6 +24,7 @@ try {
         if (Date.now() - lastCleanup > 3600000) {
           await cleanup(runtime); lastCleanup = Date.now();
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
+          await mailboxHourly(runtime);
         }
         const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates);
         if (!count) await setTimeout(1000);

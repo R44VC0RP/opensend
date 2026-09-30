@@ -20,9 +20,11 @@
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.1128.0",
     "@aws-sdk/client-s3": "^3.1128.0",
+    "@aws-sdk/client-ses": "^3.1128.0",
     "@aws-sdk/client-sesv2": "^3.1128.0",
     "@aws-sdk/client-sns": "^3.1128.0",
     "@aws-sdk/client-sts": "^3.1128.0",
+    "@aws-sdk/s3-request-presigner": "^3.1128.0",
     "@better-auth/drizzle-adapter": "^1.7.3",
     "@better-auth/mcp": "1.7.3",
     "@better-auth/oauth-provider": "1.7.3",
@@ -36,6 +38,7 @@
     "hono": "^4.13.7",
     "parse5": "^8.0.1",
     "pg": "^8.23.0",
+    "postal-mime": "^4.0.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {

@@ -1,0 +1,3 @@
+.mailbox-domains { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); margin: 0; padding: 0; list-style: none; }
+.mailbox-domains li { display: inline-flex; align-items: center; gap: var(--space-8); }
+.mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }

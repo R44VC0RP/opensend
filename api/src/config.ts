@@ -59,7 +59,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE },
     aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
-    snsTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),
+    snsTopicArns: [], inboundTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     configurationSets: { transactional: '', marketing: '' },
   };

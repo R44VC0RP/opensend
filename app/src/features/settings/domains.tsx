@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { label } from '../../lib/format'
-import type { DnsRecord, Domain } from '../../data/types'
+import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
+import { receivingStatus } from '../mailboxes/status'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
@@ -120,6 +121,7 @@ function LiveDomainDetailPage() {
         {mailFromRecords.length > 0 && <DnsRecordTable records={mailFromRecords} />}
       </div>
     </section>
+    <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
@@ -128,6 +130,50 @@ function LiveDomainDetailPage() {
       </form>
     </Dialog>
   </div>
+}
+
+const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state === 'active' ? 'success' : state === 'missing' || state === 'error' ? 'info' : 'warning'
+
+function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
+  const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal))
+  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Mailbox setup started')
+  const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off')
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
+  const [conflict, setConflict] = useState<string | null>(null)
+  const [disableOpen, setDisableOpen] = useState(false)
+  async function start() {
+    try { await enable.mutateAsync(false) }
+    catch (error) { if (error instanceof ApiError && error.code === 'MX_CONFLICT') { enable.reset(); setConflict(error.message.replace(/ Retry with force=true to continue anyway\. \[MX_CONFLICT\].*$/, '')) } }
+  }
+  if (receiving.error) return <section className="section stack"><SectionHeader title="Mailboxes" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
+  const state = receiving.data
+  const on = !!state && !['off', 'disabled'].includes(state.status)
+  const status = state ? receivingStatus[state.status] : null
+  const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
+  return <section className="section stack">
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Mailboxes</h2><p className="muted">Receive mail on {domainName} and manage mailboxes through the mailbox API.</p></div>
+      <div className="cluster">{on ? <>
+        <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
+        {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
+      </> : <Button variant="primary" disabled={!verified || !state} loading={enable.isPending} onClick={start}>Enable mailboxes</Button>}</div>
+    </div>
+    <MutationError error={enable.error ?? disable.error ?? check.error} />
+    {!verified && !on && <p className="muted">Verify the domain before enabling mailboxes.</p>}
+    {state && status && on && <>
+      <dl className="settings-facts settings-account-summary">
+        <div><dt>Receiving</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
+        <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_mailbox' ? 'Create a mailbox' : 'Store as unrouted'}</dd></div>
+        <div><dt>Mailboxes</dt><dd><Link to="/mailboxes">{state.mailboxCount}</Link></dd></div>
+        <div><dt>Region</dt><dd>{state.region}</dd></div>
+      </dl>
+      {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
+      {state.status === 'provisioning' && <Alert tone="info">Creating the S3 bucket, SNS topic and SES receipt rule. This usually takes under a minute.</Alert>}
+      {state.mx && state.status !== 'provisioning' && <Alert tone={mxTone(state.mx.state)}>{state.mx.message}</Alert>}
+      <DnsRecordTable records={records} />
+    </>}
+    <ConfirmDialog open={!!conflict} onOpenChange={open => { if (!open) setConflict(null) }} title={`Move mail for ${domainName}?`} description={`${conflict ?? ''} Existing mailboxes at that provider stop receiving mail once the MX record changes.`} confirmLabel="Enable anyway" danger onConfirm={() => enable.mutateAsync(true)} />
+    <ConfirmDialog open={disableOpen} onOpenChange={setDisableOpen} title={`Stop receiving on ${domainName}?`} description="SES stops accepting mail for this domain. Mailboxes and stored messages are kept." confirmLabel="Turn off" danger onConfirm={() => disable.mutateAsync()} />
+  </section>
 }
 
 function DnsRecordTable({ records }: { records: DnsRecord[] }) {
