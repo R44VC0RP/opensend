@@ -1,6 +1,7 @@
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { createAuth, MEMBER_LIMIT, type Auth } from './better-auth.js';
+import { accessList, canDelete, canManage, grantAccess, mailboxesFor, personalOwner, removeAccess, removeMemberAccess, type MailboxEntry } from './access.js';
 import { consentRoutes } from './consent.js';
 import { account, connect, invitation, member, organization, retiredSlug, user, type Db } from './db.js';
 import { mayCreateOrganizations, origin, type Env } from './env.js';
@@ -69,20 +70,24 @@ function personalLocals(email: string, name: string) {
   const full = clean(name.trim().split(/\s+/).join('.'));
   return [...new Set([base, full, ...[2, 3, 4, 5].map(n => base ? `${base}${n}` : '')])].filter(local => local && LOCAL.test(local) && !RESERVED_LOCAL.has(local));
 }
-export const personalOwner = (mailbox: Mailbox) => typeof mailbox.metadata?.personalFor === 'string' ? mailbox.metadata.personalFor : null;
+export { personalOwner };
 
 /** Each member gets a mailbox of their own in the organization, named after their Google username. Idempotent. */
 export async function ensurePersonalMailbox(c: Ctx, org: { id: string; slug: string }, person: { id: string; email: string; name: string }): Promise<Mailbox | null> {
   const host = orgHost(c.env, org);
   const existing = await c.var.admin.mailboxes(host);
   const mine = existing.find(mailbox => personalOwner(mailbox) === person.id);
-  if (mine) return mine;
+  if (mine) { await grantAccess(c.var.db, { mailboxId: mine.id, organizationId: org.id, userId: person.id, role: 'owner' }); return mine; }
   if (existing.length >= MAILBOX_LIMIT) return null;
   const taken = new Set(existing.flatMap(mailbox => [mailbox.address, ...mailbox.aliases]));
   for (const local of personalLocals(person.email, person.name)) {
     const address = `${local}@${host}`;
     if (taken.has(address)) continue;
-    try { return await c.var.admin.createMailbox({ address, ...(person.name ? { displayName: person.name } : {}), metadata: { product: 'codemail', organizationId: org.id, createdBy: person.id, personalFor: person.id } }); }
+    try {
+      const created = await c.var.admin.createMailbox({ address, ...(person.name ? { displayName: person.name } : {}), metadata: { product: 'codemail', organizationId: org.id, createdBy: person.id, personalFor: person.id } });
+      await grantAccess(c.var.db, { mailboxId: created.id, organizationId: org.id, userId: person.id, role: 'owner' });
+      return created;
+    }
     catch (error) { if (error instanceof OpenSendError && error.status === 409) continue; throw error; }
   }
   return null;
@@ -110,6 +115,12 @@ export async function orgGrants(c: Ctx, orgId: string) {
   const people = await c.var.db.select({ userId: member.userId, email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, orgId));
   const lists = await Promise.all(people.map(async person => (await c.env.OAUTH_PROVIDER.listUserGrants(person.userId, { limit: 100 })).items.filter(grant => grant.metadata?.organizationId === orgId).map(grant => ({ ...grant, email: person.email }))));
   return lists.flat().sort((a, b) => b.createdAt - a.createdAt);
+}
+/** Disconnects a person's agents in the organization that can use a mailbox (each agent's key is scoped to fixed mailboxes). */
+export async function revokeMailboxGrants(c: Ctx, orgId: string, userId: string, address: string) {
+  const grants = (await c.env.OAUTH_PROVIDER.listUserGrants(userId, { limit: 100 })).items.filter(grant => grant.metadata?.organizationId === orgId && (grant.metadata?.mailboxes as string[] | undefined)?.includes(address));
+  await Promise.all(grants.map(grant => revokeGrant(c, grant)));
+  return grants.length;
 }
 export async function revokeGrant(c: Ctx, grant: { id: string; userId: string; metadata?: { keyId?: string } }) {
   await c.env.OAUTH_PROVIDER.revokeGrant(grant.id, grant.userId);
@@ -251,31 +262,41 @@ ${field('Email domain', html`<div class="input-suffix">${input(html`id="slug" na
     shell(title, content, { viewer: viewerView(ctx.viewer), nav: { org: { name: ctx.membership.org.name, slug: ctx.membership.org.slug, host: orgHost(c.env, ctx.membership.org) }, active } });
 
   // ---------- mailboxes ----------
+  /** One mailbox in the organization plus the viewer's role on it; null when it isn't in the organization. */
+  const mailboxEntry = async (c: Ctx, ctx: { viewer: { user: { id: string } }; membership: Membership }, mailboxId: string) => {
+    const entries = await mailboxesFor(c.var.db, c.var.admin, ctx.membership.org, orgHost(c.env, ctx.membership.org), ctx.viewer.user.id);
+    return entries.find(entry => entry.mailbox.id === mailboxId) ?? null;
+  };
+  const memberNames = async (c: Ctx, orgId: string) => new Map((await c.var.db.select({ id: user.id, name: user.name, email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, orgId))).map(row => [row.id, { name: row.name || row.email, email: row.email }]));
+  const noAccess = (c: Ctx, org: { slug: string }, entry: MailboxEntry) => back(`/o/${org.slug}`, 'error', entry.personalFor ? `${entry.mailbox.address} is a personal mailbox; only its owner can open it.` : `You don’t have access to ${entry.mailbox.address}. Ask one of its managers to add you.`);
+
   app.get('/o/:slug', async c => {
     const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
     const { org, role } = ctx.membership; const host = orgHost(c.env, org);
-    let list: Mailbox[] = []; let loadError: string | null = null;
-    try { list = await c.var.admin.mailboxes(host); } catch (error) { loadError = errorText(error); }
-    list.sort((a, b) => a.address.localeCompare(b.address));
-    const mine = list.find(mailbox => personalOwner(mailbox) === ctx.viewer.user.id) ?? null;
-    const names = new Map((await c.var.db.select({ id: user.id, name: user.name, email: user.email }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.organizationId, org.id))).map(row => [row.id, row.name || row.email]));
-    const describe = (mailbox: Mailbox) => { const owner = personalOwner(mailbox); if (!owner) return mailbox.displayName; return owner === ctx.viewer.user.id ? 'Your mailbox' : `${names.get(owner) ?? 'Former member'}’s mailbox`; };
+    let entries: MailboxEntry[] = []; let loadError: string | null = null;
+    try { entries = await mailboxesFor(c.var.db, c.var.admin, org, host, ctx.viewer.user.id); } catch (error) { loadError = errorText(error); }
+    entries.sort((a, b) => Number(!a.role) - Number(!b.role) || a.mailbox.address.localeCompare(b.mailbox.address));
+    const mine = entries.find(entry => entry.personalFor === ctx.viewer.user.id)?.mailbox ?? null;
+    const names = await memberNames(c, org.id);
+    const describe = (entry: MailboxEntry) => !entry.personalFor ? entry.mailbox.displayName : entry.personalFor === ctx.viewer.user.id ? 'Your mailbox' : `${names.get(entry.personalFor)?.name ?? 'Former member'}’s mailbox`;
+    const badge = (entry: MailboxEntry) => entry.personalFor ? status(entry.role ? 'info' : 'neutral', entry.role ? 'Personal' : 'Personal · private') : entry.role === 'manager' ? status('info', 'Manager') : entry.role ? status('neutral', 'Member') : status('neutral', 'No access');
     const prompt = agentPrompt(c.env, org, ctx.viewer.user, mine);
-    const rows = list.map(mailbox => [
-      html`<a class="link" href="/o/${org.slug}/m/${mailbox.id}">${mailbox.stats.unreadThreads ? raw('<span class="unread-dot" aria-hidden="true"></span>') : ''}<code class="identifier">${mailbox.address}</code></a>${describe(mailbox) ? caption(describe(mailbox)!) : ''}`,
-      html`${mailbox.stats.threads}`,
-      mailbox.stats.unreadThreads ? status('info', `${mailbox.stats.unreadThreads} unread`) : html`<span class="muted">—</span>`,
-      html`<span class="muted">${mailbox.stats.lastMessageAt ? ago(mailbox.stats.lastMessageAt) : 'No mail yet'}</span>`,
-      isAdmin(role) ? action(`/o/${org.slug}/mailboxes/${mailbox.id}/delete`, 'Delete', { variant: 'danger', title: `Delete ${mailbox.address}` }) : html``,
-    ]);
+    const rows = entries.map(entry => { const { mailbox } = entry; const open = !!entry.role; return [
+      html`${open ? html`<a class="link" href="/o/${org.slug}/m/${mailbox.id}">${mailbox.stats.unreadThreads ? raw('<span class="unread-dot" aria-hidden="true"></span>') : ''}<code class="identifier">${mailbox.address}</code></a>` : html`<code class="identifier muted">${mailbox.address}</code>`}${describe(entry) ? caption(describe(entry)!) : ''}`,
+      badge(entry),
+      open ? html`${mailbox.stats.threads}${mailbox.stats.unreadThreads ? html` <span class="muted">· ${mailbox.stats.unreadThreads} unread</span>` : ''}` : html`<span class="muted">—</span>`,
+      html`<span class="muted">${open ? (mailbox.stats.lastMessageAt ? ago(mailbox.stats.lastMessageAt) : 'No mail yet') : '—'}</span>`,
+      html`<div class="cluster" style="justify-content:flex-end">${canManage(entry, role) || (entry.role && !entry.personalFor) ? linkButton('Access', `/o/${org.slug}/m/${mailbox.id}/access`, { size: 'sm' }) : ''}${canDelete(entry, role) ? action(`/o/${org.slug}/mailboxes/${mailbox.id}/delete`, 'Delete', { variant: 'danger', title: `Delete ${mailbox.address}` }) : ''}</div>`,
+    ]; });
     return inShell(c, ctx, 'mailboxes', org.name, html`${pageHeader('Mailboxes')}${notices(c)}
 ${loadError ? alert('danger', loadError, 'Couldn’t load mailboxes') : ''}
-${!mine && !loadError && list.length < MAILBOX_LIMIT ? html`<div class="ui-alert ui-tone--info"><div>You don’t have a mailbox of your own in ${org.name} yet.</div><form method="post" action="/o/${org.slug}/mailboxes/personal">${button('Create my mailbox', { size: 'sm' })}</form></div>` : ''}
-${list.length ? table([{ label: 'Address', className: 'col-primary' }, { label: 'Conversations' }, { label: 'Unread' }, { label: 'Last mail' }, { label: '', className: 'row-actions' }], rows) : loadError ? '' : empty('No mailboxes yet', 'Create one for your first agent below.')}
-<section class="section section--bordered">${list.length < MAILBOX_LIMIT ? html`${sectionHeader('New mailbox')}<form method="post" action="/o/${org.slug}/mailboxes" autocomplete="off" class="inline-form">
+${!mine && !loadError && entries.length < MAILBOX_LIMIT ? html`<div class="ui-alert ui-tone--info"><div>You don’t have a mailbox of your own in ${org.name} yet.</div><form method="post" action="/o/${org.slug}/mailboxes/personal">${button('Create my mailbox', { size: 'sm' })}</form></div>` : ''}
+${entries.length ? table([{ label: 'Address', className: 'col-primary' }, { label: 'Access' }, { label: 'Conversations' }, { label: 'Last mail' }, { label: '', className: 'row-actions-wide' }], rows) : loadError ? '' : empty('No mailboxes yet', 'Create one for your first agent below.')}
+<p class="muted">Personal mailboxes are private to their owner. Shared mailboxes are readable by the people on them; their managers and org admins choose who.</p>
+<section class="section section--bordered">${entries.length < MAILBOX_LIMIT ? html`${sectionHeader('New shared mailbox')}<form method="post" action="/o/${org.slug}/mailboxes" autocomplete="off" class="inline-form">
 ${field('Address', html`<div class="input-suffix">${input(html`id="local" name="local" type="text" required maxlength="64" placeholder="support" spellcheck="false" autocapitalize="off"`)}<span>@${host}</span></div>`, { id: 'local' })}
 ${field('Display name', input(html`id="display" name="display" type="text" maxlength="100" placeholder="Support agent"`), { id: 'display' })}
-${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="muted">This organization has the maximum of ${MAILBOX_LIMIT} mailboxes.</p>`}</section>
+${button('Create mailbox', { variant: 'primary' })}</form><p class="muted" style="margin-top:var(--space-8)">You’ll be its manager and can add people from ${org.name}.</p>` : html`<p class="muted">This organization has the maximum of ${MAILBOX_LIMIT} mailboxes.</p>`}</section>
 <section class="section section--bordered">${sectionHeader('Connect an agent', html`<button type="button" class="ui-button ui-button--primary ui-button--sm" data-copy="#agent-prompt">Copy setup prompt</button>`)}<div class="stack">
 <p class="muted">Paste this into Claude Code, OpenCode, Cursor or any agent with MCP support. It adds codemail, has you sign in and pick mailboxes, then sends you a test email.</p>
 <pre class="prompt" id="agent-prompt">${prompt}</pre>
@@ -294,7 +315,8 @@ ${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="mut
     if (existing.length >= MAILBOX_LIMIT) return back(path, 'error', `An organization can have up to ${MAILBOX_LIMIT} mailboxes.`);
     try {
       const created = await c.var.admin.createMailbox({ address: `${local}@${host}`, ...(displayName ? { displayName } : {}), metadata: { product: 'codemail', organizationId: org.id, createdBy: ctx.viewer.user.id } });
-      return back(path, 'ok', `Created ${created.address}.`);
+      await grantAccess(c.var.db, { mailboxId: created.id, organizationId: org.id, userId: ctx.viewer.user.id, role: 'manager', addedBy: ctx.viewer.user.id });
+      return redirect(`/o/${org.slug}/m/${created.id}/access?ok=${encodeURIComponent(`Created ${created.address}. Add the people who should read it.`)}`);
     } catch (error) { return back(path, 'error', errorText(error)); }
   });
   app.post('/o/:slug/mailboxes/personal', async c => {
@@ -306,18 +328,26 @@ ${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="mut
     } catch (error) { return back(path, 'error', errorText(error)); }
   });
   app.post('/o/:slug/mailboxes/:id/delete', async c => {
-    const ctx = await orgPage(c, 'admin'); if ('response' in ctx) return ctx.response;
-    const { org } = ctx.membership; const path = `/o/${org.slug}`;
-    const mailbox = await orgMailbox(c, org, c.req.param('id'));
-    if (!mailbox) return back(path, 'error', 'Mailbox not found.');
-    try { await c.var.admin.deleteMailbox(mailbox.id); return back(path, 'ok', `Deleted ${mailbox.address}.`); }
-    catch (error) { return back(path, 'error', errorText(error)); }
+    const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
+    const { org, role } = ctx.membership; const path = `/o/${org.slug}`;
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(path, 'error', 'Mailbox not found.');
+    if (!canDelete(entry, role)) return back(path, 'error', 'Only org admins and the mailbox’s managers can delete it.');
+    try {
+      await c.var.admin.deleteMailbox(entry.mailbox.id);
+      const people = await accessList(c.var.db, entry.mailbox.id);
+      await removeAccess(c.var.db, entry.mailbox.id);
+      await Promise.all(people.map(person => revokeMailboxGrants(c, org.id, person.userId, entry.mailbox.address)));
+      return back(path, 'ok', `Deleted ${entry.mailbox.address}.`);
+    } catch (error) { return back(path, 'error', errorText(error)); }
   });
   app.get('/o/:slug/m/:id', async c => {
     const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
-    const { org } = ctx.membership;
-    const mailbox = await orgMailbox(c, org, c.req.param('id'));
-    if (!mailbox) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    const { org, role } = ctx.membership;
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    if (!entry.role) return noAccess(c, org, entry);
+    const { mailbox } = entry;
     const threads = (await c.var.admin.threads(mailbox.id)).data;
     const mine = new Set([mailbox.address, ...mailbox.aliases]);
     const rows = threads.map(thread => {
@@ -328,15 +358,17 @@ ${button('Create mailbox', { variant: 'primary' })}</form>` : html`<p class="mut
         html`<span class="muted nowrap">${ago(thread.lastMessageAt)}</span>`,
       ];
     });
-    return inShell(c, ctx, 'mailboxes', mailbox.address, html`${pageHeader(mailbox.address, linkButton('All mailboxes', `/o/${org.slug}`))}
-${mailbox.displayName ? html`<p class="muted">${mailbox.displayName}</p>` : ''}
+    return inShell(c, ctx, 'mailboxes', mailbox.address, html`${pageHeader(mailbox.address, html`${!entry.personalFor ? linkButton(canManage(entry, role) ? 'Manage access' : 'Access', `/o/${org.slug}/m/${mailbox.id}/access`) : ''}${linkButton('All mailboxes', `/o/${org.slug}`)}`)}
+${mailbox.displayName ? html`<p class="muted">${mailbox.displayName}${entry.personalFor ? ' · personal, only you can read it' : ''}</p>` : ''}
 ${threads.length ? table([{ label: 'Conversation', className: 'col-primary' }, { label: 'People' }, { label: 'Last activity', className: 'row-actions' }], rows) : empty('No mail yet', html`Send something to <code>${mailbox.address}</code>.`)}`);
   });
   app.get('/o/:slug/m/:id/t/:threadId', async c => {
     const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
     const { org } = ctx.membership;
-    const mailbox = await orgMailbox(c, org, c.req.param('id'));
-    if (!mailbox) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    if (!entry.role) return noAccess(c, org, entry);
+    const { mailbox } = entry;
     const thread = await c.var.admin.thread(mailbox.id, c.req.param('threadId')).catch(() => null);
     if (!thread) return back(`/o/${org.slug}/m/${mailbox.id}`, 'error', 'Conversation not found.');
     const who = (value: { name: string | null; address: string }) => value.name ? `${value.name} <${value.address}>` : value.address;
@@ -344,6 +376,64 @@ ${threads.length ? table([{ label: 'Conversation', className: 'col-primary' }, {
 <div>${thread.messages.map(message => html`<article class="thread-message"><div class="thread-message__meta"><strong>${who(message.from)}</strong><span class="muted">${new Date(message.receivedAt).toUTCString().slice(5, 22)} UTC</span></div>
 <div class="cluster muted"><span>To ${[...message.to, ...message.cc].map(who).join(', ')}</span>${message.direction === 'outbound' ? status(message.status === 'delivered' ? 'success' : ['bounced', 'failed', 'complained'].includes(message.status) ? 'danger' : 'neutral', `Sent · ${message.status}`) : message.read ? '' : status('info', 'Unread')}</div>
 <pre class="thread-message__body">${(message.replyText || message.text || '').trim() || '(no text)'}</pre>${message.attachments?.length ? html`<p class="muted">Attachments: ${message.attachments.map(file => file.filename).join(', ')}</p>` : ''}</article>`)}</div>`);
+  });
+
+  // ---------- mailbox access ----------
+  app.get('/o/:slug/m/:id/access', async c => {
+    const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
+    const { org, role } = ctx.membership;
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    const manage = canManage(entry, role);
+    if (!entry.role && !manage) return noAccess(c, org, entry);
+    const { mailbox } = entry;
+    const base = `/o/${org.slug}/m/${mailbox.id}/access`;
+    const names = await memberNames(c, org.id);
+    const people = (await accessList(c.var.db, mailbox.id)).sort((a, b) => (a.role === 'member' ? 1 : 0) - (b.role === 'member' ? 1 : 0) || (names.get(a.userId)?.name ?? '').localeCompare(names.get(b.userId)?.name ?? ''));
+    const others = [...names.entries()].filter(([id]) => !people.some(person => person.userId === id)).sort((a, b) => a[1].name.localeCompare(b[1].name));
+    const roleLabel = (value: string) => value === 'owner' ? status('info', 'Owner') : value === 'manager' ? status('info', 'Manager') : status('neutral', 'Member');
+    return inShell(c, ctx, 'mailboxes', `${mailbox.address} access`, html`${pageHeader(`Access · ${mailbox.address}`, html`${entry.role ? linkButton('Open mailbox', `/o/${org.slug}/m/${mailbox.id}`) : ''}${linkButton('All mailboxes', `/o/${org.slug}`)}`)}${notices(c)}
+${entry.personalFor ? alert('info', `This is ${entry.personalFor === ctx.viewer.user.id ? 'your' : `${names.get(entry.personalFor)?.name ?? 'a former member'}’s`} personal mailbox. Only its owner can read it, and no one can be added.`) : html`<p class="muted">People on this shared mailbox can read it, send from it and connect agents to it. ${manage ? 'You can add and remove people.' : 'Its managers and org admins can add and remove people.'}</p>`}
+${table([{ label: 'Person', className: 'col-primary' }, { label: 'Role' }, { label: '', className: 'row-actions-wide' }], people.map(person => [
+      html`${names.get(person.userId)?.name ?? 'Former member'}${person.userId === ctx.viewer.user.id ? html` <span class="muted">(you)</span>` : ''}${caption(names.get(person.userId)?.email ?? '')}`,
+      roleLabel(person.role),
+      manage && person.role !== 'owner' ? html`<div class="cluster" style="justify-content:flex-end">${action(`${base}/add`, person.role === 'manager' ? 'Make member' : 'Make manager', { hidden: { user: person.userId, role: person.role === 'manager' ? 'member' : 'manager' } })}${action(`${base}/${person.userId}/remove`, person.userId === ctx.viewer.user.id ? 'Leave' : 'Remove', { variant: 'danger' })}</div>` : html``,
+    ]))}
+${manage ? html`<section class="section section--bordered">${sectionHeader('Add people')}${others.length ? html`<form method="post" action="${base}/add" class="inline-form">
+${field('Member of ' + org.name, html`<select class="ui-input" id="user" name="user">${others.map(([id, person]) => html`<option value="${id}">${person.name} (${person.email})</option>`)}</select>`, { id: 'user' })}
+${field('Role', html`<select class="ui-input" id="role" name="role"><option value="member">Member (read and send)</option><option value="manager">Manager (also adds people)</option></select>`, { id: 'role', narrow: true })}
+${button('Add', { variant: 'primary' })}</form>` : html`<p class="muted">Everyone in ${org.name} already has access. Invite more people under <a class="link" href="/o/${org.slug}/members">Members</a>.</p>`}</section>` : ''}`);
+  });
+  app.post('/o/:slug/m/:id/access/add', async c => {
+    const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
+    const { org, role } = ctx.membership;
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    const path = `/o/${org.slug}/m/${entry.mailbox.id}/access`;
+    if (!canManage(entry, role)) return back(path, 'error', entry.personalFor ? 'Personal mailboxes can’t be shared.' : 'Only this mailbox’s managers and org admins can add people.');
+    const form = await c.req.formData();
+    const userId = String(form.get('user') ?? ''); const newRole = form.get('role') === 'manager' ? 'manager' : 'member';
+    const names = await memberNames(c, org.id);
+    if (!names.has(userId)) return back(path, 'error', `Only members of ${org.name} can be added.`);
+    await grantAccess(c.var.db, { mailboxId: entry.mailbox.id, organizationId: org.id, userId, role: newRole, addedBy: ctx.viewer.user.id });
+    return back(path, 'ok', `${names.get(userId)!.name} is now a ${newRole} of ${entry.mailbox.address}.`);
+  });
+  app.post('/o/:slug/m/:id/access/:userId/remove', async c => {
+    const ctx = await orgPage(c); if ('response' in ctx) return ctx.response;
+    const { org, role } = ctx.membership;
+    const entry = await mailboxEntry(c, ctx, c.req.param('id'));
+    if (!entry) return back(`/o/${org.slug}`, 'error', 'Mailbox not found.');
+    const path = `/o/${org.slug}/m/${entry.mailbox.id}/access`;
+    const target = c.req.param('userId');
+    const leaving = target === ctx.viewer.user.id && !!entry.role && !entry.personalFor;
+    if (!canManage(entry, role) && !leaving) return back(path, 'error', 'Only this mailbox’s managers and org admins can remove people.');
+    if (entry.personalFor) return back(path, 'error', 'The owner of a personal mailbox can’t be removed.');
+    await removeAccess(c.var.db, entry.mailbox.id, target);
+    const disconnected = await revokeMailboxGrants(c, org.id, target, entry.mailbox.address);
+    const names = await memberNames(c, org.id);
+    const who = names.get(target)?.name ?? 'That person';
+    return leaving ? back(`/o/${org.slug}`, 'ok', `You left ${entry.mailbox.address}.${disconnected ? ` ${disconnected} agent${disconnected === 1 ? '' : 's'} using it were disconnected.` : ''}`)
+      : back(path, 'ok', `${who} no longer has access to ${entry.mailbox.address}.${disconnected ? ` Their ${disconnected} agent${disconnected === 1 ? '' : 's'} using it were disconnected.` : ''}`);
   });
 
   // ---------- members and invitations ----------
@@ -396,6 +486,8 @@ ${invites.length ? html`<section class="section">${sectionHeader('Pending invita
     if (target.role === 'owner') return back(path, 'error', 'Owners can’t be removed.');
     try {
       await c.var.auth.api.removeMember({ body: { memberIdOrEmail: c.req.param('id'), organizationId: org.id }, headers: c.req.raw.headers });
+      // They lose every mailbox, including their own personal one, which stays until an admin deletes it.
+      await removeMemberAccess(c.var.db, org.id, target.userId);
       // Their agents lose access immediately.
       const grants = (await c.env.OAUTH_PROVIDER.listUserGrants(target.userId, { limit: 100 })).items.filter(grant => grant.metadata?.organizationId === org.id);
       await Promise.all(grants.map(grant => revokeGrant(c, grant)));

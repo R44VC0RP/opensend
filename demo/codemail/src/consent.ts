@@ -7,6 +7,7 @@ import type { Env } from './env.js';
 import { alert, button, html, linkButton, solo, status } from './html.js';
 import type { CodemailProps } from './mcp.js';
 import type { Permission } from './opensend.js';
+import { mailboxesFor } from './access.js';
 import { memberships, orgHost, viewerOf, viewerView, type Ctx, type Vars } from './web.js';
 
 const PERMISSIONS: { value: Permission; label: string; hint: string }[] = [
@@ -48,7 +49,8 @@ export function consentRoutes() {
     try {
       const details = await oauth.describeConsent(authRequest);
       const consent = await oauth.beginConsent(authRequest);
-      const mailboxes = (await c.var.admin.mailboxes(orgHost(c.env, current.org))).sort((a, b) => a.address.localeCompare(b.address));
+      // Only mailboxes this person may read: their personal mailbox and shared ones they're on.
+      const mailboxes = (await mailboxesFor(c.var.db, c.var.admin, current.org, orgHost(c.env, current.org), viewer.user.id)).filter(entry => entry.role).map(entry => entry.mailbox).sort((a, b) => a.address.localeCompare(b.address));
       const failure = url.searchParams.get('error');
       const body = html`<h1>Connect ${details.clientName}</h1>
 <p>${details.clientDomain ? html`Published by <strong>${details.clientDomain}</strong>.` : 'This app registered itself, so its name isn’t verified.'} Choose what it can do.</p>
@@ -60,7 +62,7 @@ ${orgs.length > 1 ? html`<div class="ui-field"><span class="ui-field__label">Org
 <input type="hidden" name="handle" value="${consent.handle}"><input type="hidden" name="org" value="${current.org.slug}">
 <fieldset class="ui-field" style="border:0;margin:0;padding:0"><legend class="ui-field__label" style="margin-bottom:var(--space-8)">Mailboxes in ${current.org.name}</legend>
 ${mailboxes.length ? html`<div class="choices">${mailboxes.map(mailbox => html`<label class="choice"><input type="checkbox" name="mailbox" value="${mailbox.id}" checked><span><code class="identifier">${mailbox.address}</code>${mailbox.displayName ? html`<span class="muted">${mailbox.displayName}</span>` : ''}</span></label>`)}</div>`
-        : alert('warning', html`${current.org.name} has no mailboxes yet. <a class="link" href="/o/${current.org.slug}" target="_blank" rel="noreferrer">Create one</a>, then reload this page.`)}</fieldset>
+        : alert('warning', html`You don’t have access to any mailboxes in ${current.org.name} yet. <a class="link" href="/o/${current.org.slug}" target="_blank" rel="noreferrer">Create one or ask to be added</a>, then reload this page.`)}</fieldset>
 <fieldset class="ui-field" style="border:0;margin:0;padding:0"><legend class="ui-field__label" style="margin-bottom:var(--space-8)">Permissions</legend><div class="choices">
 ${PERMISSIONS.map(item => html`<label class="choice"><input type="checkbox" name="permission" value="${item.value}" checked ${item.value === 'read' ? 'disabled' : ''}><span>${item.label}<span class="muted">${item.hint}</span></span></label>`)}</div></fieldset>
 <div class="solo-actions">${button('Deny', { name: 'decision', value: 'deny' })}${button('Connect', { variant: 'primary', name: 'decision', value: 'approve', disabled: !mailboxes.length })}</div></form>`;
@@ -83,7 +85,7 @@ ${PERMISSIONS.map(item => html`<label class="choice"><input type="checkbox" name
       const retry = (message: string) => c.redirect(selfUrl(url, { error: message, org: String(form.get('org') ?? '') || null }), 303);
       const current = (await memberships(c.var.db, viewer.user.id)).find(item => item.org.slug === form.get('org'));
       if (!current) return retry('Choose one of your organizations.');
-      const available = await c.var.admin.mailboxes(orgHost(c.env, current.org));
+      const available = (await mailboxesFor(c.var.db, c.var.admin, current.org, orgHost(c.env, current.org), viewer.user.id)).filter(entry => entry.role).map(entry => entry.mailbox);
       const chosen = available.filter(mailbox => form.getAll('mailbox').includes(mailbox.id));
       if (!chosen.length) return retry('Choose at least one mailbox.');
       const permissions: Permission[] = ['read', ...PERMISSIONS.map(item => item.value).filter(value => value !== 'read' && form.getAll('permission').includes(value))];

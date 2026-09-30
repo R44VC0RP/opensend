@@ -1,6 +1,6 @@
 import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
-import { asc, eq } from 'drizzle-orm';
-import { connect, member, organization, user } from './db.js';
+import { and, asc, eq, inArray } from 'drizzle-orm';
+import { connect, mailboxAccess, member, organization, user } from './db.js';
 import type { Directory } from './directory.js';
 import type { Env } from './env.js';
 import type { CodemailProps } from './mcp.js';
@@ -20,15 +20,22 @@ const mcpApi = {
       const admin = new OpenSendAdmin(env.OPENSEND_URL, env.OPENSEND_API_KEY, env.MAIL_DOMAIN);
       const connection = connect(env.HYPERDRIVE.connectionString);
       let rows: { userId: string; name: string; email: string; role: string; orgName: string; slug: string }[];
+      let allowed = new Set<string>();
+      const granted = (props.mailboxes ?? []).map(mailbox => mailbox.id);
       try {
         await connection.ready;
         rows = await connection.db.select({ userId: member.userId, name: user.name, email: user.email, role: member.role, orgName: organization.name, slug: organization.slug })
           .from(member).innerJoin(user, eq(user.id, member.userId)).innerJoin(organization, eq(organization.id, member.organizationId))
           .where(eq(member.organizationId, props.organizationId)).orderBy(asc(user.name));
+        // The agent's key covers the mailboxes chosen at sign-in; the person must still have access to each.
+        if (granted.length) allowed = new Set((await connection.db.select({ id: mailboxAccess.mailboxId }).from(mailboxAccess).where(and(eq(mailboxAccess.userId, props.userId), inArray(mailboxAccess.mailboxId, granted)))).map(row => row.id));
       } finally { ctx.waitUntil(connection.close()); }
-      if (!rows.some(row => row.userId === props.userId)) {
+      const stillMember = rows.some(row => row.userId === props.userId);
+      const lost = granted.filter(id => !allowed.has(id));
+      if (!stillMember || lost.length) {
         ctx.waitUntil(admin.revokeKey(props.keyId).catch(() => {}));
-        return Response.json({ error: 'invalid_token', error_description: 'You are no longer a member of this organization.' }, { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="OAuth", error="invalid_token"' } });
+        const reason = !stillMember ? 'You are no longer a member of this organization.' : 'You no longer have access to a mailbox this connection uses. Reconnect codemail to choose mailboxes again.';
+        return Response.json({ error: 'invalid_token', error_description: reason }, { status: 401, headers: { 'WWW-Authenticate': 'Bearer realm="OAuth", error="invalid_token"' } });
       }
       const host = `${rows[0]!.slug}.${env.MAIL_DOMAIN}`;
       let agents: Promise<{ address: string; displayName: string | null }[]> | undefined;

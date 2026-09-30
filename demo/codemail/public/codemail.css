@@ -63,3 +63,4 @@ a.link:hover { text-decoration: underline; text-underline-offset: 3px; }
 /* The copyable agent setup prompt. */
 pre.prompt { margin: 0; padding: var(--space-12) var(--space-16); max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: var(--radius-sm); background: var(--color-layer-1); border: 1px solid var(--color-border-muted); font-size: var(--text-xs); line-height: var(--leading-xs); color: var(--color-text); }
 .ui-alert form { margin: 0; flex-shrink: 0; }
+.ui-table .row-actions-wide { width: 240px; text-align: right; }

@@ -1,6 +1,6 @@
 // codemail's tables live in their own Postgres schema ("codemail") inside the OpenSend database.
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { boolean, index, pgSchema, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { boolean, index, pgSchema, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import pg from 'pg';
 
 const schema = pgSchema('codemail');
@@ -56,6 +56,15 @@ export const retiredSlug = schema.table('retired_slug', {
   slug: text('slug').primaryKey(), retiredAt: ts('retired_at').notNull().defaultNow(),
   formerMemberEmails: text('former_member_emails').array().notNull().default([]), subdomainId: text('subdomain_id'),
 });
+
+// Who may read each mailbox. owner = personal mailbox; manager/member = shared mailbox. No row, no access.
+export const mailboxAccess = schema.table('mailbox_access', {
+  mailboxId: text('mailbox_id').notNull(),
+  organizationId: text('organization_id').notNull().references(() => organization.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  role: text('role').$type<'owner' | 'manager' | 'member'>().notNull(), addedBy: text('added_by'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+}, t => [primaryKey({ columns: [t.mailboxId, t.userId] }), index('mailbox_access_user').on(t.userId, t.organizationId), index('mailbox_access_org').on(t.organizationId, t.mailboxId)]);
 
 export const authSchema = { user, session, account, verification, organization, member, invitation };
 
