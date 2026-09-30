@@ -6627,6 +6627,74 @@
           "data"
         ]
       },
+      "MailboxContactPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailboxContact"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data",
+          "nextCursor"
+        ]
+      },
+      "MailboxContact": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most recent display name seen for the address."
+          },
+          "sentCount": {
+            "type": "integer",
+            "description": "Messages this mailbox sent to the address (to, cc or bcc)."
+          },
+          "receivedCount": {
+            "type": "integer",
+            "description": "Messages the address sent to this mailbox."
+          },
+          "copiedCount": {
+            "type": "integer",
+            "description": "Received messages the address was also on (to or cc)."
+          },
+          "firstContactAt": {
+            "type": "string"
+          },
+          "lastContactAt": {
+            "type": "string"
+          },
+          "automated": {
+            "type": "boolean",
+            "description": "The address sends automated mail (auto-replies, bounces, bulk) or looks like a no-reply address."
+          }
+        },
+        "required": [
+          "address",
+          "name",
+          "sentCount",
+          "receivedCount",
+          "copiedCount",
+          "firstContactAt",
+          "lastContactAt",
+          "automated"
+        ]
+      },
       "MailboxDownload": {
         "type": "object",
         "properties": {
@@ -30891,6 +30959,220 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/labels' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/mailbox/v1/mailboxes/{mailboxId}/contacts": {
+      "get": {
+        "operationId": "mailboxListContacts",
+        "tags": [
+          "Mailbox messages"
+        ],
+        "summary": "List contacts",
+        "description": "Everyone this mailbox has corresponded with, derived from its mail: people it sent to, people who wrote to it, and others on those messages. Spam and the mailbox’s own addresses are left out. Automated and no-reply senders are excluded unless includeAutomated=true.",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "mailboxId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Match address or name."
+            },
+            "required": false,
+            "description": "Match address or name.",
+            "name": "q",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "recent",
+                "frequent"
+              ],
+              "default": "recent"
+            },
+            "required": false,
+            "name": "sort",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
+            },
+            "required": false,
+            "name": "includeAutomated",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{1,6}$"
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxContactPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxListContacts } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxListContacts({\n  client,\n  path: {\n    \"mailboxId\": \"mailbox_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/mailboxes/mailbox_123/contacts' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
           }
         ]
       }

@@ -1567,6 +1567,37 @@ export type MailboxLabelList = {
     }>;
 };
 
+export type MailboxContactPage = {
+    data: Array<MailboxContact>;
+    nextCursor: string | null;
+};
+
+export type MailboxContact = {
+    address: string;
+    /**
+     * The most recent display name seen for the address.
+     */
+    name: string | null;
+    /**
+     * Messages this mailbox sent to the address (to, cc or bcc).
+     */
+    sentCount: number;
+    /**
+     * Messages the address sent to this mailbox.
+     */
+    receivedCount: number;
+    /**
+     * Received messages the address was also on (to or cc).
+     */
+    copiedCount: number;
+    firstContactAt: string;
+    lastContactAt: string;
+    /**
+     * The address sends automated mail (auto-replies, bounces, bulk) or looks like a no-reply address.
+     */
+    automated: boolean;
+};
+
 export type MailboxDownload = {
     url: string;
     expiresAt: string;
@@ -10564,6 +10595,78 @@ export type MailboxListLabelsResponses = {
 };
 
 export type MailboxListLabelsResponse = MailboxListLabelsResponses[keyof MailboxListLabelsResponses];
+
+export type MailboxListContactsData = {
+    body?: never;
+    path: {
+        mailboxId: string;
+    };
+    query?: {
+        /**
+         * Match address or name.
+         */
+        q?: string;
+        sort?: 'recent' | 'frequent';
+        includeAutomated?: 'true' | 'false';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/mailbox/v1/mailboxes/{mailboxId}/contacts';
+};
+
+export type MailboxListContactsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type MailboxListContactsError = MailboxListContactsErrors[keyof MailboxListContactsErrors];
+
+export type MailboxListContactsResponses = {
+    /**
+     * Success
+     */
+    200: MailboxContactPage;
+};
+
+export type MailboxListContactsResponse = MailboxListContactsResponses[keyof MailboxListContactsResponses];
 
 export type MailboxGetRawMessageData = {
     body?: never;

@@ -12,7 +12,7 @@ export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, per
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
 const MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 // Local parts that never read replies (RFC 3834 recommends not auto-replying to these).
-const NO_REPLY = /^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?)(?:[+._-].*)?@/i;
+export const NO_REPLY = /^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?)(?:[+._-].*)?@/i;
 
 export type AttachmentInput = { content: string; filename: string; contentType?: string; disposition?: 'attachment' | 'inline'; contentId?: string } | { id: string };
 type ResolvedAttachment = { filename: string; contentType: string; disposition: 'attachment' | 'inline'; contentId: string | null; bytes: Uint8Array; sendingAttachmentId?: string };

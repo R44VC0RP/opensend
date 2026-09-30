@@ -546,6 +546,43 @@ export function registerMailbox(app: App) {
       SELECT coalesce(t.name, m.name) AS name, coalesce(t.threads, 0) AS threads, coalesce(m.messages, 0) AS messages, coalesce(m.unread, 0) AS unread FROM t FULL JOIN m ON m.name = t.name ORDER BY 1 LIMIT 500`);
     return c.json({ data: result.rows.map(row => ({ name: row.name, threads: row.threads, messages: row.messages, unreadMessages: row.unread })) }, 200);
   });
+  const ContactSchema = z.object({
+    address: z.string(), name: z.string().nullable().describe('The most recent display name seen for the address.'),
+    sentCount: z.number().int().describe('Messages this mailbox sent to the address (to, cc or bcc).'),
+    receivedCount: z.number().int().describe('Messages the address sent to this mailbox.'),
+    copiedCount: z.number().int().describe('Received messages the address was also on (to or cc).'),
+    firstContactAt: z.string(), lastContactAt: z.string(),
+    automated: z.boolean().describe('The address sends automated mail (auto-replies, bounces, bulk) or looks like a no-reply address.'),
+  }).openapi('MailboxContact');
+  app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/contacts', operationId: 'mailboxListContacts', tags: [TAG.messages], summary: 'List contacts',
+    description: 'Everyone this mailbox has corresponded with, derived from its mail: people it sent to, people who wrote to it, and others on those messages. Spam and the mailbox’s own addresses are left out. Automated and no-reply senders are excluded unless includeAutomated=true.',
+    request: { params: MailboxParams, query: z.object({ q: z.string().max(200).optional().describe('Match address or name.'), sort: z.enum(['recent', 'frequent']).default('recent'), includeAutomated: z.enum(['true', 'false']).default('false'), cursor: z.string().regex(/^\d{1,6}$/).optional(), limit: Limit }) },
+    responses: { 200: response(pageOf(ContactSchema, 'MailboxContactPage')), ...errors } }), async c => {
+    const { mailbox } = await mailboxFor(c, c.req.valid('param').mailboxId); const q = c.req.valid('query');
+    const offset = Number(q.cursor ?? 0);
+    const like = q.q ? `%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%` : null;
+    const rows = await c.env.db.execute<{ address: string; name: string | null; sent: number; received: number; copied: number; first_at: string; last_at: string; automated: boolean }>(sql`
+      WITH own AS (SELECT address FROM mailbox_addresses WHERE mailbox_id = ${mailbox.id}),
+      msgs AS (SELECT mm.direction, mm.received_at AS at, m.from_address, m.from_name, m."to", m.cc, m.bcc, m.automated, m.spam
+        FROM mailbox_messages mm JOIN mail_messages m ON m.id = mm.message_id WHERE mm.mailbox_id = ${mailbox.id}),
+      touch AS (
+        SELECT lower(from_address) AS address, nullif(from_name, '') AS name, at, 'received' AS kind, automated FROM msgs WHERE direction = 'inbound' AND NOT spam
+        UNION ALL SELECT lower(x->>'address'), nullif(x->>'name', ''), at, 'sent', false FROM msgs, jsonb_array_elements(msgs."to" || msgs.cc || msgs.bcc) x WHERE direction = 'outbound'
+        UNION ALL SELECT lower(x->>'address'), nullif(x->>'name', ''), at, 'copied', false FROM msgs, jsonb_array_elements(msgs."to" || msgs.cc) x WHERE direction = 'inbound' AND NOT spam),
+      contacts AS (
+        SELECT address, (array_agg(name ORDER BY at DESC) FILTER (WHERE name IS NOT NULL))[1] AS name,
+          count(*) FILTER (WHERE kind = 'sent')::int AS sent, count(*) FILTER (WHERE kind = 'received')::int AS received, count(*) FILTER (WHERE kind = 'copied')::int AS copied,
+          min(at) AS first_at, max(at) AS last_at,
+          bool_or(automated) OR address ~* '^(no-?reply|do-?not-?reply|donotreply|mailer-daemon|postmaster|bounces?)([+._-].*)?@' AS automated
+        FROM touch WHERE address LIKE '%_@_%' AND address NOT IN (SELECT address FROM own) AND regexp_replace(address, '[+][^@]*@', '@') NOT IN (SELECT address FROM own)
+        GROUP BY address)
+      SELECT * FROM contacts
+      WHERE ${q.includeAutomated === 'true' ? sql`true` : sql`NOT automated`} AND ${like ? sql`(address ILIKE ${like} OR name ILIKE ${like})` : sql`true`}
+      ORDER BY ${q.sort === 'frequent' ? sql`sent + received DESC, last_at DESC` : sql`last_at DESC`}, address
+      LIMIT ${q.limit + 1} OFFSET ${offset}`);
+    const data = rows.rows.slice(0, q.limit).map(row => ({ address: row.address, name: row.name, sentCount: row.sent, receivedCount: row.received, copiedCount: row.copied, firstContactAt: iso(row.first_at)!, lastContactAt: iso(row.last_at)!, automated: row.automated }));
+    return c.json({ data, nextCursor: rows.rows.length > q.limit ? String(offset + q.limit) : null }, 200);
+  });
   app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/messages/{messageId}/raw', operationId: 'mailboxGetRawMessage', tags: [TAG.messages], summary: 'Download the original MIME', description: 'Returns a short-lived S3 link to the original .eml. Raw messages are kept for 90 days.', request: { params: MessageParams }, responses: { 200: response(z.object({ url: z.string(), expiresAt: z.string() }).openapi('MailboxDownload')), ...errors } }), async c => {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId);
     if (!item.row.rawBucket || !item.row.rawKey || !item.row.region) throw new ApiError(404, 'RAW_NOT_AVAILABLE', 'This message has no stored original.');
