@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "codemail",
+  "account_id": "15d29c8639fd3733b1b5486a2acfd968",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-08",
+  // global_fetch_strictly_public is required for OAuth Client ID Metadata Documents.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "routes": [{ "pattern": "mail.opcd.ai", "custom_domain": true }],
+  "vars": {
+    "PUBLIC_URL": "https://mail.opcd.ai",
+    "OPENSEND_URL": "https://opensend.anoma.ly"
+  },
+  // OAuth clients, grants and tokens. Tokens are stored as hashes; grant props (the mailbox key) are encrypted.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }],
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
+}
