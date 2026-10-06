@@ -12,7 +12,7 @@ import { eventView, latestCursor, mailboxEventTypes, readEvents, recordEvents, w
 import { mailboxS3, queueReconcile } from './mailbox-setup.js';
 import { attachToMailboxes, createMailbox, htmlToPlain, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
-import { idempotent, storeAttachmentBytes } from './sending.js';
+import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
 import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyRecipients, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 
@@ -679,7 +679,7 @@ export function registerMailbox(app: App) {
     return c.json({ id: row.id, filename: row.filename, contentType: row.contentType, size: row.size, disposition: row.disposition as 'attachment' | 'inline', contentId: row.contentId }, 201);
   });
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages', operationId: 'mailboxSendMessage', tags: [TAG.messages], summary: 'Send a new message', description: 'Starts a new conversation. Sent through OpenSend’s transactional pipeline (suppression, SES configuration set, delivery tracking) with open/click tracking off. Supports the Idempotency-Key header. Per-mailbox limits apply (see sendLimits).',
-    request: { params: MailboxParams, body: json(SendBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    request: { params: MailboxParams, headers: IdempotencyHeaders, body: json(SendBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
     const { mailbox, scope, access: value } = await mailboxFor(c, c.req.valid('param').mailboxId, 'send'); const body = c.req.valid('json');
     const view = await dispatch(c, mailbox, scope, value, body, async () => ({ from: await senderAddress(c, mailbox, body.from), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers }));
@@ -687,17 +687,17 @@ export function registerMailbox(app: App) {
   });
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages/{messageId}/reply', operationId: 'mailboxReplyToMessage', tags: [TAG.messages], summary: 'Reply to a message',
     description: 'Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.',
-    request: { params: MessageParams, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    request: { params: MessageParams, headers: IdempotencyHeaders, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
     const p = c.req.valid('param');
     return c.json(await reply(c, p.mailboxId, async mailbox => (await c.env.db.select({ row: mailMessages }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailbox.id), eq(mailboxMessages.messageId, p.messageId))))[0]?.row), 202);
   });
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/threads/{threadId}/reply', operationId: 'mailboxReplyToThread', tags: [TAG.threads], summary: 'Reply to a conversation', description: 'Replies to the newest inbound message in the conversation (or the newest message if none is inbound). Same options as replying to a message.',
-    request: { params: ThreadParams, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    request: { params: ThreadParams, headers: IdempotencyHeaders, body: json(ReplyBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
     const p = c.req.valid('param');
     return c.json(await reply(c, p.mailboxId, mailbox => latestReplyTarget(c.env.db, mailbox.id, p.threadId)), 202);
   });
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages/{messageId}/forward', operationId: 'mailboxForwardMessage', tags: [TAG.messages], summary: 'Forward a message', description: 'Sends the original message with its headers summarized under an optional note, in the same conversation. Original attachments are included by default. Supports Idempotency-Key.',
-    request: { params: MessageParams, body: json(ForwardBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
+    request: { params: MessageParams, headers: IdempotencyHeaders, body: json(ForwardBody) }, responses: { 202: response(Sent), ...errors } }), async c => {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId, 'send'); const body = c.req.valid('json');
     const content = forwardBody(item.row, { text: body.text, html: body.html });
     const originals = body.includeAttachments ? (await c.env.db.select({ id: mailAttachments.id }).from(mailAttachments).where(eq(mailAttachments.messageId, item.row.id))).map(row => ({ id: row.id })) : [];

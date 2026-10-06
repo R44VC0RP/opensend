@@ -5383,6 +5383,12 @@ export type GetTemplateAssetContentResponse = GetTemplateAssetContentResponses[k
 
 export type SendEmailData = {
     body: SendEmailInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path?: never;
     query?: never;
     url: '/v1/emails/send';
@@ -5444,6 +5450,12 @@ export type SendEmailResponse = SendEmailResponses[keyof SendEmailResponses];
 
 export type SendEmailBatchData = {
     body: SendEmailBatchInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path?: never;
     query?: never;
     url: '/v1/emails/batch';
@@ -5774,6 +5786,12 @@ export type ListEmailEventsResponse = ListEmailEventsResponses[keyof ListEmailEv
 
 export type UploadAttachmentData = {
     body: AttachmentUpload;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path?: never;
     query?: never;
     url: '/v1/attachments';
@@ -6098,6 +6116,12 @@ export type ListCampaignsResponse = ListCampaignsResponses[keyof ListCampaignsRe
 
 export type CreateCampaignData = {
     body: CreateCampaignInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path?: never;
     query?: never;
     url: '/v1/campaigns';
@@ -6724,6 +6748,12 @@ export type SetCampaignArchivedResponse = SetCampaignArchivedResponses[keyof Set
 
 export type TestCampaignData = {
     body: CampaignTestInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         id: string;
     };
@@ -6787,6 +6817,12 @@ export type TestCampaignResponse = TestCampaignResponses[keyof TestCampaignRespo
 
 export type StartCampaignReviewData = {
     body: CampaignRevisionInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         id: string;
     };
@@ -6914,6 +6950,12 @@ export type GetCampaignReviewResponse = GetCampaignReviewResponses[keyof GetCamp
 
 export type SendCampaignData = {
     body: CampaignSendInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         id: string;
     };
@@ -6977,6 +7019,12 @@ export type SendCampaignResponse = SendCampaignResponses[keyof SendCampaignRespo
 
 export type ScheduleCampaignData = {
     body: CampaignScheduleInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         id: string;
     };
@@ -7040,6 +7088,12 @@ export type ScheduleCampaignResponse = ScheduleCampaignResponses[keyof ScheduleC
 
 export type CancelCampaignData = {
     body?: never;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         id: string;
     };
@@ -10285,6 +10339,12 @@ export type MailboxListMessagesResponse = MailboxListMessagesResponses[keyof Mai
 
 export type MailboxSendMessageData = {
     body: MailboxSendInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         mailboxId: string;
     };
@@ -10865,6 +10925,12 @@ export type MailboxUploadAttachmentResponse = MailboxUploadAttachmentResponses[k
 
 export type MailboxReplyToMessageData = {
     body: MailboxReplyInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         mailboxId: string;
         messageId: string;
@@ -10929,6 +10995,12 @@ export type MailboxReplyToMessageResponse = MailboxReplyToMessageResponses[keyof
 
 export type MailboxReplyToThreadData = {
     body: MailboxReplyInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         mailboxId: string;
         threadId: string;
@@ -10993,6 +11065,12 @@ export type MailboxReplyToThreadResponse = MailboxReplyToThreadResponses[keyof M
 
 export type MailboxForwardMessageData = {
     body: MailboxForwardInput;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
     path: {
         mailboxId: string;
         messageId: string;

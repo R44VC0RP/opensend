@@ -231,6 +231,15 @@ function canonical(value: unknown): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical((value as Record<string, unknown>)[k])).join(',') + '}';
   return JSON.stringify(value) ?? 'null';
 }
+// Documents the optional header read by idempotent() in the OpenAPI reference and SDK types. The
+// length/pattern constraints are OpenAPI metadata only, so idempotent() still validates the key and
+// keeps returning INVALID_IDEMPOTENCY_KEY rather than a generic validation error.
+export const IdempotencyHeaders = z.object({
+  'Idempotency-Key': z.string().optional().openapi({
+    minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', example: 'order-4821-receipt',
+    description: 'Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.',
+  }),
+});
 export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>): Promise<T> {
   const key = c.req.header('Idempotency-Key');
   if (key === undefined) return c.env.db.transaction(work);
@@ -596,12 +605,12 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 }
 
 export function registerSending(app: App) {
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { body: json(SendInput) }, responses: { 202: response(Receipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SendInput) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); return queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', tags: ['Emails'], security, request: { body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (input.emails.reduce((n, e) => n + (e.html?.length ?? 0) + (e.text?.length ?? 0), 0) > 2 * 1024 * 1024) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', 'Combined batch body content may not exceed 2 MiB.');
     const result = await idempotent(c, a, input, async db => {
@@ -650,7 +659,7 @@ export function registerSending(app: App) {
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse({ ...r, data: a.permissions.includes('manage') ? r.data : redactCapabilityData(r.data) })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { body: json(AttachmentInput) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentInput) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (input.content.length > Math.ceil(MAX_ATTACHMENTS / 3) * 4) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB decoded.');
     // Flat character validation avoids stack exhaustion from repeated regex groups on large uploads.
@@ -694,7 +703,7 @@ export function registerSending(app: App) {
       await db.delete(attachments).where(and(scope(attachments, a), eq(attachments.id, attachmentId)));
     }); return c.json({ id: attachmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this environment as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.', tags: ['Campaigns'], security, request: { body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this environment as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.', tags: ['Campaigns'], security, request: { headers: IdempotencyHeaders, body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     assertBlockContent(input.html);
     const result = await idempotent(c, a, input, async db => {
@@ -816,12 +825,12 @@ export function registerSending(app: App) {
     await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, current.draft); editable(current); await db.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews r WHERE l.owner_type = 'review' AND l.owner_id = r.id AND l.workspace_id = r.workspace_id AND l.environment = r.environment AND r.workspace_id = ${a.workspaceId} AND r.environment = ${a.environment} AND r.campaign_id = ${campaignId}`); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
       const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
@@ -854,14 +863,14 @@ export function registerSending(app: App) {
     if (!review) notFound('Campaign review');
     return c.json(asyncReviewView(review), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery. Omit reviewId to snapshot and validate the complete audience automatically before any provider attempt; supply an existing completed reviewId to reuse it. The 202 count is accepted recipient intents, not SES acceptance or delivery.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery. Omit reviewId to snapshot and validate the complete audience automatically before any provider attempt; supply an existing completed reviewId to reuse it. The 202 count is accepted recipient intents, not SES acceptance or delivery.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. Omit reviewId to snapshot and validate automatically; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/schedule', operationId: 'scheduleCampaign', description: 'Accept the current revision for durable scheduled delivery. Omit reviewId to snapshot and validate automatically; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSchedule) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const result = await idempotent(c, a, input, db => launchCampaign(c.env, db, a, c.req.valid('param').id, input, c.get('requestId'))); return c.json(CampaignQueued.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/cancel', operationId: 'cancelCampaign', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders }, responses: { 200: response(CampaignCanceled), ...errors } }), async c => {
     const a = actor(c, 'send'); const campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, row.draft); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); return cancelCampaignWork(db, a, row); });
     return c.json(CampaignCanceled.parse(result), 200);

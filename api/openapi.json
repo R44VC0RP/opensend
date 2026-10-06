@@ -17439,6 +17439,22 @@
             "secureDashboardSession": []
           }
         ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -17590,6 +17606,22 @@
           },
           {
             "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -18515,6 +18547,22 @@
             "secureDashboardSession": []
           }
         ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -19131,6 +19179,22 @@
           },
           {
             "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -20935,6 +20999,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -21101,6 +21179,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -21433,6 +21525,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -21599,6 +21705,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -21764,6 +21884,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "responses": {
@@ -30155,6 +30289,20 @@
             "required": true,
             "name": "mailboxId",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -31718,6 +31866,20 @@
             "required": true,
             "name": "messageId",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -31902,6 +32064,20 @@
             "required": true,
             "name": "threadId",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -32086,6 +32262,20 @@
             "required": true,
             "name": "messageId",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7E]+$",
+              "example": "order-4821-receipt",
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+            },
+            "required": false,
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "name": "Idempotency-Key",
+            "in": "header"
           }
         ],
         "requestBody": {
