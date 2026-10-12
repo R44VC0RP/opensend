@@ -401,14 +401,42 @@ function registerMetrics(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
     const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
-    const distinct = (condition: SQL) => sql<number>`count(DISTINCT ${emails.id}) FILTER (WHERE ${condition})::int`;
-    const outcome = (status: string, type: EventType) => distinct(sql`${emails.status} = ${status} OR ${events.type} = ${type}`);
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
-    // ROLLUP computes the total and at most 367 daily or 8785 hourly aggregates in one snapshot.
-    // The scoped left join retains queued emails and limits all events to this cohort.
-    const rows = await c.env.db.select({ date, emails: sql<number>`count(DISTINCT ${emails.id})::int`, accepted: distinct(sql`NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${events.type} IN ('email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.delivery_delayed'))`), delivered: outcome('delivered', 'email.delivered'), bounced: outcome('bounced', 'email.bounced'), complained: outcome('complained', 'email.complained'), opened: distinct(sql`${events.type} = 'email.opened'`), clicked: distinct(sql`${events.type} = 'email.clicked'`), failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${events.type} IN ('email.rejected', 'email.rendering_failed')`), deliveryDelayed: outcome('delayed', 'email.delivery_delayed'), simulated: distinct(sql`${emails.simulated}`) }).from(emails).leftJoin(events, and(eq(emails.id, sql`${events.data}->>'emailId'`), eq(emails.workspaceId, events.workspaceId), eq(emails.environment, events.environment), scoped(events, a))).where(filter).groupBy(sql`ROLLUP (${date})`).orderBy(date);
-    const { date: _date, ...totals } = rows.find(row => row.date === null)!;
-    const buckets = rows.filter(row => row.date !== null).map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
+    // Collapse events to one row of outcome flags per email before joining, so each cohort email joins at
+    // most once and plain FILTERed counts replace count(DISTINCT) over the email-event join. Replayed events
+    // still count once, and events recorded after `to` still count. An email's events are recorded after the
+    // email itself, so events older than the cohort start (less a day of clock slack) cannot match; the
+    // partial index on emailId-bearing events keeps contact and other non-email events out of the scan.
+    const eventFloor = new Date(Date.parse(start) - 86400000).toISOString();
+    const result = await c.env.db.execute<{ date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }>(sql`
+      WITH outcomes AS (
+        SELECT ${events.data}->>'emailId' AS email_id,
+          bool_or(${events.type} IN ('email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.delivery_delayed')) AS accepted,
+          bool_or(${events.type} = 'email.delivered') AS delivered, bool_or(${events.type} = 'email.bounced') AS bounced,
+          bool_or(${events.type} = 'email.complained') AS complained, bool_or(${events.type} = 'email.opened') AS opened,
+          bool_or(${events.type} = 'email.clicked') AS clicked, bool_or(${events.type} IN ('email.rejected', 'email.rendering_failed')) AS failed,
+          bool_or(${events.type} = 'email.delivery_delayed') AS delayed
+        FROM ${events}
+        WHERE ${scoped(events, a)} AND ${events.data} ? 'emailId' AND ${events.createdAt} >= ${eventFloor}
+        GROUP BY 1
+      )
+      SELECT ${date} AS "date", count(*)::int AS "emails",
+        count(*) FILTER (WHERE NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR o.accepted))::int AS "accepted",
+        count(*) FILTER (WHERE ${emails.status} = 'delivered' OR o.delivered)::int AS "delivered",
+        count(*) FILTER (WHERE ${emails.status} = 'bounced' OR o.bounced)::int AS "bounced",
+        count(*) FILTER (WHERE ${emails.status} = 'complained' OR o.complained)::int AS "complained",
+        count(*) FILTER (WHERE o.opened)::int AS "opened", count(*) FILTER (WHERE o.clicked)::int AS "clicked",
+        count(*) FILTER (WHERE ${emails.status} IN ('rejected', 'rendering_failed') OR o.failed)::int AS "failed",
+        count(*) FILTER (WHERE ${emails.status} = 'delayed' OR o.delayed)::int AS "deliveryDelayed",
+        count(*) FILTER (WHERE ${emails.simulated})::int AS "simulated"
+      FROM ${emails} LEFT JOIN outcomes o ON o.email_id = ${emails.id}
+      WHERE ${filter}
+      GROUP BY 1 ORDER BY 1`);
+    // Every email belongs to exactly one creation bucket, so totals are the sum of the buckets (no ROLLUP sort).
+    const rows = result.rows;
+    const totals = { emails: 0, accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: 0 };
+    for (const row of rows) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += row[key];
+    const buckets = rows.map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
     let daily = buckets;
     if (q.granularity === 'hour') {
       const days = new Map<string, z.infer<typeof bucket>>();

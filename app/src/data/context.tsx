@@ -59,9 +59,9 @@ export function useApi() {
   if (!api) throw new Error('ApiProvider is required')
   return api
 }
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>) {
+export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll: { interval: number, background: boolean } = { interval: 3000, background: true }) {
   const api = useApi()
-  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: 3000, refetchIntervalInBackground: true })
+  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: poll.interval, refetchIntervalInBackground: poll.background })
 }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false) {
   const api = useApi()
