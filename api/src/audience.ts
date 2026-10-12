@@ -318,14 +318,18 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'manage'), importId = c.req.valid('param').id;
     const result = await c.env.db.transaction(async tx => {
       const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return job;
-      if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('update'); if (!list) notFound('List'); }
-      for (const row of job.rows) {
-        const [contact] = await tx.insert(contacts).values({ id: id('con'), ...scopeValues(identity), email: row.email, name: row.name, properties: row.properties }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { ...(row.name !== undefined ? { name: row.name } : {}), properties: sql`${contacts.properties} || ${JSON.stringify(row.properties)}::jsonb`, deletedAt: null, updatedAt: new Date().toISOString() } }).returning();
-        // The upsert locks the current profile, so concurrent imports cannot bypass the merged limit.
-        // Rejecting here rolls back this entire commit, including earlier rows and restorations.
-        if (!Properties.safeParse(contact!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
-        if (job.listId) await tx.insert(listMembers).values({ ...scopeValues(identity), listId: job.listId, contactId: contact!.id }).onConflictDoNothing();
-      }
+      // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.
+      if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
+      // One set-based upsert per commit instead of a round trip per row. Preview already rejects duplicate
+      // emails within an import, and sorting by email gives overlapping concurrent imports one lock order.
+      // Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
+      const rows = [...job.rows].sort((a, b) => a.email < b.email ? -1 : a.email > b.email ? 1 : 0);
+      const upserted = rows.length ? await tx.insert(contacts).values(rows.map(row => ({ id: id('con'), ...scopeValues(identity), email: row.email, name: row.name ?? null, properties: row.properties }))).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { name: sql`coalesce(excluded.name, ${contacts.name})`, properties: sql`${contacts.properties} || excluded.properties`, deletedAt: null, updatedAt: new Date().toISOString() } }).returning({ id: contacts.id, email: contacts.email, properties: contacts.properties }) : [];
+      // The upsert locks every current profile, so concurrent imports cannot bypass the merged limit.
+      // Rejecting here rolls back this entire commit, including restorations.
+      const byEmail = new Map(upserted.map(contact => [contact.email, contact]));
+      for (const row of job.rows) if (!Properties.safeParse(byEmail.get(row.email)!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
+      if (job.listId && upserted.length) await tx.insert(listMembers).values(upserted.map(contact => ({ ...scopeValues(identity), listId: job.listId!, contactId: contact.id }))).onConflictDoNothing();
       const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return updated!;
     }); return c.json(result, 200);
   });
