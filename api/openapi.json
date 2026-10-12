@@ -13854,7 +13854,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Persist a preview before commit. Feature limit: 1 MiB UTF-8 CSV, 1000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.",
+        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.",
         "requestBody": {
           "required": true,
           "content": {
@@ -13865,7 +13865,7 @@
                   "csv": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1048576
+                    "maxLength": 5242880
                   },
                   "listId": {
                     "type": "string",

@@ -35,7 +35,8 @@ const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), 
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), ...Dates }).openapi('AudienceImport');
-const ImportInput = z.object({ csv: z.string().min(1).max(1048576), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000;
+const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
 
 function scope(table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, identity: Pick<Actor, 'workspaceId' | 'environment'>) { return and(eq(table.workspaceId, identity.workspaceId), eq(table.environment, identity.environment))!; }
 function scopeValues(identity: Pick<Actor, 'workspaceId' | 'environment'>) { return { workspaceId: identity.workspaceId, environment: identity.environment }; }
@@ -166,10 +167,10 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
 
 // Adapted from app/src/features/audience/csv.ts: quoted fields, escaped quotes, CRLF and BOM.
 function parseCsv(text: string): string[][] {
-  if (new TextEncoder().encode(text).length > 1048576) throw new ApiError(413, 'IMPORT_TOO_LARGE', 'CSV imports are limited to 1 MiB and 1000 contact rows.');
+  if (new TextEncoder().encode(text).length > IMPORT_MAX_BYTES) throw new ApiError(413, 'IMPORT_TOO_LARGE', 'CSV imports are limited to 5 MiB and 50,000 contact rows.');
   const rows: string[][] = []; let row: string[] = [], cell = '', quoted = false, endedQuote = false;
   const input = text.replace(/^\uFEFF/, '');
-  const finishRow = () => { row.push(cell); if (row.some(value => value.trim())) rows.push(row); if (rows.length > 1001) throw new ApiError(413, 'IMPORT_TOO_LARGE', 'CSV imports are limited to 1000 contact rows.'); row = []; cell = ''; endedQuote = false; };
+  const finishRow = () => { row.push(cell); if (row.some(value => value.trim())) rows.push(row); if (rows.length > IMPORT_MAX_ROWS + 1) throw new ApiError(413, 'IMPORT_TOO_LARGE', 'CSV imports are limited to 50,000 contact rows.'); row = []; cell = ''; endedQuote = false; };
   for (let i = 0; i < input.length; i++) {
     const char = input[i]!;
     if (quoted) { if (char === '"') { if (input[i + 1] === '"') { cell += '"'; i++; } else { quoted = false; endedQuote = true; } } else cell += char; continue; }
@@ -304,7 +305,7 @@ export function registerAudience(app: App) {
     const identity = actor(c), segment = await findSegment(c.env.db, identity, c.req.valid('param').id), listId = c.req.valid('json').listId;
     const conditions = [compileRule(segment.rule)]; if (listId) { await findList(c.env.db, identity, listId); conditions.push(inList(identity, listId)); } return c.json(counts(await boundedContacts(c.env.db, identity, conditions, 1000)), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 1 MiB UTF-8 CSV, 1000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'manage'), input = c.req.valid('json'); if (input.listId) await findList(c.env.db, identity, input.listId);
     const preview = previewImport(input); const [row] = await c.env.db.insert(imports).values({ id: id('imp'), ...scopeValues(identity), listId: input.listId, ...preview }).returning(); return c.json(row!, 201);
   });
@@ -320,16 +321,30 @@ export function registerAudience(app: App) {
       const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return job;
       // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.
       if (job.listId) { const [list] = await tx.select().from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
-      // One set-based upsert per commit instead of a round trip per row. Preview already rejects duplicate
-      // emails within an import, and sorting by email gives overlapping concurrent imports one lock order.
-      // Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
-      const rows = [...job.rows].sort((a, b) => a.email < b.email ? -1 : a.email > b.email ? 1 : 0);
-      const upserted = rows.length ? await tx.insert(contacts).values(rows.map(row => ({ id: id('con'), ...scopeValues(identity), email: row.email, name: row.name ?? null, properties: row.properties }))).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { name: sql`coalesce(excluded.name, ${contacts.name})`, properties: sql`${contacts.properties} || excluded.properties`, deletedAt: null, updatedAt: new Date().toISOString() } }).returning({ id: contacts.id, email: contacts.email, properties: contacts.properties }) : [];
+      // One statement upserts every row and adds list memberships, however large the import. Rows travel as a
+      // single JSON parameter, so the Postgres bind-parameter limit does not cap the row count. Preview already
+      // rejects duplicate emails within an import, and ORDER BY email gives overlapping concurrent imports one
+      // lock order. Imported names are never null, so COALESCE keeps the stored name only when the import omits it.
+      const payload = JSON.stringify(job.rows.map(row => ({ id: id('con'), email: row.email, name: row.name ?? null, properties: row.properties })));
+      const now = new Date().toISOString();
+      const upserted = job.rows.length ? (await tx.execute<{ email: string; properties: Record<string, string | number | boolean | null> }>(sql`
+        WITH incoming AS (
+          SELECT * FROM jsonb_to_recordset(${payload}::jsonb) AS r(id text, email text, name text, properties jsonb)
+        ), upserted AS (
+          INSERT INTO audience_contacts AS c (id, workspace_id, environment, email, name, properties)
+          SELECT id, ${identity.workspaceId}, ${identity.environment}, email, name, properties FROM incoming ORDER BY email
+          ON CONFLICT (workspace_id, environment, email) DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now}
+          RETURNING c.id, c.email, c.properties
+        ), members AS (
+          INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id)
+          SELECT ${identity.workspaceId}, ${identity.environment}, ${job.listId}::text, id FROM upserted WHERE ${job.listId}::text IS NOT NULL
+          ON CONFLICT DO NOTHING
+        )
+        SELECT email, properties FROM upserted`)).rows : [];
       // The upsert locks every current profile, so concurrent imports cannot bypass the merged limit.
-      // Rejecting here rolls back this entire commit, including restorations.
+      // Rejecting here rolls back this entire commit, including memberships and restorations.
       const byEmail = new Map(upserted.map(contact => [contact.email, contact]));
       for (const row of job.rows) if (!Properties.safeParse(byEmail.get(row.email)!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
-      if (job.listId && upserted.length) await tx.insert(listMembers).values(upserted.map(contact => ({ ...scopeValues(identity), listId: job.listId!, contactId: contact.id }))).onConflictDoNothing();
       const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return updated!;
     }); return c.json(result, 200);
   });

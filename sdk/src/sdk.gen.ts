@@ -636,7 +636,7 @@ export const listContactImports = <ThrowOnError extends boolean = false>(options
 });
 
 /**
- * Persist a preview before commit. Feature limit: 1 MiB UTF-8 CSV, 1000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.
+ * Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.
  */
 export const previewContactImport = <ThrowOnError extends boolean = false>(options: Options<PreviewContactImportData, ThrowOnError>): RequestResult<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError> => (options.client ?? client).post<PreviewContactImportResponses, PreviewContactImportErrors, ThrowOnError>({
     security: [
