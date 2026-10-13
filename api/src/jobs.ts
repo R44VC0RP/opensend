@@ -1,13 +1,28 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, id, log } from './core.js';
 import type { DbExecutor, JobHandler, Mode, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 export const MAX_ATTEMPTS = 6;
 
+// Counts enqueue() calls made while serving one request, so the response path wakes the queue only for new work.
+const enqueued = new AsyncLocalStorage<{ count: number }>();
+export async function countEnqueued(work: () => Promise<void>) {
+  const scope = { count: 0 };
+  await enqueued.run(scope, work);
+  return scope.count;
+}
 export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; environment: Mode; payload: Record<string, unknown>; availableAt?: string }) {
   const jobId = id('job');
   await db.insert(jobs).values({ id: jobId, ...input });
+  const scope = enqueued.getStore();
+  if (scope) scope.count++;
   return jobId;
+}
+// Thrown by a handler that is polling (not failing): the runner returns the same row to pending at
+// availableAt without consuming an attempt, instead of inserting a new job row per poll.
+export class JobDeferred extends Error {
+  constructor(readonly availableAt: string, readonly payload?: Record<string, unknown>) { super('Job deferred.'); }
 }
 
 // Postgres is the durable queue. CF Queue messages only wake it; cron/polling recovers missed wakeups.
@@ -41,6 +56,12 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       await runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence);
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
+      if (error instanceof JobDeferred) {
+        // The claim incremented attempts; undo it so intentional polling never reaches MAX_ATTEMPTS.
+        await runtime.db.update(jobs).set({ status: 'pending', attempts: sql`${jobs.attempts} - 1`, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(error.payload ? { payload: error.payload } : {}) }).where(fence);
+        log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
+        return;
+      }
       const code = error instanceof ApiError ? error.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.

@@ -16,6 +16,7 @@ import { registerMcp } from './mcp.js';
 import { registerMailbox } from './mailbox.js';
 import { registerMcpAuth } from './mcp-auth.js';
 import { createLlmsText, createMarkdownDocs, createOpenApiDocument } from './openapi-docs.js';
+import { countEnqueued } from './jobs.js';
 
 export function createApp() {
   const app = new OpenAPIHono<AppEnv>({ defaultHook(result) {
@@ -29,15 +30,17 @@ export function createApp() {
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
     const start = Date.now();
-    await next();
+    const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
     c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
     if (timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
-    if (c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.env.wake) {
-      try { await c.env.wake(c.get('actor')?.wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+    // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
+    const wakeJobs = c.get('actor')?.wakeJobs;
+    if ((enqueued > 0 || wakeJobs) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.env.wake) {
+      try { await c.env.wake(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
     }
     const targets = c.get('actor')?.dispatchTargets;
     if (targets?.size && c.res.status < 300 && c.env.dispatch) {

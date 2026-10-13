@@ -2746,9 +2746,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   jobs: (type: string) => Promise<Json[]>;
 }) => Promise<void>) {
   assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(FIXTURE_DATABASE_URL!).hostname), 'Simulated SES fixtures require an isolated local database.');
-  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }, { dispatchDue }] = await Promise.all([
+  const [{ createApp }, { nodeRuntime }, { drizzle }, { jobHandlers }, { operationJobs }, { ensureRegionSettings }, { dispatchDue }, { JobDeferred }] = await Promise.all([
     import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/sending.js'),
-    import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'),
+    import('./src/operations.js'), import('./src/ses-region-state.js'), import('./src/dispatcher.js'), import('./src/jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
@@ -2783,7 +2783,14 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         assert.ok(pending.length, `Expected a pending ${type} job.`);
         for (const job of pending) {
           await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = $1", [job.id]);
-          await handlers[type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: job.workspace_id, environment: job.environment });
+          try {
+            await handlers[type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: job.workspace_id, environment: job.environment });
+          } catch (error) {
+            // Mirror processJobs: a deferral returns the same row to pending without consuming an attempt.
+            if (!(error instanceof JobDeferred)) throw error;
+            await db.query("UPDATE jobs SET status = 'pending', attempts = attempts - 1, lease_until = NULL, last_error = NULL, available_at = $2, payload = coalesce($3::jsonb, payload) WHERE id = $1", [job.id, error.availableAt, error.payload ? JSON.stringify(error.payload) : null]);
+            continue;
+          }
           await db.query("UPDATE jobs SET status = 'completed' WHERE id = $1", [job.id]);
         }
       }
@@ -3245,8 +3252,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(deferred.length, 1, 'Full capacity must retain exactly one expansion continuation.');
         assert.equal(deferred[0]!.payload.cursor, 400);
         const dueAt = new Date(deferred[0]!.available_at).getTime();
-        // Ten seconds of a 20/s rate is below the floor, so the recheck stays at the two-second cap.
-        assert.ok(dueAt >= before + 2000 - 5 && dueAt <= after + 2000 + 5, `Rate ${rate ?? 'missing'} should defer 2000ms; observed ${dueAt - before}ms.`);
+        // A full 400-row buffer rechecks once it could drain to half: 200 rows at 20/s is 10 s; an unknown rate waits 5 s.
+        const wait = rate === null ? 5000 : 10000;
+        assert.ok(dueAt >= before + wait - 5 && dueAt <= after + wait + 5, `Rate ${rate ?? 'missing'} should defer ${wait}ms; observed ${dueAt - before}ms.`);
+        assert.equal(deferred[0]!.attempts, 0, 'A deferral must not consume a job attempt.');
         const full = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
         assert.equal(full.counts.total, 400, 'Deferral must not materialize more immutable emails.');
         assert.equal(full.expansion.expanded, 400);

@@ -1,13 +1,13 @@
 import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys, jobs, jobSchedule } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachment } from '@aws-sdk/client-sesv2';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime, type Storage } from './core.js';
-import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { enqueue, JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
@@ -39,6 +39,9 @@ const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 const CAMPAIGN_BUFFER = 400;
 const campaignBuffer = (rate: number) => Math.min(20000, Math.max(CAMPAIGN_BUFFER, Math.ceil(rate * 10)));
 const environmentBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ceil(rate * 20)));
+// Recheck a full buffer or in-flight campaign once its backlog should have drained at the cached
+// regional rate; rechecking sooner only repeats the same work. Unknown rates use a fixed interval.
+const drainDelayMs = (backlog: number, rate: number, floor = 1000) => rate > 0 ? Math.max(floor, Math.min(15000, Math.ceil(1000 * backlog / rate))) : 5000;
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes both environments without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
@@ -1302,9 +1305,24 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   const campaignId = payload.campaignId;
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', permissions: ['manage'], domains: [] };
   try {
-    const [initial] = await runtime.db.select().from(campaignExpansions).where(and(eq(campaignExpansions.campaignId, campaignId), scope(campaignExpansions, a)));
+    const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
+      rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+    }).from(campaignExpansions).leftJoin(campaignReviews, eq(campaignReviews.id, campaignExpansions.reviewId)).leftJoin(campaigns, eq(campaigns.id, campaignExpansions.campaignId))
+      .where(and(eq(campaignExpansions.campaignId, campaignId), scope(campaignExpansions, a)));
     if (!initial || !['pending', 'expanding'].includes(initial.status) || initial.jobId !== job.id) return;
     a.keyId = initial.actorKeyId;
+    if (!initial.scheduledAt || Date.parse(initial.scheduledAt) <= Date.now()) {
+      // Poll a full buffer with one bounded count, before the draft read, locks and origin checks.
+      // The transaction below still rechecks capacity under the admission lock before expanding.
+      const limits = { campaign: campaignBuffer(initial.rate), total: environmentBuffer(initial.rate) };
+      const [buffered] = (await runtime.db.execute<{ total: number; campaign: number }>(sql`SELECT
+        (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND review_id IS NOT NULL AND status IN ('queued','attempting') LIMIT ${limits.total}) e) AS total,
+        (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND campaign_id=${campaignId} AND review_id IS NOT NULL AND status IN ('queued','attempting') LIMIT ${limits.campaign}) c) AS campaign`)).rows;
+      if (buffered!.campaign >= limits.campaign || buffered!.total >= limits.total) {
+        const backlog = Math.max(buffered!.campaign - limits.campaign / 2, buffered!.total - limits.total / 2);
+        throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, initial.rate)).toISOString(), { ...payload, cursor: initial.expanded });
+      }
+    }
     const [review] = await runtime.db.select({ draft: campaignReviews.draft }).from(campaignReviews).where(eq(campaignReviews.id, initial.reviewId));
     const readyJobs = await runtime.db.transaction(async db => {
       const campaign = await findCampaign(db, a, initial.campaignId, true);
@@ -1325,10 +1343,9 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total);
       if (capacity <= 0) {
-        // Recheck before half a buffer could drain. Unknown/low quotas retain the
-        // old two-second pacing; high quotas must not inherit a two-second gap.
-        const delayMs = buffer!.rate > 0 ? Math.max(10, Math.min(2000, Math.ceil(500 * campaignBuffer(buffer!.rate) / buffer!.rate))) : 2000;
-        await defer(new Date(Date.now() + delayMs).toISOString()); return;
+        // Lost a race with another expansion after the bounded precheck: requeue this row (the rollback releases only locks).
+        const backlog = Math.max(buffer!.campaign - campaignBuffer(buffer!.rate) / 2, buffer!.total - environmentBuffer(buffer!.rate) / 2);
+        throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), { ...payload, cursor: expansion.expanded });
       }
       const recipients = await recipientChunk(db, expansion.reviewId, expansion.expanded, capacity);
       if (!review || !recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== expansion.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
@@ -1353,6 +1370,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       await wake(runtime, 1);
     }
   } catch (error) {
+    if (error instanceof JobDeferred) throw error;
     const retry = !(error instanceof ApiError) || error.retryable;
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_EXPANSION_FAILED', 'Campaign expansion will retry its durable cursor.', undefined, true);
     try { await runtime.db.transaction(async db => {
@@ -1366,16 +1384,28 @@ const finishExpandedCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Campaign completion requires a campaign.');
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', domains: [], permissions: ['manage'] };
   try {
+    // While mail is in flight, poll with one bounded count instead of locking the campaign, and
+    // recheck about when the remaining rows should have dispatched at the cached regional rate.
+    const [progress] = (await runtime.db.execute<{ status: string | null; pending: number; rate: number }>(sql`SELECT
+      (SELECT status FROM sending_campaigns WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND id=${payload.campaignId}) AS status,
+      (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND campaign_id=${payload.campaignId} AND status IN ('queued','attempting') LIMIT 20000) p) AS pending,
+      coalesce((SELECT l.max_send_rate FROM sending_campaign_expansions x JOIN sending_campaign_reviews r ON r.id = x.review_id
+        JOIN sending_region_limits l ON l.workspace_id = x.workspace_id AND l.environment = x.environment AND l.region = r.draft->>'region'
+        WHERE x.workspace_id=${a.workspaceId} AND x.environment=${a.environment} AND x.campaign_id=${payload.campaignId}),0) AS rate`)).rows;
+    if (progress!.pending > 0 && ['scheduled', 'sending'].includes(progress!.status ?? '')) throw new JobDeferred(new Date(Date.now() + drainDelayMs(progress!.pending, progress!.rate, 2000)).toISOString());
     await runtime.db.transaction(async db => {
       const campaign = await findCampaign(db, a, payload.campaignId as string, true);
       if (!['scheduled', 'sending'].includes(campaign.status)) return;
       const [expansion] = await db.select({ status: campaignExpansions.status }).from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaign.id)));
       if (expansion?.status !== 'completed') return;
       const pending = await db.select({ id: emails.id }).from(emails).where(and(scope(emails, a), eq(emails.campaignId, campaign.id), inArray(emails.status, ['queued', 'attempting']))).limit(1);
-      if (pending.length) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
-      else await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaign.id));
+      if (pending.length) throw new JobDeferred(new Date(Date.now() + 2000).toISOString());
+      await db.update(campaigns).set({ status: 'completed', updatedAt: now() }).where(campaignWhere(a, campaign.id));
     });
-  } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign completion will retry until it is durable.', undefined, true); }
+  } catch (error) {
+    if (error instanceof JobDeferred) throw error;
+    throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign completion will retry until it is durable.', undefined, true);
+  }
 };
 // Pre-migration email.dispatch job rows complete as no-ops: sending_emails.status drives the dispatcher (src/dispatcher.ts).
 const retiredDispatchJob: JobHandler = async () => {};
