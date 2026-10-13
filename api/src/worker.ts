@@ -5,7 +5,7 @@ import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
 import { drainJobs } from './dispatch.js';
-import { jobConcurrency, nextWakeDelay } from './jobs.js';
+import { followDueJobs, jobConcurrency } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { mailboxHourly } from './mailbox-ingest.js';
@@ -125,9 +125,9 @@ export default {
       const concurrency = workerConcurrency(env);
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
-      await drainJobs(runtime, 100, concurrency, 10000);
-      const delaySeconds = await nextWakeDelay(runtime);
-      if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
+      // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
+      const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }), 45000);
+      log('info', { code: 'QUEUE_FOLLOW', outcome });
     });
     batch.ackAll();
   },
@@ -146,9 +146,7 @@ export default {
       await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
       const concurrency = workerConcurrency(env);
       // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
-      await drainJobs(runtime, 100, concurrency, 10000);
-      const delaySeconds = await nextWakeDelay(runtime);
-      if (delaySeconds !== null) await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds });
+      await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
     });
   },
 } satisfies ExportedHandler<Env>;

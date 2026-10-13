@@ -147,3 +147,31 @@ export async function nextWakeDelay(runtime: Runtime) {
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }
+// Reserve the next delayed wake: only the caller that moves next_wake_at earlier (or past an expired reservation)
+// may schedule it. Without this every queue invocation scheduled its own follow-up, so each wake burst and each
+// completed job added a chain that never merged, and the duplicates crowded out the wakes that mattered.
+export async function reserveNextWake(runtime: Runtime, delaySeconds: number): Promise<boolean> {
+  const reserved = await runtime.db.execute(sql`INSERT INTO job_schedule (workspace_id, next_wake_at)
+    VALUES (${runtime.config.workspaceId}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
+    ON CONFLICT (workspace_id) DO UPDATE SET next_wake_at = excluded.next_wake_at
+    WHERE job_schedule.next_wake_at IS NULL OR job_schedule.next_wake_at <= clock_timestamp()
+      OR job_schedule.next_wake_at > excluded.next_wake_at + interval '1 second'
+    RETURNING 1`);
+  return reserved.rows.length > 0;
+}
+// Drain, then make sure exactly one continuation covers the next due job. A queue invocation may wait in place for a
+// job due within keepAliveMs (paced campaigns release every 10-20 s) instead of relying on a delayed message; if it
+// is interrupted, its reservation expires and the next drain or the minute cron schedules again.
+export async function followDueJobs(runtime: Runtime, drain: () => Promise<unknown>, sendWake: (delaySeconds: number) => Promise<unknown>, keepAliveMs = 0): Promise<'idle' | 'covered' | 'scheduled'> {
+  const deadline = Date.now() + keepAliveMs;
+  for (;;) {
+    await drain();
+    const delaySeconds = await nextWakeDelay(runtime);
+    if (delaySeconds === null) return 'idle';
+    if (!await reserveNextWake(runtime, delaySeconds)) return 'covered';
+    const waitMs = Math.max(1000, delaySeconds * 1000);
+    if (Date.now() + waitMs + 2000 <= deadline) { await new Promise(resolve => setTimeout(resolve, waitMs)); continue; }
+    await sendWake(delaySeconds);
+    return 'scheduled';
+  }
+}

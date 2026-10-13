@@ -23,6 +23,7 @@ export const agentTokens = pgTable('agent_tokens', {
 export const jobSchedule = pgTable('job_schedule', {
   workspaceId: text('workspace_id').primaryKey(), turn: integer('turn').notNull().default(0),
   wakeNotBefore: timestamp('wake_not_before', { withTimezone: true, mode: 'string' }),
+  nextWakeAt: timestamp('next_wake_at', { withTimezone: true, mode: 'string' }),
 });
 export const jobs = pgTable('jobs', {
   id: text('id').primaryKey(), workspaceId: text('workspace_id').notNull(),
