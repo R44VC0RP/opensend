@@ -10,6 +10,8 @@ export type EmailSnapshot = {
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
+  /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
+  unsubscribeUrl?: string;
 };
 export type CampaignDraft = {
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
@@ -54,6 +56,8 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
   recipients: jsonb('recipients').$type<ReviewedRecipient[]>().notNull(), matched: integer('matched').notNull(), eligible: integer('eligible').notNull(), suppressed: integer('suppressed').notNull(), unsubscribed: integer('unsubscribed').notNull(),
   contentHash: text('content_hash').notNull(), createdAt: time('created_at').notNull().defaultNow(),
   storageVersion: integer('storage_version').notNull().default(1),
+  // Version of the per-recipient renderer (interpolation, preheader, footer) that must reproduce this review's emails.
+  rendererVersion: integer('renderer_version').notNull().default(1),
   status: text('status').$type<'pending' | 'processing' | 'ready' | 'failed'>().notNull().default('ready'),
   actorKeyId: text('actor_key_id'), processed: integer('processed').notNull().default(0),
   recipientBytes: bigint('recipient_bytes', { mode: 'number' }).notNull().default(0), preparedBytes: bigint('prepared_bytes', { mode: 'number' }).notNull().default(0),

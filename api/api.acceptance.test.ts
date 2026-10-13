@@ -1989,6 +1989,17 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Preview&quot;!'));
     assert.ok(!content.html.includes('<img src=x'));
     assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
+    // The sent row stores only a stub and its unsubscribe URL; the body above was rebuilt from the frozen review.
+    const db = await fixtureDatabase(t);
+    const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1 AND environment = 'test'", [messages[0].id])).rows;
+    assert.equal(stored.snapshot.html, undefined, 'Sent campaign emails must not persist rendered HTML.');
+    assert.equal(stored.snapshot.text, undefined);
+    assert.equal(stored.snapshot.deferredCampaign, true);
+    assert.match(stored.snapshot.unsubscribeUrl, /\/unsubscribe\/u_[A-Za-z0-9_-]+$/);
+    assert.ok(content.html.includes(stored.snapshot.unsubscribeUrl), 'The rebuilt body carries the unsubscribe link that was sent.');
+    assert.ok(content.text.endsWith(`Unsubscribe: ${stored.snapshot.unsubscribeUrl}`));
+    const token = stored.snapshot.unsubscribeUrl.slice(stored.snapshot.unsubscribeUrl.lastIndexOf('/') + 1);
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM operation_unsubscribe_tokens WHERE token_hash = encode(sha256(convert_to($1, 'UTF8')), 'hex')", [token])).rows[0].n, 1, 'The stored link is the one whose token was issued.');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: revised.revision, draft: { ...revised.draft, previewText: 'Too late' } }), 409, 'CAMPAIGN_LOCKED');
     assert.equal(ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret)).html, content.html);
     const current = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));

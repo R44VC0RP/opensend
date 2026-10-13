@@ -15,7 +15,7 @@ import { simulatedSes } from './adapters/simulated-ses.js';
 export type Mail = typeof emails.$inferSelect;
 type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient };
 type Leased = { mail: Mail; review: Review | null };
-type Prepared = Leased & { snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string } };
+type Prepared = Leased & { snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
@@ -164,9 +164,10 @@ async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<
   let mail = leased.mail;
   let rows: Awaited<ReturnType<typeof attachmentRows>> | undefined;
   let unsubscribe: Prepared['unsubscribe'];
+  let stored: Prepared['stored'];
   if (mail.snapshot.deferredCampaign) {
     const materialized = await materializeCampaignEmail(runtime, a, mail, leased.review);
-    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe;
+    mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
   const s = mail.snapshot;
   const parts: Attachment[] = [];
@@ -178,7 +179,7 @@ async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<
     : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } };
-  return { mail, review: leased.review, snapshot: s, content, unsubscribe };
+  return { mail, review: leased.review, snapshot: s, content, unsubscribe, stored };
 }
 
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
@@ -228,7 +229,7 @@ async function claimGroup(runtime: Runtime, a: Actor, prepared: Prepared[], orig
     id: item.mail.id, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, origin_allowed: origins.get(originKey(item)) ?? false,
     destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
-    marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.snapshot : null,
+    marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));

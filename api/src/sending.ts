@@ -671,7 +671,9 @@ export function registerSending(app: App) {
     return c.json(emailView(row ?? notFound('Email')), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
-    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id); const s = row.snapshot;
+    const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
+    // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
+    const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(c.env, a, row) : row.snapshot;
     const manage = a.permissions.includes('manage');
     // App-owned capabilities only, not a general sanitizer for transactional bearer links.
     // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
@@ -869,7 +871,7 @@ export function registerSending(app: App) {
       const rendered = renderCampaignContent(c.env, draft);
       const reviewId = id('review');
       const contentHash = await digest(canonical({ version: 2, draft: row.draft, rendered }));
-      await db.insert(campaignReviews).values({ id: reviewId, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: [], matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0, contentHash, storageVersion: 2, status: 'pending', actorKeyId: a.keyId, rendered });
+      await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: [], matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0, contentHash, storageVersion: 2, status: 'pending', actorKeyId: a.keyId, rendered });
       const propertyKeys = [...new Set([draft.subject, rendered.html ?? '', rendered.text ?? ''].flatMap(value => [...value.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)].map(match => match[1]!)))];
       const counts = await snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
       const [review] = await db.update(campaignReviews).set(counts).where(eq(campaignReviews.id, reviewId)).returning();
@@ -1000,7 +1002,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
       const rendered = renderCampaignContent(runtime, draft);
       reviewId = id('review');
       const contentHash = await digest(canonical({ version: 2, draft: row.draft, rendered }));
-      await db.insert(campaignReviews).values({ id: reviewId, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: [], matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0, contentHash, storageVersion: 2, status: 'pending', actorKeyId: a.keyId, rendered });
+      await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, environment: a.environment, campaignId, revision: row.revision, draft: row.draft, recipients: [], matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0, contentHash, storageVersion: 2, status: 'pending', actorKeyId: a.keyId, rendered });
       const propertyKeys = [...new Set([draft.subject, rendered.html ?? '', rendered.text ?? ''].flatMap(value => [...value.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)].map(match => match[1]!)))];
       const counts = await snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys);
       [active] = await db.update(campaignReviews).set(counts).where(eq(campaignReviews.id, reviewId)).returning();
@@ -1268,10 +1270,40 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   if (!review?.rendered || review.status !== 'ready' || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
   const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
   if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
-  const unsubscribe = await createUnsubscribeLink(runtime, a.workspaceId, a.environment, snapshot.to[0]!);
+  // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
+  const reused = mail.snapshot.unsubscribeUrl;
+  const unsubscribe = reused
+    ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, environment: a.environment, email: snapshot.to[0]!.trim().toLowerCase() } }
+    : await createUnsubscribeLink(runtime, a.workspaceId, a.environment, snapshot.to[0]!);
   marketingFooter(snapshot, unsubscribe.url);
   sizeCheck(snapshot, rows);
-  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record };
+  // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
+  // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
+  const stored: EmailSnapshot = { ...mail.snapshot, unsubscribeUrl: unsubscribe.url };
+  return { mail: { ...mail, snapshot }, rows, unsubscribe: unsubscribe.record, stored };
+}
+// Bump when interpolation, preheader or footer output changes, and keep the previous renderer for older reviews.
+export const CAMPAIGN_RENDERER_VERSION = 1;
+// Rebuilds a sent campaign email from its frozen review, recipient values and stored unsubscribe URL, and refuses to
+// show anything that does not match the hash of what was reviewed and sent.
+type SentReview = { draft: CampaignDraft; rendered: { html?: string; text?: string } | null; renderer_version: number; recipient: ReviewedRecipient; content_hash: string | null };
+export async function sentCampaignContent(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect): Promise<EmailSnapshot> {
+  if (!mail.reviewId || mail.reviewOrdinal === null || !mail.snapshot.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  const found = await runtime.db.execute<SentReview>(sql`
+    SELECT v.draft, v.rendered, v.renderer_version, r.recipient, r.content_hash
+    FROM sending_campaign_reviews v JOIN sending_review_recipients r ON r.review_id = v.id AND r.ordinal = ${mail.reviewOrdinal}
+    WHERE v.id = ${mail.reviewId} AND v.campaign_id = ${mail.campaignId} AND v.workspace_id = ${a.workspaceId} AND v.environment = ${a.environment}`);
+  return rebuildCampaignEmail(runtime, a, mail.snapshot, found.rows[0], await attachmentRows(runtime.db, a, mail.snapshot.attachments));
+}
+// Pure: no writes, no provider calls. Also used to verify stored bodies before they are dropped.
+export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: EmailSnapshot, review: SentReview | undefined, rows: (typeof attachments.$inferSelect)[]): Promise<EmailSnapshot> {
+  if (!review?.rendered || !review.content_hash) throw new ApiError(410, 'EMAIL_CONTENT_EXPIRED', 'The campaign review this email was rendered from has been retired.');
+  if (review.renderer_version !== CAMPAIGN_RENDERER_VERSION) throw new ApiError(409, 'CAMPAIGN_RENDERER_CHANGED', `This email was rendered by campaign renderer v${review.renderer_version}; this release only reproduces v${CAMPAIGN_RENDERER_VERSION}.`);
+  if (!stub.unsubscribeUrl) throw new ApiError(409, 'EMAIL_CONTENT_UNAVAILABLE', 'This campaign email has no stored content to rebuild.');
+  const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
+  if (await digest(canonical(snapshot)) !== review.content_hash) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
+  marketingFooter(snapshot, stub.unsubscribeUrl);
+  return snapshot;
 }
 const prepareCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.reviewId !== 'string' || typeof payload.campaignId !== 'string' || typeof payload.cursor !== 'number') throw new ApiError(422, 'INVALID_JOB', 'Campaign preparation requires a review and cursor.');
