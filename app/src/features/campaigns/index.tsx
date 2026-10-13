@@ -5,14 +5,14 @@ import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/conte
 import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, SendCampaignInput } from '../../data/types'
 import {
-  Alert, Button, ConfirmDialog, Dialog, EmptyState, ErrorState,
+  Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState,
   Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
   StatusBadge, Tabs, useToast,
 } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
-import { CampaignProgress, campaignPollInterval } from './CampaignProgress'
+import { CampaignPacing, CampaignProgress, campaignPollInterval, maxPerDay, minPerDay, perDayError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
@@ -367,8 +367,10 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const [error, setError] = useState('')
   const [confirmation, setConfirmation] = useState<SendCampaignInput | null>(null)
   const [testOpen, setTestOpen] = useState(false)
+  const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true })
   const guard = useRef(false)
   const api = useApi()
+
   const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
   const readinessError = campaignReadinessError(campaign)
   const reviewPolling = useRef<AbortController | null>(null)
@@ -382,6 +384,10 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     setReviewProgress(null)
     return api.review ? api.review(campaign.id, campaign.revision!, { signal: controller.signal, onProgress: setReviewProgress }) : {...await api.campaigns.audience({listId: campaign.listId, segmentId: campaign.segmentId}), id: 'demo', revision: campaign.revision ?? 1} as ReviewResult
   })
+  const perDay = Number(pace.perDay.trim().replaceAll(',', ''))
+  const paceError = pace.limit ? perDayError(perDay) : ''
+  const paceDays = pace.limit && !paceError && audience.data?.eligible ? Math.ceil(audience.data.eligible / perDay) : null
+  const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Releases up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
   function requestConfirmation() {
@@ -389,7 +395,10 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     if (readinessError) { setError(readinessError); return }
     setError('')
     if (audience.data && audience.data.eligible < 1) { setError('Choose an audience with at least one eligible contact before sending.'); return }
+    if (paceError) { setError(`Daily limit: ${paceError}`); return }
     const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', ...(audience.data ? { reviewId: audience.data.id } : {}), revision: audience.data?.revision ?? campaign.revision }
+    // Defaults (no daily limit, auto-pause on) need no pacing object.
+    if (pace.limit || !pace.autoPause) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause }
     if (mode === 'schedule') {
       // datetime-local has no offset: this field is explicitly UTC, never the browser's local zone.
       const parsed = new Date(`${scheduled}:00Z`)
@@ -408,7 +417,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     finally { guard.current = false }
   }
   return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster"><StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster"><StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit', api.environment)}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
@@ -424,11 +433,14 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
           </div>
           <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Refresh recipient count</Button>
           {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
-        </> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary">
+        </> : <>
+          <CampaignPacing key={`${campaign.id}:${campaign.expansion?.pacing?.perDay ?? ''}:${campaign.expansion?.pacing?.autoPause ?? ''}`} campaign={campaign} />
+          {campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
-          {campaign.expansion && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
+          {campaign.expansion && !campaign.expansion.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
           {['sent', 'completed'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
         </div>}
+        </>}
       </section>
       <section className="campaign-fields">
         <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
@@ -440,10 +452,17 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
       <SectionHeader title="Delivery" />
       <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
       {mode === 'schedule' && <div className="form-grid"><Field label="Time zone"><Input value="UTC (UTC+00:00)" readOnly aria-label="Time zone" /></Field><Field label="Date and time (UTC)" htmlFor="campaign-schedule"><Input id="campaign-schedule" type="datetime-local" value={scheduled} onChange={event => { setScheduled(event.target.value); setError('') }} disabled={sendMutation.isPending} /></Field></div>}
+      <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">
+        <div id="campaign-pacing-label" className="ui-field__label">Pace sending</div>
+        <Checkbox label="Limit per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
+        {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError} hint={paceDays ? `About ${paceDays} ${paceDays === 1 ? 'day' : 'days'} for ${number(audience.data!.eligible)} eligible recipients.` : undefined}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
+        <Checkbox label="Auto-pause on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />
+        <p className="muted">Sending also respects the SES daily quota.</p>
+      </div>
       {error && <Alert tone="danger">{error}</Alert>}
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC. OpenSend validates the complete audience before delivery.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now. OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>
 }

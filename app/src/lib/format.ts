@@ -16,3 +16,15 @@ export const formatNumber = number
 export const formatPercent = percent
 export const formatDate = date
 export const formatTime = time
+// Coarse, human-readable distance from now ("in 5 hours", "2 minutes ago"); best for estimates, not exact times.
+export function relativeTime(value: string | null | undefined, now = Date.now()) {
+  const at = Date.parse(value ?? '')
+  if (!Number.isFinite(at)) return '—'
+  const ms = at - now
+  const abs = Math.abs(ms)
+  if (abs < 60_000) return ms >= 0 ? 'in under a minute' : 'just now'
+  const format = new Intl.RelativeTimeFormat('en-US', { numeric: 'auto' })
+  if (abs < 3_600_000) return format.format(Math.round(ms / 60_000), 'minute')
+  if (abs < 172_800_000) return format.format(Math.round(ms / 3_600_000), 'hour')
+  return format.format(Math.round(ms / 86_400_000), 'day')
+}

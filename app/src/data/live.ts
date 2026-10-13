@@ -149,9 +149,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
       send: async (input, signal) => {
         if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
-        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {...(input.reviewId ? {reviewId: input.reviewId} : {}), revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {})}, signal)
+        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {...(input.reviewId ? {reviewId: input.reviewId} : {}), revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {})}, signal)
         return receipt as import('./types').CampaignSendReceipt
       },
+      pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
+      resume: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/resume`, 'POST', {}, signal)),
+      setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause})}, signal)),
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
     review: async (id, revision, options = {}) => {
