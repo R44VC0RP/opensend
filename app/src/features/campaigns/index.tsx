@@ -12,7 +12,7 @@ import {
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
-import { CampaignPacing, CampaignProgress, campaignPollInterval, maxPerDay, minPerDay, perDayError } from './CampaignProgress'
+import { CampaignPacing, CampaignProgress, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
@@ -367,7 +367,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const [error, setError] = useState('')
   const [confirmation, setConfirmation] = useState<SendCampaignInput | null>(null)
   const [testOpen, setTestOpen] = useState(false)
-  const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true })
+  const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '50' })
   const guard = useRef(false)
   const api = useApi()
 
@@ -387,7 +387,9 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const perDay = Number(pace.perDay.trim().replaceAll(',', ''))
   const paceError = pace.limit ? perDayError(perDay) : ''
   const paceDays = pace.limit && !paceError && audience.data?.eligible ? Math.ceil(audience.data.eligible / perDay) : null
-  const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Releases up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
+  const sharePercent = Number(pace.share.trim())
+  const shareError = ratePercentError(sharePercent)
+  const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Releases up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of the SES send rate.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const [receipt, setReceipt] = useState('')
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
   function requestConfirmation() {
@@ -396,9 +398,10 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     setError('')
     if (audience.data && audience.data.eligible < 1) { setError('Choose an audience with at least one eligible contact before sending.'); return }
     if (paceError) { setError(`Daily limit: ${paceError}`); return }
+    if (shareError) { setError(`Send rate: ${shareError}`); return }
     const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', ...(audience.data ? { reviewId: audience.data.id } : {}), revision: audience.data?.revision ?? campaign.revision }
-    // Defaults (no daily limit, auto-pause on) need no pacing object.
-    if (pace.limit || !pace.autoPause) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause }
+    // Defaults (no daily limit, auto-pause on, full send rate) need no pacing object.
+    if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
     if (mode === 'schedule') {
       // datetime-local has no offset: this field is explicitly UTC, never the browser's local zone.
       const parsed = new Date(`${scheduled}:00Z`)
@@ -434,7 +437,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
           <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Refresh recipient count</Button>
           {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
         </> : <>
-          <CampaignPacing key={`${campaign.id}:${campaign.expansion?.pacing?.perDay ?? ''}:${campaign.expansion?.pacing?.autoPause ?? ''}`} campaign={campaign} />
+          <CampaignPacing key={`${campaign.id}:${campaign.expansion?.pacing?.perDay ?? ''}:${campaign.expansion?.pacing?.autoPause ?? ''}:${campaign.expansion?.pacing?.rateShare ?? ''}`} campaign={campaign} />
           {campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
           {campaign.expansion && !campaign.expansion.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
@@ -456,6 +459,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
         <div id="campaign-pacing-label" className="ui-field__label">Pace sending</div>
         <Checkbox label="Limit per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
         {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError} hint={paceDays ? `About ${paceDays} ${paceDays === 1 ? 'day' : 'days'} for ${number(audience.data!.eligible)} eligible recipients.` : undefined}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
+        <Field label={`Use at most ${shareError ? 'N' : sharePercent}% of the SES send rate`} htmlFor="campaign-rate-share" error={shareError} hint="The rest stays free for transactional email and other campaigns."><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
         <Checkbox label="Auto-pause on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />
         <p className="muted">Sending also respects the SES daily quota.</p>
       </div>

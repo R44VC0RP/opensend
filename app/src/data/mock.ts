@@ -218,6 +218,9 @@ function campaignTotals(state: DemoState, campaign: Campaign): Campaign {
 function validPerDay(perDay: number | null | undefined) {
   if (perDay != null && (!Number.isInteger(perDay) || perDay < 100 || perDay > 10_000_000)) invalid('pacing.perDay', 'Daily limit must be a whole number from 100 to 10,000,000.')
 }
+function validRateShare(rateShare: number | undefined) {
+  if (rateShare !== undefined && (typeof rateShare !== 'number' || !Number.isFinite(rateShare) || rateShare < 0.05 || rateShare > 1)) invalid('pacing.rateShare', 'Send rate share must be from 0.05 to 1.')
+}
 function requireUnarchived(campaign: Campaign) {
   if (campaign.archivedAt != null) throw new ApiError('Restore this campaign before editing, reviewing, testing, or sending it.', 'CAMPAIGN_ARCHIVED', {}, undefined, 409)
 }
@@ -604,7 +607,7 @@ export function createMockApi(): OpenSendApi {
         requireUnarchived(campaign)
         if (campaign.status !== 'draft') throw new ApiError('This campaign has already been sent or scheduled.', 'conflict')
         if (input.mode !== 'now' && input.mode !== 'schedule') invalid('mode', 'Choose send now or schedule.')
-        if (input.pacing) validPerDay(input.pacing.perDay)
+        if (input.pacing) { validPerDay(input.pacing.perDay); validRateShare(input.pacing.rateShare) }
         const timezone = text(input.timezone, 'timezone', 100)
         try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format() } catch { invalid('timezone', 'Choose a valid IANA timezone.') }
         let scheduledAt: string | null = null
@@ -652,7 +655,7 @@ export function createMockApi(): OpenSendApi {
       // Demo sends finish instantly, so there is never an in-progress send to pause, resume, or re-pace.
       pause: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('Only a campaign that is still releasing recipients can be paused.', 'CAMPAIGN_NOT_PAUSABLE', {}, undefined, 409) }),
       resume: (campaignId, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); throw new ApiError('This campaign is not paused.', 'CAMPAIGN_NOT_PAUSED', {}, undefined, 409) }),
-      setPacing: (campaignId, input, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); validPerDay(input.perDay); throw new ApiError('Only a campaign that is still sending can change its daily limit.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409) }),
+      setPacing: (campaignId, input, signal) => run(signal, true, s => { find(s.campaigns, campaignId, 'Campaign'); validPerDay(input.perDay); validRateShare(input.rateShare); throw new ApiError('Only a campaign that is still sending can change its daily limit.', 'CAMPAIGN_NOT_SENDING', {}, undefined, 409) }),
     },
     templates: {
       list: (input = {}, signal) => run(signal, false, s => page((s.templates ??= []).filter(template => (template.archivedAt != null) === (input.archived === true) && (!input.publishedOnly || template.published)).map(template => ({id: template.id, url: template.url, revision: template.revision, name: template.draft.name, description: template.draft.description, subject: template.draft.subject, published: !!template.published, publishedRevision: template.publishedRevision, archivedAt: template.archivedAt, createdAt: template.createdAt, updatedAt: template.updatedAt})), input, template => `${template.name} ${template.description}`)),

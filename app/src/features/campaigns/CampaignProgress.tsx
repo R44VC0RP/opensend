@@ -10,6 +10,11 @@ export const heldInterval = 60_000
 export const minPerDay = 100
 export const maxPerDay = 10_000_000
 export const perDayError = (value: number) => Number.isInteger(value) && value >= minPerDay && value <= maxPerDay ? '' : `Enter a whole number from ${number(minPerDay)} to ${number(maxPerDay)}.`
+// Rate share is edited as a whole percent of the SES per-second send rate; the API takes a 0.05–1 fraction.
+export const minRatePercent = 5
+export const maxRatePercent = 100
+export const ratePercentError = (value: number) => Number.isInteger(value) && value >= minRatePercent && value <= maxRatePercent ? '' : `Enter a whole percent from ${minRatePercent} to ${maxRatePercent}.`
+const ratePercent = (share?: number) => Math.round((share ?? 1) * 100)
 const releasing = (expansion?: CampaignExpansion | null) => expansion?.status === 'pending' || expansion?.status === 'expanding'
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (expansion?: CampaignExpansion | null) => expansion?.status === 'paused' || (releasing(expansion) && Boolean(expansion?.waiting))
@@ -77,6 +82,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const active = releasing(expansion)
   const [limit, setLimit] = useState(() => pacing?.perDay ? String(pacing.perDay) : '')
   const [autoPause, setAutoPause] = useState(pacing?.autoPause ?? true)
+  const [share, setShare] = useState(() => String(ratePercent(pacing?.rateShare)))
   const [error, setError] = useState('')
   // Each action returns the full campaign; write it into the cache instead of refetching everything.
   const campaignKey = ['opensend', api.mode, api.environment, 'campaign', campaign.id]
@@ -100,17 +106,23 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const trimmed = limit.trim()
   const nextPerDay = trimmed ? Number(trimmed.replaceAll(',', '')) : null
   const limitError = nextPerDay === null ? '' : perDayError(nextPerDay)
-  const changed = nextPerDay !== (pacing?.perDay ?? null) || autoPause !== (pacing?.autoPause ?? true)
+  const nextPercent = Number(share.trim())
+  const shareError = ratePercentError(nextPercent)
+  // Compare in whole percents so an unrounded API value is not resent unless edited.
+  const shareChanged = nextPercent !== ratePercent(pacing?.rateShare)
+  const changed = nextPerDay !== (pacing?.perDay ?? null) || autoPause !== (pacing?.autoPause ?? true) || shareChanged
   function save(event: FormEvent) {
     event.preventDefault()
     if (busy || !changed) return
-    if (limitError) { setError(limitError); return }
-    void run(() => update.mutateAsync({ perDay: nextPerDay, autoPause }))
+    if (limitError) { setError(`Daily limit: ${limitError}`); return }
+    if (shareError) { setError(`Send rate: ${shareError}`); return }
+    void run(() => update.mutateAsync({ perDay: nextPerDay, autoPause, ...(shareChanged ? { rateShare: nextPercent / 100 } : {}) }))
   }
   if (!expansion || (!paused && !active && !pacing?.perDay)) return null
   const perDay = pacing?.perDay ?? null
   const released = `${number(expansion.expanded)} of ${number(expansion.total)} released`
   const nextSlice = perDay && pacing?.nextWindowAt && (active || paused) ? ` · next slice ${relativeTime(pacing.nextWindowAt)}` : ''
+  const rateShare = pacing?.rateShare != null && pacing.rateShare < 1 ? ` · up to ${ratePercent(pacing.rateShare)}% of send rate` : ''
   return <div className="campaign-pacing">
     {paused && <Alert tone="warning" title="Sending paused">
       <div className="campaign-pacing-banner">
@@ -119,7 +131,7 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       </div>
     </Alert>}
     <div className="campaign-summary-line">
-      <span>{perDay ? <>{released} · {number(perDay)}/day{nextSlice && <span title={atUtc(pacing!.nextWindowAt!)}>{nextSlice}</span>}</> : released}</span>
+      <span>{perDay ? <>{released} · {number(perDay)}/day{nextSlice && <span title={atUtc(pacing!.nextWindowAt!)}>{nextSlice}</span>}</> : released}{rateShare}</span>
       {active && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
     </div>
     {perDay && (active || paused) && <div className="campaign-summary-line muted"><span>Released in this 24-hour slice</span><span>{number(pacing?.windowExpanded ?? 0)} / {number(perDay)}</span></div>}
@@ -128,6 +140,8 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
       <div className="campaign-pacing-limit">
         <label htmlFor="campaign-pacing-limit" className="muted">Daily limit</label>
         <Input id="campaign-pacing-limit" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} placeholder="No limit" value={limit} aria-invalid={Boolean(limitError) || undefined} onChange={event => { setLimit(event.target.value); setError('') }} disabled={busy} />
+        <label htmlFor="campaign-pacing-share" className="muted">Max send rate %</label>
+        <Input id="campaign-pacing-share" className="campaign-pacing-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={share} aria-invalid={Boolean(shareError) || undefined} onChange={event => { setShare(event.target.value); setError('') }} disabled={busy} />
         <Button type="submit" size="sm" loading={update.isPending} disabled={busy || !changed}>Save</Button>
       </div>
       <Checkbox label="Auto-pause on high bounces or complaints" checked={autoPause} onCheckedChange={value => { setAutoPause(value); setError('') }} disabled={busy} />

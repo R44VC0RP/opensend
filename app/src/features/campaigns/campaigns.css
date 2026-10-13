@@ -80,7 +80,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing .campaign-summary-line { align-items: center; }
 .campaign-pacing-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-12); }
 .campaign-pacing-form { display: flex; flex-direction: column; gap: var(--space-4); }
-.campaign-pacing-limit { display: flex; align-items: center; gap: var(--space-8); }
+.campaign-pacing-limit { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
 .campaign-pacing-limit .ui-input { width: 140px; }
+.campaign-pacing-limit .ui-input.campaign-pacing-share { width: 88px; }
 .campaign-pacing-options { display: flex; flex-direction: column; gap: var(--space-4); }
 .campaign-pacing-options .ui-field { max-width: 240px; }

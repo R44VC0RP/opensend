@@ -47,13 +47,14 @@ export type SegmentInput = Pick<Segment, 'name' | 'match' | 'rules' | 'rule'> & 
 export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; contacts: Contact[] }
 export type CampaignPreview = { html: string; text: string }
 export interface Campaign { counts?: { total: number; byStatus: Record<string, number> }; expansion?: CampaignExpansion | null; archivedAt?: ISODate | null; revision?: number; reviewId?: string | null; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; timezone: string; recipients: number; delivered: number; bounced: number; complaints: number }
-// pacing, pausedAt, pauseReason, and waiting are optional so older API responses still type-check.
-export interface CampaignPacing { perDay: number | null; autoPause: boolean; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
+// pacing, pausedAt, pauseReason, waiting, and rateShare are optional so older API responses still type-check.
+// rateShare is the fraction (0.05–1) of the SES per-second send rate the campaign may use; 1 is the full rate.
+export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
 export interface CampaignExpansion { status: 'pending' | 'expanding' | 'paused' | 'completed' | 'failed' | 'canceled'; total: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota'; until: ISODate } | null }
-export interface CampaignPacingInput { perDay: number | null; autoPause?: boolean }
+export interface CampaignPacingInput { perDay: number | null; autoPause?: boolean; rateShare?: number }
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; reviewId: string | null; scheduledAt: ISODate | null; archivedAt: ISODate | null }
-export interface SendCampaignInput { reviewId?: string; revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean } }
+export interface SendCampaignInput { reviewId?: string; revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
 export interface ApiKey { environment?: 'live' | 'test'; revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
 export interface ApiKeyInput { environment?: 'live' | 'test'; name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }

@@ -154,7 +154,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       },
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
       resume: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/resume`, 'POST', {}, signal)),
-      setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause})}, signal)),
+      setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause}), ...(input.rateShare === undefined ? {} : {rateShare: input.rateShare})}, signal)),
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
     },
     review: async (id, revision, options = {}) => {
