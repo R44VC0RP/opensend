@@ -105,36 +105,49 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   if (lockedLists.length !== listIds.length) notFound('List');
   const lockedSegments = segmentIds.length ? await db.select().from(segments).where(and(scope(segments, identity), inArray(segments.id, segmentIds))).orderBy(asc(segments.id)).for('share') : [];
   if (lockedSegments.length !== segmentIds.length) notFound('Segment');
-  const conditions = [inList(identity, spec.listId)];
+  // Set-based membership (no OFFSET 0 fence) lets the planner hash-join millions of members instead of probing per contact.
+  const member = (listId: string) => sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
+  const conditions = [member(spec.listId)];
   if (spec.segmentId) conditions.push(compileRule(lockedSegments.find(row => row.id === spec.segmentId)!.rule));
-  for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${inList(identity, listId)})`);
+  for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${member(listId)})`);
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
+  // Hyperdrive ends any statement after 60 seconds, so a large audience (up to 2,000,000 contacts) is captured
+  // in several bounded statements inside the caller's transaction: matching contacts are staged in 16 contact-ID
+  // ranges, ordered once, then inserted in ordinal chunks. Each contact is evaluated exactly once.
+  await db.execute(sql`SET LOCAL work_mem = '256MB'`);
+  await db.execute(sql`CREATE TEMP TABLE audience_snapshot (rank integer NOT NULL, id text NOT NULL, recipient jsonb NOT NULL, eligible boolean NOT NULL, suppressed boolean NOT NULL) ON COMMIT DROP`);
+  const bounds = ['', ...'123456789abcdef'.split('').map(digit => `con_${digit}`), null];
+  let staged = 0;
+  for (let index = 0; index < bounds.length - 1; index++) {
+    const lower = bounds[index]!, upper = bounds[index + 1];
+    const chunk = await db.execute(sql`INSERT INTO audience_snapshot (rank, id, recipient, eligible, suppressed)
+      SELECT ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`},
+        ${contacts.id}, jsonb_strip_nulls(jsonb_build_object('id', ${contacts.id}, 'email', ${contacts.email}, 'name', nullif(CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END, ''),
+          'properties', ${propertyKeys.length ? sql`coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
+            WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb)` : sql`'{}'::jsonb`})),
+        NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed', ${contacts.suppressed}
+      FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), sql`${contacts.id} >= ${lower}`, upper ? sql`${contacts.id} < ${upper}` : undefined, ...conditions)}`);
+    staged += chunk.rowCount ?? 0;
+    if (staged > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
+  }
+  // One sort assigns the send order (priority, then contact ID) and the running size used for the 1 GiB cap.
+  await db.execute(sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS
+    SELECT (row_number() OVER w)::int AS ordinal, recipient, bytes, sum(bytes) OVER w AS running_bytes
+    FROM (SELECT rank, id, recipient, octet_length(recipient::text) AS bytes FROM audience_snapshot WHERE eligible) e
+    WINDOW w AS (ORDER BY rank, id ROWS UNBOUNDED PRECEDING)`);
+  const [{ eligibleRows }] = (await db.execute<{ eligibleRows: number }>(sql`SELECT count(*)::int AS "eligibleRows" FROM audience_ordered`)).rows as [{ eligibleRows: number }];
+  for (let from = 0; from < eligibleRows; from += 200000) {
+    await db.execute(sql`INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
+      SELECT ${reviewId}, ordinal, recipient, bytes FROM audience_ordered
+      WHERE ordinal > ${from} AND ordinal <= ${from + 200000} AND bytes <= 1048576 AND running_bytes <= 1073741824`);
+  }
   const result = await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string; captured: number }>(sql`
-    WITH matched AS MATERIALIZED (
-      SELECT ${contacts.id} AS id, ${contacts.email} AS email, CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END AS name,
-        ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS consent,
-        coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
-          WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb) AS properties,
-        ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`} AS rank
-      FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}
-      ORDER BY ${contacts.id} LIMIT 2000001
-    ), eligible AS (
-      SELECT row_number() OVER (ORDER BY rank, id ROWS UNBOUNDED PRECEDING)::int AS ordinal,
-        jsonb_strip_nulls(jsonb_build_object('id', id, 'email', email, 'name', nullif(name, ''), 'properties', properties)) AS recipient
-      FROM matched WHERE NOT suppressed AND consent = 'subscribed'
-    ), sized AS (
-      SELECT *, octet_length(recipient::text) AS bytes,
-        sum(octet_length(recipient::text)) OVER (ORDER BY ordinal ROWS UNBOUNDED PRECEDING) AS running_bytes FROM eligible
-    ), captured AS (
-      INSERT INTO sending_review_recipients(review_id, ordinal, recipient, recipient_bytes)
-      SELECT ${reviewId}, ordinal, recipient, bytes FROM sized WHERE bytes <= 1048576 AND running_bytes <= 1073741824
-      RETURNING recipient_bytes
-    ) SELECT count(*)::int AS matched,
-      count(*) FILTER (WHERE NOT suppressed AND consent = 'subscribed')::int AS eligible,
-      count(*) FILTER (WHERE suppressed)::int AS suppressed,
-      count(*) FILTER (WHERE NOT suppressed AND consent <> 'subscribed')::int AS unsubscribed,
-      (SELECT count(*)::int FROM captured) AS captured,
-      (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM captured) AS bytes FROM matched`);
+    SELECT (SELECT count(*)::int FROM audience_snapshot) AS matched,
+      (SELECT count(*) FILTER (WHERE eligible)::int FROM audience_snapshot) AS eligible,
+      (SELECT count(*) FILTER (WHERE suppressed)::int FROM audience_snapshot) AS suppressed,
+      (SELECT count(*) FILTER (WHERE NOT suppressed AND NOT eligible)::int FROM audience_snapshot) AS unsubscribed,
+      (SELECT count(*)::int FROM sending_review_recipients WHERE review_id = ${reviewId}) AS captured,
+      (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM sending_review_recipients WHERE review_id = ${reviewId}) AS bytes`);
   const row = result.rows[0]!;
   if (row.matched > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   if (row.captured !== row.eligible) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');

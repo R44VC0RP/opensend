@@ -60,7 +60,8 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
 }, t => [index('sending_review_campaign').on(t.workspaceId, t.environment, t.campaignId)]);
 // Recipient values are copied once from one database snapshot; no live contact joins during preparation or expansion.
 export const reviewRecipients = pgTable('sending_review_recipients', {
-  reviewId: text('review_id').notNull().references(() => campaignReviews.id, { onDelete: 'cascade' }),
+  // No foreign key (migration 026): a statement-level trigger on reviews cascades deletes without a per-row insert check.
+  reviewId: text('review_id').notNull(),
   ordinal: integer('ordinal').notNull(), recipient: jsonb('recipient').$type<ReviewedRecipient>().notNull(),
   recipientBytes: integer('recipient_bytes').notNull(), contentHash: text('content_hash'), subject: text('subject'), snapshotBytes: integer('snapshot_bytes'),
 }, t => [primaryKey({ columns: [t.reviewId, t.ordinal] })]);
