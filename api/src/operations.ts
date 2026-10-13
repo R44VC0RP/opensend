@@ -398,8 +398,9 @@ function registerMetrics(app: App) {
   const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day') }).openapi('MetricsQuery');
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(bucket), hourly: z.array(bucket).optional() }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
+    const compute = async () => {
     const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     // Collapse events to one row of outcome flags per email before joining, so each cohort email joins at
@@ -448,8 +449,48 @@ function registerMetrics(app: App) {
       }
       daily = [...days.values()];
     }
-    return c.json({ basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) }, 200);
+    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) };
+    };
+    // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
+    // 60-second cache per workspace/environment/filters/window; API keys, MCP and agent tokens stay exact.
+    if (a.credential !== 'dashboard') return c.json(await compute(), 200);
+    const startMs = Date.parse(start), endMs = Date.parse(end), nowMs = Date.now();
+    // "Last N days/hours as of now" windows move every request; bucket them by minute and window length.
+    const window = Math.abs(nowMs - endMs) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round((endMs - startMs) / 60_000)}` : `abs:${start}:${end}`;
+    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, a.environment, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
+    c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
+    return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });
+}
+
+const METRICS_CACHE_SECONDS = 60;
+const metricsMemory = new Map<string, { expires: number; value: unknown }>();
+const metricsInflight = new Map<string, Promise<unknown>>();
+// Per-isolate memory first, then the colo-wide Workers Cache API when present (absent on Node).
+// Concurrent identical requests in one isolate share a single database query.
+async function cachedMetrics(origin: string, key: string, compute: () => Promise<unknown>): Promise<{ value: unknown; hit: boolean }> {
+  const now = Date.now(), memory = metricsMemory.get(key);
+  if (memory && memory.expires > now) return { value: memory.value, hit: true };
+  const pending = metricsInflight.get(key);
+  if (pending) return { value: await pending, hit: true };
+  const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+  const request = new Request(`${origin}/__cache/metrics/${await digest(key)}`);
+  const remember = (value: unknown) => {
+    if (metricsMemory.size >= 500) metricsMemory.delete(metricsMemory.keys().next().value!);
+    metricsMemory.set(key, { expires: Date.now() + METRICS_CACHE_SECONDS * 1000, value });
+  };
+  if (cache) {
+    const hit = await cache.match(request).catch(() => undefined);
+    if (hit) { const value = await hit.json(); remember(value); return { value, hit: true }; }
+  }
+  const work = compute();
+  metricsInflight.set(key, work);
+  try {
+    const value = await work;
+    remember(value);
+    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${METRICS_CACHE_SECONDS}` } })).catch(() => undefined);
+    return { value, hit: false };
+  } finally { metricsInflight.delete(key); }
 }
 
 const webhookJob: JobHandler = async (runtime, payload, job) => {
