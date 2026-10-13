@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { bigint, boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
@@ -28,7 +29,7 @@ export const emails = pgTable('sending_emails', {
   attemptStartedAt: time('attempt_started_at'), errorCode: text('error_code'), scheduledAt: time('scheduled_at'), dispatchVersion: integer('dispatch_version').notNull().default(0),
   leaseUntil: time('lease_until'),
   createdAt: time('created_at').notNull().defaultNow(), updatedAt: time('updated_at').notNull().defaultNow(),
-}, t => [index('sending_emails_page').on(t.workspaceId, t.environment, t.id), index('sending_emails_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_emails_campaign').on(t.workspaceId, t.environment, t.campaignId), uniqueIndex('sending_emails_provider').on(t.workspaceId, t.environment, t.region, t.providerId), uniqueIndex('sending_emails_review_recipient').on(t.reviewId, t.reviewOrdinal)]);
+}, t => [index('sending_emails_page').on(t.workspaceId, t.environment, t.id), index('sending_emails_created_page').on(t.workspaceId, t.environment, t.createdAt.desc(), t.id.desc()), index('sending_emails_kind_created').on(t.workspaceId, t.environment, sql`(${t.snapshot}->>'kind')`, t.createdAt), index('sending_emails_campaign').on(t.workspaceId, t.environment, t.campaignId), uniqueIndex('sending_emails_provider').on(t.workspaceId, t.environment, t.region, t.providerId), uniqueIndex('sending_emails_review_recipient').on(t.reviewId, t.reviewOrdinal)]);
 export const emailEvents = pgTable('sending_email_events', {
   id: text('id').primaryKey(), ...scope(), emailId: text('email_id').notNull(), type: text('type').notNull(), providerId: text('provider_id'),
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
