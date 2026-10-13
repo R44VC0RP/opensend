@@ -16,9 +16,10 @@ const ListInput = z.object({ name: z.string().trim().min(1).max(200), descriptio
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
 const ContactRead = Contact.extend({ listIds: z.array(z.string()) }).openapi('ContactRead');
 const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
-const ListRead = z.object({ ...List.shape, counts: ListCounts }).strict().openapi('ContactListRead');
+const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
-const ContactQuery = SearchQuery.extend({ consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
+const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.') }).openapi('ListContactListsQuery');
+const ContactQuery = SearchQuery.extend({ email: z.string().trim().email().max(320).transform(v => v.toLowerCase()).optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 const RuleLeaf = z.union([z.object({ field: z.enum(['email', 'firstName', 'plan', 'country']), operator: z.enum(['eq', 'neq', 'contains']), value: z.string().max(200) }).strict(), z.object({ field: z.enum(['lastOpenAt', 'lastClickAt']), operator: z.enum(['within', 'inactive']), days: z.number().int().min(1).max(730) }).strict()]);
 // Finite-depth schemas remain fully representable in OpenAPI; no recursive lazy schema.
 let ruleSchema: z.ZodType<SegmentRule> = RuleLeaf;
@@ -48,7 +49,7 @@ async function findSegment(db: DbExecutor, identity: Actor, segmentId: string) {
 // Literal substring search: %, _ and backslash have no wildcard meaning.
 function searchText(column: AnyPgColumn, search: string): SQL { return sql`strpos(lower(${column}), lower(${search})) > 0`; }
 function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>) {
-  return [query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  return [query.email ? eq(contacts.email, query.email) : undefined, query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
 async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>) {
   if (!rows.length) return [];
@@ -258,9 +259,9 @@ export function registerAudience(app: App) {
     const rows = await c.env.db.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId), query.cursor ? gt(consentAudit.id, query.cursor) : undefined)).orderBy(asc(consentAudit.id)).limit(query.limit + 1);
     return c.json(paginate(rows, query.limit), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/lists', operationId: 'listContactLists', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(ListRead)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/lists', operationId: 'listContactLists', tags: ['Audience'], security, request: { query: ListQuery }, responses: { 200: response(page(ListRead)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(lists).where(and(scope(lists, identity), query.search ? searchText(lists.name, query.search) : undefined, query.cursor ? gt(lists.id, query.cursor) : undefined)).orderBy(asc(lists.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit); return c.json({ ...result, data: await readLists(c.env.db, identity, result.data) }, 200);
+    const result = paginate(rows, query.limit); return c.json({ ...result, data: query.counts === 'false' ? result.data.map(row => ({ ...row, counts: null })) : await readLists(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists', operationId: 'createContactList', tags: ['Audience'], security, request: { body: json(ListInput) }, responses: { 201: response(List), ...errors } }), async c => {
     const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(lists).values({ id: id('lst'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(row!, 201);

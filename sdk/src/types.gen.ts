@@ -109,7 +109,7 @@ export type ContactListRead = {
         unsubscribed: number;
         unknown: number;
         suppressed: number;
-    };
+    } | null;
 };
 
 export type ContactList = {
@@ -2603,6 +2603,10 @@ export type ListContactsData = {
         cursor?: string;
         limit?: number;
         search?: string;
+        /**
+         * Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.
+         */
+        email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
         listId?: string;
@@ -3090,6 +3094,10 @@ export type ListContactListsData = {
         cursor?: string;
         limit?: number;
         search?: string;
+        /**
+         * false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.
+         */
+        counts?: 'true' | 'false';
     };
     url: '/v1/lists';
 };
@@ -3419,6 +3427,10 @@ export type ListListMembersData = {
         cursor?: string;
         limit?: number;
         search?: string;
+        /**
+         * Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.
+         */
+        email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
     };

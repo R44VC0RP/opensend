@@ -509,7 +509,10 @@
             "type": "string"
           },
           "counts": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "properties": {
               "total": {
                 "type": "integer"
@@ -9990,6 +9993,18 @@
           {
             "schema": {
               "type": "string",
+              "maxLength": 320,
+              "format": "email",
+              "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address."
+            },
+            "required": false,
+            "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.",
+            "name": "email",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "enum": [
                 "unknown",
                 "subscribed",
@@ -11380,6 +11395,21 @@
             "required": false,
             "name": "search",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "true",
+              "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list."
+            },
+            "required": false,
+            "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.",
+            "name": "counts",
+            "in": "query"
           }
         ],
         "responses": {
@@ -12248,6 +12278,18 @@
             },
             "required": false,
             "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 320,
+              "format": "email",
+              "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address."
+            },
+            "required": false,
+            "description": "Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.",
+            "name": "email",
             "in": "query"
           },
           {
