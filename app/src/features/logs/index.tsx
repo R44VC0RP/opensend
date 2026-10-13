@@ -37,7 +37,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
   useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
   const params = { regionId, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
-  const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal))
+  const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal), { interval: 30_000 })
   return <div className="logs-page"><LogsHeader regionId={regionId} view="sent" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
@@ -67,7 +67,7 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
   const pagination = useCursorPagination()
   const { pageSize, tableRef } = useAdaptivePageSize(5, 100)
   const cursor = pagination.cursor
-  const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal))
+  const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000 })
   if (api.environment === 'test') return <div className="logs-page"><LogsHeader regionId={regionId} view="received" /><Alert tone="info">Received mail is live-only. Switch to live mode to see it.</Alert></div>
   return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>
@@ -131,9 +131,11 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   </div>
 }
 
+// Statuses that can still change without user action; terminal emails are not polled.
+const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['email', id], (api, signal) => api.emails.get(id, signal))
+  const query = useApiQuery(['email', id], (api, signal) => api.emails.get(id, signal), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false })
   if (query.isPending) return <EmailDetailSkeleton />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return query.data ? <EmailDetail email={query.data} /> : null
@@ -149,7 +151,7 @@ function EmailDetail({ email }: { email: Email }) {
   const hasHtml = email.html.trim().length > 0
   const plainText = email.text ?? (api.mode === 'demo' && hasHtml ? htmlToText(email.html) : '')
   const hasPlainText = plainText.trim().length > 0
-  const contacts = useApiQuery(['contact-for-email', email.to], (api, signal) => api.contacts.list({ search: email.to, pageSize: 10 }, signal))
+  const contacts = useApiQuery(['contact-for-email', email.to], (api, signal) => api.contacts.list({ email: email.to, pageSize: 1 }, signal))
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
   return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
     <dl className="email-metadata"><div><dt>To</dt><dd>{email.to}</dd></div><div><dt>From</dt><dd>{email.fromName ? `${email.fromName} <${email.from}>` : email.from}</dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>

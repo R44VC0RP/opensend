@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
@@ -11,7 +12,7 @@ import {
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, number, time } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
-import { CampaignProgress } from './CampaignProgress'
+import { CampaignProgress, campaignPollInterval } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 export { CampaignsPage } from './CampaignList'
 import './campaigns.css'
@@ -127,7 +128,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const [optionCursors, setOptionCursors] = useState<{lists?: string; domains?: string}>({})
   const options = useApiQuery(['campaign-options', { pageSize: 100, ...optionCursors }], async (api, signal) => {
     const [listPage, domainPage] = await Promise.all([
-      api.lists.list({ pageSize: 100, cursor: optionCursors.lists }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({pageSize: 100, cursor: optionCursors.domains, refresh: false}, signal),
+      api.lists.list({ pageSize: 100, cursor: optionCursors.lists, counts: false }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({pageSize: 100, cursor: optionCursors.domains, refresh: false}, signal),
     ])
     const lists = listPage.items, domains = domainPage.items
     return { lists, domains: domains.filter(domain => domain.status === 'verified'), next: {lists: listPage.nextCursor, domains: domainPage.nextCursor} }
@@ -135,7 +136,9 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const previousOptions = useRef<typeof options.data>(undefined)
   if (options.data) previousOptions.current = options.data
   const choices = options.data ?? previousOptions.current ?? { lists: [], domains: [], next: { lists: null, domains: null } }
-  const saveMutation = useApiMutation((api, input: CampaignInput) => api.campaigns.save(input))
+  const cache = useQueryClient()
+  // Saves write the campaign into the cache instead of refetching every query on each autosave.
+  const saveMutation = useApiMutation((api, input: CampaignInput) => api.campaigns.save(input), undefined, false, false)
   const pending = preparing || autosaving || attachmentsBusy || composerBusy || saveMutation.isPending || loadingLatest
   busyRef.current = pending
   const markDirty = useCallback(() => { editVersion.current += 1; setEdits(editVersion.current); dirtyRef.current = true; setDirty(true); setError('') }, [])
@@ -235,6 +238,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
+      cache.setQueryData(['opensend', api.mode, api.environment, 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['opensend', api.mode, api.environment, 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
@@ -339,7 +344,7 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
 
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
-  const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal))
+  const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <>

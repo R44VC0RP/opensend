@@ -5,6 +5,7 @@ import { Button, DataTable, EmptyState, ErrorState, Input, PageHeader, Paginatio
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
+import { campaignPollInterval } from './CampaignProgress'
 import './campaigns.css'
 
 const campaignPath = (campaign: Campaign, environment?: 'live' | 'test') => `/campaigns/${encodeURIComponent(campaign.id)}/${!campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status) ? 'edit' : 'review'}${environment ? `?environment=${environment}` : ''}`
@@ -20,7 +21,10 @@ export function CampaignsPage() {
   const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const pageSize = 10
   const request = { search, archived, status: status === 'all' ? undefined : status, page, pageSize }
-  const query = useApiQuery(['campaigns', request], (api, signal) => api.campaigns.list(request, signal))
+  const query = useApiQuery(['campaigns', request], (api, signal) => api.campaigns.list(request, signal), { interval: data => {
+    const intervals = (data?.items ?? []).map(campaignPollInterval).filter((value): value is number => value !== false)
+    return intervals.length ? Math.max(15_000, Math.min(...intervals)) : false
+  } })
   const filtered = Boolean(search || status !== 'all')
   function filter(key: string, value: string) {
     setParams(previous => { const next = new URLSearchParams(previous); value ? next.set(key, value) : next.delete(key); next.delete('page'); return next })

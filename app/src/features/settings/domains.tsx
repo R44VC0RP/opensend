@@ -76,7 +76,7 @@ function LiveDomainsPage() {
 function LiveDomainDetailPage() {
   const { id = '' } = useParams()
   const { regionId, setRegionId } = useRegion()
-  const domain = useApiQuery(['domain', id], (api, signal) => api.domains.get(id, signal))
+  const domain = useApiQuery(['domain', id], (api, signal) => api.domains.get(id, signal), { interval: domain => domain?.status === 'pending' || domain?.mailFromStatus === 'pending' ? 60_000 : false })
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Domain readiness refreshed', true)
   const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true)
   const [mailFromOpen, setMailFromOpen] = useState(false)
@@ -135,7 +135,7 @@ function LiveDomainDetailPage() {
 const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state === 'active' ? 'success' : state === 'missing' || state === 'error' ? 'info' : 'warning'
 
 function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
-  const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal))
+  const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
   const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Mailbox setup started')
   const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off')
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')

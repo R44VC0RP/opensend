@@ -13,7 +13,7 @@ export function fieldError(error: unknown, field: string) { return error instanc
 export function MutationError({ error }: { error: unknown }) { return error ? <Alert tone="danger">{error instanceof Error ? error.message : 'The request could not be completed.'}</Alert> : null }
 export function useAudienceLists(search = '', cursor?: string) {
   return useApiQuery(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {
-    const page = await api.lists.list({pageSize: 100, search, cursor}, signal)
+    const page = await api.lists.list({pageSize: 100, search, cursor, counts: false}, signal)
     return Object.assign(page.items, {nextCursor: page.nextCursor ?? null})
   })
 }

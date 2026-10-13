@@ -24,7 +24,7 @@ function LiveMailboxesPage() {
   const [search, setSearch] = useState('')
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
-  const mailboxes = useApiQuery(['mailboxes', search, cursor], (api, signal) => api.mailboxes.list({ search: search.trim() || undefined, cursor }, signal))
+  const mailboxes = useApiQuery(['mailboxes', search, cursor], (api, signal) => api.mailboxes.list({ search: search.trim() || undefined, cursor }, signal), { interval: 60_000 })
   const domains = useApiQuery(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal))
   return <div className="stack">
     <PageHeader title="Mailboxes" actions={<><Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Mailbox keys</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/mailboxes/webhooks">Webhooks</Link></>} />

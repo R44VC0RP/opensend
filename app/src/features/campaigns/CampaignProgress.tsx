@@ -1,6 +1,18 @@
 import type { Campaign } from '../../data/types'
 import { number } from '../../lib/format'
 
+export const liveInterval = 3000
+// Poll only while a send can still change; a future schedule waits until it is due.
+export function campaignPollInterval(campaign?: Pick<Campaign, 'status' | 'scheduledAt' | 'expansion'> | null): number | false {
+  if (!campaign) return false
+  if (campaign.status === 'sending') return liveInterval
+  if (campaign.status === 'scheduled') {
+    const due = Date.parse(campaign.scheduledAt ?? '') - Date.now()
+    return due > liveInterval ? Math.min(due, 2_147_483_647) : liveInterval
+  }
+  return campaign.expansion?.status === 'pending' || campaign.expansion?.status === 'expanding' ? liveInterval : false
+}
+
 export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   if (!campaign.counts) return null
   const { total: materialized, byStatus } = campaign.counts
@@ -26,6 +38,6 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
     <p className="muted">Processed means no longer queued or processing, including failed and canceled emails. It does not mean delivered.</p>
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
-    <p className="muted">Updates every 3 seconds.</p>
+    {campaignPollInterval(campaign) === liveInterval && <p className="muted">Updates every 3 seconds.</p>}
   </div>
 }

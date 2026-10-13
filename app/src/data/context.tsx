@@ -59,11 +59,13 @@ export function useApi() {
   if (!api) throw new Error('ApiProvider is required')
   return api
 }
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll: { interval: number, background: boolean } = { interval: 3000, background: true }) {
+// Polling is opt-in and foreground-only; pass a function to poll only while the data is in progress.
+export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval: number | ((data: T | undefined) => number | false) }) {
   const api = useApi()
-  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: poll.interval, refetchIntervalInBackground: poll.background })
+  const interval = poll?.interval
+  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
 }
-export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false) {
+export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
@@ -71,10 +73,11 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
     gcTime: 0,
     mutationFn: (input: TInput) => write(api, input),
     onSuccess: () => {
-      const external = new Set(['regions', 'domain', 'domains', 'campaign-options'])
+      if (successMessage) toast(successMessage, 'success')
+      if (!invalidate) return
+      const external = new Set(['regions', 'region-discovery', 'domain', 'domains', 'campaign-options'])
       void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && (refreshSes || !external.has(String(query.queryKey[3])))}).catch(() => {})
       if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'campaign-options', refetchType: 'none'}).catch(() => {})
-      if (successMessage) toast(successMessage, 'success')
     },
   })
 }

@@ -158,7 +158,7 @@ export function MailboxDetailPage() {
   const threadId = params.get('thread')
   const [search, setSearch] = useState('')
   const mailbox = useApiQuery(['mailbox', id], (api, signal) => api.mailboxes.get(id, signal))
-  const threads = useApiQuery(['mailbox-threads', id, view, search], (api, signal) => api.mailboxes.threads(id, { view, search: search.trim() || undefined }, signal))
+  const threads = useApiQuery(['mailbox-threads', id, view, search], (api, signal) => api.mailboxes.threads(id, { view, search: search.trim() || undefined }, signal), { interval: 30_000 })
   const thread = useApiQuery(['mailbox-thread', id, threadId], (api, signal) => threadId ? api.mailboxes.thread(id, threadId, signal) : Promise.resolve(null))
   const own = useMemo(() => ownAddresses(mailbox.data), [mailbox.data])
   const select = (next: string | null) => { const search = new URLSearchParams(params); if (next) search.set('thread', next); else search.delete('thread'); setParams(search) }

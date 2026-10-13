@@ -28,7 +28,7 @@ export function OverviewPage() {
   const navigate = useNavigate()
   // Each refresh runs four created-cohort metrics aggregations; aggregates over hours or days do not need
   // the 3-second polling used for live queues, and a hidden tab should not keep the database busy.
-  const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal), { interval: 60_000, background: false })
+  const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal), { interval: 60_000 })
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
   const discovery = useRegionDiscovery(api.environment === 'test' ? undefined : current)

@@ -661,7 +661,7 @@ export function createMockApi(): OpenSendApi {
         filterRegion(s, input.regionId)
         if (input.listId) find(s.lists, input.listId, 'List')
         const contacts = input.segmentId ? segmentContacts(s, find(s.segments, input.segmentId, 'Segment')) : s.contacts
-        return page(contacts.filter(c => (!input.status || c.status === input.status) && (!input.listId || c.listIds.includes(input.listId))).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), input, c => `${c.email} ${c.name} ${c.country}`)
+        return page(contacts.filter(c => (!input.email || c.email.toLowerCase() === input.email.toLowerCase()) && (!input.status || c.status === input.status) && (!input.listId || c.listIds.includes(input.listId))).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), input, c => `${c.email} ${c.name} ${c.country}`)
       }),
       get: (contactId, signal) => run(signal, false, s => find(s.contacts, contactId, 'Contact')),
       save: (input: ContactInput, signal) => run(signal, true, s => {
