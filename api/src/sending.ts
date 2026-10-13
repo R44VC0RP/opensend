@@ -44,9 +44,10 @@ const AUTO_PAUSE = { bounceRate: 0.02, bounceMinimum: 1000, complaintRate: 0.000
 // Campaigns stop releasing recipients while SES's remaining 24-hour quota is within this reserve, which
 // stays available for transactional mail. The quota itself is read from SES, never configured.
 const sesDailyReserve = (max24: number) => Math.max(1000, Math.ceil(max24 * 0.1));
-// A rate-shared campaign releases about five seconds of its share at a time, and never banks more than ten
-// seconds while waiting, so a pause or hold cannot be caught up at the full send rate.
-const RELEASE_INTERVAL_MS = 5000, RELEASE_BURST_MS = 10000;
+// A rate-shared campaign aims to release about every five to ten seconds. Each release covers the time actually
+// elapsed since the previous one, because a real cycle (queue wake, claim, job) takes 13-20 s in production;
+// it never banks more than 20 seconds while waiting, so a pause, hold or stall cannot be caught up at full rate.
+const RELEASE_INTERVAL_MS = 5000, RELEASE_BURST_MS = 20000;
 const campaignBuffer = (rate: number) => Math.min(20000, Math.max(CAMPAIGN_BUFFER, Math.ceil(rate * 10)));
 const environmentBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ceil(rate * 20)));
 // Recheck a full buffer or in-flight campaign once its backlog should have drained at the cached

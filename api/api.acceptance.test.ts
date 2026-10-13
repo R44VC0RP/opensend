@@ -3382,37 +3382,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
         SELECT 'con_' || md5($1 || n::text), $1, 'test', 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
       await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [ws, list.id]);
-      // 100/s regional rate: the 1,000-row campaign buffer never limits this test, so only the share does.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 100, clock_timestamp())
-        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 100, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      // 20/s regional rate: the 400-row campaign buffer only limits the final full-rate step.
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 20, clock_timestamp())
+        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 20, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('shared'), from: 'sender@example.com', subject: 'Synthetic shared rate', html: '<p>Synthetic rate share acceptance only.</p>', audience: { listId: list.id } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { rateShare: 0.01 } }), 422);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: {} }), 202);
       await run('campaign.prepare');
-      // Default share 0.5 of 100/s is 50/s; the first release is five seconds of that share.
+      // Default share 0.5 of 20/s is 10/s; the first release is five seconds of that share.
       const before = Date.now();
       await run('campaign.expand');
       let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.expansion.pacing.rateShare, 0.5);
       assert.equal(view.expansion.pacing.perDay, null);
-      assert.equal(view.expansion.expanded, 250);
+      assert.equal(view.expansion.expanded, 50);
       let [next] = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
       assert.ok(typeof next!.payload.releasedAt === 'string', 'The continuation remembers when it last released.');
       const due = Date.parse(next!.available_at) - before;
-      assert.ok(due >= 4000 && due <= 7000, `The next release waits until 250 rows are paid for at 50/s; observed ${due}ms.`);
-      // After a long wait, at most ten seconds of the share (500 rows) is released, not the backlog of a minute.
+      assert.ok(due >= 4000 && due <= 7000, `The next release waits until 50 rows are paid for at 10/s; observed ${due}ms.`);
+      // Running again immediately releases nothing: the share has not accrued yet.
+      await run('campaign.expand');
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).expansion.expanded, 50);
+      // After a long wait, at most twenty seconds of the share (200 rows) is released, not the backlog of a minute.
+      [next] = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET payload = jsonb_set(payload, '{releasedAt}', to_jsonb($2::text)) WHERE id = $1`, [next!.id, new Date(Date.now() - 60_000).toISOString()]);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 750);
-      // Raising the share to the full rate keeps other settings and releases the rest at once.
+      assert.equal(view.expansion.expanded, 250);
+      // Raising the share to the full rate keeps other settings; only the dispatch buffer (400 queued) limits it now.
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: null, rateShare: 1 }));
       assert.equal(view.expansion.pacing.rateShare, 1);
       assert.equal(view.expansion.pacing.autoPause, true);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1000);
-      assert.equal(view.expansion.status, 'completed');
+      assert.equal(view.expansion.expanded, 400);
     });
   });
 
