@@ -71,7 +71,7 @@ export const campaignExpansions = pgTable('sending_campaign_expansions', {
   error: jsonb('error').$type<{ code: string; message: string }>(), requestId: text('request_id'), jobId: text('job_id'),
   updatedAt: time('updated_at').notNull().defaultNow(),
   // Paced delivery (migration 024): optional cap per rolling 24-hour window, pause state and why expansion waits.
-  pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true),
+  pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true), rateShare: doublePrecision('rate_share'),
   windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
   pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<{ code: string; message: string }>(), healthCheckedAt: time('health_checked_at'),
   waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota'>(), waitingUntil: time('waiting_until'),

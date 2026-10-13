@@ -44,6 +44,9 @@ const AUTO_PAUSE = { bounceRate: 0.02, bounceMinimum: 1000, complaintRate: 0.000
 // Campaigns stop releasing recipients while SES's remaining 24-hour quota is within this reserve, which
 // stays available for transactional mail. The quota itself is read from SES, never configured.
 const sesDailyReserve = (max24: number) => Math.max(1000, Math.ceil(max24 * 0.1));
+// A rate-shared campaign releases about five seconds of its share at a time, and never banks more than ten
+// seconds while waiting, so a pause or hold cannot be caught up at the full send rate.
+const RELEASE_INTERVAL_MS = 5000, RELEASE_BURST_MS = 10000;
 const campaignBuffer = (rate: number) => Math.min(20000, Math.max(CAMPAIGN_BUFFER, Math.ceil(rate * 10)));
 const environmentBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ceil(rate * 20)));
 // Recheck a full buffer or in-flight campaign once its backlog should have drained at the cached
@@ -127,12 +130,12 @@ const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'com
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
 const Expansion = z.object({ status: z.enum(['pending', 'expanding', 'paused', 'completed', 'failed', 'canceled']), total: z.number().int().describe('Fixed reviewed recipient count reserved at send or schedule.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: z.object({ code: z.string(), message: z.string() }).nullable(),
-  pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
+  pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: z.object({ code: z.string(), message: z.string() }).nullable(),
   waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when.') }).openapi('CampaignExpansion');
 function expansionView(row: typeof campaignExpansions.$inferSelect) {
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
-  return Expansion.parse({ ...row, pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next },
+  return Expansion.parse({ ...row, pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next },
     pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null, error: row.error ?? null });
 }
 const Campaign = z.object({ expansion: Expansion.nullable().optional(), id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
@@ -158,7 +161,8 @@ const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('Ca
 const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
 const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
 const CampaignPreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png') }).openapi('CampaignPreviewImage');
-const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).') }).strict().openapi('CampaignPacing');
+const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).'),
+  rateShare: z.number().min(0.05).max(1).optional().describe('Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.') }).strict().openapi('CampaignPacing');
 const CampaignSend = z.object({ reviewId: z.string().min(1).optional().describe('Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.'), revision: z.number().int().positive(), pacing: Pacing.optional() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
@@ -920,10 +924,10 @@ export function registerSending(app: App) {
     await db.update(campaignExpansions).set({ status: expansion.expanded ? 'expanding' : 'pending', pausedAt: null, pauseReason: null, healthCheckedAt: now(), jobId, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
     await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
   }));
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign, expansion) => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign, expansion) => {
     if (!['pending', 'expanding', 'paused'].includes(expansion.status)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'This campaign has finished releasing recipients.');
     const input = c.req.valid('json');
-    await db.update(campaignExpansions).set({ pacePerDay: input.perDay ?? null, autoPause: input.autoPause ?? expansion.autoPause, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
+    await db.update(campaignExpansions).set({ pacePerDay: input.perDay ?? null, autoPause: input.autoPause ?? expansion.autoPause, rateShare: input.rateShare ?? expansion.rateShare, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
     // A release waiting for the next window or quota rechecks now under the new settings.
     if (expansion.jobId && !(campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now())) await db.update(jobs).set({ availableAt: now() }).where(and(eq(jobs.id, expansion.jobId), eq(jobs.status, 'pending')));
     await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
@@ -976,7 +980,7 @@ function backgroundFailure(error: unknown) {
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and prepare a new review, or cancel the campaign.` };
 }
 async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { reviewId?: string; revision: number; scheduledAt?: string; pacing?: z.infer<typeof Pacing> }, requestId?: string) {
-  const pacing = { pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true };
+  const pacing = { pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true, rateShare: input.pacing ? input.pacing.rateShare ?? 0.5 : null };
   // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
@@ -1369,7 +1373,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Campaign expansion requires a campaign.');
   const campaignId = payload.campaignId;
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', permissions: ['manage'], domains: [] };
-  let sesAllowance = Number.POSITIVE_INFINITY;
+  let sesAllowance = Number.POSITIVE_INFINITY, rateAllowance = Number.POSITIVE_INFINITY, shareRate = 0;
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
       rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
@@ -1416,6 +1420,13 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
         sesAllowance = Number(initial.max24) - Number(initial.sent24) - buffered!.total - sesDailyReserve(Number(initial.max24));
         if (sesAllowance <= 0) await hold('ses_daily_quota', new Date(nowMs + 10 * 60_000).toISOString());
       }
+      // Rate share: release at most rateShare of the regional send rate, measured from the previous release.
+      if (initial.rateShare !== null && initial.rateShare < 1 && Number(initial.rate) > 0) {
+        shareRate = initial.rateShare * Number(initial.rate);
+        const last = typeof payload.releasedAt === 'string' ? Date.parse(payload.releasedAt) : nowMs - RELEASE_INTERVAL_MS;
+        rateAllowance = Math.floor(shareRate * Math.min(Math.max(0, nowMs - last), RELEASE_BURST_MS) / 1000);
+        if (rateAllowance < 1) throw new JobDeferred(new Date(last + Math.ceil(1000 / shareRate)).toISOString(), { ...payload, cursor: initial.expanded });
+      }
     }
     const [review] = await runtime.db.select({ draft: campaignReviews.draft }).from(campaignReviews).where(eq(campaignReviews.id, initial.reviewId));
     const readyJobs = await runtime.db.transaction(async db => {
@@ -1440,7 +1451,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       const windowUsed = windowStart === expansion.windowStartedAt ? expansion.windowExpanded : 0;
       const paceLeft = expansion.pacePerDay === null ? Number.POSITIVE_INFINITY : expansion.pacePerDay - windowUsed;
       if (paceLeft <= 0) throw new JobDeferred(new Date(Date.parse(windowStart!) + DAY_MS).toISOString(), { ...payload, cursor: expansion.expanded });
-      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total, paceLeft, sesAllowance);
+      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total, paceLeft, sesAllowance, rateAllowance);
       if (capacity <= 0) {
         // Lost a race with another expansion after the bounded precheck: requeue this row (the rollback releases only locks).
         const backlog = Math.max(buffer!.campaign - campaignBuffer(buffer!.rate) / 2, buffer!.total - environmentBuffer(buffer!.rate) / 2);
@@ -1457,7 +1468,9 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       const links = prepared.flatMap(({ id: emailId, snapshot }) => snapshot.attachments.map(attachmentId => ({ workspaceId: a.workspaceId, environment: a.environment, attachmentId, ownerType: 'email' as const, ownerId: emailId })));
       if (links.length) await db.insert(attachmentLinks).values(links);
       const expanded = recipients[recipients.length - 1]!.ordinal, completed = expanded === expansion.total;
-      const jobId = completed ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } });
+      // A rate-shared continuation runs once this release has been paid for at the campaign's share.
+      const jobId = completed ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}), ...(shareRate ? { releasedAt: now() } : {}) },
+        ...(shareRate ? { availableAt: new Date(Date.now() + Math.max(1000, Math.ceil(1000 * prepared.length / shareRate))).toISOString() } : {}) });
       if (completed) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
       await db.update(campaignExpansions).set({ expanded, jobId, status: completed ? 'completed' : 'expanding', windowStartedAt: windowStart, windowExpanded: windowUsed + prepared.length, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
       await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));

@@ -3295,7 +3295,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('paced'), from: 'sender@example.com', subject: 'Synthetic paced send', html: '<p>Synthetic pacing acceptance only.</p>', audience: { listId: list.id, priority: { property: 'plan', values: ['active'] } } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 99 } }), 422);
-      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 1100 } }), 202).queued, 1400);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 1100, rateShare: 1 } }), 202).queued, 1400);
       await run('campaign.prepare');
       const firstOrdinals = (await db.query(`SELECT r.recipient->>'email' AS email FROM sending_review_recipients r JOIN sending_campaigns c ON c.review_id = r.review_id WHERE c.id = $1 ORDER BY r.ordinal LIMIT 350`, [campaign.id])).rows;
       assert.ok(firstOrdinals.every(row => Number(row.email.match(/\d+/)![0]) % 4 === 0), 'Priority contacts are reviewed and released first.');
@@ -3372,6 +3372,47 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(view.expansion.expanded, 1400);
       assert.equal(view.expansion.status, 'completed');
       assert.equal(view.expansion.pacing.autoPause, false);
+    });
+  });
+
+  test('a rate-shared campaign releases only its share of the send rate and cannot catch up after waiting', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('shared') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [ws, list.id]);
+      // 100/s regional rate: the 1,000-row campaign buffer never limits this test, so only the share does.
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 100, clock_timestamp())
+        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 100, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('shared'), from: 'sender@example.com', subject: 'Synthetic shared rate', html: '<p>Synthetic rate share acceptance only.</p>', audience: { listId: list.id } }), 201);
+      error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { rateShare: 0.01 } }), 422);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: {} }), 202);
+      await run('campaign.prepare');
+      // Default share 0.5 of 100/s is 50/s; the first release is five seconds of that share.
+      const before = Date.now();
+      await run('campaign.expand');
+      let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.pacing.rateShare, 0.5);
+      assert.equal(view.expansion.pacing.perDay, null);
+      assert.equal(view.expansion.expanded, 250);
+      let [next] = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+      assert.ok(typeof next!.payload.releasedAt === 'string', 'The continuation remembers when it last released.');
+      const due = Date.parse(next!.available_at) - before;
+      assert.ok(due >= 4000 && due <= 7000, `The next release waits until 250 rows are paid for at 50/s; observed ${due}ms.`);
+      // After a long wait, at most ten seconds of the share (500 rows) is released, not the backlog of a minute.
+      await db.query(`UPDATE jobs SET payload = jsonb_set(payload, '{releasedAt}', to_jsonb($2::text)) WHERE id = $1`, [next!.id, new Date(Date.now() - 60_000).toISOString()]);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 750);
+      // Raising the share to the full rate keeps other settings and releases the rest at once.
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: null, rateShare: 1 }));
+      assert.equal(view.expansion.pacing.rateShare, 1);
+      assert.equal(view.expansion.pacing.autoPause, true);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1000);
+      assert.equal(view.expansion.status, 'completed');
     });
   });
 

@@ -521,6 +521,10 @@ export type CampaignExpansion = {
          * Pause automatically when bounce or complaint rates exceed safe thresholds.
          */
         autoPause: boolean;
+        /**
+         * Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.
+         */
+        rateShare: number;
         windowStartedAt: string | null;
         /**
          * Recipients released in the current 24-hour window.
@@ -926,6 +930,10 @@ export type CampaignPacing = {
      * Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).
      */
     autoPause?: boolean;
+    /**
+     * Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.
+     */
+    rateShare?: number;
 };
 
 export type CampaignScheduleInput = {
@@ -951,6 +959,10 @@ export type CampaignPacingUpdate = {
      * Omit to keep the current setting.
      */
     autoPause?: boolean;
+    /**
+     * Omit to keep the current setting.
+     */
+    rateShare?: number;
 };
 
 export type WorkspaceSettings = {

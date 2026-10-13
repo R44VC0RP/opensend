@@ -2424,6 +2424,10 @@
                 "type": "boolean",
                 "description": "Pause automatically when bounce or complaint rates exceed safe thresholds."
               },
+              "rateShare": {
+                "type": "number",
+                "description": "Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate."
+              },
               "windowStartedAt": {
                 "type": [
                   "string",
@@ -2445,6 +2449,7 @@
             "required": [
               "perDay",
               "autoPause",
+              "rateShare",
               "windowStartedAt",
               "windowExpanded",
               "nextWindowAt"
@@ -3930,6 +3935,12 @@
             "type": "boolean",
             "default": true,
             "description": "Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted)."
+          },
+          "rateShare": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 1,
+            "description": "Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate."
           }
         },
         "additionalProperties": false
@@ -3999,6 +4010,12 @@
           },
           "autoPause": {
             "type": "boolean",
+            "description": "Omit to keep the current setting."
+          },
+          "rateShare": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 1,
             "description": "Omit to keep the current setting."
           }
         },
