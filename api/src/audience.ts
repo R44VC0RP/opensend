@@ -28,7 +28,8 @@ function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
-export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segmentId: z.string().min(1).max(120).optional(), excludeListIds: z.array(z.string().min(1).max(120)).max(20).optional(), excludeSegmentIds: z.array(z.string().min(1).max(120)).max(20).optional() }).strict();
+export const AudienceSpec = z.object({ listId: z.string().min(1).max(120), segmentId: z.string().min(1).max(120).optional(), excludeListIds: z.array(z.string().min(1).max(120)).max(20).optional(), excludeSegmentIds: z.array(z.string().min(1).max(120)).max(20).optional(),
+  priority: z.object({ property: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,79}$/), values: z.array(z.string().max(200)).min(1).max(20) }).strict().optional().describe('Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.') }).strict();
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
 const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), occurredAt: z.string(), createdAt: z.string() });
@@ -113,11 +114,12 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
       SELECT ${contacts.id} AS id, ${contacts.email} AS email, CASE WHEN ${propertyKeys.includes('name')} THEN ${contacts.name} END AS name,
         ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS consent,
         coalesce((SELECT jsonb_object_agg(p.key, p.value) FROM jsonb_each(${contacts.properties}) p
-          WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb) AS properties
+          WHERE p.key IN (SELECT jsonb_array_elements_text(${JSON.stringify(propertyKeys)}::jsonb))), '{}'::jsonb) AS properties,
+        ${spec.priority ? sql`coalesce(array_position(ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(spec.priority.values)}::jsonb)), ${contacts.properties} ->> ${spec.priority.property}), ${spec.priority.values.length + 1})` : sql`0`} AS rank
       FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}
-      ORDER BY ${contacts.id} LIMIT 1000001
+      ORDER BY ${contacts.id} LIMIT 2000001
     ), eligible AS (
-      SELECT row_number() OVER (ORDER BY id ROWS UNBOUNDED PRECEDING)::int AS ordinal,
+      SELECT row_number() OVER (ORDER BY rank, id ROWS UNBOUNDED PRECEDING)::int AS ordinal,
         jsonb_strip_nulls(jsonb_build_object('id', id, 'email', email, 'name', nullif(name, ''), 'properties', properties)) AS recipient
       FROM matched WHERE NOT suppressed AND consent = 'subscribed'
     ), sized AS (
@@ -134,7 +136,7 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
       (SELECT count(*)::int FROM captured) AS captured,
       (SELECT coalesce(sum(recipient_bytes), 0)::bigint FROM captured) AS bytes FROM matched`);
   const row = result.rows[0]!;
-  if (row.matched > 1000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 1,000,000 matching contacts. No recipients were truncated.');
+  if (row.matched > 2000000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   if (row.captured !== row.eligible) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
   if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', 'This campaign has no eligible subscribed recipients.');
   return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, recipientBytes: Number(row.bytes) };

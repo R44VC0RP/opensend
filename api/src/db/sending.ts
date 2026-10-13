@@ -67,9 +67,14 @@ export const reviewRecipients = pgTable('sending_review_recipients', {
 export const campaignExpansions = pgTable('sending_campaign_expansions', {
   campaignId: text('campaign_id').primaryKey(), reviewId: text('review_id').notNull().unique(), ...scope(), actorKeyId: text('actor_key_id').notNull(),
   total: integer('total').notNull(), expanded: integer('expanded').notNull().default(0), canceled: integer('canceled').notNull().default(0),
-  status: text('status').$type<'pending' | 'expanding' | 'completed' | 'failed' | 'canceled'>().notNull().default('pending'),
+  status: text('status').$type<'pending' | 'expanding' | 'paused' | 'completed' | 'failed' | 'canceled'>().notNull().default('pending'),
   error: jsonb('error').$type<{ code: string; message: string }>(), requestId: text('request_id'), jobId: text('job_id'),
   updatedAt: time('updated_at').notNull().defaultNow(),
+  // Paced delivery (migration 024): optional cap per rolling 24-hour window, pause state and why expansion waits.
+  pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true),
+  windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
+  pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<{ code: string; message: string }>(), healthCheckedAt: time('health_checked_at'),
+  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota'>(), waitingUntil: time('waiting_until'),
 }, t => [index('sending_expansion_scope').on(t.workspaceId, t.environment, t.actorKeyId)]);
 export const regionalLimits = pgTable('sending_region_limits', {
   ...scope(), region: text('region').notNull(), maxSendRate: doublePrecision('max_send_rate').notNull().default(0), max24HourSend: doublePrecision('max_24_hour_send').notNull().default(0), sentLast24Hours: doublePrecision('sent_last_24_hours').notNull().default(0), reserved: integer('reserved').notNull().default(0),

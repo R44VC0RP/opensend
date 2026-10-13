@@ -495,7 +495,7 @@ export type Campaign = {
 };
 
 export type CampaignExpansion = {
-    status: 'pending' | 'expanding' | 'completed' | 'failed' | 'canceled';
+    status: 'pending' | 'expanding' | 'paused' | 'completed' | 'failed' | 'canceled';
     /**
      * Fixed reviewed recipient count reserved at send or schedule.
      */
@@ -511,6 +511,37 @@ export type CampaignExpansion = {
     error: {
         code: string;
         message: string;
+    } | null;
+    pacing: {
+        /**
+         * Maximum recipients released per rolling 24-hour window; null means no daily cap.
+         */
+        perDay: number | null;
+        /**
+         * Pause automatically when bounce or complaint rates exceed safe thresholds.
+         */
+        autoPause: boolean;
+        windowStartedAt: string | null;
+        /**
+         * Recipients released in the current 24-hour window.
+         */
+        windowExpanded: number;
+        /**
+         * When the next 24-hour window opens, when a daily cap is set.
+         */
+        nextWindowAt: string | null;
+    };
+    pausedAt: string | null;
+    pauseReason: {
+        code: string;
+        message: string;
+    } | null;
+    /**
+     * Why releasing recipients is currently held, and the best estimate of until when.
+     */
+    waiting: {
+        reason: 'pacing_window' | 'ses_daily_quota';
+        until: string;
     } | null;
 } | null;
 
@@ -535,6 +566,13 @@ export type CampaignDraft = {
         segmentId?: string;
         excludeListIds?: Array<string>;
         excludeSegmentIds?: Array<string>;
+        /**
+         * Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.
+         */
+        priority?: {
+            property: string;
+            values: Array<string>;
+        };
     };
     defaults?: {
         [key: string]: string | number | boolean | null;
@@ -563,6 +601,13 @@ export type CreateCampaignInput = {
         segmentId?: string;
         excludeListIds?: Array<string>;
         excludeSegmentIds?: Array<string>;
+        /**
+         * Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.
+         */
+        priority?: {
+            property: string;
+            values: Array<string>;
+        };
     };
     defaults?: {
         [key: string]: string | number | boolean | null;
@@ -801,6 +846,13 @@ export type CampaignUpdateInput = {
             segmentId?: string;
             excludeListIds?: Array<string>;
             excludeSegmentIds?: Array<string>;
+            /**
+             * Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.
+             */
+            priority?: {
+                property: string;
+                values: Array<string>;
+            };
         };
         defaults?: {
             [key: string]: string | number | boolean | null;
@@ -862,6 +914,18 @@ export type CampaignSendInput = {
      */
     reviewId?: string;
     revision: number;
+    pacing?: CampaignPacing;
+};
+
+export type CampaignPacing = {
+    /**
+     * Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.
+     */
+    perDay?: number | null;
+    /**
+     * Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).
+     */
+    autoPause?: boolean;
 };
 
 export type CampaignScheduleInput = {
@@ -870,6 +934,7 @@ export type CampaignScheduleInput = {
      */
     reviewId?: string;
     revision: number;
+    pacing?: CampaignPacing;
     scheduledAt: string;
 };
 
@@ -878,6 +943,14 @@ export type CampaignCanceled = {
     status: 'canceled';
     canceled: number;
     inFlight: number;
+};
+
+export type CampaignPacingUpdate = {
+    perDay: number | null;
+    /**
+     * Omit to keep the current setting.
+     */
+    autoPause?: boolean;
 };
 
 export type WorkspaceSettings = {
@@ -7166,6 +7239,199 @@ export type CancelCampaignResponses = {
 };
 
 export type CancelCampaignResponse = CancelCampaignResponses[keyof CancelCampaignResponses];
+
+export type PauseCampaignData = {
+    body: {
+        [key: string]: never;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/pause';
+};
+
+export type PauseCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PauseCampaignError = PauseCampaignErrors[keyof PauseCampaignErrors];
+
+export type PauseCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type PauseCampaignResponse = PauseCampaignResponses[keyof PauseCampaignResponses];
+
+export type ResumeCampaignData = {
+    body: {
+        [key: string]: never;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/resume';
+};
+
+export type ResumeCampaignErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ResumeCampaignError = ResumeCampaignErrors[keyof ResumeCampaignErrors];
+
+export type ResumeCampaignResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type ResumeCampaignResponse = ResumeCampaignResponses[keyof ResumeCampaignResponses];
+
+export type SetCampaignPacingData = {
+    body: CampaignPacingUpdate;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/pacing';
+};
+
+export type SetCampaignPacingErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SetCampaignPacingError = SetCampaignPacingErrors[keyof SetCampaignPacingErrors];
+
+export type SetCampaignPacingResponses = {
+    /**
+     * Success
+     */
+    200: Campaign;
+};
+
+export type SetCampaignPacingResponse = SetCampaignPacingResponses[keyof SetCampaignPacingResponses];
 
 export type GetWorkspaceSettingsData = {
     body?: never;

@@ -37,6 +37,13 @@ const CAMPAIGN_PREPARED_BYTES = 64 * 1024 * 1024 * 1024;
 // Materialized-but-unsent rows per campaign / per environment: about ten seconds of the regional
 // send rate, so expansion (a scheduler job with its own latency) never starves the dispatcher.
 const CAMPAIGN_BUFFER = 400;
+const DAY_MS = 24 * 3600_000;
+// Automatic pause: AWS reviews accounts at 5% bounces and 0.1% complaints, so pause well before either,
+// once enough mail has been accepted for the rate to be meaningful.
+const AUTO_PAUSE = { bounceRate: 0.02, bounceMinimum: 1000, complaintRate: 0.0008, complaintMinimum: 5000, intervalMs: 30 * 60_000 };
+// Campaigns stop releasing recipients while SES's remaining 24-hour quota is within this reserve, which
+// stays available for transactional mail. The quota itself is read from SES, never configured.
+const sesDailyReserve = (max24: number) => Math.max(1000, Math.ceil(max24 * 0.1));
 const campaignBuffer = (rate: number) => Math.min(20000, Math.max(CAMPAIGN_BUFFER, Math.ceil(rate * 10)));
 const environmentBuffer = (rate: number) => Math.min(50000, Math.max(1000, Math.ceil(rate * 20)));
 // Recheck a full buffer or in-flight campaign once its backlog should have drained at the cached
@@ -119,7 +126,15 @@ const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, au
 const CampaignStatus = z.enum(['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled']);
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
 const CampaignCounts = z.object({ total: z.number().int().nonnegative(), byStatus: z.record(Status, z.number().int().nonnegative()) }).describe('Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.');
-const Expansion = z.object({ status: z.enum(['pending', 'expanding', 'completed', 'failed', 'canceled']), total: z.number().int().describe('Fixed reviewed recipient count reserved at send or schedule.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: z.object({ code: z.string(), message: z.string() }).nullable() }).openapi('CampaignExpansion');
+const Expansion = z.object({ status: z.enum(['pending', 'expanding', 'paused', 'completed', 'failed', 'canceled']), total: z.number().int().describe('Fixed reviewed recipient count reserved at send or schedule.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: z.object({ code: z.string(), message: z.string() }).nullable(),
+  pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
+  pausedAt: z.string().nullable(), pauseReason: z.object({ code: z.string(), message: z.string() }).nullable(),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when.') }).openapi('CampaignExpansion');
+function expansionView(row: typeof campaignExpansions.$inferSelect) {
+  const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
+  return Expansion.parse({ ...row, pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next },
+    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null, error: row.error ?? null });
+}
 const Campaign = z.object({ expansion: Expansion.nullable().optional(), id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.'), environment: z.enum(['live', 'test']), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), status: CampaignStatus, reviewId: z.string().nullable(), scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts }).openapi('Campaign');
 const CampaignRate = z.object({ value: z.number().nonnegative().nullable().describe('Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.'), numerator: z.number().int().nonnegative(), denominator: z.number().int().nonnegative() });
 const CampaignStats = z.object({
@@ -143,7 +158,8 @@ const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('Ca
 const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
 const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
 const CampaignPreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png') }).openapi('CampaignPreviewImage');
-const CampaignSend = z.object({ reviewId: z.string().min(1).optional().describe('Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.'), revision: z.number().int().positive() }).strict().openapi('CampaignSendInput');
+const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).') }).strict().openapi('CampaignPacing');
+const CampaignSend = z.object({ reviewId: z.string().min(1).optional().describe('Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.'), revision: z.number().int().positive(), pacing: Pacing.optional() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), status: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
@@ -189,7 +205,7 @@ async function campaignViews<T extends { id: string; environment: Mode; status: 
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
     const expansion = expansions.find(item => item.campaignId === row.id);
-    return { ...row, url: campaignUrl(runtime, row), counts, ...(expansion ? { expansion: Expansion.parse(expansion) } : {}) };
+    return { ...row, url: campaignUrl(runtime, row), counts, ...(expansion ? { expansion: expansionView(expansion) } : {}) };
   });
 }
 async function pageBinding(a: Actor, resource: string, query: Record<string, unknown>) {
@@ -758,7 +774,7 @@ export function registerSending(app: App) {
     }
     const [expansion] = await c.env.db.select().from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, row.id)));
     const rate = (numerator: number, denominator: number, enabled = true) => ({ numerator, denominator, value: denominator && a.environment === 'live' && enabled ? numerator / denominator : null });
-    return c.json(CampaignStats.parse({ id: row.id, name: row.draft.name, environment: row.environment, status: row.status, tracking: row.draft.tracking, counts, expansion: expansion ?? null, totals,
+    return c.json(CampaignStats.parse({ id: row.id, name: row.draft.name, environment: row.environment, status: row.status, tracking: row.draft.tracking, counts, expansion: expansion ? expansionView(expansion) : null, totals,
       rates: { delivery: rate(totals.delivered, totals.accepted), bounce: rate(totals.bounced, totals.accepted), complaint: rate(totals.complained, totals.accepted), open: rate(totals.opened, totals.delivered, row.draft.tracking), click: rate(totals.clicked, totals.delivered, row.draft.tracking) },
     }), 200);
   });
@@ -833,7 +849,7 @@ export function registerSending(app: App) {
     const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 2,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
       const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
@@ -878,6 +894,40 @@ export function registerSending(app: App) {
     const result = await idempotent(c, a, {}, async db => { const row = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, row.draft); if (row.status === 'completed') throw new ApiError(409, 'CAMPAIGN_ALREADY_DISPATCHED', 'This campaign has already finished dispatching.'); return cancelCampaignWork(db, a, row); });
     return c.json(CampaignCanceled.parse(result), 200);
   });
+  // Paced delivery controls. Pausing stops releasing new recipients; mail already queued (a few seconds of
+  // the send rate) still dispatches. Resume continues from the same reviewed position.
+  const control = async (c: Ctx, change: (db: DbExecutor, a: Actor, campaign: typeof campaigns.$inferSelect, expansion: typeof campaignExpansions.$inferSelect) => Promise<void>) => {
+    const a = actor(c, 'send'), campaignId = c.req.param('id')!;
+    await c.env.db.transaction(async db => {
+      const campaign = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, campaign.draft);
+      const [expansion] = await db.select().from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaignId))).for('update');
+      if (!expansion || !['scheduled', 'sending'].includes(campaign.status)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Only a scheduled or sending campaign can be paused, resumed or paced.');
+      await change(db, a, campaign, expansion);
+    });
+    const row = await findCampaign(c.env.db, a, campaignId);
+    return c.json(Campaign.parse((await campaignViews(c.env, a, [row]))[0]!), 200);
+  };
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pause', operationId: 'pauseCampaign', description: 'Stop releasing new recipients. Queued mail (a few seconds of the send rate) still dispatches. Resume continues from the same position; cancel still works while paused.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign, expansion) => {
+    if (!['pending', 'expanding'].includes(expansion.status)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSABLE', expansion.status === 'paused' ? 'This campaign is already paused.' : 'Only a campaign that is still releasing recipients can be paused.');
+    await db.update(campaignExpansions).set({ status: 'paused', pausedAt: now(), pauseReason: { code: 'PAUSED_BY_USER', message: 'Paused from the dashboard or API.' }, jobId: null, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
+    if (expansion.jobId) await db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: 'CAMPAIGN_PAUSED' }).where(and(eq(jobs.id, expansion.jobId), eq(jobs.status, 'pending')));
+    await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
+  }));
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/resume', operationId: 'resumeCampaign', description: 'Continue releasing recipients from where a paused campaign stopped. After an automatic pause, the next health check runs 30 minutes later.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign, expansion) => {
+    if (expansion.status !== 'paused') throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign can be resumed.');
+    // While its review is still preparing, preparation starts expansion when it completes.
+    const jobId = campaign.preparingReviewId ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expansion.expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? campaign.scheduledAt : undefined });
+    await db.update(campaignExpansions).set({ status: expansion.expanded ? 'expanding' : 'pending', pausedAt: null, pauseReason: null, healthCheckedAt: now(), jobId, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
+    await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
+  }));
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign, expansion) => {
+    if (!['pending', 'expanding', 'paused'].includes(expansion.status)) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'This campaign has finished releasing recipients.');
+    const input = c.req.valid('json');
+    await db.update(campaignExpansions).set({ pacePerDay: input.perDay ?? null, autoPause: input.autoPause ?? expansion.autoPause, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
+    // A release waiting for the next window or quota rechecks now under the new settings.
+    if (expansion.jobId && !(campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now())) await db.update(jobs).set({ availableAt: now() }).where(and(eq(jobs.id, expansion.jobId), eq(jobs.status, 'pending')));
+    await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
+  }));
 }
 
 function asyncReviewView(review: typeof campaignReviews.$inferSelect) {
@@ -894,7 +944,7 @@ async function checkCampaignCapacity(db: DbExecutor, a: Actor, incoming: number)
       FROM sending_campaign_expansions x WHERE x.workspace_id = ${a.workspaceId} AND x.environment = ${a.environment}
     ) SELECT coalesce(sum(n), 0) AS total, coalesce(sum(n) FILTER (WHERE actor_key_id = ${a.keyId}), 0) AS key FROM outstanding`);
   const row = result.rows[0]!;
-  if (Number(row.total) + incoming > 2000000 || Number(row.key) + incoming > 1000000) throw new ApiError(429, 'CAMPAIGN_PENDING_LIMIT_EXCEEDED', 'Campaigns may reserve 1,000,000 outstanding recipients per sender key and 2,000,000 per environment. Wait for dispatch or cancel an active campaign.', undefined, true);
+  if (Number(row.total) + incoming > 4000000 || Number(row.key) + incoming > 2000000) throw new ApiError(429, 'CAMPAIGN_PENDING_LIMIT_EXCEEDED', 'Campaigns may reserve 2,000,000 outstanding recipients per sender key and 4,000,000 per environment. Wait for dispatch or cancel an active campaign.', undefined, true);
 }
 async function cancelCampaignWork(db: DbExecutor, a: Actor, row: typeof campaigns.$inferSelect, errorCode?: string) {
   const [expansion] = await db.select().from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, row.id))).for('update');
@@ -925,7 +975,8 @@ function backgroundFailure(error: unknown) {
   const code = error instanceof ApiError ? error.code : 'CAMPAIGN_DEPENDENCY_FAILED';
   return { code, message: `Campaign work could not finish (${code}). Correct the cause and prepare a new review, or cancel the campaign.` };
 }
-async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { reviewId?: string; revision: number; scheduledAt?: string }, requestId?: string) {
+async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, input: { reviewId?: string; revision: number; scheduledAt?: string; pacing?: z.infer<typeof Pacing> }, requestId?: string) {
+  const pacing = { pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true };
   // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
@@ -956,7 +1007,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
       await linkAttachments(db, a, draft.attachments, 'review', reviewId, lockedAttachments);
       await enqueue(db, { type: 'campaign.prepare', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId, reviewId, cursor: 0 } });
     }
-    await db.insert(campaignExpansions).values({ campaignId, reviewId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: active!.eligible, requestId });
+    await db.insert(campaignExpansions).values({ campaignId, reviewId, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: active!.eligible, requestId, ...pacing });
     const status = input.scheduledAt ? 'scheduled' as const : 'sending' as const;
     await db.update(campaigns).set({ status, reviewId, preparingReviewId: active!.status === 'ready' ? null : reviewId, scheduledAt: input.scheduledAt ?? null, updatedAt: now() }).where(campaignWhere(a, campaignId));
     if (active!.status === 'ready') {
@@ -975,7 +1026,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing');
   await checkCampaignCapacity(db, a, review.eligible);
   await attachmentRows(db, a, review.draft.attachments, true);
-  await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId });
+  await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId, ...pacing });
   const status = input.scheduledAt ? 'scheduled' as const : 'sending' as const;
   await db.update(campaigns).set({ status, scheduledAt: input.scheduledAt ?? null, updatedAt: now() }).where(campaignWhere(a, campaignId));
   const jobId = await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId, cursor: 0, ...(requestId ? { requestId } : {}) } });
@@ -1233,7 +1284,7 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
       if (!review || !['pending', 'processing'].includes(review.status) || review.processed !== payload.cursor) return;
       const [delivery] = await db.select().from(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.reviewId, review.id))).for('update');
       const current = campaign.preparingReviewId === review.id && campaign.revision === review.revision && !campaign.archivedAt &&
-        (['draft', 'reviewed'].includes(campaign.status) || !!delivery && ['scheduled', 'sending'].includes(campaign.status) && ['pending', 'expanding'].includes(delivery.status));
+        (['draft', 'reviewed'].includes(campaign.status) || !!delivery && ['scheduled', 'sending'].includes(campaign.status) && ['pending', 'expanding', 'paused'].includes(delivery.status));
       if (!authorized || !current) {
         const failure = { code: authorized ? 'STALE_CAMPAIGN_REVIEW' : 'ORIGIN_KEY_REVOKED', message: authorized ? 'The campaign changed during preparation. Prepare the current revision.' : 'The reviewing origin is no longer authorized.' };
         await db.update(campaignReviews).set({ status: 'failed', error: failure }).where(eq(campaignReviews.id, review.id));
@@ -1282,7 +1333,8 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
       const ready = cursor === review.eligible;
       await db.update(campaignReviews).set({ processed: cursor, preparedBytes: review.preparedBytes + bytes, contentHash: hash, status: ready ? 'ready' : 'processing' }).where(eq(campaignReviews.id, review.id));
       await db.update(campaigns).set({ ...(ready ? delivery ? { reviewId: review.id, preparingReviewId: null } : { status: 'reviewed' as const, reviewId: review.id, preparingReviewId: null } : {}), updatedAt: now() }).where(campaignWhere(a, campaign.id));
-      if (ready && delivery) {
+      // A campaign paused during preparation starts expanding when it is resumed.
+      if (ready && delivery && delivery.status !== 'paused') {
         const jobId = await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: 0, ...(delivery.requestId ? { requestId: delivery.requestId } : {}) }, availableAt: campaign.scheduledAt ?? undefined });
         await db.update(campaignExpansions).set({ jobId }).where(eq(campaignExpansions.campaignId, campaign.id));
       }
@@ -1295,18 +1347,34 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
       const [campaign] = await db.select().from(campaigns).where(campaignWhere(a, campaignId)).for('update');
       const failure = backgroundFailure(error);
       const changed = await db.update(campaignReviews).set({ status: 'failed', error: failure }).where(and(scope(campaignReviews, a), eq(campaignReviews.id, reviewId), eq(campaignReviews.processed, payload.cursor as number), inArray(campaignReviews.status, ['pending', 'processing']))).returning({ id: campaignReviews.id });
-      const failedDelivery = changed.length ? await db.update(campaignExpansions).set({ status: 'failed', error: failure, updatedAt: now() }).where(and(scope(campaignExpansions, a), eq(campaignExpansions.reviewId, reviewId), inArray(campaignExpansions.status, ['pending', 'expanding']))).returning({ id: campaignExpansions.campaignId }) : [];
+      const failedDelivery = changed.length ? await db.update(campaignExpansions).set({ status: 'failed', error: failure, updatedAt: now() }).where(and(scope(campaignExpansions, a), eq(campaignExpansions.reviewId, reviewId), inArray(campaignExpansions.status, ['pending', 'expanding', 'paused']))).returning({ id: campaignExpansions.campaignId }) : [];
       if (changed.length && campaign?.preparingReviewId === reviewId) await db.update(campaigns).set({ ...(failedDelivery.length && ['scheduled', 'sending'].includes(campaign.status) ? { status: 'draft' as const, reviewId: null, scheduledAt: null } : {}), preparingReviewId: null, updatedAt: now() }).where(campaignWhere(a, campaign.id));
     }); } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign failure state will retry until it is durable.', undefined, true); }
   }
 };
+// Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail.
+async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Promise<{ code: string; message: string } | null> {
+  const [row] = (await db.execute<{ accepted: number; bounced: number; complained: number }>(sql`SELECT
+    count(*) FILTER (WHERE provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed'))::int AS accepted,
+    count(*) FILTER (WHERE status = 'bounced')::int AS bounced, count(*) FILTER (WHERE status = 'complained')::int AS complained
+    FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND campaign_id = ${campaignId}`)).rows;
+  const percent = (part: number, whole: number) => `${(100 * part / whole).toFixed(2)}%`;
+  if (row!.accepted >= AUTO_PAUSE.bounceMinimum && row!.bounced / row!.accepted > AUTO_PAUSE.bounceRate)
+    return { code: 'BOUNCE_RATE_HIGH', message: `Paused automatically: ${percent(row!.bounced, row!.accepted)} of ${row!.accepted} accepted emails bounced (limit ${AUTO_PAUSE.bounceRate * 100}%). Review the audience before resuming.` };
+  if (row!.accepted >= AUTO_PAUSE.complaintMinimum && row!.complained / row!.accepted > AUTO_PAUSE.complaintRate)
+    return { code: 'COMPLAINT_RATE_HIGH', message: `Paused automatically: ${percent(row!.complained, row!.accepted)} of ${row!.accepted} accepted emails were marked as spam (limit ${AUTO_PAUSE.complaintRate * 100}%). Review the audience before resuming.` };
+  return null;
+}
 const expandCampaign: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.campaignId !== 'string') throw new ApiError(422, 'INVALID_JOB', 'Campaign expansion requires a campaign.');
   const campaignId = payload.campaignId;
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', permissions: ['manage'], domains: [] };
+  let sesAllowance = Number.POSITIVE_INFINITY;
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
       rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+      max24: sql<number>`coalesce((SELECT max_24_hour_send FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+      sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
     }).from(campaignExpansions).leftJoin(campaignReviews, eq(campaignReviews.id, campaignExpansions.reviewId)).leftJoin(campaigns, eq(campaigns.id, campaignExpansions.campaignId))
       .where(and(eq(campaignExpansions.campaignId, campaignId), scope(campaignExpansions, a)));
     if (!initial || !['pending', 'expanding'].includes(initial.status) || initial.jobId !== job.id) return;
@@ -1321,6 +1389,32 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       if (buffered!.campaign >= limits.campaign || buffered!.total >= limits.total) {
         const backlog = Math.max(buffered!.campaign - limits.campaign / 2, buffered!.total - limits.total / 2);
         throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, initial.rate)).toISOString(), { ...payload, cursor: initial.expanded });
+      }
+      const nowMs = Date.now(), owned = and(eq(campaignExpansions.campaignId, campaignId), eq(campaignExpansions.jobId, job.id));
+      // Record why releasing is held (shown on the campaign), then wait in place without a new job row.
+      const hold = async (reason: 'pacing_window' | 'ses_daily_quota', until: string): Promise<never> => {
+        await runtime.db.update(campaignExpansions).set({ waitingReason: reason, waitingUntil: until }).where(owned);
+        throw new JobDeferred(until, { ...payload, cursor: initial.expanded });
+      };
+      const rolling = initial.pacePerDay !== null && !!initial.windowStartedAt && nowMs - Date.parse(initial.windowStartedAt) >= DAY_MS;
+      // Automatic pause: checked at most every 30 minutes while releasing, so always before a new daily window
+      // opens; a resume restarts the 30 minutes so a deliberate resume is not immediately re-paused.
+      if (initial.autoPause && (!initial.healthCheckedAt || nowMs - Date.parse(initial.healthCheckedAt) >= AUTO_PAUSE.intervalMs)) {
+        const unhealthy = await campaignHealth(runtime.db, a, campaignId);
+        if (unhealthy) {
+          await runtime.db.update(campaignExpansions).set({ status: 'paused', pausedAt: now(), pauseReason: unhealthy, jobId: null, waitingReason: null, waitingUntil: null, healthCheckedAt: now(), updatedAt: now() })
+            .where(and(owned, inArray(campaignExpansions.status, ['pending', 'expanding'])));
+          log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId, reason: unhealthy.code });
+          return;
+        }
+        await runtime.db.update(campaignExpansions).set({ healthCheckedAt: now() }).where(owned);
+      }
+      // Daily pacing: at most pacePerDay recipients per rolling 24-hour window.
+      if (initial.pacePerDay !== null && initial.windowStartedAt && !rolling && initial.windowExpanded >= initial.pacePerDay) await hold('pacing_window', new Date(Date.parse(initial.windowStartedAt) + DAY_MS).toISOString());
+      // SES 24-hour quota (cached from GetAccount about every minute): keep a reserve for transactional mail.
+      if (Number(initial.max24) > 0) {
+        sesAllowance = Number(initial.max24) - Number(initial.sent24) - buffered!.total - sesDailyReserve(Number(initial.max24));
+        if (sesAllowance <= 0) await hold('ses_daily_quota', new Date(nowMs + 10 * 60_000).toISOString());
       }
     }
     const [review] = await runtime.db.select({ draft: campaignReviews.draft }).from(campaignReviews).where(eq(campaignReviews.id, initial.reviewId));
@@ -1341,7 +1435,12 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
         rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${review!.draft.region}),0)`,
       }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
-      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total);
+      // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release).
+      const windowStart = expansion.pacePerDay !== null && (!expansion.windowStartedAt || Date.now() - Date.parse(expansion.windowStartedAt) >= DAY_MS) ? now() : expansion.windowStartedAt;
+      const windowUsed = windowStart === expansion.windowStartedAt ? expansion.windowExpanded : 0;
+      const paceLeft = expansion.pacePerDay === null ? Number.POSITIVE_INFINITY : expansion.pacePerDay - windowUsed;
+      if (paceLeft <= 0) throw new JobDeferred(new Date(Date.parse(windowStart!) + DAY_MS).toISOString(), { ...payload, cursor: expansion.expanded });
+      const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, environmentBuffer(buffer!.rate) - buffer!.total, paceLeft, sesAllowance);
       if (capacity <= 0) {
         // Lost a race with another expansion after the bounded precheck: requeue this row (the rollback releases only locks).
         const backlog = Math.max(buffer!.campaign - campaignBuffer(buffer!.rate) / 2, buffer!.total - environmentBuffer(buffer!.rate) / 2);
@@ -1360,7 +1459,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       const expanded = recipients[recipients.length - 1]!.ordinal, completed = expanded === expansion.total;
       const jobId = completed ? null : await enqueue(db, { type: 'campaign.expand', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, cursor: expanded, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) } });
       if (completed) await enqueue(db, { type: 'campaign.finish', workspaceId: a.workspaceId, environment: a.environment, payload: { campaignId: campaign.id, ...(expansion.requestId ? { requestId: expansion.requestId } : {}) }, availableAt: new Date(Date.now() + 2000).toISOString() });
-      await db.update(campaignExpansions).set({ expanded, jobId, status: completed ? 'completed' : 'expanding', updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
+      await db.update(campaignExpansions).set({ expanded, jobId, status: completed ? 'completed' : 'expanding', windowStartedAt: windowStart, windowExpanded: windowUsed + prepared.length, waitingReason: null, waitingUntil: null, updatedAt: now() }).where(eq(campaignExpansions.campaignId, campaign.id));
       await db.update(campaigns).set({ updatedAt: now() }).where(campaignWhere(a, campaign.id));
       return prepared.length;
     });

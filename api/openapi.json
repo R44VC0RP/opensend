@@ -2374,6 +2374,7 @@
             "enum": [
               "pending",
               "expanding",
+              "paused",
               "completed",
               "failed",
               "canceled"
@@ -2408,6 +2409,93 @@
               "code",
               "message"
             ]
+          },
+          "pacing": {
+            "type": "object",
+            "properties": {
+              "perDay": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Maximum recipients released per rolling 24-hour window; null means no daily cap."
+              },
+              "autoPause": {
+                "type": "boolean",
+                "description": "Pause automatically when bounce or complaint rates exceed safe thresholds."
+              },
+              "windowStartedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windowExpanded": {
+                "type": "integer",
+                "description": "Recipients released in the current 24-hour window."
+              },
+              "nextWindowAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When the next 24-hour window opens, when a daily cap is set."
+              }
+            },
+            "required": [
+              "perDay",
+              "autoPause",
+              "windowStartedAt",
+              "windowExpanded",
+              "nextWindowAt"
+            ]
+          },
+          "pausedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pauseReason": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "waiting": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "pacing_window",
+                  "ses_daily_quota"
+                ]
+              },
+              "until": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "until"
+            ],
+            "description": "Why releasing recipients is currently held, and the best estimate of until when."
           }
         },
         "required": [
@@ -2415,7 +2503,11 @@
           "total",
           "expanded",
           "canceled",
-          "error"
+          "error",
+          "pacing",
+          "pausedAt",
+          "pauseReason",
+          "waiting"
         ]
       },
       "CampaignDraft": {
@@ -2526,6 +2618,30 @@
                   "maxLength": 120
                 },
                 "maxItems": 20
+              },
+              "priority": {
+                "type": "object",
+                "properties": {
+                  "property": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]{0,79}$"
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
+                  }
+                },
+                "required": [
+                  "property",
+                  "values"
+                ],
+                "additionalProperties": false,
+                "description": "Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: \"plan\", values: [\"active\", \"former\"] }."
               }
             },
             "default": {},
@@ -2671,6 +2787,30 @@
                   "maxLength": 120
                 },
                 "maxItems": 20
+              },
+              "priority": {
+                "type": "object",
+                "properties": {
+                  "property": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]{0,79}$"
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "minItems": 1,
+                    "maxItems": 20
+                  }
+                },
+                "required": [
+                  "property",
+                  "values"
+                ],
+                "additionalProperties": false,
+                "description": "Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: \"plan\", values: [\"active\", \"former\"] }."
               }
             },
             "default": {},
@@ -3502,6 +3642,30 @@
                       "maxLength": 120
                     },
                     "maxItems": 20
+                  },
+                  "priority": {
+                    "type": "object",
+                    "properties": {
+                      "property": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9_]{0,79}$"
+                      },
+                      "values": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        "minItems": 1,
+                        "maxItems": 20
+                      }
+                    },
+                    "required": [
+                      "property",
+                      "values"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: \"plan\", values: [\"active\", \"former\"] }."
                   }
                 },
                 "default": {},
@@ -3740,11 +3904,34 @@
           "revision": {
             "type": "integer",
             "exclusiveMinimum": 0
+          },
+          "pacing": {
+            "$ref": "#/components/schemas/CampaignPacing"
           }
         },
         "required": [
           "revision"
         ],
+        "additionalProperties": false
+      },
+      "CampaignPacing": {
+        "type": "object",
+        "properties": {
+          "perDay": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 10000000,
+            "description": "Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota."
+          },
+          "autoPause": {
+            "type": "boolean",
+            "default": true,
+            "description": "Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted)."
+          }
+        },
         "additionalProperties": false
       },
       "CampaignScheduleInput": {
@@ -3758,6 +3945,9 @@
           "revision": {
             "type": "integer",
             "exclusiveMinimum": 0
+          },
+          "pacing": {
+            "$ref": "#/components/schemas/CampaignPacing"
           },
           "scheduledAt": {
             "type": "string",
@@ -3795,6 +3985,27 @@
           "canceled",
           "inFlight"
         ]
+      },
+      "CampaignPacingUpdate": {
+        "type": "object",
+        "properties": {
+          "perDay": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 100,
+            "maximum": 10000000
+          },
+          "autoPause": {
+            "type": "boolean",
+            "description": "Omit to keep the current setting."
+          }
+        },
+        "required": [
+          "perDay"
+        ],
+        "additionalProperties": false
       },
       "WorkspaceSettings": {
         "type": "object",
@@ -21196,7 +21407,7 @@
     "/v1/campaigns/{id}/reviews": {
       "post": {
         "operationId": "startCampaignReview",
-        "description": "Start durable preparation for up to 1,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.",
+        "description": "Start durable preparation for up to 2,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.",
         "tags": [
           "Campaigns"
         ],
@@ -22064,6 +22275,508 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/cancel' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
+    "/v1/campaigns/{id}/pause": {
+      "post": {
+        "operationId": "pauseCampaign",
+        "description": "Stop releasing new recipients. Queued mail (a few seconds of the send rate) still dispatches. Resume continues from the same position; cancel still works while paused.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { pauseCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await pauseCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/pause' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      }
+    },
+    "/v1/campaigns/{id}/resume": {
+      "post": {
+        "operationId": "resumeCampaign",
+        "description": "Continue releasing recipients from where a paused campaign stopped. After an automatic pause, the next health check runs 30 minutes later.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { resumeCampaign } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await resumeCampaign({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/resume' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      }
+    },
+    "/v1/campaigns/{id}/pacing": {
+      "post": {
+        "operationId": "setCampaignPacing",
+        "description": "Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignPacingUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Campaign"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { setCampaignPacing } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await setCampaignPacing({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"perDay\": 100\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/pacing' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"perDay\": 100\n}'"
           }
         ]
       }

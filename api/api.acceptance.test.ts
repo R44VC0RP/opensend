@@ -3281,6 +3281,100 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('paced') }), 201);
+      // Bulk-seed reserved-domain contacts; every fourth one is plan=active so priority ordering is observable.
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent, properties)
+        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'paced-' || n || '@example.com', 'subscribed', CASE WHEN n % 4 = 0 THEN '{"plan":"active"}'::jsonb ELSE '{"plan":"none"}'::jsonb END
+        FROM generate_series(1, 1400) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [ws, list.id]);
+      // A high cached rate keeps the dispatch buffer out of the way; the daily SES quota is unknown (0) until set below.
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 5000, clock_timestamp())
+        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('paced'), from: 'sender@example.com', subject: 'Synthetic paced send', html: '<p>Synthetic pacing acceptance only.</p>', audience: { listId: list.id, priority: { property: 'plan', values: ['active'] } } }), 201);
+      error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 99 } }), 422);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 1100 } }), 202).queued, 1400);
+      await run('campaign.prepare');
+      const firstOrdinals = (await db.query(`SELECT r.recipient->>'email' AS email FROM sending_review_recipients r JOIN sending_campaigns c ON c.review_id = r.review_id WHERE c.id = $1 ORDER BY r.ordinal LIMIT 350`, [campaign.id])).rows;
+      assert.ok(firstOrdinals.every(row => Number(row.email.match(/\d+/)![0]) % 4 === 0), 'Priority contacts are reviewed and released first.');
+
+      // Window 1 releases exactly the daily cap; the next run waits in place for the next window.
+      await run('campaign.expand');
+      let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1100);
+      assert.equal(view.expansion.pacing.perDay, 1100);
+      assert.equal(view.expansion.pacing.windowExpanded, 1100);
+      assert.equal(Date.parse(view.expansion.pacing.nextWindowAt) - Date.parse(view.expansion.pacing.windowStartedAt), 86_400_000);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1100, 'The daily cap holds within the window.');
+      assert.equal(view.expansion.waiting.reason, 'pacing_window');
+      let pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+      assert.equal(pending.length, 1, 'Waiting for the window keeps exactly one continuation row.');
+      assert.ok(Math.abs(Date.parse(pending[0]!.available_at) - Date.parse(view.expansion.pacing.nextWindowAt)) < 1000, 'The continuation is due when the next window opens.');
+      assert.equal(pending[0]!.attempts, 0);
+
+      // Bounces above 2% of at least 1,000 accepted emails pause the campaign before the next window opens.
+      await db.query(`UPDATE sending_emails SET status = CASE WHEN review_ordinal <= 50 THEN 'bounced' ELSE 'delivered' END, provider_id = 'sim_' || id WHERE campaign_id = $1`, [campaign.id]);
+      // Simulate the next day: the window has elapsed and so has the last 30-minute health check.
+      await db.query(`UPDATE sending_campaign_expansions SET window_started_at = window_started_at - interval '25 hours', health_checked_at = health_checked_at - interval '25 hours' WHERE campaign_id = $1`, [campaign.id]);
+      await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.status, 'paused');
+      assert.equal(view.expansion.pauseReason.code, 'BOUNCE_RATE_HIGH');
+      assert.equal(view.expansion.expanded, 1100, 'An automatic pause releases nothing more.');
+      assert.equal(view.status, 'sending');
+      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      error(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}), 409, 'CAMPAIGN_NOT_PAUSABLE');
+
+      // Resume continues from the same position in a new window (the health check waits 30 minutes).
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
+      assert.equal(view.expansion.status, 'expanding');
+      assert.equal(view.expansion.pauseReason, null);
+      error(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}), 409, 'CAMPAIGN_NOT_PAUSED');
+      // Manual pause completes the pending continuation; pacing changes keep autoPause when omitted.
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}));
+      assert.equal(view.expansion.pauseReason.code, 'PAUSED_BY_USER');
+      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 200 }));
+      assert.equal(view.expansion.pacing.perDay, 200);
+      assert.equal(view.expansion.pacing.autoPause, true);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
+
+      // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
+      // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
+      await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
+      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1200, 'Nothing is released into the reserved SES quota.');
+      assert.equal(view.expansion.waiting.reason, 'ses_daily_quota');
+      // With quota available, the rest of the new 200/day window (100 already released) goes out.
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+      await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1300);
+      assert.equal(view.expansion.pacing.windowExpanded, 200);
+      assert.equal(view.expansion.waiting, null);
+      // Raising the cap mid-window lets the rest go now; cancel still works for paced campaigns.
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 1000, autoPause: false }));
+      await run('campaign.expand');
+      view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(view.expansion.expanded, 1400);
+      assert.equal(view.expansion.status, 'completed');
+      assert.equal(view.expansion.pacing.autoPause, false);
+    });
+  });
+
   test('dispatch retries definitive throttling once but never replays rejection or uncertain provider acceptance', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([

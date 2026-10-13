@@ -12,13 +12,13 @@ An audience is captured with one database snapshot. Only referenced personalizat
 
 | Bound | Current implementation |
 | --- | --- |
-| Matching contacts per background review | 1,000,000, before consent/suppression filtering |
+| Matching contacts per background review | 2,000,000, before consent/suppression filtering |
 | Concurrent review execution | Bounded by worker/runner job concurrency; additional reviews remain durable queue work |
 | Referenced personalization snapshot | 1 GiB per review, 1 MiB per recipient |
 | Estimated final content | 64 GiB per campaign; attachments remain shared references |
 | Preparation/expansion chunk | Up to 20,000 / 2,000 recipients respectively; preparation is also bounded to 4 MiB and ten seconds |
 | Active campaign dispatch buffer | Ten seconds of the cached regional send rate per campaign (400 floor, 20,000 cap) and twenty seconds per environment (1,000 floor, 50,000 cap); full buffers are rechecked within two seconds |
-| Outstanding campaign intents | 1,000,000 per originating credential; 2,000,000 per environment |
+| Outstanding campaign intents | 2,000,000 per originating credential; 4,000,000 per environment |
 | Orchestration jobs per process/invocation | `JOB_CONCURRENCY`: default 2, maximum 8 for Node and 6 for Cloudflare (campaign preparation/expansion/completion, webhooks, maintenance; never mail) |
 | Dispatcher shards | `DISPATCH_SHARDS` Durable Objects per environment/region on Cloudflare (default 4), each pacing 1/N of the regional quota with up to six provider calls in flight (about 35 sends/s per shard at 170 ms provider latency); the Node runner dispatches in-process |
 
