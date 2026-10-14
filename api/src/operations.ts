@@ -11,6 +11,7 @@ import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
+import { resolveRegionRuntime } from './ses-region-state.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
@@ -344,7 +345,10 @@ function registerPublicEvents(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/events/ses', operationId: 'receiveSesSnsEvent', tags: ['Events'], security: [], request: { body: { required: true, content: { 'application/json': { schema: snsSchema }, 'text/plain': { schema: z.string().openapi('SnsPlainTextEnvelope') } } } }, responses: { 202: response(z.object({ accepted: z.boolean() }).openapi('SnsAccepted')), ...errors } }), async c => {
     let raw: unknown; try { raw = JSON.parse(await c.req.text()); } catch { throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected an SNS JSON envelope.'); }
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
-    const envelope = parsed.data; const trusted = await verifySns(c.env, envelope);
+    const envelope = parsed.data;
+    // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
+    if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
+    const trusted = await verifySns(c.env, envelope);
     if (envelope.Type !== 'Notification') {
       if (envelope.Type === 'SubscriptionConfirmation') {
         const url = trustedSnsUrl(envelope.SubscribeURL!, trusted.host, false);

@@ -45,12 +45,27 @@ export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, re
     throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region', retryable);
   }
 }
-export async function resolveRegionRuntime(runtime: Runtime): Promise<Runtime> {
-  const [settings, trusted, inbound] = await Promise.all([
-    getRegionSettings(runtime.db, runtime.config.workspaceId),
-    runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
-    runtime.db.select({ region: mailboxRegions.region, account: mailboxRegions.accountId, arn: mailboxRegions.topicArn }).from(mailboxRegions).where(eq(mailboxRegions.workspaceId, runtime.config.workspaceId)),
-  ]);
+const regionRows = (runtime: Runtime) => Promise.all([
+  getRegionSettings(runtime.db, runtime.config.workspaceId),
+  runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
+  runtime.db.select({ region: mailboxRegions.region, account: mailboxRegions.accountId, arn: mailboxRegions.topicArn }).from(mailboxRegions).where(eq(mailboxRegions.workspaceId, runtime.config.workspaceId)),
+]);
+// Per-isolate cache for the SES callback route only (one POST per SES event, ~23/s mid-send, 3 queries each).
+// Callers must treat a cached miss as unknown and re-resolve fresh before rejecting (see the SNS route).
+const regionCache = new Map<string, { expires: number; rows: ReturnType<typeof regionRows> }>();
+export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?: number } = {}): Promise<Runtime> {
+  let rows: ReturnType<typeof regionRows>;
+  const cached = options.cacheMs ? regionCache.get(runtime.config.workspaceId) : undefined;
+  if (cached && cached.expires > Date.now()) rows = cached.rows;
+  else {
+    rows = regionRows(runtime);
+    if (options.cacheMs) {
+      const entry = { expires: Date.now() + options.cacheMs, rows };
+      regionCache.set(runtime.config.workspaceId, entry);
+      rows.catch(() => { if (regionCache.get(runtime.config.workspaceId) === entry) regionCache.delete(runtime.config.workspaceId); });
+    }
+  }
+  const [settings, trusted, inbound] = await rows;
   const resources = setupResources(settings.installationId);
   const valid = trusted.filter(row => row.account && /^\d{12}$/.test(row.account) && row.arn === `arn:aws:sns:${row.region}:${row.account}:${resources.topicName}`);
   const accounts = new Set(valid.map(row => row.account!));
