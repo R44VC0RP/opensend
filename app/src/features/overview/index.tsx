@@ -13,7 +13,7 @@ export function OverviewPage() {
   const { regionId } = useRegion()
   const api = useApi()
   const live = api.mode === 'live'
-  const [range, setRange] = useState<TimeRange>('7d')
+  const [range, setRange] = useState<TimeRange>('24h')
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedStream = searchParams.get('stream')
   const stream = requestedStream === 'transactional' || requestedStream === 'marketing' ? requestedStream : 'all'
