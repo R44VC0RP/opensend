@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, gte, inArray, like, lt, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
@@ -11,7 +11,7 @@ import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, type RoutineIngress } from './sending.js';
+import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
@@ -539,7 +539,7 @@ function routineInput(item: FeedbackItem, workspaceId: string): RoutineIngress |
   const timestamp = data?.[kind.toLowerCase()]?.timestamp;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  return { workspaceId, environment: item.environment, type: kind === 'Send' ? 'send' : 'delivery', providerId, createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
+  return { workspaceId, environment: item.environment, type: kind === 'Send' ? 'send' : 'delivery', providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
     ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: item.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' } };
 }
 /**
@@ -600,11 +600,15 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
   const [input] = await runtime.db.select({ receipt: snsReceipts, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
-  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), eq(emails.providerId, providerId))).where(receiptWhere);
+  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), tagged
+    // Fallback for a lost provider response: see ingestRoutineSesEvents.
+    ? or(eq(emails.providerId, providerId), and(isNull(emails.providerId), eq(emails.status, 'acceptance_unknown'), eq(emails.id, tagged)))
+    : eq(emails.providerId, providerId))).where(receiptWhere);
   if (!input || input.receipt.processedAt) return;
   const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
   if (email.simulated !== (job.environment === 'test')) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
+  const tagged = taggedEmailId(data);
   const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;

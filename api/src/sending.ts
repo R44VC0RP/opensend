@@ -1087,7 +1087,13 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: EmailEventI
   const [result] = await ingestRoutineSesEvents(runtime, [input]);
   return result!;
 }
-export type RoutineIngress = EmailEventInput & { type: 'send' | 'delivery'; providerId: string; ingress: IncomingReceipt };
+export type RoutineIngress = EmailEventInput & { type: 'send' | 'delivery'; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt };
+/** The opensend_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
+export function taggedEmailId(message: unknown): string | undefined {
+  const tag = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags?.opensend_email_id;
+  const value = Array.isArray(tag) ? tag[0] : undefined;
+  return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
+}
 // One statement persists a whole batch of verified Send/Delivery callbacks: receipts, matched
 // events, monotonic status, public events and webhook deliveries. Callbacks that arrive before
 // provider acceptance is recorded keep their receipt and one deferred recovery job instead.
@@ -1098,14 +1104,17 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ordinal: index, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
     external_id: input.externalId ?? null, data: input.data ?? {}, created_at: input.createdAt ?? now(),
-    event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload,
+    event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
   const result = await runtime.db.execute<{ ordinal: number; event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(ordinal int, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb)
+        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), mail AS MATERIALIZED (
       SELECT x.ordinal, e.id, e.status, e.region FROM input x JOIN sending_emails e
-        ON e.workspace_id = ${workspaceId} AND e.environment = ${environment} AND e.region = x.region AND e.provider_id = x.provider_id AND e.simulated = ${environment === 'test'}::boolean
+        ON e.workspace_id = ${workspaceId} AND e.environment = ${environment} AND e.region = x.region AND e.simulated = ${environment === 'test'}::boolean
+          -- A lost provider response (timeout or interrupted attempt) never recorded the MessageId. The tag the dispatcher
+          -- stamped on the message proves SES accepted it; only such rows may be matched by tag.
+          AND (e.provider_id = x.provider_id OR (e.provider_id IS NULL AND e.status = 'acceptance_unknown' AND e.id = x.tagged_email_id))
       ORDER BY e.id FOR UPDATE OF e
     ), incoming AS (
       INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, environment, processed_at)
