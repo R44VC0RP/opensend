@@ -403,34 +403,20 @@ function registerMetrics(app: App) {
     const compute = async () => {
     const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
-    // Collapse events to one row of outcome flags per email before joining, so each cohort email joins at
-    // most once and plain FILTERed counts replace count(DISTINCT) over the email-event join. Replayed events
-    // still count once, and events recorded after `to` still count. An email's events are recorded after the
-    // email itself, so events older than the cohort start (less a day of clock slack) cannot match; the
-    // partial index on emailId-bearing events keeps contact and other non-email events out of the scan.
-    const eventFloor = new Date(Date.parse(start) - 86400000).toISOString();
+    // Outcomes come from the per-email flags kept by the operation_events trigger (migration 031): the same
+    // union of public events the old per-query event aggregation produced, without re-reading the events.
+    const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
     const result = await c.env.db.execute<{ date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }>(sql`
-      WITH outcomes AS (
-        SELECT ${events.data}->>'emailId' AS email_id,
-          bool_or(${events.type} IN ('email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.delivery_delayed')) AS accepted,
-          bool_or(${events.type} = 'email.delivered') AS delivered, bool_or(${events.type} = 'email.bounced') AS bounced,
-          bool_or(${events.type} = 'email.complained') AS complained, bool_or(${events.type} = 'email.opened') AS opened,
-          bool_or(${events.type} = 'email.clicked') AS clicked, bool_or(${events.type} IN ('email.rejected', 'email.rendering_failed')) AS failed,
-          bool_or(${events.type} = 'email.delivery_delayed') AS delayed
-        FROM ${events}
-        WHERE ${scoped(events, a)} AND ${events.data} ? 'emailId' AND ${events.createdAt} >= ${eventFloor}
-        GROUP BY 1
-      )
       SELECT ${date} AS "date", count(*)::int AS "emails",
-        count(*) FILTER (WHERE NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR o.accepted))::int AS "accepted",
-        count(*) FILTER (WHERE ${emails.status} = 'delivered' OR o.delivered)::int AS "delivered",
-        count(*) FILTER (WHERE ${emails.status} = 'bounced' OR o.bounced)::int AS "bounced",
-        count(*) FILTER (WHERE ${emails.status} = 'complained' OR o.complained)::int AS "complained",
-        count(*) FILTER (WHERE o.opened)::int AS "opened", count(*) FILTER (WHERE o.clicked)::int AS "clicked",
-        count(*) FILTER (WHERE ${emails.status} IN ('rejected', 'rendering_failed') OR o.failed)::int AS "failed",
-        count(*) FILTER (WHERE ${emails.status} = 'delayed' OR o.delayed)::int AS "deliveryDelayed",
+        count(*) FILTER (WHERE NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
+        count(*) FILTER (WHERE ${emails.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
+        count(*) FILTER (WHERE ${emails.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
+        count(*) FILTER (WHERE ${emails.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
+        count(*) FILTER (WHERE ${has(OUTCOME.opened)})::int AS "opened", count(*) FILTER (WHERE ${has(OUTCOME.clicked)})::int AS "clicked",
+        count(*) FILTER (WHERE ${emails.status} IN ('rejected', 'rendering_failed') OR ${has(OUTCOME.failed)})::int AS "failed",
+        count(*) FILTER (WHERE ${emails.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
         count(*) FILTER (WHERE ${emails.simulated})::int AS "simulated"
-      FROM ${emails} LEFT JOIN outcomes o ON o.email_id = ${emails.id}
+      FROM ${emails}
       WHERE ${filter}
       GROUP BY 1 ORDER BY 1`);
     // Every email belongs to exactly one creation bucket, so totals are the sum of the buckets (no ROLLUP sort).
@@ -456,13 +442,18 @@ function registerMetrics(app: App) {
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     const startMs = Date.parse(start), endMs = Date.parse(end), nowMs = Date.now();
     // "Last N days/hours as of now" windows move every request; bucket them by minute and window length.
-    const window = Math.abs(nowMs - endMs) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round((endMs - startMs) / 60_000)}` : `abs:${start}:${end}`;
+    // The Overview's "previous period" ends one window-length ago, so it is relative too: key it by how far back it
+    // ends as well, or it never hits the cache.
+    const length = endMs - startMs, back = nowMs - endMs;
+    const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
     const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, a.environment, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });
 }
 
+// Bits of sending_emails.event_outcomes, set by the operation_events trigger in migration 031.
+const OUTCOME = { accepted: 1, delivered: 2, bounced: 4, complained: 8, opened: 16, clicked: 32, failed: 64, delayed: 128 } as const;
 const METRICS_CACHE_SECONDS = 60;
 const metricsMemory = new Map<string, { expires: number; value: unknown }>();
 const metricsInflight = new Map<string, Promise<unknown>>();
