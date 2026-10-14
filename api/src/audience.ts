@@ -162,7 +162,7 @@ export async function canMarket(runtime: Runtime, identity: Actor, email: string
   const [row] = await runtime.db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
   return !!row && !row.deletedAt && !row.suppressed && row.marketingConsent === 'subscribed';
 }
-export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, environment: Mode, email: string, source: 'footer-get' | 'rfc8058-post' | 'ses-subscription' = 'footer-get'): Promise<{ contactId: string; changed: boolean }> {
+export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, environment: Mode, email: string, source: 'footer-confirm' | 'rfc8058-post' | 'ses-subscription'): Promise<{ contactId: string; changed: boolean }> {
   const normalized = Email.safeParse(email);
   if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
   return runtime.db.transaction(async tx => {
@@ -174,7 +174,7 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
     const now = new Date().toISOString();
     await tx.update(contacts).set({ marketingConsent: 'unsubscribed', updatedAt: now }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
     const auditId = id('cns');
-    const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'GET request presented a valid footer unsubscribe token; no human identity asserted.';
+    const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.';
     await tx.insert(consentAudit).values({ id: auditId, ...identity, contactId: contact.id, email: normalized.data, status: 'unsubscribed', source, evidence, actorKeyId: null, occurredAt: now });
     await enqueue(tx, { type: 'operation.publish', ...identity, payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: now, ...identity, region: null, data: { contactId: contact.id, status: 'unsubscribed', source } } } });
     return { contactId: contact.id, changed: true };
