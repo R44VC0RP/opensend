@@ -37,7 +37,7 @@ export const emails = pgTable('sending_emails', {
 export const emailEvents = pgTable('sending_email_events', {
   id: text('id').primaryKey(), ...scope(), emailId: text('email_id').notNull(), type: text('type').notNull(), providerId: text('provider_id'),
   externalId: text('external_id'), data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}), simulated: boolean('simulated').notNull(), createdAt: time('created_at').notNull().defaultNow(),
-}, t => [index('sending_events_page').on(t.workspaceId, t.environment, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.environment, t.externalId)]);
+}, t => [index('sending_events_page').on(t.workspaceId, t.environment, t.emailId, t.id), uniqueIndex('sending_events_external').on(t.workspaceId, t.environment, t.externalId), index('sending_email_events_retention').on(t.workspaceId, t.createdAt)]);
 export const attachments = pgTable('sending_attachments', {
   id: text('id').primaryKey(), ...scope(), filename: text('filename').notNull(), contentType: text('content_type').notNull(), size: integer('size').notNull(),
   disposition: text('disposition').$type<'attachment' | 'inline'>().notNull(), contentId: text('content_id'), storageKey: text('storage_key').notNull(), checksum: text('checksum').notNull(), sourceTemplateAssetId: text('source_template_asset_id'),
