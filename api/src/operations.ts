@@ -598,6 +598,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
   const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
+  const tagged = taggedEmailId(data);
   const [input] = await runtime.db.select({ receipt: snsReceipts, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
   } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), tagged
@@ -608,7 +609,6 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
   if (email.simulated !== (job.environment === 'test')) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
-  const tagged = taggedEmailId(data);
   const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;
