@@ -32,6 +32,9 @@
   // One long-lived dispatcher per environment/region/shard, placed near the database.
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
+  // Run HTTP requests next to the PlanetScale database (us-east-2): each query was a ~40 ms cross-country round trip.
+  // Placement affects fetch handlers only; queues, crons and the dispatcher Durable Objects are unchanged.
+  "placement": { "region": "aws:us-east-2" },
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fe48d8b8b9294750a362eb8145186752" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-attachments" }],
