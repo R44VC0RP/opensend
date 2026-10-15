@@ -770,7 +770,7 @@ export function registerSending(app: App) {
     // current status keeps progress and lifetime outcomes in the same snapshot without loading mail bodies.
     const grouped = await c.env.db.select({
       status: emails.status, count: sql<number>`count(DISTINCT ${emails.id})::int`,
-      accepted: distinct(sql`NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay'))`),
+      accepted: distinct(sql`NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${emailEvents.type} IN ('send', 'delivery', 'bounce', 'complaint', 'delivery_delay'))`),
       delivered: outcome('delivered', 'delivery'), bounced: outcome('bounced', 'bounce'), complained: outcome('complained', 'complaint'),
       opened: distinct(sql`${emailEvents.type} = 'open'`), clicked: distinct(sql`${emailEvents.type} = 'click'`),
       failed: distinct(sql`${emails.status} IN ('rejected', 'rendering_failed') OR ${emailEvents.type} IN ('reject', 'rendering_failure')`),
@@ -1076,10 +1076,13 @@ export async function verifiedAttachment(runtime: Runtime, row: typeof attachmen
   try { return await load; } finally { if (pending.get(key) === load) pending.delete(key); }
 }
 
-export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
-export const publicEventType: Record<string, string> = { send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
+// validation_suppressed is an SES Bounce with bounceSubType EmailValidationSuppressed: SES Auto Validation dropped the
+// recipient before sending, so it is not a delivery bounce (AWS excludes it from Reputation.BounceRate). The email becomes
+// suppressed rather than bounced, and its public email.bounced event carries no bounced outcome (migration 034).
+export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', delivery: 'delivered', bounce: 'bounced', validation_suppressed: 'suppressed', complaint: 'complained', reject: 'rejected', rendering_failure: 'rendering_failed', delivery_delay: 'delayed', accepted: 'accepted', suppressed: 'suppressed', acceptance_unknown: 'acceptance_unknown', simulated: 'simulated' };
+export const publicEventType: Record<string, string> = { send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
 export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
-type EmailEventInput = { workspaceId: string; environment: Mode; type: string; providerId?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
+type EmailEventInput = { workspaceId: string; environment: Mode; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
   return (await persistEmailEvent(runtime, input)).event;
@@ -1180,7 +1183,7 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
       ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, ${input.environment === 'test'}::boolean, ${input.createdAt ?? now()}::timestamptz
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
-    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), updated_at = clock_timestamp()
+    UPDATE sending_emails e SET status = ${next ?? null}, provider_id = coalesce(${input.providerId || null}::text, e.provider_id), error_code = coalesce(${input.errorCode ?? null}::text, e.error_code), updated_at = clock_timestamp()
     FROM mail, inserted WHERE e.id = mail.id AND e.workspace_id = ${input.workspaceId} AND e.environment = ${input.environment}
       AND ${next ?? null}::text IS NOT NULL AND ${next ? rank[next] : -1} >= (${JSON.stringify(rank)}::jsonb ->> mail.status)::int
   ), published AS (
@@ -1400,10 +1403,11 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
     }); } catch { throw new ApiError(503, 'JOB_FINALIZATION_FAILED', 'Campaign failure state will retry until it is durable.', undefined, true); }
   }
 };
-// Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail.
+// Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
+// (ineligible at claim time, or dropped by SES Auto Validation before sending) is neither accepted nor bounced.
 async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Promise<{ code: string; message: string } | null> {
   const [row] = (await db.execute<{ accepted: number; bounced: number; complained: number }>(sql`SELECT
-    count(*) FILTER (WHERE provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed'))::int AS accepted,
+    count(*) FILTER (WHERE status <> 'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed')))::int AS accepted,
     count(*) FILTER (WHERE status = 'bounced')::int AS bounced, count(*) FILTER (WHERE status = 'complained')::int AS complained
     FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND campaign_id = ${campaignId}`)).rows;
   const percent = (part: number, whole: number) => `${(100 * part / whole).toFixed(2)}%`;

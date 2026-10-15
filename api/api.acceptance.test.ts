@@ -2043,6 +2043,8 @@ describe('Dashboard API capabilities', () => {
       { status: 'rejected', events: ['reject'] }, { status: 'rendering_failed', events: ['rendering_failure'] },
       { status: 'suppressed', events: [] }, { status: 'canceled', events: [] }, { status: 'acceptance_unknown', events: [] },
       { status: 'sent', events: ['send'], accepted: true }, { status: 'accepted', events: [], accepted: true },
+      // SES Auto Validation drop: the provider accepted the call but never sent; neither accepted nor bounced.
+      { status: 'sent', events: ['send', 'validation_suppressed'], accepted: true },
       { status: 'delivered', events: [], accepted: true, campaignId: untracked.id },
       { status: 'delivered', events: ['delivery'], campaignId: simulated.id, environment: 'test' },
       { status: 'delivered', events: [], workspaceId: 'foreign-stats-workspace' },
@@ -2073,7 +2075,9 @@ describe('Dashboard API capabilities', () => {
     const stats = ok(await http('GET', path, live.secret));
     assert.equal(stats.status, 'completed');
     assert.equal(stats.tracking, true);
-    assert.equal(stats.counts.total, 11);
+    assert.equal(stats.counts.total, 12);
+    assert.equal(stats.counts.byStatus.suppressed, 2);
+    assert.equal(stats.counts.byStatus.bounced, 1);
     assert.equal(stats.counts.byStatus.delivered, 1);
     assert.equal(stats.counts.byStatus.complained, 1);
     assert.equal(stats.counts.byStatus.canceled, 1);
@@ -2562,7 +2566,8 @@ describe('Operational configuration and public event boundaries', () => {
     runtime.config.workspaceId = unique('validation-workspace');
     runtime.config.awsAccountId = '111122223333';
     const emailId = unique('validation-email'), contactId = unique('validation-contact'), providerId = unique('ses-message'), messageId = unique('sns-message');
-    const recipient = address(), topicArn = `arn:aws:sns:${REGION}:${runtime.config.awsAccountId}:synthetic-validation`;
+    const bouncedId = unique('validation-email'), bouncedContactId = unique('validation-contact'), bouncedProviderId = unique('ses-message'), bouncedMessageId = unique('sns-message');
+    const recipient = address(), bouncedRecipient = address(), topicArn = `arn:aws:sns:${REGION}:${runtime.config.awsAccountId}:synthetic-validation`;
     const snapshot = { from: 'sender@example.com', to: [recipient], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic validation', text: 'Synthetic only', attachments: [], tracking: false, headers: [] };
     await db.query('BEGIN');
     try {
@@ -2570,6 +2575,10 @@ describe('Operational configuration and public event boundaries', () => {
       await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
         VALUES($1,$2,'live',$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [emailId, runtime.config.workspaceId, REGION, JSON.stringify([recipient]), providerId, JSON.stringify(snapshot)]);
       await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment) VALUES($1,$2,$3,'live')`, [topicArn, messageId, runtime.config.workspaceId]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,marketing_consent) VALUES($1,$2,'live',$3,'subscribed')`, [bouncedContactId, runtime.config.workspaceId, bouncedRecipient]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
+        VALUES($1,$2,'live',$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [bouncedId, runtime.config.workspaceId, REGION, JSON.stringify([bouncedRecipient]), bouncedProviderId, JSON.stringify({ ...snapshot, to: [bouncedRecipient] })]);
+      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment) VALUES($1,$2,$3,'live')`, [topicArn, bouncedMessageId, runtime.config.workspaceId]);
       await db.query('COMMIT');
     } catch (cause) { await db.query('ROLLBACK'); throw cause; }
     cleanup(t, async () => {
@@ -2585,9 +2594,23 @@ describe('Operational configuration and public event boundaries', () => {
     } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' });
     const contact = (await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE id=$1', [contactId])).rows[0];
     assert.deepEqual(contact, { suppressed: true, suppression_reason: 'email_validation' });
-    const event = (await db.query("SELECT data FROM sending_email_events WHERE email_id=$1 AND type='bounce'", [emailId])).rows[0];
+    const event = (await db.query("SELECT data FROM sending_email_events WHERE email_id=$1 AND type='validation_suppressed'", [emailId])).rows[0];
     assert.equal(event.data.bounceType, 'Permanent');
     assert.equal(event.data.bounceSubType, 'EmailValidationSuppressed');
+    // It never left SES: the email is suppressed, not bounced, and carries no bounced (or accepted) metrics outcome.
+    const suppressed = (await db.query('SELECT status, error_code, event_outcomes FROM sending_emails WHERE id=$1', [emailId])).rows[0];
+    assert.deepEqual(suppressed, { status: 'suppressed', error_code: 'EMAIL_VALIDATION_SUPPRESSED', event_outcomes: 0 });
+    const published = (await db.query("SELECT type, data FROM operation_events WHERE workspace_id=$1 AND data->>'emailId'=$2", [runtime.config.workspaceId, emailId])).rows;
+    assert.deepEqual(published.map(row => [row.type, row.data.bounceSubType]), [['email.bounced', 'EmailValidationSuppressed']]);
+
+    // A real permanent bounce keeps its existing representation.
+    await operationJobs['operation.ses']!(runtime, { topicArn, messageId: bouncedMessageId, region: REGION, message: {
+      eventType: 'Bounce', mail: { messageId: bouncedProviderId, sendingAccountId: runtime.config.awsAccountId },
+      bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: bouncedRecipient }], timestamp: new Date().toISOString() },
+    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' });
+    assert.deepEqual((await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE id=$1', [bouncedContactId])).rows[0], { suppressed: true, suppression_reason: 'hard_bounce' });
+    assert.deepEqual((await db.query('SELECT status, error_code, event_outcomes FROM sending_emails WHERE id=$1', [bouncedId])).rows[0], { status: 'bounced', error_code: null, event_outcomes: 5 });
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM sending_email_events WHERE email_id=$1 AND type='bounce'", [bouncedId])).rows[0].n, 1);
   });
 
   test('webhook configuration rejects SSRF targets, defaults to seven events, and protects rotatable signing secrets without making deliveries', async t => {

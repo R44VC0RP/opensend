@@ -419,7 +419,7 @@ function registerMetrics(app: App) {
     const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
     const result = await c.env.db.execute<{ date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }>(sql`
       SELECT ${date} AS "date", count(*)::int AS "emails",
-        count(*) FILTER (WHERE NOT ${emails.simulated} AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
+        count(*) FILTER (WHERE NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
         count(*) FILTER (WHERE ${emails.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
         count(*) FILTER (WHERE ${emails.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
         count(*) FILTER (WHERE ${emails.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
@@ -640,7 +640,11 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   // Routine send/delivery events have no later consent or engagement writes.
   // Mark their receipt in the same commit as status, event and webhook fan-out.
   const routine = kind === 'Send' || kind === 'Delivery';
-  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: mapped.rawType, externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime,
+  // SES Auto Validation drops risky recipients before sending and reports each as a Permanent bounce with this subtype.
+  // It never left SES, so record it as suppressed (not bounced); the contact is still suppressed below.
+  const validationSuppressed = kind === 'Bounce' && eventDetail.bounceSubType === 'EmailValidationSuppressed';
+  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: validationSuppressed ? 'validation_suppressed' : mapped.rawType,
+    ...(validationSuppressed ? { errorCode: 'EMAIL_VALIDATION_SUPPRESSED' } : {}), externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime,
     ...(routine ? { receipt: { topicArn: String(payload.topicArn), messageId: String(payload.messageId) } } : {}),
   });
   if (routine) return;
@@ -652,7 +656,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
     for (const address of recipients) {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (suppress) {
-        const suppressionReason = kind === 'Complaint' ? 'complaint' : eventDetail.bounceSubType === 'EmailValidationSuppressed' ? 'email_validation' : 'hard_bounce';
+        const suppressionReason = kind === 'Complaint' ? 'complaint' : validationSuppressed ? 'email_validation' : 'hard_bounce';
         await tx.insert(contacts).values({ id: id('con'), workspaceId: job.workspaceId, environment: job.environment, email: address, suppressed: true, suppressionReason }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { suppressed: true, suppressionReason, updatedAt: now() } });
       } else if (observeEngagement) {
         const column = kind === 'Open' ? contacts.lastOpenAt : contacts.lastClickAt;
