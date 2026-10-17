@@ -44,9 +44,10 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     if (!/^os_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
     const [key] = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.hash, await digest(token)), eq(mailboxKeys.workspaceId, c.env.config.workspaceId), isNull(mailboxKeys.revokedAt))).limit(1);
     if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
+    const limit = c.env.config.apiRateLimitPerMinute;
     const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES (${key.workspaceId}, ${key.id}, date_trunc('minute', now()), 1)
-      ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, 1201) ELSE 1 END, window_start = excluded.window_start RETURNING used`);
-    if (budget.rows[0]!.used > 1200) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', 'This key exceeded its 1200-request minute budget. Retry after the window resets.', undefined, true); }
+      ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${limit + 1}) ELSE 1 END, window_start = excluded.window_start RETURNING used`);
+    if (budget.rows[0]!.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${limit}-request minute budget. Retry after the window resets.`, undefined, true); }
     await c.env.db.update(mailboxKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.id, key.id), or(isNull(mailboxKeys.lastUsedAt), sql`${mailboxKeys.lastUsedAt} < now() - interval '1 minute'`)));
     c.set('mailboxAccess', { keyId: key.id, workspaceId: key.workspaceId, environment: LIVE, admin: false, mailboxIds: key.mailboxIds, permissions: key.permissions });
     c.env = await resolveRegionRuntime(c.env);

@@ -25,6 +25,8 @@ export interface Storage {
   delete(key: string): Promise<void>;
 }
 export interface Config {
+  /** Requests per minute per live credential; test credentials get half. */
+  apiRateLimitPerMinute: number;
   workspaceId: string;
   authSecret: string;
   previousAuthSecret?: string;

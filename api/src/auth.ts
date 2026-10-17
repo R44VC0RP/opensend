@@ -53,7 +53,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   }
   const identity = c.get('actor');
   if (!identity.keyId.startsWith('user_')) {
-    const maxRequests = identity.environment === 'test' ? 600 : 1200;
+    const maxRequests = identity.environment === 'test' ? Math.floor(c.env.config.apiRateLimitPerMinute / 2) : c.env.config.apiRateLimitPerMinute;
     const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
       VALUES (${identity.workspaceId}, ${identity.keyId}, date_trunc('minute', now()), 1)
       ON CONFLICT (workspace_id, key_id) DO UPDATE SET

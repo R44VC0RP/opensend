@@ -27,6 +27,8 @@ const values = z.object({
   DISPATCH_TARGET_RATE: optional(z.coerce.number().int().min(1).max(100000)),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
   WEBHOOK_ALLOWED_HOSTS: z.string().default(''),
+  // Requests per minute allowed for each live API key, agent token, MCP grant and mailbox key (test keys get half).
+  API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
   REPUTATION_ALERT_SLACK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
 });
@@ -61,6 +63,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
+    apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },
   };
 }
