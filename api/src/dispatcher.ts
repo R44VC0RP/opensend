@@ -5,6 +5,7 @@ import { emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type 
 import { attachmentRows, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { assertLiveRegionReady } from './ses-region-state.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
+import { CLOUDFLARE_REGION, cloudflareMessage, cloudflareSendError, CloudflareSendError, normalizeMessageId, providerFor, type Provider } from './providers.js';
 
 // The dispatcher is a long-lived loop, hosted by a Durable Object on Cloudflare and by the
 // runner process on Node. PostgreSQL remains the only source of truth: a row is sent at most
@@ -15,15 +16,21 @@ import { simulatedSes } from './adapters/simulated-ses.js';
 export type Mail = typeof emails.$inferSelect;
 type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient };
 type Leased = { mail: Mail; review: Review | null };
-type Prepared = Leased & { snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
+// Verified attachment bytes stay provider-neutral; SES Content is built once at prepare time only for SES.
+type Part = { filename: string; contentType: string; disposition: 'attachment' | 'inline'; contentId: string | null; body: Uint8Array };
+type Prepared = Leased & { snapshot: EmailSnapshot; parts: Part[]; content?: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; sentSinceRefresh: number; brakeUntil?: number }
+// holdUntil pauses claiming after a provider-reported daily limit (Cloudflare) so a full queue cannot spin.
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; sentSinceRefresh: number; brakeUntil?: number; holdUntil?: number }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
+const DAILY_LIMIT_HOLD_MS = 15 * 60000;
+/** One sending provider behind the dispatcher: its quota source and its send call with outcome mapping. */
+export interface SendingProvider { kind: Provider; quota(): Promise<QuotaSnapshot>; send(runtime: Runtime, a: Actor, item: Prepared): Promise<Outcome> }
 
 export interface DispatcherOptions {
   environment: Mode; region: string;
@@ -60,8 +67,12 @@ function semaphore(limit: number) {
 }
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-export function providerClient(runtime: Runtime, environment: Mode, region: string): SESv2Client {
-  return environment === 'live' ? getSes(runtime, region) : simulatedSes(runtime, region);
+// The test environment always uses the in-process SES transport, whatever the region; provider-specific
+// constraints are enforced when mail is queued, so test keys still exercise them.
+export function dispatchProvider(runtime: Runtime, environment: Mode, region: string): SendingProvider {
+  if (environment === 'live' && providerFor(region) === 'cloudflare') return cloudflareProvider(runtime);
+  const ses = environment === 'live' ? getSes(runtime, region) : simulatedSes(runtime, region);
+  return { kind: 'ses', quota: () => fetchQuota(ses), send: (runtime, a, item) => sendOne(runtime, a, ses, item) };
 }
 async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
   const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
@@ -71,7 +82,7 @@ async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
 // sending_region_limits is the shared one-minute quota cache for every shard, the expander and the
 // dashboard. Only the shard that finds it stale calls GetAccount (a 1 TPS control-plane API), and
 // the conditional upsert keeps concurrent shards from repeating that call.
-async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: GateState, ses: SESv2Client, refreshMs: number) {
+async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: GateState, provider: SendingProvider, refreshMs: number) {
   if (gate.quota && Date.now() - gate.quota.checkedAt <= refreshMs) return false;
   const cached = await runtime.db.execute<{ max_send_rate: number; max_24_hour_send: number; sent_last_24_hours: number; checked_at: string }>(sql`
     SELECT max_send_rate, max_24_hour_send, sent_last_24_hours, checked_at::text FROM sending_region_limits
@@ -83,7 +94,7 @@ async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: Gat
     gate.sentSinceRefresh = 0;
     return true;
   }
-  const quota = await fetchQuota(ses);
+  const quota = await provider.quota();
   await runtime.db.execute(sql`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
     VALUES (${a.workspaceId}, ${a.environment}, ${region}, ${quota.maxSendRate}, ${quota.max24HourSend}, ${quota.sentLast24Hours}, 0, clock_timestamp())
     ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
@@ -160,7 +171,15 @@ async function recoverInterrupted(runtime: Runtime, a: Actor): Promise<number> {
   return result.rows[0]?.count ?? 0;
 }
 
-async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<Prepared> {
+function sesContent(s: EmailSnapshot, parts: Part[]): SendEmailCommandInput['Content'] {
+  const attachments: Attachment[] = parts.map(part => ({ FileName: part.filename, RawContent: part.body, ContentType: part.contentType, ContentDisposition: part.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(part.contentId ? { ContentId: part.contentId } : {}) }));
+  return s.raw
+    ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
+    : s.html && attachments.some(part => part.ContentDisposition === 'INLINE')
+      ? { Raw: { Data: inlineMessage(s, attachments) } }
+      : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: attachments } };
+}
+async function prepareMail(runtime: Runtime, a: Actor, leased: Leased, provider: Provider): Promise<Prepared> {
   let mail = leased.mail;
   let rows: Awaited<ReturnType<typeof attachmentRows>> | undefined;
   let unsubscribe: Prepared['unsubscribe'];
@@ -170,16 +189,11 @@ async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<
     mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
   const s = mail.snapshot;
-  const parts: Attachment[] = [];
+  const parts: Part[] = [];
   rows ??= await attachmentRows(runtime.db, a, s.attachments);
-  for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
+  for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ filename: row.filename, contentType: row.contentType, disposition: row.disposition === 'inline' ? 'inline' : 'attachment', contentId: row.contentId, body }); }
   sizeCheck(s, rows);
-  const content: SendEmailCommandInput['Content'] = s.raw
-    ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
-    : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
-      ? { Raw: { Data: inlineMessage(s, parts) } }
-      : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } };
-  return { mail, review: leased.review, snapshot: s, content, unsubscribe, stored };
+  return { mail, review: leased.review, snapshot: s, parts, content: provider === 'ses' ? sesContent(s, parts) : undefined, unsubscribe, stored };
 }
 
 // Preflight failures (storage, rendering, hash mismatch) cannot have sent email: reject the row.
@@ -305,7 +319,7 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
   const request: SendEmailCommandInput = { FromEmailAddress: formattedSender(s.from, s.fromName), Destination: { ToAddresses: s.to, CcAddresses: s.cc, BccAddresses: s.bcc }, ReplyToAddresses: s.replyTo,
     ConfigurationSetName: runtime.config.configurationSets[s.kind], EmailTags: [{ Name: 'opensend_email_id', Value: mail.id }, { Name: 'opensend_workspace_id', Value: a.workspaceId }],
     ConfigurationOverrides: { Tracking: { OpenTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED', ClickTrackingEnabled: s.tracking ? 'ENABLED' : 'DISABLED' } },
-    Content: item.content,
+    Content: item.content!,
   };
   try {
     const result = await ses.send(new SendEmailCommand(request));
@@ -325,6 +339,61 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
       ? { mail, type: 'reject', errorCode: failure.name ?? 'SES_REJECTED', data: { code: failure.name ?? 'SES_REJECTED', retryable: false, ...diagnostics } }
       : { mail, type: 'acceptance_unknown', errorCode: 'SES_ACCEPTANCE_UNKNOWN', data: { code: 'SES_ACCEPTANCE_UNKNOWN', retryable: false, ...diagnostics } };
   }
+}
+
+// Cloudflare Email Service: pacing and the optional daily cap come from configuration (Cloudflare publishes
+// neither). The 24-hour count is only read when a cap is configured; it uses the created-time index.
+function cloudflareProvider(runtime: Runtime): SendingProvider {
+  const settings = runtime.config.cloudflare, sender = runtime.cloudflareEmail;
+  // Same refusal as assertLiveRegionReady, before any lease: send() below always has a transport.
+  if (!sender) throw new ApiError(409, 'CLOUDFLARE_EMAIL_NOT_CONFIGURED', 'Configure the Cloudflare EMAIL binding or REST credentials before live Cloudflare sending.', 'region', true);
+  return { kind: 'cloudflare',
+    quota: async () => {
+      let sent = 0;
+      if (settings?.dailyLimit) {
+        const counted = await runtime.db.execute<{ count: number }>(sql`SELECT count(*)::int AS count FROM sending_emails WHERE workspace_id = ${runtime.config.workspaceId} AND environment = 'live'
+          AND created_at > clock_timestamp() - interval '24 hours' AND region = ${CLOUDFLARE_REGION} AND attempt_started_at > clock_timestamp() - interval '24 hours'`);
+        sent = Number(counted.rows[0]?.count ?? 0);
+      }
+      return { maxSendRate: settings?.sendRate ?? 10, max24HourSend: settings?.dailyLimit ?? -1, sentLast24Hours: sent, checkedAt: Date.now() };
+    },
+    // Never throws (like SES sendOne): every failure becomes an outcome so the group is always recorded.
+    send: async (runtime, a, item) => {
+      const mail = item.mail;
+      try {
+        const result = await sender.send(cloudflareMessage(item.snapshot, item.parts));
+        const providerId = typeof result?.messageId === 'string' ? normalizeMessageId(result.messageId) : '';
+        if (!providerId) return { mail, type: 'acceptance_unknown', errorCode: 'CLOUDFLARE_ACCEPTANCE_UNKNOWN', data: { code: 'CLOUDFLARE_MESSAGE_ID_MISSING' } };
+        return { mail, type: 'accepted', providerId, data: {} };
+      } catch (error) {
+        // Provider messages can contain addresses; only the normalized code and status are recorded.
+        const failure = error instanceof CloudflareSendError ? error : cloudflareSendError(undefined);
+        log('warn', { code: 'CLOUDFLARE_SEND_FAILED', providerCode: failure.code, status: failure.status, emailId: mail.id, environment: a.environment });
+        // The account's daily limit: requeue well past the burst and hold this shard (see GateState.holdUntil).
+        // It never counts toward the throttle cap, so mail waits for the limit to lift rather than failing.
+        if (failure.code === 'E_DAILY_LIMIT_EXCEEDED') return { mail, type: 'provider_throttled', errorCode: 'CLOUDFLARE_DAILY_LIMIT', data: { code: 'CLOUDFLARE_DAILY_LIMIT', retryable: true }, requeueAt: new Date(Date.now() + DAILY_LIMIT_HOLD_MS).toISOString() };
+        if (failure.code === 'E_RATE_LIMIT_EXCEEDED') {
+          // Count earlier rate-limit requeues directly: daily-limit requeues also advance dispatch_version.
+          let providerRetries = 0;
+          if (mail.dispatchVersion > 0) {
+            try {
+              const prior = await runtime.db.execute<{ count: number }>(sql`SELECT count(*)::int AS count FROM sending_email_events
+                WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND email_id = ${mail.id} AND type = 'provider_throttled' AND data->>'code' = 'CLOUDFLARE_THROTTLED'`);
+              providerRetries = Number(prior.rows[0]?.count ?? 0);
+            } catch {
+              // The provider definitively refused; requeue conservatively rather than lose the group's outcomes.
+              return { mail, type: 'provider_throttled', errorCode: 'CLOUDFLARE_THROTTLED', data: { code: 'CLOUDFLARE_THROTTLED', retryable: true }, requeueAt: new Date(Date.now() + 60000).toISOString() };
+            }
+          }
+          if (providerRetries < 5) return { mail, type: 'provider_throttled', errorCode: 'CLOUDFLARE_THROTTLED', data: { code: 'CLOUDFLARE_THROTTLED', retryable: true, attempt: providerRetries + 1 }, requeueAt: new Date(Date.now() + Math.min(60000, 2000 * 2 ** providerRetries)).toISOString() };
+        }
+        // Internal errors, synchronous delivery failures, timeouts and network errors may have been accepted: never resent.
+        if (failure.retryable) return { mail, type: 'acceptance_unknown', errorCode: 'CLOUDFLARE_ACCEPTANCE_UNKNOWN', data: { code: 'CLOUDFLARE_ACCEPTANCE_UNKNOWN', providerCode: failure.code, retryable: false } };
+        const code = `CLOUDFLARE_${failure.code.replace(/^E_/, '')}`;
+        return { mail, type: 'reject', errorCode: code, data: { code, retryable: false } };
+      }
+    },
+  };
 }
 
 // One statement records every provider outcome in the batch: attempt-result events, monotonic
@@ -402,7 +471,7 @@ async function recordSuppressed(runtime: Runtime, a: Actor, mails: Mail[]) {
     FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ id: m.id })))}::jsonb) AS x(id text) ON CONFLICT DO NOTHING`);
 }
 
-type Lane = { ses: SESv2Client; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { provider: SendingProvider; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
@@ -416,21 +485,21 @@ async function releaseLeases(runtime: Runtime, a: Actor, mails: Mail[]) {
 // rows: one claim statement, paced provider calls, one record statement. Recording overlaps the next
 // group's claim and sends; failures surface at the end of the batch.
 async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
-  const { a, ses, gate, options, counters, phase } = lane;
+  const { a, provider, gate, options, counters, phase } = lane;
   const leased = await phase('lease', () => leaseDue(runtime, a, options.region, options.batchSize));
   if (!leased.length) return { processed: 0, blocked: false };
   counters.claimed += leased.length;
   // Quota is loaded lazily so idle regions never touch the provider control plane.
-  if (await phase('quota', () => ensureQuota(runtime, a, options.region, gate, ses, options.quotaRefreshMs))) await options.onGate?.(gate);
-  if (dailyRemaining(gate) <= 0) {
+  if (await phase('quota', () => ensureQuota(runtime, a, options.region, gate, provider, options.quotaRefreshMs))) await options.onGate?.(gate);
+  if (dailyRemaining(gate) <= 0 || (gate.holdUntil ?? 0) > Date.now()) {
     await releaseLeases(runtime, a, leased.map(item => item.mail));
     counters.claimed -= leased.length;
-    log('warn', { code: 'SES_DAILY_QUOTA_EXHAUSTED', environment: options.environment, region: options.region });
+    log('warn', { code: provider.kind === 'ses' ? 'SES_DAILY_QUOTA_EXHAUSTED' : 'CLOUDFLARE_DAILY_LIMIT', environment: options.environment, region: options.region });
     return { processed: 0, blocked: true };
   }
   const prepared: Prepared[] = [];
   await phase('prepare', () => Promise.all(leased.map(async item => {
-    try { prepared.push(await prepareMail(runtime, a, item)); }
+    try { prepared.push(await prepareMail(runtime, a, item, provider.kind)); }
     catch (error) { counters.skipped++; await rejectPreflight(runtime, a, item.mail, error); }
   })));
   if (!prepared.length) return { processed: leased.length, blocked: false };
@@ -453,8 +522,9 @@ async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed:
     const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.limitSends(async () => {
       const wait = reserve(gate, item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, options.shard, lane.pacing);
       if (wait > 0) { const paced = Date.now(); await sleep(wait); counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - paced; }
-      const outcome = await sendOne(runtime, a, ses, item);
+      const outcome = await provider.send(runtime, a, item);
       if (outcome.type === 'provider_throttled') brake(gate);
+      if (outcome.errorCode === 'CLOUDFLARE_DAILY_LIMIT') gate.holdUntil = Date.now() + DAILY_LIMIT_HOLD_MS;
       return outcome;
     }))));
     pendingRecords.push(phase('record', () => recordOutcomes(runtime, a, outcomes)).then(async () => {
@@ -481,11 +551,11 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     const startedAt = Date.now();
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
-  const ses = providerClient(runtime, options.environment, options.region);
+  const provider = dispatchProvider(runtime, options.environment, options.region);
   if (options.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, options.region, 'marketing', true);
   counters.recovered = await phase('recover', () => recoverInterrupted(runtime, a));
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: options.environment === 'live' };
-  const lane: Lane = { ses, gate, pacing, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const lane: Lane = { provider, gate, pacing, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lanes = Math.max(1, options.lanes ?? 2);
   let idleLanes = 0, blocked = false;
   await Promise.all(Array.from({ length: lanes }, async () => {

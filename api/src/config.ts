@@ -15,7 +15,8 @@ const values = z.object({
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
   PUBLIC_URL: z.string().url(),
   SES_FEEDBACK_URL: optional(z.string().url().max(2048)),
-  DEFAULT_SES_REGION: z.string().regex(/^[a-z]{2}(?:-[a-z]+)+-\d$/).default('us-east-1'),
+  // An SES region, or the reserved `cloudflare` region for Cloudflare Email Service.
+  DEFAULT_SES_REGION: z.string().regex(/^(?:[a-z]{2}(?:-[a-z]+)+-\d|cloudflare)$/).default('us-east-1'),
   ENABLE_LIVE_SES: z.enum(['true', 'false']).default('false'),
   SIMULATED_SES_LATENCY_MS: z.coerce.number().int().min(0).max(15000).default(100),
   SIMULATED_SES_RATE: z.coerce.number().int().min(1).max(100000).default(1000),
@@ -30,6 +31,16 @@ const values = z.object({
   // Requests per minute allowed for each live API key, agent token, MCP grant and mailbox key (test keys get half).
   API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
+  // Cloudflare Email Service (region `cloudflare`). The account ID verifies delivery events and, with the API
+  // token (a secret: Email Sending Edit, plus Queues for Node event pulls), enables REST sending on Node.
+  CLOUDFLARE_ACCOUNT_ID: optional(z.string().regex(/^[a-f0-9]{32}$/i).transform(value => value.toLowerCase())),
+  CLOUDFLARE_EMAIL_API_TOKEN: optional(z.string().min(1).max(512)),
+  // Cloudflare publishes no send rate; pace live Cloudflare sends at this many recipients per second.
+  CLOUDFLARE_EMAIL_SEND_RATE: z.coerce.number().int().min(1).max(1000).default(10),
+  // Optional 24-hour cap; unset means unknown and Cloudflare enforces the account's own limit.
+  CLOUDFLARE_EMAIL_DAILY_LIMIT: optional(z.coerce.number().int().min(1).max(100000000)),
+  // Node only: queue ID of the email sending event subscription queue to pull delivery events from.
+  CLOUDFLARE_EVENTS_QUEUE_ID: optional(z.string().regex(/^[a-f0-9]{32}$/i)),
   REPUTATION_ALERT_SLACK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
 });
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
@@ -65,5 +76,6 @@ export function loadConfig(input: Record<string, unknown>): Config {
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },
+    cloudflare: { accountId: v.CLOUDFLARE_ACCOUNT_ID, apiToken: v.CLOUDFLARE_EMAIL_API_TOKEN, sendRate: v.CLOUDFLARE_EMAIL_SEND_RATE, dailyLimit: v.CLOUDFLARE_EMAIL_DAILY_LIMIT, eventsQueueId: v.CLOUDFLARE_EVENTS_QUEUE_ID },
   };
 }

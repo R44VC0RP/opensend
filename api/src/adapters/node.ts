@@ -4,6 +4,7 @@ import { loadConfig } from '../config.js';
 import { ApiError, log } from '../core.js';
 import type { Runtime } from '../core.js';
 import { s3Storage } from './storage.js';
+import { cloudflareSender } from './cloudflare-email.js';
 export function postgresConnection(connectionString: string | undefined) {
   if (!connectionString) throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL is required.');
   let url: URL; try { url = new URL(connectionString); } catch { throw new ApiError(503, 'CONFIG_INVALID', 'DATABASE_URL must be a PostgreSQL URL.'); }
@@ -20,5 +21,6 @@ export function nodeRuntime(env: Record<string, string | undefined>): { runtime:
   // pg evicts failed idle clients, but an unhandled pool error also terminates Node.
   // Keep the API/runner alive to reconnect; never log the error's client/config data.
   pool.on('error', () => log('error', { code: 'POSTGRES_POOL_ERROR', message: 'An idle PostgreSQL connection failed; the pool will reconnect.' }));
-  return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env) }, close: () => pool.end() };
+  const config = loadConfig(env);
+  return { runtime: { db: drizzle(pool), storage: s3Storage(env), config, cloudflareEmail: cloudflareSender(config) }, close: () => pool.end() };
 }

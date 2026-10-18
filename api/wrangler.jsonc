@@ -29,8 +29,14 @@
     "DISPATCH_RATE_FACTOR": "1.1",
     "WEBHOOK_ALLOWED_HOSTS": "",
     // Requests per minute per live API key / agent token / MCP grant / mailbox key (test: half). The 1-vCPU database is the limit.
-    "API_RATE_LIMIT_PER_MINUTE": "10000"
+    "API_RATE_LIMIT_PER_MINUTE": "10000",
+    // Cloudflare Email Service (region `cloudflare`): live sends use the EMAIL binding below. The account ID
+    // verifies delivery events; Cloudflare publishes no send rate, so pacing uses this recipients/second target.
+    "CLOUDFLARE_ACCOUNT_ID": "15d29c8639fd3733b1b5486a2acfd968",
+    "CLOUDFLARE_EMAIL_SEND_RATE": "10"
   },
+  // Cloudflare Email Service sending binding (unrestricted senders and recipients; onboarded domains only).
+  "send_email": [{ "name": "EMAIL" }],
   // One long-lived dispatcher per environment/region/shard, placed near the database.
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
@@ -48,7 +54,10 @@
     ],
     "consumers": [
       { "queue": "opensend-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
-      { "queue": "opensend-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 }
+      { "queue": "opensend-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 },
+      // Cloudflare Email Service delivery events: attach one event subscription per sending domain with
+      // wrangler queues subscription create opensend-cloudflare-events --source email.sending ...
+      { "queue": "opensend-cloudflare-events", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5 }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

@@ -6,6 +6,7 @@ import { jobs } from './db/core.js';
 import { enqueue } from './jobs.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { readReputation } from './ses-setup.js';
+import { providerFor } from './providers.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
 const THRESHOLDS = { bounceRate: { warning: 0.05, risk: 0.1 }, complaintRate: { warning: 0.001, risk: 0.005 } } as const;
@@ -48,7 +49,8 @@ export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
   if (!runtime.config.reputationAlertUrl || !runtime.config.aws || !runtime.config.liveEnabled) return 0;
   const resolved = await resolveRegionRuntime(runtime);
   let queued = 0;
-  for (const region of resolved.config.regions) {
+  // Reputation metrics are SES CloudWatch metrics; Cloudflare Email Service has none to read.
+  for (const region of resolved.config.regions.filter(value => providerFor(value) === 'ses')) {
     const cw = new CloudWatchClient({ region, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) });
     try {
       const reputation = await readReputation(cw, AbortSignal.timeout(20000));

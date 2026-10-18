@@ -17,6 +17,7 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
+import { assertCampaignProvider, assertCloudflareHeaders, assertCloudflareRequest, CLOUDFLARE_LIMITS, providerFor } from './providers.js';
 
 const MAX_ATTACHMENTS = 8 * 1024 * 1024;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
@@ -80,7 +81,7 @@ const AttachmentIds = z.array(z.string().min(1).max(120)).max(20).default([]);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
-  region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
+  region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted. An enabled SES region, or `cloudflare` for Cloudflare Email Service: transactional only (no marketing kind, templates or tracking), one replyTo address and at most 5 MiB per message; violations return 422 PROVIDER_STREAM_UNSUPPORTED, PROVIDER_TEMPLATE_UNSUPPORTED, PROVIDER_TRACKING_UNSUPPORTED or VALIDATION_FAILED, or 413 ENCODED_MESSAGE_TOO_LARGE.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(),
 }).strict().superRefine((v, ctx) => {
@@ -491,6 +492,8 @@ export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const bytes = new TextEncoder().encode((snapshot.raw ?? '') + (snapshot.html ?? '') + (snapshot.text ?? '') + snapshot.subject).length;
   // Conservatively reserve base64/MIME expansion, line folding and headers. This is an application cap, not SES's 40 MB maximum.
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
+  // Cloudflare Email Service caps the whole message, attachments included, at 5 MiB.
+  if (providerFor(snapshot.region) === 'cloudflare' && encoded > CLOUDFLARE_LIMITS.messageBytes) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the Cloudflare Email Service 5 MiB message limit.');
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
 }
 function marketingFooter(snapshot: EmailSnapshot, url: string) {
@@ -504,6 +507,8 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false, htmlValidated = false): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
+  const cloudflare = providerFor(input.region) === 'cloudflare';
+  if (cloudflare) assertCloudflareRequest(input);
   if (!sharedValidated) {
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
     sender(runtime, a, input.from, input.region);
@@ -587,6 +592,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   await checkPending(db, a, 1);
   const snapshot = await prepare(runtime, db, a, parsed.data);
   snapshot.headers = [...snapshot.headers, ...request.headers];
+  if (providerFor(snapshot.region) === 'cloudflare') assertCloudflareHeaders(snapshot.headers);
   const receipt = await queueEmail(db, a, snapshot);
   return { emailId: receipt.id, snapshot };
 }
@@ -737,7 +743,7 @@ export function registerSending(app: App) {
     const result = await idempotent(c, a, input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await instantiateTemplate(c.env, db, a, input.templateId) : null;
       const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], region: await assertRegionEnabled(db, a.workspaceId, input.region), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}) };
-      draftSender(c.env, a, draft);
+      draftSender(c.env, a, draft); assertCampaignProvider(draft.region);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, environment: a.environment, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
       return { ...row!, counts: emptyCounts() };
@@ -825,7 +831,7 @@ export function registerSending(app: App) {
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
       const selectedRegion = await assertRegionEnabled(db, a.workspaceId, input.draft.region ?? current.draft.region);
-      draftSender(c.env, a, { ...input.draft, region: selectedRegion });
+      draftSender(c.env, a, { ...input.draft, region: selectedRegion }); assertCampaignProvider(selectedRegion);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
@@ -855,13 +861,13 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
+    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); assertCampaignProvider(row.draft.region); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 2,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
-      const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
+      const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision); assertCampaignProvider(row.draft.region);
       const draft = readyCampaign(row.draft); sender(c.env, a, draft.from, draft.region);
       if (row.preparingReviewId) {
         const [active] = await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId)));
@@ -989,7 +995,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   // A campaign launch is one job that must start now; ask the response path for an uncoalesced scheduler wake.
   a.wakeJobs = Math.max(a.wakeJobs ?? 0, 12);
   if (input.scheduledAt && (Date.parse(input.scheduledAt) <= Date.now() || Date.parse(input.scheduledAt) > Date.now() + 365 * 86400000)) throw new ApiError(422, 'INVALID_SCHEDULE', 'Schedule between now and one year from now.');
-  const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
+  const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision); assertCampaignProvider(row.draft.region);
   await db.delete(campaignExpansions).where(and(scope(campaignExpansions, a), eq(campaignExpansions.campaignId, campaignId), eq(campaignExpansions.status, 'failed')));
   // Previewing must not silently opt normal send/schedule into the legacy path.
   // Only clients explicitly supplying reviewId request that snapshot contract.

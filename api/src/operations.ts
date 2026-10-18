@@ -15,6 +15,7 @@ import { resolveRegionRuntime } from './ses-region-state.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
+import { assertSesOperation, cloudflareDomainReadiness, isCloudflareFeedback, providerFor } from './providers.js';
 import { deliveryAttempts, deliveries, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -150,6 +151,8 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, envi
   return link.url;
 }
 async function domainReadiness(runtime: Runtime, row: typeof domains.$inferSelect, identity?: GetEmailIdentityCommandOutput) {
+  // Cloudflare sending domains are read from public DNS; there is no identity API to call.
+  if (providerFor(row.region) === 'cloudflare') return cloudflareDomainReadiness(row);
   const value = identity ?? await sesCall(() => getSes(runtime, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })));
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
   const dns: z.infer<typeof domainSchema>['dns'] = [];
@@ -179,26 +182,36 @@ export function registerOperations(app: App) {
     await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
     return c.json({ name, environment: a.environment }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
+  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); const selected = c.req.valid('query').region ?? c.env.config.regions[0]!; assertSesOperation(selected, 'SES account settings'); return c.json(await account(c.env, selected), 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Domains in the `cloudflare` region are always checked over public DNS for the records Cloudflare Email Service publishes when the domain is onboarded. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
+    const a = actor(c), q = c.req.valid('query'); external(a);
+    const selected = q.region ?? c.env.config.regions[0]!;
+    if (providerFor(selected) === 'ses') getSes(c.env, selected); else region(c.env, selected);
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const rows = await c.env.db.select().from(domains).where(and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined)).orderBy(desc(domains.id)).limit(q.limit + 1);
     if (q.refresh === 'false') {
       const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
-      const data = rows.slice(0, q.limit).map(row => {
+      const data: z.infer<typeof domainSchema>[] = [];
+      // Cloudflare rows read public DNS (no AWS calls), sequentially like the refresh path.
+      for (const row of rows.slice(0, q.limit)) data.push(providerFor(row.region) === 'cloudflare' ? await cloudflareDomainReadiness(row) : (() => {
         const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
         const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true;
         return { id: row.id, name: row.name, region: row.region, verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified: cached?.sendingEnabled === true, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready, mailFromDomain: null, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
-      });
+      })());
       return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
     }
     const data: z.infer<typeof domainSchema>[] = [];
-    for (const row of rows.slice(0, q.limit)) { if (data.length) await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
+    for (const row of rows.slice(0, q.limit)) { if (data.length && providerFor(row.region) === 'ses') await new Promise(resolve => setTimeout(resolve, 1000)); data.push(await domainReadiness(c.env, row)); }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
+    if (providerFor(body.region) === 'cloudflare') {
+      // Onboarding happens in the Cloudflare dashboard or with wrangler; OpenSend records the domain and reads its DNS.
+      region(c.env, body.region);
+      const [row] = await c.env.db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
+      return c.json(await domainReadiness(c.env, row!), 201);
+    }
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
     catch (error) {
@@ -213,7 +226,7 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
-    if (!row) return notFound('Domain'); allowedDomain(a, row.name);
+    if (!row) return notFound('Domain'); allowedDomain(a, row.name); assertSesOperation(row.region, 'Custom MAIL FROM');
     const { mailFromDomain } = c.req.valid('json');
     if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
     await sesCall(() => getSes(c.env, row.region).send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
@@ -568,7 +581,8 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   for (const [index, item] of items.entries()) {
     try {
       if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
-      else verifySesAccount(runtime, item.message);
+      // Cloudflare event consumers verify the Cloudflare account before translating events into this shape.
+      else if (!isCloudflareFeedback(item)) verifySesAccount(runtime, item.message);
       const input = routineInput(item, workspaceId);
       if (input) { const group = routine.get(item.environment) ?? []; group.push({ index, input }); routine.set(item.environment, group); }
       else if (item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
@@ -669,7 +683,8 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
 };
 const sesJob: JobHandler = async (runtime, payload, job) => {
   if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
-  verifySesAccount(runtime, payload.message);
+  // Deferred recovery of a Cloudflare delivery event (its account was verified by the event consumer).
+  if (!isCloudflareFeedback({ environment: job.environment, region: payload.region, topicArn: payload.topicArn })) verifySesAccount(runtime, payload.message);
   await processSesReceipt(runtime, payload, job);
 };
 function assertSimulatedFeedback(payload: Record<string, unknown>, job: { environment: Mode }) {

@@ -5,6 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
+import type { CloudflareEmailSender } from './providers.js';
 
 export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
@@ -51,6 +52,9 @@ export interface Config {
   reputationAlertUrl?: string;
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
   configurationSets: { transactional: string; marketing: string };
+  // Cloudflare Email Service (region `cloudflare`). Pacing comes from configuration: Cloudflare publishes no
+  // send rate or quota API. The API token is a secret and never logged.
+  cloudflare?: { accountId?: string; apiToken?: string; sendRate: number; dailyLimit?: number; eventsQueueId?: string };
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
@@ -65,6 +69,8 @@ export interface Runtime {
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+  // Live Cloudflare Email Service transport: the Worker `send_email` binding or the REST API on Node.
+  cloudflareEmail?: CloudflareEmailSender;
 }
 export type MailboxAccess = { keyId: string; workspaceId: string; environment: Mode; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };

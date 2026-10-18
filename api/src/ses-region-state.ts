@@ -5,10 +5,12 @@ import { mailboxRegions } from './db/mailbox.js';
 import { campaigns, emails } from './db/sending.js';
 import { jobs } from './db/core.js';
 import { feedbackTarget, setupResources } from './ses-setup.js';
+import { providerFor } from './providers.js';
 
 export const discoveryTarget = (config: Config) => JSON.stringify([config.publicUrl, feedbackTarget(config)]);
 
-export const regionPattern = /^[a-z]{2}(?:-[a-z]+)+-\d$/;
+// SES regions plus the reserved Cloudflare Email Service region.
+export const regionPattern = /^(?:[a-z]{2}(?:-[a-z]+)+-\d|cloudflare)$/;
 export const DISCOVERY_TTL = 15 * 60 * 1000;
 const settingWhere = (workspaceId: string) => eq(sesSettings.workspaceId, workspaceId);
 export const regionWhere = (workspaceId: string, region: string) => and(eq(sesRegions.workspaceId, workspaceId), eq(sesRegions.region, region));
@@ -40,6 +42,11 @@ export async function assertRegionEnabled(db: DbExecutor, workspaceId: string, r
   return selected;
 }
 export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false) {
+  if (providerFor(region) === 'cloudflare') {
+    // Cloudflare has no discovery rows: live sending needs ENABLE_LIVE_SES and a binding or API token.
+    if (!runtime.config.liveEnabled || !runtime.cloudflareEmail) throw new ApiError(409, 'CLOUDFLARE_EMAIL_NOT_CONFIGURED', 'Enable live sending and configure the Cloudflare EMAIL binding or CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_EMAIL_API_TOKEN before live Cloudflare sending.', 'region', retryable);
+    return;
+  }
   const [row] = await db.select().from(sesRegions).where(regionWhere(runtime.config.workspaceId, region)).limit(1);
   if (!row?.report?.provisioned || row.report.account?.sendingEnabled !== true || row.credentialsFingerprint !== await credentialFingerprint(runtime.config) || row.publicUrl !== discoveryTarget(runtime.config) || row.trustedAccountId !== row.report.account?.id || row.trustedTopicArn !== row.report.resources.topic.arn || row.report.resources[stream].sendingEnabled !== true) {
     throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region', retryable);
@@ -97,8 +104,10 @@ export async function regionCatalog(runtime: Runtime) {
     const row = rows.find(value => value.region === region);
     const stale = row?.lastDiscoveredAt && (row.fingerprint !== fingerprint || row.publicUrl !== discoveryTarget(runtime.config) || Date.now() - Date.parse(row.lastDiscoveredAt) >= DISCOVERY_TTL);
     const discovering = active.some(job => job.payload.region === region && job.payload.credentialsFingerprint === fingerprint && job.payload.publicUrl === discoveryTarget(runtime.config));
-    const discoveryStatus = discovering ? 'discovering' : !row?.lastDiscoveredAt ? 'not_discovered' : stale ? 'stale' : row.status ?? 'not_discovered';
-    return { region, enabled: settings.enabledRegions.includes(region), isDefault: region === settings.defaultRegion,
+    const provider = providerFor(region);
+    // Cloudflare has nothing to discover: its status reflects whether a live transport is configured.
+    const discoveryStatus = provider === 'cloudflare' ? runtime.cloudflareEmail && runtime.config.liveEnabled ? 'ready' : 'blocked' : discovering ? 'discovering' : !row?.lastDiscoveredAt ? 'not_discovered' : stale ? 'stale' : row.status ?? 'not_discovered';
+    return { region, provider, enabled: settings.enabledRegions.includes(region), isDefault: region === settings.defaultRegion,
       discoveryStatus, lastDiscoveredAt: row?.lastDiscoveredAt ?? null, provisionJobId: row?.provisionJobId ?? null,
       provisionStatus: row?.provisionStatus ?? null, provisionError: row?.provisionError ?? null };
   }) };

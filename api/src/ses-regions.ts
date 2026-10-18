@@ -9,11 +9,12 @@ import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
 import { assertProvisionable, AutoValidationModeSchema, discoverSes, provisionSes, SesDiscoverySchema, setAutoValidation, type SesDiscovery } from './ses-setup.js';
 import { assertRegionEnabled, configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
+import { assertSesOperation, providerFor } from './providers.js';
 export { ensureRegionSettings, resolveRegionRuntime } from './ses-region-state.js';
 
 const Params = z.object({ region: z.string().max(32).regex(regionPattern) }).openapi('SesRegionParams');
 const Catalog = z.object({ defaultRegion: z.string(), data: z.array(z.object({
-  region: z.string(), enabled: z.boolean(), isDefault: z.boolean(),
+  region: z.string(), provider: z.enum(['ses', 'cloudflare']).describe('Sending provider: Amazon SES, or Cloudflare Email Service for the reserved region `cloudflare` (transactional only, nothing to discover or provision).'), enabled: z.boolean(), isDefault: z.boolean(),
   discoveryStatus: z.enum(['not_discovered', 'discovering', 'stale', 'ready', 'needs_provisioning', 'blocked']),
   lastDiscoveredAt: z.string().nullable(), provisionJobId: z.string().nullable(),
   provisionStatus: z.enum(['pending', 'running', 'completed', 'failed']).nullable(), provisionError: z.string().nullable(),
@@ -39,19 +40,19 @@ async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: str
 }
 export function registerSesRegions(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/regions', operationId: 'listRegions', tags: ['Regions'], security,
-    description: 'Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration.',
+    description: 'Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration. The reserved region `cloudflare` is Cloudflare Email Service; its discoveryStatus is ready when a live transport is configured, otherwise blocked.',
     responses: { 200: response(Catalog), ...errors },
   }), async c => { access(c); return c.json(Catalog.parse(await regionCatalog(c.env)), 200); });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}', operationId: 'configureRegion', tags: ['Regions'], security,
-    description: 'Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.',
+    description: 'Enable/disable a region (an SES region or `cloudflare`) or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes provider resources or historical mail.',
     request: { params: Params, body: json(z.object({ enabled: z.boolean().optional(), makeDefault: z.boolean().optional() }).strict().refine(value => value.enabled !== undefined || value.makeDefault === true, 'Choose enabled or makeDefault.').openapi('ConfigureRegion')) },
     responses: { 200: response(Catalog), ...errors },
   }), async c => { access(c, true); return c.json(Catalog.parse(await configureRegion(c.env, c.req.valid('param').region, c.req.valid('json'))), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/regions/{region}/discovery', operationId: 'discoverRegion', tags: ['Regions'], security,
-    description: 'Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache.',
+    description: 'Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.',
     request: { params: Params, query: z.object({ refresh: z.enum(['true', 'false']).optional() }) }, responses: { 200: response(SesDiscoverySchema), ...errors },
   }), async c => {
-    access(c, false, true); const { region } = c.req.valid('param');
+    access(c, false, true); const { region } = c.req.valid('param'); assertSesOperation(region, 'Discovery');
     const settings = await getRegionSettings(c.env.db, c.env.config.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before discovery.', 'region');
     const [cached] = await c.env.db.select().from(sesRegions).where(regionWhere(c.env.config.workspaceId, region)).limit(1);
@@ -61,10 +62,10 @@ export function registerSesRegions(app: App) {
     await saveDiscovery(c.env, report); return c.json(report, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/regions/{region}/provision', operationId: 'provisionRegion', tags: ['Regions'], security,
-    description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
+    description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.',
     request: { params: Params, body: json(z.object({ confirm: z.literal(true) }).strict().openapi('ProvisionRegion')) }, responses: { 202: response(Receipt), ...errors },
   }), async c => {
-    const value = access(c, true); assertProvisionable(c.env); const { region } = c.req.valid('param');
+    const value = access(c, true); const { region } = c.req.valid('param'); assertSesOperation(region, 'Provisioning'); assertProvisionable(c.env);
     const receipt = await c.env.db.transaction(async tx => {
       await assertRegionEnabled(tx, value.workspaceId, region);
       await tx.insert(sesRegions).values({ workspaceId: value.workspaceId, region }).onConflictDoNothing();
@@ -82,10 +83,10 @@ export function registerSesRegions(app: App) {
     return c.json(receipt, 202);
   });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}/auto-validation', operationId: 'configureRegionAutoValidation', tags: ['Regions'], security,
-    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.',
+    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.',
     request: { params: Params, body: json(ValidationSettings.extend({ confirm: z.literal(true) }).strict().openapi('ConfigureSesAutoValidation')) }, responses: { 200: response(ValidationSettings), ...errors },
   }), async c => {
-    const value = access(c, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');
+    const value = access(c, true); const { region } = c.req.valid('param'); assertSesOperation(region, 'Auto Validation'); const input = c.req.valid('json');
     const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before configuring Auto Validation.', 'region');
     await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
@@ -109,7 +110,7 @@ async function approvedOrigin(runtime: Runtime, keyId: string) {
 }
 const provision: JobHandler = async (runtime, payload, job) => {
   const parsed = Params.safeParse(payload);
-  if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId || typeof payload.actorKeyId !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES provisioning job.');
+  if (!parsed.success || providerFor(parsed.data.region) !== 'ses' || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId || typeof payload.actorKeyId !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES provisioning job.');
   const { region } = parsed.data;
   if (payload.credentialsFingerprint !== await credentialFingerprint(runtime.config) || payload.publicUrl !== discoveryTarget(runtime.config)) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'AWS credentials or public URL changed; request provisioning again.');
   if (!await approvedOrigin(runtime, payload.actorKeyId)) throw new ApiError(403, 'ORIGIN_KEY_REVOKED', 'The provisioning principal is no longer authorized.');
@@ -136,6 +137,7 @@ export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
     const active = await tx.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running'])));
     let count = 0;
     for (const region of settings.enabledRegions) {
+      if (providerFor(region) !== 'ses') continue;
       const row = rows.find(value => value.region === region);
       if (row?.lastDiscoveredAt && row.credentialsFingerprint === fingerprint && row.publicUrl === target && Date.now() - Date.parse(row.lastDiscoveredAt) < DISCOVERY_TTL) continue;
       if (active.some(job => job.payload.region === region && job.payload.credentialsFingerprint === fingerprint && job.payload.publicUrl === target)) continue;
@@ -147,7 +149,7 @@ export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
 }
 const discover: JobHandler = async (runtime, payload, job) => {
   const parsed = Params.safeParse(payload);
-  if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES discovery job.');
+  if (!parsed.success || providerFor(parsed.data.region) !== 'ses' || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES discovery job.');
   if (payload.credentialsFingerprint !== await credentialFingerprint(runtime.config) || payload.publicUrl !== discoveryTarget(runtime.config)) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'Discovery connection settings changed.');
   const settings = await getRegionSettings(runtime.db, job.workspaceId);
   if (!settings.enabledRegions.includes(parsed.data.region)) return;

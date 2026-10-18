@@ -15,6 +15,7 @@ import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
 import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyRecipients, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
+import { assertSesOperation, providerFor } from './providers.js';
 
 const BASE = '/mailbox/v1';
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -279,7 +280,7 @@ export function registerMailbox(app: App) {
   // ---------- domains ----------
   app.openapi(route({ method: 'get', path: '/domains', operationId: 'mailboxListDomains', tags: [TAG.domains], summary: 'List domains and their receiving status', responses: { 200: response(z.object({ data: z.array(DomainSchema) }).openapi('MailboxDomainList')), ...errors } }), async c => {
     admin(c);
-    const rows = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, c.env.config.workspaceId), eq(domains.environment, LIVE), inArray(domains.region, c.env.config.regions))).orderBy(asc(domains.name));
+    const rows = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, c.env.config.workspaceId), eq(domains.environment, LIVE), inArray(domains.region, c.env.config.regions.filter(region => providerFor(region) === 'ses')))).orderBy(asc(domains.name));
     return c.json({ data: await domainViews(c.env, rows) }, 200);
   });
   app.openapi(route({ method: 'get', path: '/domains/{id}', operationId: 'mailboxGetDomain', tags: [TAG.domains], request: { params: IdParam }, responses: { 200: response(DomainSchema), ...errors } }), async c => {
@@ -298,6 +299,8 @@ export function registerMailbox(app: App) {
     description: 'Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: an OpenSend S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.',
     request: { params: IdParam, body: json(z.object({ catchAll: z.enum(['create_mailbox', 'store']).optional(), force: z.boolean().default(false) }).strict().openapi('EnableMailboxDomain')) }, responses: { 202: response(DomainSchema), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id); const input = c.req.valid('json');
+    // Receiving uses SES receipt rules; Cloudflare sending domains cannot enable mailboxes yet.
+    assertSesOperation(row.region, 'Mailbox receiving');
     if (!c.env.config.regions.includes(row.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable the domain’s SES region first.');
     const identity = await getSes(c.env, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch(() => { throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true); });
     if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
