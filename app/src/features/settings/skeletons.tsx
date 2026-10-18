@@ -53,7 +53,7 @@ export const settingsColumns = {
 } satisfies Record<string, SkeletonColumn[]>
 
 function RouteTabs({ value }: { value: 'ses' | 'webhooks' }) {
-  return <Tabs value={value} onValueChange={() => {}} items={[{ value: 'ses', label: 'Amazon SES' }, { value: 'webhooks', label: 'Webhooks' }]} />
+  return <Tabs value={value} onValueChange={() => {}} items={[{ value: 'ses', label: 'Sending' }, { value: 'webhooks', label: 'Webhooks' }]} />
 }
 
 export function RegionDiscoverySkeleton() {

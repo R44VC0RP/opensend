@@ -4,7 +4,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, Field, Input, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApi, useRegion } from '../../data/context'
-import { regionCatalogKey, regionDiscoveryKey, useRegionAccess, useRegionCatalog, useRegionDiscovery } from '../../data/regions'
+import { isCloudflareRegion, regionCatalogKey, regionDiscoveryKey, regionLabel, useRegionAccess, useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import type { AutoValidationMode, RegionCatalog, RegionCatalogEntry, SesDiscovery, Stream } from '../../data/types'
 import { date, label, number } from '../../lib/format'
 import { fieldError, MutationError } from './shared'
@@ -16,7 +16,11 @@ const activeJob = (entry: RegionCatalogEntry) => entry.provisionStatus === 'pend
 const flag = (value: boolean | null | undefined, yes = 'Yes', no = 'No') => value == null ? 'Unknown' : value ? yes : no
 const amount = (value: number | null | undefined) => value == null ? 'Unknown' : number(value)
 const checkedAt = (value: string) => date(value, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' })
+// Cloudflare has nothing to discover: the API reports ready when a transport is configured, otherwise blocked.
+const cloudflareStatus = (entry: RegionCatalogEntry) => !entry.enabled ? 'Disabled' : entry.discoveryStatus === 'ready' ? 'Ready' : 'Not configured'
+const regionTone = (entry: RegionCatalogEntry) => !entry.enabled || activeJob(entry) ? 'neutral' : entry.discoveryStatus === 'ready' ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : entry.discoveryStatus === 'blocked' ? 'warning' : 'neutral'
 function regionStatus(entry: RegionCatalogEntry) {
+  if (isCloudflareRegion(entry)) return cloudflareStatus(entry)
   if (!entry.enabled) return 'Disabled'
   if (activeJob(entry)) return entry.provisionStatus === 'pending' ? 'Queued' : 'Provisioning'
   if (entry.discoveryStatus === 'discovering') return 'Checking'
@@ -65,22 +69,22 @@ export function RegionSetup() {
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}
       <Field label="Default sending region" htmlFor="default-sending-region" hint="Used when a send doesn't specify a region.">
-        <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: row.region}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
+        <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: regionLabel(row.region)}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
       </Field>
       <DataTable loading={catalog.isPending} skeletonRows={2} rows={catalog.data?.data ?? []} rowKey={row => row.region} selectedId={entry?.region} empty={<EmptyState title="No regions configured" />} columns={[
-        {...settingsColumns.regions[0], render: row => <button type="button" className="settings-region-link" aria-label={`View ${row.region}`} aria-current={entry?.region === row.region ? 'true' : undefined} aria-controls="ses-region-detail" onClick={() => {setViewRegion(row.region)}}>{row.region}</button>},
-        {...settingsColumns.regions[1], render: row => <StatusBadge status={regionStatus(row)} tone={!row.enabled || activeJob(row) ? 'neutral' : row.discoveryStatus === 'ready' ? 'success' : row.provisionStatus === 'failed' ? 'danger' : row.discoveryStatus === 'blocked' ? 'warning' : 'neutral'} />},
+        {...settingsColumns.regions[0], render: row => <button type="button" className="settings-region-link" aria-label={`View ${row.region}`} aria-current={entry?.region === row.region ? 'true' : undefined} aria-controls="ses-region-detail" onClick={() => {setViewRegion(row.region)}}>{row.region}<span className="muted">&nbsp;· {isCloudflareRegion(row) ? 'Cloudflare Email Service' : 'Amazon SES'}</span></button>},
+        {...settingsColumns.regions[1], render: row => <StatusBadge status={regionStatus(row)} tone={regionTone(row)} />},
         {...settingsColumns.regions[2], render: row => <div className="cluster settings-row-actions">{row.enabled ? !row.isDefault && <Button variant="ghost" disabled={!canManage || activeJob(row) || configure.isPending} title={activeJob(row) ? 'Wait for provisioning to finish.' : undefined} onClick={() => {configure.reset(); setDisableRegion(row)}}>Disable</Button> : <Button disabled={!canManage || configure.isPending} onClick={() => {void enable(row.region).catch(() => {})}}>Enable</Button>}</div>},
       ]} />
     </section>
-    {entry && <RegionDetail key={entry.region} entry={entry} inspected={inspectedRegion === entry.region} />}
+    {entry && (isCloudflareRegion(entry) ? <CloudflareDetail key={entry.region} entry={entry} /> : <RegionDetail key={entry.region} entry={entry} inspected={inspectedRegion === entry.region} />)}
     <Dialog open={enableOpen} onOpenChange={open => {if (!configure.isPending) setEnableOpen(open)}} title="Add region" footer={<><Button disabled={configure.isPending} onClick={() => setEnableOpen(false)}>Cancel</Button><Button variant="primary" loading={configure.isPending} type="submit" form="enable-ses-region">Add region</Button></>}>
       <form id="enable-ses-region" className="stack" onSubmit={submitEnable}>
         <MutationError error={configure.error} />
-        <Field label="AWS region" htmlFor="ses-region" error={fieldError(configure.error, 'region')} hint="Checks live AWS without creating resources."><Input id="ses-region" value={newRegion} onChange={event => setNewRegion(event.target.value)} placeholder="us-east-1" maxLength={32} pattern="[a-z]{2}(-[a-z]+)+-[0-9]" required autoFocus disabled={configure.isPending} /></Field>
+        <Field label="Region" htmlFor="ses-region" error={fieldError(configure.error, 'region')} hint="An AWS region checks live AWS without creating resources. Use cloudflare for Cloudflare Email Service."><Input id="ses-region" value={newRegion} onChange={event => setNewRegion(event.target.value)} placeholder="us-east-1" maxLength={32} pattern="[a-z]{2}(-[a-z]+)+-[0-9]|cloudflare" required autoFocus disabled={configure.isPending} /></Field>
       </form>
     </Dialog>
-    <ConfirmDialog open={disableRegion !== null} onOpenChange={open => {if (!open) setDisableRegion(null)}} title={`Disable ${disableRegion?.region ?? 'region'}?`} description="Stops new sends in this region in Live and Test. Keeps AWS resources and mail history." confirmLabel="Disable" danger pending={configure.isPending} onConfirm={async () => {if (disableRegion) await configure.mutateAsync({region: disableRegion.region, enabled: false})}} />
+    <ConfirmDialog open={disableRegion !== null} onOpenChange={open => {if (!open) setDisableRegion(null)}} title={`Disable ${disableRegion?.region ?? 'region'}?`} description="Stops new sends in this region in Live and Test. Keeps provider resources and mail history." confirmLabel="Disable" danger pending={configure.isPending} onConfirm={async () => {if (disableRegion) await configure.mutateAsync({region: disableRegion.region, enabled: false})}} />
   </>
 }
 
@@ -126,6 +130,16 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
     {ready ? <details className="settings-provisioning-details"><summary>Provisioning details</summary><div className="stack">{actions}{checklist}</div></details> : checklist}
     {!report && (discovery.isFetching || discovering) ? <RegionDiscoverySkeleton /> : report ? <DiscoveryReport report={report} entry={entry} /> : null}
     <ConfirmDialog open={confirmOpen} onOpenChange={setConfirmOpen} title={`Provision ${entry.region}?`} description={api.mode === 'demo' ? 'Simulates SES configuration sets and SNS feedback. No real AWS resources or email are changed.' : `Creates or repairs SES configuration sets and SNS feedback in AWS account ${report?.account?.id ?? '(not identified)'}, in ${entry.region}. This changes real AWS resources even when Test is selected. Does not send email, change DNS, or grant production access.`} confirmLabel="Provision resources" pending={provision.isPending} onConfirm={() => provision.mutateAsync()} />
+  </section>
+}
+
+function CloudflareDetail({entry}: {entry: RegionCatalogEntry}) {
+  const status = cloudflareStatus(entry)
+  return <section id="ses-region-detail" className="section stack settings-region-detail" aria-label={`${entry.region} setup`}>
+    <SectionHeader title={<span className="cluster">Cloudflare<StatusBadge status={status} tone={regionTone(entry)} /></span>} />
+    <p className="muted">Cloudflare Email Service sends transactional email only. Campaigns, tracking and stored templates need an SES region.</p>
+    {!entry.enabled && <p className="muted">Enable this region to send through Cloudflare.</p>}
+    {entry.enabled && status === 'Not configured' && <Alert tone="warning" title="Not configured">Add the Workers <code>send_email</code> binding or a REST API token, then subscribe the events queue for each sending domain. See Cloudflare Email Service in the API setup guide.</Alert>}
   </section>
 }
 

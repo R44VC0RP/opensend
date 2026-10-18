@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
+import { isCloudflareRegion, regionLabel } from '../../data/regions'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { receivingStatus } from '../mailboxes/status'
@@ -28,7 +29,7 @@ function downloadDnsRecords(domain: string, records: { type: string; name: strin
 
 function setupSummary(domain: Domain) {
   const parts = [domain.dkimStatus && domain.dkimStatus !== 'verified' && `DKIM ${domain.dkimStatus}`, ['pending', 'failed'].includes(domain.mailFromStatus) && `MAIL FROM ${domain.mailFromStatus}`].filter(Boolean)
-  return parts.length ? parts.join(' · ') : 'Waiting for SES'
+  return parts.length ? parts.join(' · ') : isCloudflareRegion(domain.regionId) ? 'Waiting for DNS' : 'Waiting for SES'
 }
 
 function LiveDomainsPage() {
@@ -58,7 +59,7 @@ function LiveDomainsPage() {
       <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
         { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.status !== 'verified' && <div className="muted">{setupSummary(row)}</div>}</div> },
-        { ...settingsColumns.domains[2], render: row => row.regionId },
+        { ...settingsColumns.domains[2], render: row => regionLabel(row.regionId) },
         { ...settingsColumns.domains[3], render: row => <Link to={`/domains/${row.id}`}>{row.status === 'verified' && row.mailFromStatus === 'verified' ? 'Manage' : 'Review records'}</Link> },
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
@@ -67,7 +68,7 @@ function LiveDomainsPage() {
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
         <Field label="Domain name" htmlFor="domain-name" error={invalid || fieldError(create.error, 'name')}><Input id="domain-name" autoFocus required value={name} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="updates.acme.com" /></Field>
-        <Field label="Sending region" htmlFor="domain-region"><Input id="domain-region" value={regionId} readOnly /></Field>
+        <Field label="Sending region" htmlFor="domain-region" hint={isCloudflareRegion(regionId) ? `Onboard the domain first in the Cloudflare dashboard or with wrangler email sending enable <domain>.` : undefined}><Input id="domain-region" value={regionLabel(regionId)} readOnly /></Field>
       </form>
     </Dialog>
   </div>
@@ -98,20 +99,22 @@ function LiveDomainDetailPage() {
   const mailFromName = current.mailFromDomain ?? mailFromRecords[0]?.name ?? null
   const dkimStatus = current.dkimStatus ?? (current.status === 'verified' ? 'verified' : 'pending')
   const sending = current.status === 'verified' ? { status: 'Ready', tone: 'success' as const } : current.status === 'issue' ? { status: 'Failed', tone: 'danger' as const } : { status: 'Waiting for DNS', tone: 'warning' as const }
+  const cloudflare = isCloudflareRegion(current.regionId)
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
-    <PageHeader title={current.name} backTo="/domains" actions={<><a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a><Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></>} />
+    <PageHeader title={current.name} backTo="/domains" actions={<>{!cloudflare && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}<Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></>} />
     <MutationError error={verify.error} />
-    {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
+    {regionId !== current.regionId && <Alert tone="info">This domain belongs to {regionLabel(current.regionId)}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {regionLabel(current.regionId)}</Button></Alert>}
     <dl className="settings-facts settings-account-summary">
       <div><dt>Sending</dt><dd><StatusBadge status={sending.status} tone={sending.tone} /></dd></div>
       <div><dt>DKIM</dt><dd><StatusBadge status={label(dkimStatus)} /></dd></div>
-      <div><dt>Custom MAIL FROM</dt><dd>{mailFromName ? <StatusBadge status={label(current.mailFromStatus)} /> : <span className="muted">Not configured</span>}</dd></div>
-      <div><dt>Region</dt><dd>{current.regionId}</dd></div>
+      <div><dt>{cloudflare ? 'Bounce domain' : 'Custom MAIL FROM'}</dt><dd>{mailFromName ? <StatusBadge status={label(current.mailFromStatus)} /> : <span className="muted">Not configured</span>}</dd></div>
+      <div><dt>Region</dt><dd>{regionLabel(current.regionId)}</dd></div>
     </dl>
     <section className="section stack">
-      <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these records at your DNS provider, then verify. SES can take up to 72 hours to detect changes.</p></div>{current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>}</div>
+      <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">{cloudflare ? <>Cloudflare publishes these records when you onboard {current.name} in the Cloudflare dashboard or with <code>wrangler email sending enable {current.name}</code>. Then verify.</> : 'Add these records at your DNS provider, then verify. SES can take up to 72 hours to detect changes.'}</p></div>{current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>}</div>
       {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
+      {cloudflare ? current.records.length > 0 && <DnsRecordTable records={current.records} /> : <>
       {dkimRecords.length > 0 && <div className="stack settings-discovery-section">
         <div className="ui-section-header"><div className="domain-group-title"><h3>DKIM</h3><p className="muted">Signs mail sent from {current.name}.</p></div></div>
         <DnsRecordTable records={dkimRecords} />
@@ -120,8 +123,9 @@ function LiveDomainDetailPage() {
         <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">{mailFromName ? 'Routes bounces through your subdomain and aligns SPF.' : 'Optional. Routes bounces through a subdomain you own and aligns SPF.'}</p></div><Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add custom MAIL FROM'}</Button></div>
         {mailFromRecords.length > 0 && <DnsRecordTable records={mailFromRecords} />}
       </div>
+      </>}
     </section>
-    <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />
+    {!cloudflare && <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />}
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />

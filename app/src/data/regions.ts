@@ -5,6 +5,10 @@ import { ApiError, type OpenSendApi, type RegionCatalog, type RegionCatalogEntry
 
 export const regionCatalogKey = (api: OpenSendApi) => ['opensend', api.mode, api.environment, 'regions'] as const
 export const regionDiscoveryKey = (api: OpenSendApi, region: string) => ['opensend', api.mode, 'live', 'region-discovery', region] as const
+export const CLOUDFLARE_REGION = 'cloudflare'
+// The reserved `cloudflare` region is Cloudflare Email Service: transactional only, no SES discovery, provisioning or reputation.
+export const isCloudflareRegion = (region: string | Pick<RegionCatalogEntry, 'region' | 'provider'> | null | undefined) => typeof region === 'string' ? region === CLOUDFLARE_REGION : region?.provider === 'cloudflare' || region?.region === CLOUDFLARE_REGION
+export const regionLabel = (region: string) => isCloudflareRegion(region) ? 'Cloudflare' : region
 export const regionJobActive = (entry?: RegionCatalogEntry) => entry?.discoveryStatus === 'discovering' || entry?.provisionStatus === 'pending' || entry?.provisionStatus === 'running'
 
 export function useRegionAccess() {
@@ -34,7 +38,7 @@ export function useRegionDiscovery(entry: RegionCatalogEntry | undefined, option
   const cache = useQueryClient()
   const region = entry?.region ?? ''
   const automatic = options.auto ?? access.autoDiscover
-  const allowed = Boolean(entry?.enabled && access.canDiscover)
+  const allowed = Boolean(entry?.enabled && access.canDiscover && !isCloudflareRegion(entry))
   const active = regionJobActive(entry)
   const query = useQuery({
     queryKey: regionDiscoveryKey(api, region),

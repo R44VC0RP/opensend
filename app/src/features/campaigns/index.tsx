@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEven
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
-import { useRegionCatalog } from '../../data/regions'
+import { isCloudflareRegion, useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState,
@@ -44,7 +44,9 @@ export function CampaignEditorPage() {
   const { id } = useParams()
   const { regionId } = useRegion()
   const regions = useRegionCatalog({ enabled: !id })
-  const fallbackRegion = regionId || regions.data?.defaultRegion || ''
+  // Campaigns are marketing mail, which the transactional-only Cloudflare region refuses: prefer an SES region.
+  const ses = (region?: string) => region && !isCloudflareRegion(region) ? region : ''
+  const fallbackRegion = ses(regionId) || ses(regions.data?.defaultRegion) || regions.data?.data.find(row => row.enabled && !isCloudflareRegion(row))?.region || (regions.data ? regionId || regions.data.defaultRegion : '')
   const scope = useRef({ id, key: id ?? 'new', createdId: null as string | null })
   if (scope.current.id !== id) {
     const ownCreation = !scope.current.id && id === scope.current.createdId
