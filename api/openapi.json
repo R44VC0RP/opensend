@@ -14878,7 +14878,7 @@
                   "statement": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 20000,
+                    "maxLength": 4000,
                     "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
                   }
                 },
@@ -15044,7 +15044,7 @@
                   "statement": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 20000,
+                    "maxLength": 4000,
                     "description": "AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons."
                   }
                 },
@@ -25976,7 +25976,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Marketing consent is now unsubscribed.",
+            "description": "Confirmation page; GET never changes consent (link scanners prefetch footer links).",
             "content": {
               "text/html": {
                 "schema": {
@@ -26118,7 +26118,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Marketing consent is now unsubscribed.",
+            "description": "Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).",
             "content": {
               "text/html": {
                 "schema": {

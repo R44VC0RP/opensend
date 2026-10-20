@@ -6,7 +6,7 @@ import { compileRule } from './audience.js';
 import { audiencePlans, consentAudit, contacts, listMembers, lists, segments, type AudienceOperation } from './db/audience.js';
 import { enqueue } from './jobs.js';
 
-const Statement = z.string().trim().min(1).max(20_000).describe("AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.");
+const Statement = z.string().trim().min(1).max(4000).describe("AudienceQL statement. Supported: SELECT fields|count(*) FROM contacts [WHERE ...] [LIMIT n]; UPDATE contacts SET name|consent|properties.key = value WHERE ...; ADD contacts TO LIST 'name-or-id' WHERE ...; REMOVE contacts FROM LIST 'name-or-id' WHERE .... WHERE supports AND with =, !=, CONTAINS, IS NULL, IS NOT NULL and timestamp comparisons over id, email, name, consent, suppressed, list, segment, lastOpenAt, lastClickAt and properties.key. No raw tables, joins, comments or semicolons.");
 const Value = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 const Sample = z.object({ id: z.string(), email: z.string(), name: z.string().nullable(), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean() });
 const QueryResult = z.object({ columns: z.array(z.string()), rows: z.array(z.record(z.string(), Value.or(z.record(z.string(), Value)))), matched: z.number().int(), truncated: z.boolean() }).openapi('AudienceQueryResult');
@@ -19,6 +19,8 @@ function scoped(column: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, 
 function clean(statement: string) {
   const value = statement.trim();
   if (/[;\0]|--|\/\*/.test(value)) throw new ApiError(422, 'AUDIENCEQL_INVALID', 'AudienceQL does not allow semicolons, comments, or multiple statements.', 'statement');
+  if (value.length > 4000) throw new ApiError(422, 'AUDIENCEQL_INVALID', 'AudienceQL statements may contain at most 4000 characters.', 'statement');
+  if (/\s{32}/.test(value)) throw new ApiError(422, 'AUDIENCEQL_INVALID', 'AudienceQL does not allow long runs of whitespace.', 'statement');
   return value;
 }
 function splitOutside(value: string, separator: ',' | 'AND'): string[] {

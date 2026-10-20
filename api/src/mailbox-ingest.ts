@@ -2,7 +2,7 @@ import PostalMime, { type Address, type Email } from 'postal-mime';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
-import { enqueue } from './jobs.js';
+import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { mailAttachments, mailboxDomains, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents, recordEvents, type MailboxEventInput } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3, RAW_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
@@ -10,6 +10,7 @@ import { assignThread, attachToMailboxes, messageIdList, normalizeMessageId, rem
 
 const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MIME only (Worker memory).
 const BODY_LIMIT = 1_000_000;
+const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
 const live: Scope['environment'] = 'live';
 
@@ -107,8 +108,11 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
   const attachments: (typeof mailAttachments.$inferInsert)[] = [];
+  const skipAttachments = (email?.attachments.length ?? 0) > MAX_ATTACHMENTS;
+  if (skipAttachments) log('warn', { code: 'MAILBOX_ATTACHMENTS_SKIPPED', count: email!.attachments.length, limit: MAX_ATTACHMENTS });
+  let uploadFailed = false;
   try {
-    for (const [index, part] of (email?.attachments ?? []).entries()) {
+    for (const [index, part] of (skipAttachments ? [] : email?.attachments ?? []).entries()) {
       const bytes = part.content instanceof ArrayBuffer ? part.content : typeof part.content === 'string' ? new TextEncoder().encode(part.content).buffer as ArrayBuffer : (part.content.buffer as ArrayBuffer).slice(part.content.byteOffset, part.content.byteOffset + part.content.byteLength);
       const attachmentId = `matt_${(await digest(`${messageRowId}:${index}`)).slice(0, 32)}`;
       const key = `${ATTACHMENT_PREFIX}${messageRowId}/${attachmentId}`;
@@ -116,8 +120,13 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
       await s3.send(new PutObjectCommand({ Bucket: receipt.bucket, Key: key, Body: new Uint8Array(bytes), ContentType: contentType }));
       attachments.push({ id: attachmentId, ...scope, messageId: messageRowId, filename: (part.filename ?? `attachment-${index + 1}`).slice(0, 255), contentType, sizeBytes: bytes.byteLength, contentId: normalizeMessageId(part.contentId), disposition: part.disposition === 'inline' || part.related ? 'inline' as const : 'attachment' as const, sha256: hex(await crypto.subtle.digest('SHA-256', bytes)), bucket: receipt.bucket, storageKey: key });
     }
-  } catch { throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true); }
+  } catch { uploadFailed = true; }
   finally { s3.destroy(); }
+  if (uploadFailed) {
+    // On the last attempt the receipt is marked failed so hourly recovery stops re-queuing it.
+    if (job.attempts >= MAX_ATTEMPTS) { await runtime.db.update(mailReceipts).set({ status: 'failed', error: 'ATTACHMENT_UPLOAD_FAILED', processedAt: new Date().toISOString() }).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId))); log('error', { code: 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', final: true }); return; }
+    throw new ApiError(503, 'MAILBOX_ATTACHMENT_UPLOAD_FAILED', 'An attachment could not be stored in S3; retrying.', undefined, true);
+  }
 
   const runnable = await runtime.db.transaction(async tx => {
     const events: MailboxEventInput[] = [];
@@ -125,13 +134,18 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     const [existingRow] = await tx.select({ id: mailMessages.id }).from(mailMessages).where(eq(mailMessages.id, messageRowId));
     if (existingRow) { await done(); return 0; }
     // The same message delivered in separate SMTP transactions (for example to two receiving domains)
-    // becomes one stored message; the later receipt only adds its recipients.
+    // becomes one stored message; the later receipt only adds its recipients. Headers are sender-controlled, so the
+    // content must match too, or a forged Message-ID would pull another mailbox's message into this receipt's mailboxes.
     let target: typeof mailMessages.$inferSelect | undefined;
     if (messageId) {
       const [known] = await tx.select({ id: mailMessageIds.mailMessageId }).from(mailMessageIds).where(and(eq(mailMessageIds.workspaceId, scope.workspaceId), eq(mailMessageIds.environment, scope.environment), eq(mailMessageIds.messageId, messageId)));
       if (known) {
         const [row] = await tx.select().from(mailMessages).where(eq(mailMessages.id, known.id));
-        if (row?.direction === 'inbound' && row.fromAddress === from.address && row.subject === subject) target = row;
+        if (row?.direction === 'inbound' && row.fromAddress === from.address && row.subject === subject && row.text === text.value && row.html === html.value && row.attachmentCount === attachments.length) {
+          const stored = row.attachmentCount ? (await tx.select({ sha256: mailAttachments.sha256 }).from(mailAttachments).where(eq(mailAttachments.messageId, row.id))).map(item => item.sha256).sort() : [];
+          const incoming = attachments.map(item => item.sha256).sort();
+          if (stored.length === incoming.length && stored.every((value, index) => value === incoming[index])) target = row;
+        }
       }
     }
     if (!target) {
@@ -140,7 +154,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         id: messageRowId, ...scope, direction: 'inbound', threadId, region: receipt.region, sesMessageId, messageId, inReplyTo, references, subject,
         fromAddress: from.address, fromName: from.name, to: flatten(email?.to), cc: flatten(email?.cc), bcc: flatten(email?.bcc), replyTo: flatten(email?.replyTo),
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
-        text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed', snippet: snippetOf(text.value, html.value),
+        text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes: raw.byteLength, rawBucket: receipt.bucket, rawKey: receipt.objectKey,
         verdicts, spam, automated: automated(email, from.address), status,
       }).returning();
@@ -150,8 +164,10 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     }
     const routed = await routeRecipients(tx, scope, receipt.recipients, { allowCreate: !spam });
     let mailboxIds = routed.mailboxIds;
-    // Replies addressed elsewhere (for example a forwarded thread) stay with the mailboxes already in the conversation.
-    if (!mailboxIds.length) mailboxIds = (await tx.selectDistinct({ id: mailboxThreads.mailboxId }).from(mailboxThreads).where(eq(mailboxThreads.threadId, target.threadId))).map(row => row.id);
+    // Replies addressed elsewhere (for example a forwarded thread) stay with the mailboxes already in the conversation,
+    // but only from an authenticated sender: In-Reply-To and References are forgeable.
+    const authenticated = verdicts.dmarc === 'PASS' || (verdicts.spf === 'PASS' && verdicts.dkim === 'PASS');
+    if (!mailboxIds.length && authenticated) mailboxIds = (await tx.selectDistinct({ id: mailboxThreads.mailboxId }).from(mailboxThreads).where(eq(mailboxThreads.threadId, target.threadId))).map(row => row.id);
     if (routed.unrouted.length) await tx.insert(mailUnrouted).values(routed.unrouted.map(address => ({ ...scope, messageId: target!.id, address }))).onConflictDoNothing();
     const added = await attachToMailboxes(tx, scope, target, mailboxIds);
     for (const mailboxId of routed.created) events.push({ type: 'mailbox.created', mailboxId, data: { origin: 'auto' } });

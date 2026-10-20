@@ -57,9 +57,8 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     const actor = c.get('actor');
     if (actor.credential !== 'dashboard' && actor.environment !== 'live') throw new ApiError(403, 'MAILBOX_LIVE_ONLY', 'Mailboxes receive real mail; use a live key.');
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Mailbox access requires a key without domain restrictions, or a mailbox key.');
-    const manage = actor.permissions.includes('manage');
-    const permissions: MailboxPermission[] = manage ? ['read', 'send', 'modify'] : actor.permissions.filter((p): p is 'read' | 'send' => p === 'read' || p === 'send');
-    c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: manage, mailboxIds: null, permissions });
+    if (!actor.permissions.includes('manage')) throw new ApiError(403, 'ADMIN_REQUIRED', 'Mailbox routes require a mailbox key, or an unrestricted live OpenSend key with manage permission.');
+    c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] });
     c.env = await resolveRegionRuntime(c.env);
     await next();
   });

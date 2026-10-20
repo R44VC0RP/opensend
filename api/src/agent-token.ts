@@ -2,12 +2,11 @@ import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
 import type { Config, Mode, Permission } from './core.js';
 
-const LegacyPayload = z.object({
-  v: z.literal(1), grant: z.string().regex(/^mcp_[A-Za-z0-9_-]{1,200}$/), environment: z.enum(['live', 'test']),
+const Payload = z.object({
+  v: z.literal(2), id: z.string().regex(/^agt_[0-9a-f]{32}$/), grant: z.string().regex(/^mcp_[A-Za-z0-9_-]{1,200}$/), environment: z.enum(['live', 'test']),
   permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3), domains: z.array(z.string()).max(50),
   exp: z.number().int().positive(), nonce: z.string().regex(/^[0-9a-f]{32}$/),
 }).strict();
-const Payload = z.union([LegacyPayload, LegacyPayload.extend({ v: z.literal(2), id: z.string().regex(/^agt_[0-9a-f]{32}$/) })]);
 export type AgentTokenPayload = z.infer<typeof Payload>;
 
 const encoder = new TextEncoder();

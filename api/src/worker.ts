@@ -76,6 +76,11 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
 }
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+      if (request.method === 'GET' || request.method === 'HEAD') { url.protocol = 'https:'; return secureResponse(Response.redirect(url.toString(), 301)); }
+      return secureResponse(Response.json({ error: { code: 'HTTPS_REQUIRED', message: 'Use HTTPS.', retryable: false } }, { status: 403, headers: { 'cache-control': 'no-store' } }));
+    }
     try {
       const admissionStarted = performance.now();
       const address = request.headers.get('CF-Connecting-IP') ?? '127.0.0.1';

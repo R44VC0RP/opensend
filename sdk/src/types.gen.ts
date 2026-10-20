@@ -8760,7 +8760,7 @@ export type UnsubscribeByLinkError = UnsubscribeByLinkErrors[keyof UnsubscribeBy
 
 export type UnsubscribeByLinkResponses = {
     /**
-     * Marketing consent is now unsubscribed.
+     * Confirmation page; GET never changes consent (link scanners prefetch footer links).
      */
     200: UnsubscribeConfirmationHtml;
 };
@@ -8823,7 +8823,7 @@ export type UnsubscribeOneClickError = UnsubscribeOneClickErrors[keyof Unsubscri
 
 export type UnsubscribeOneClickResponses = {
     /**
-     * Marketing consent is now unsubscribed.
+     * Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).
      */
     200: UnsubscribeConfirmationHtml;
 };

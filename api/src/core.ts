@@ -119,6 +119,7 @@ export const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 } as const;
 export function applySecurityHeaders(headers: Headers): Headers {
   // Route-specific policies (notably OAuth form redirects) take precedence.
