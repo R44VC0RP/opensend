@@ -3547,4 +3547,79 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'live'", [runtime.config.workspaceId])).rows[0].count, 0);
     });
   });
+
+  test('MOCK JEV TRANSPORT: screened live transactional spam is rejected before SES, clean and unscreened mail sends, and an outage fails open', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { dispatchDue }, { credentialFingerprint, discoveryTarget }, { loadConfig }] = await Promise.all([
+        import('@aws-sdk/client-sesv2'), import('./src/dispatcher.js'), import('./src/ses-region-state.js'), import('./src/config.js'),
+      ]);
+      const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
+      assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
+      assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
+      // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
+      runtime.config.liveEnabled = true;
+      runtime.config.aws = { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' };
+      runtime.config.screen = { apiKey: 'synthetic-typesafe-key', model: 'jev-test', mode: 'reject', threshold: 0.7 };
+      const topic = `arn:aws:sns:${REGION}:111122223333:synthetic-feedback`;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id, region, report, credentials_fingerprint, public_url, trusted_account_id, trusted_topic_arn)
+        VALUES ($1, $2, $3, $4, $5, '111122223333', $6)`, [runtime.config.workspaceId, REGION,
+        JSON.stringify({ provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }),
+        await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      const sent: string[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async (command: any) => {
+        if (command instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(command instanceof SendEmailCommand, 'Only GetAccount and SendEmail are expected.');
+        const emailId = command.input.EmailTags!.find((tag: Json) => tag.Name === 'opensend_email_id')!.Value!;
+        sent.push(emailId);
+        return { MessageId: `live-${emailId}` };
+      });
+      const marker = unique('CASINO-BONUS');
+      let classifierDown = false;
+      const classified: string[] = [];
+      const passthrough = globalThis.fetch;
+      t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (!url.startsWith('https://api.typesafe.ai/')) return passthrough(input, init);
+        assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
+        assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer synthetic-typesafe-key');
+        const request = JSON.parse(String(init?.body));
+        assert.equal(request.model, 'jev-test');
+        assert.equal(request.questions.spam.type, 'noul');
+        assert.equal(request.state.signals.recipients, 1);
+        classified.push(request.state.email.subject);
+        if (classifierDown) throw new Error('Synthetic classifier outage');
+        return Response.json({ model: 'jev-test', answers: { spam: { noul: request.state.email.subject.includes(marker) ? 0.97 : 0.02 } } });
+      });
+      const send = async (extra: Json) => ok(await local('POST', '/v1/emails/send', mail(extra), 'live'), 202).id as string;
+      const get = async (emailId: string) => ok(await local('GET', `/v1/emails/${emailId}`, undefined, 'live'));
+      const events = async (emailId: string) => page(await local('GET', `/v1/emails/${emailId}/events`, undefined, 'live'));
+
+      const spamSubject = `Join ${marker} on OpenCode`;
+      const spam = await send({ subject: spamSubject, html: `<p>You were invited to <b>${marker}</b>.</p>`, screen: true });
+      const clean = await send({ subject: 'Join Acme on OpenCode', screen: true });
+      const unscreened = await send({ subject: `Join ${marker} unscreened on OpenCode` });
+      await dispatchDue(runtime, 'live', REGION);
+      const rejected = await get(spam);
+      assert.equal(rejected.status, 'rejected');
+      assert.equal(rejected.errorCode, 'CONTENT_REJECTED_SPAM');
+      assert.equal(rejected.providerId, null);
+      const reject = (await events(spam)).find(event => event.type === 'reject');
+      assert.ok(reject, 'A screen rejection records a reject event.');
+      assert.equal(reject.data.code, 'CONTENT_REJECTED_SPAM');
+      assert.equal(reject.data.providerCalled, false);
+      assert.deepEqual(reject.data.screen, { spam: 0.97, model: 'jev-test', threshold: 0.7 });
+      assert.ok(!sent.includes(spam), 'A rejected message never reaches SES.');
+      assert.equal((await get(clean)).status, 'accepted');
+      assert.equal((await get(unscreened)).status, 'accepted', 'Unscreened mail is never classified, whatever its content.');
+      assert.deepEqual(classified.sort(), [spamSubject, 'Join Acme on OpenCode'].sort());
+      assert.deepEqual(sent.sort(), [clean, unscreened].sort());
+
+      classifierDown = true;
+      const outage = await send({ subject: `Join ${marker} during an outage`, screen: true });
+      await dispatchDue(runtime, 'live', REGION);
+      assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
+      assert.ok(sent.includes(outage));
+      assert.equal(classified.length, 3);
+    });
+  });
 });

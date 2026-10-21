@@ -49,6 +49,8 @@ export interface Config {
   inboundTopicArns?: string[];
   webhookAllowedHosts: string[];
   reputationAlertUrl?: string;
+  // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
+  screen?: { apiKey: string; model: string; mode: 'reject' | 'flag'; threshold: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
   configurationSets: { transactional: string; marketing: string };
 }

@@ -29,7 +29,11 @@
     "DISPATCH_RATE_FACTOR": "1.1",
     "WEBHOOK_ALLOWED_HOSTS": "",
     // Requests per minute per live API key / agent token / MCP grant / mailbox key (test: half). The 1-vCPU database is the limit.
-    "API_RATE_LIMIT_PER_MINUTE": "10000"
+    "API_RATE_LIMIT_PER_MINUTE": "10000",
+    // Opt-in Jev content screen for `screen: true` transactional sends; active only once the TYPESAFE_API_KEY secret is set.
+    "JEV_MODEL": "jev-latest",
+    "JEV_SCREEN_MODE": "reject",
+    "JEV_SCREEN_THRESHOLD": "0.7"
   },
   // One long-lived dispatcher per environment/region/shard, placed near the database.
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },

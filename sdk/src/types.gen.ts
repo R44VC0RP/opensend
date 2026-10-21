@@ -365,6 +365,10 @@ export type SendEmailInput = {
     };
     attachments?: Array<string>;
     tracking?: boolean;
+    /**
+     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
+     */
+    screen?: boolean;
 };
 
 export type EmailBatchQueued = {

@@ -5,6 +5,7 @@ import { emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type 
 import { attachmentRows, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { assertLiveRegionReady } from './ses-region-state.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
+import { screenSnapshot } from './screen.js';
 
 // The dispatcher is a long-lived loop, hosted by a Durable Object on Cloudflare and by the
 // runner process on Node. PostgreSQL remains the only source of truth: a row is sent at most
@@ -160,6 +161,29 @@ async function recoverInterrupted(runtime: Runtime, a: Actor): Promise<number> {
   return result.rows[0]?.count ?? 0;
 }
 
+// A screen rejection carries its verdict into the reject event.
+class ScreenRejected extends ApiError {
+  constructor(public screen: { spam: number; model: string; threshold: number }) { super(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be unsolicited advertising.'); }
+}
+let screenSkipLoggedAt = 0;
+// Opt-in Jev screen for live transactional mail. It fails open: a classifier outage must never stop transactional mail.
+async function screenMail(runtime: Runtime, mail: Mail, s: EmailSnapshot) {
+  const settings = runtime.config.screen;
+  if (!settings) {
+    if (Date.now() - screenSkipLoggedAt >= 60000) { screenSkipLoggedAt = Date.now(); log('warn', { code: 'CONTENT_SCREEN_SKIPPED', emailId: mail.id, message: 'screen requested but TYPESAFE_API_KEY is not configured' }); }
+    return;
+  }
+  let result: Awaited<ReturnType<typeof screenSnapshot>>;
+  try { result = await screenSnapshot(runtime, s); }
+  catch (error) {
+    log('warn', { code: 'CONTENT_SCREEN_UNAVAILABLE', emailId: mail.id, message: error instanceof ApiError ? error.message : 'The content classifier failed; sending unscreened.' });
+    return;
+  }
+  if (!result || result.spam < settings.threshold) return;
+  if (settings.mode === 'reject') throw new ScreenRejected({ spam: result.spam, model: result.model, threshold: settings.threshold });
+  log('warn', { code: 'CONTENT_SPAM_SUSPECTED', emailId: mail.id, spam: result.spam, model: result.model });
+}
+
 async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<Prepared> {
   let mail = leased.mail;
   let rows: Awaited<ReturnType<typeof attachmentRows>> | undefined;
@@ -170,6 +194,7 @@ async function prepareMail(runtime: Runtime, a: Actor, leased: Leased): Promise<
     mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
   const s = mail.snapshot;
+  if (s.screen && a.environment === 'live' && s.kind === 'transactional') await screenMail(runtime, mail, s);
   const parts: Attachment[] = [];
   rows ??= await attachmentRows(runtime.db, a, s.attachments);
   for (const row of rows) { const body = await verifiedAttachment(runtime, row); parts.push({ FileName: row.filename, RawContent: body, ContentType: row.contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) }); }
@@ -197,8 +222,10 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
       WHERE id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING id
     ) INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-    SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, id, 'reject', ${`preflight-failed:${mail.id}`}, ${a.environment === 'test'}::boolean, ${JSON.stringify({ code, providerCalled: false })}::jsonb FROM rejected ON CONFLICT DO NOTHING`);
-  log('error', { code, emailId: mail.id, environment: a.environment, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
+    SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, id, 'reject', ${`preflight-failed:${mail.id}`}, ${a.environment === 'test'}::boolean, ${JSON.stringify({ code, providerCalled: false, ...(error instanceof ScreenRejected ? { screen: error.screen } : {}) })}::jsonb FROM rejected ON CONFLICT DO NOTHING`);
+  // Screen rejections are an expected policy outcome, not a dispatcher fault.
+  if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, environment: a.environment, spam: error.screen.spam, model: error.screen.model });
+  else log('error', { code, emailId: mail.id, environment: a.environment, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
   await finishEmailCampaign(runtime, a, mail);
 }
 

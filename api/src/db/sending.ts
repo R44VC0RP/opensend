@@ -10,6 +10,8 @@ export type EmailSnapshot = {
   template?: { name: string; data: Record<string, unknown>; source: { Subject?: string; Html?: string; Text?: string }; render: 'ses' | 'simulated' };
   headers: { Name: string; Value: string }[];
   deferredCampaign?: boolean;
+  /** Live transactional only: ask the content classifier (Jev) before dispatch. */
+  screen?: boolean;
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
 };
