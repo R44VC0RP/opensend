@@ -7,7 +7,8 @@ import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { mailboxHourly } from './mailbox-ingest.js';
 import { syncOutboundMessages } from './mailbox-send.js';
-import { queueStartupDiscovery } from './ses-regions.js';
+import { queueStartupDiscovery, resolveRegionRuntime } from './ses-regions.js';
+import { pullCloudflareEvents } from './adapters/cloudflare-email.js';
 import { ApiError, log } from './core.js';
 try {
   const { runtime, close } = nodeRuntime(process.env);
@@ -18,6 +19,8 @@ try {
   const gates = new Map<string, GateState>();
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
+  // Cloudflare delivery events (when configured) are pulled alongside the job loop; it logs and continues on errors.
+  const cloudflareEvents = pullCloudflareEvents(runtime, resolveRegionRuntime, () => stopped);
   try {
     await queueStartupDiscovery(runtime);
     while (!stopped) {
@@ -38,7 +41,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { await close(); }
+  } finally { stopped = true; await cloudflareEvents; await close(); }
 } catch (error) {
   log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
   process.exitCode = 1;

@@ -30,7 +30,7 @@ export const expectedMx = (domain: string, region: string): MxReport['expected']
 const provider = (host: string) => PROVIDERS.find(([pattern]) => pattern.test(host))?.[1] ?? null;
 
 type DohAnswer = { name: string; type: number; data: string };
-async function resolve(name: string, type: 'MX' | 'CNAME'): Promise<{ status: number; answers: DohAnswer[] }> {
+export async function resolve(name: string, type: 'MX' | 'CNAME' | 'TXT'): Promise<{ status: number; answers: DohAnswer[] }> {
   const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000) });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`DNS_HTTP_${response.status}`); }
   const body = await response.json() as { Status?: number; Answer?: DohAnswer[] };

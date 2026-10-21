@@ -3548,3 +3548,273 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 });
+
+describe('CLOUDFLARE EMAIL SERVICE: transactional provider region with a fake sender and mocked DNS', () => {
+  const CF = 'cloudflare', ACCOUNT = '0123456789abcdef0123456789abcdef';
+  type Sent = import('./src/providers.js').CloudflareMessage;
+  // In-process fake for the Workers binding / REST transport: each send takes the next scripted outcome.
+  function fakeSender(script: Array<string | { messageId: string }>) {
+    const sent: Sent[] = [];
+    return { sent, sender: { send: async (message: Sent) => {
+      sent.push(structuredClone(message));
+      const next = script.shift() ?? { messageId: `<${unique('cf')}@example.com>` };
+      if (typeof next === 'string') { const { cloudflareSendError } = await import('./src/providers.js'); throw cloudflareSendError(next); }
+      return next;
+    } } };
+  }
+  async function enableCloudflare(local: (method: string, path: string, body?: Json, environment?: 'test' | 'live') => Promise<Reply>) {
+    return ok(await local('PUT', `/v1/regions/${CF}`, { enabled: true }, 'live'));
+  }
+
+  test('the cloudflare region enables without SES discovery and SES-only operations are refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, jobs }) => {
+      const catalog = await enableCloudflare(local);
+      const row = catalog.data.find((entry: Json) => entry.region === CF);
+      assert.deepEqual([row.provider, row.enabled, row.isDefault, row.discoveryStatus], ['cloudflare', true, false, 'blocked'], 'Without a transport the region is not ready.');
+      assert.equal(catalog.data.find((entry: Json) => entry.region === REGION).provider, 'ses');
+      runtime.cloudflareEmail = fakeSender([]).sender;
+      assert.equal(ok(await local('GET', '/v1/regions')).data.find((entry: Json) => entry.region === CF).discoveryStatus, 'blocked', 'A transport alone is not ready while live sending is disabled.');
+      runtime.config.liveEnabled = true;
+      assert.equal(ok(await local('GET', '/v1/regions')).data.find((entry: Json) => entry.region === CF).discoveryStatus, 'ready');
+      error(await local('GET', `/v1/regions/${CF}/discovery`, undefined, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+      error(await local('POST', `/v1/regions/${CF}/provision`, { confirm: true }, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+      error(await local('PUT', `/v1/regions/${CF}/auto-validation`, { stream: 'transactional', mode: 'off', confirm: true }, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+      error(await local('GET', `/v1/settings/ses?region=${CF}`, undefined, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+      for (const type of ['ses.discover', 'ses.provision']) assert.equal((await jobs(type)).length, 0);
+      // Making it the default works through the same endpoint.
+      assert.equal(ok(await local('PUT', `/v1/regions/${CF}`, { makeDefault: true }, 'live')).defaultRegion, CF);
+    });
+  });
+
+  test('queue-time rules reject marketing, templates, tracking, extra reply-to, unsupported headers and oversized messages', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const objects = new Map<string, { body: Uint8Array; contentType: string }>();
+      runtime.storage = { async put(key, body, contentType) { objects.set(key, { body, contentType }); }, async get(key) { return objects.get(key) ?? null; }, async delete(key) { objects.delete(key); } };
+      await enableCloudflare(local);
+      const { text: _text, subject: _subject, ...withoutContent } = mail({ region: CF });
+      error(await local('POST', '/v1/emails/send', mail({ region: CF, kind: 'marketing' })), 422, 'PROVIDER_STREAM_UNSUPPORTED');
+      error(await local('POST', '/v1/emails/send', { ...withoutContent, template: { name: 'welcome', data: {} } }), 422, 'PROVIDER_TEMPLATE_UNSUPPORTED');
+      error(await local('POST', '/v1/emails/send', mail({ region: CF, tracking: true })), 422, 'PROVIDER_TRACKING_UNSUPPORTED');
+      assert.equal(error(await local('POST', '/v1/emails/send', mail({ region: CF, replyTo: [address(), address()] })), 422, 'VALIDATION_FAILED').field, 'replyTo');
+      // A 4 MiB attachment fits SES's 16 MiB estimate but not Cloudflare's 5 MiB message limit.
+      const attachment = ok(await local('POST', '/v1/attachments', { filename: 'large.txt', contentType: 'text/plain', content: Buffer.alloc(4 * 1024 * 1024, 'a').toString('base64') }), 201);
+      assert.match(error(await local('POST', '/v1/emails/send', mail({ region: CF, attachments: [attachment.id] })), 413, 'ENCODED_MESSAGE_TOO_LARGE').message, /5 MiB/);
+      ok(await local('POST', '/v1/emails/send', mail({ attachments: [attachment.id] })), 202);
+      // Campaigns are marketing: refused for the cloudflare region on create and on retargeting an SES draft.
+      error(await local('POST', '/v1/campaigns', { name: unique('cf-campaign'), region: CF }), 422, 'PROVIDER_STREAM_UNSUPPORTED');
+      const draft = ok(await local('POST', '/v1/campaigns', { name: unique('ses-campaign'), region: REGION }), 201);
+      error(await local('PATCH', `/v1/campaigns/${draft.id}`, { revision: draft.revision, draft: { name: draft.draft.name, region: CF } }), 422, 'PROVIDER_STREAM_UNSUPPORTED');
+      // Mailbox-style sends carry headers: only X-* and Cloudflare's allowlist pass.
+      const [{ queueMailboxEmail }, { assertCloudflareHeaders }, { resolveRegionRuntime }] = await Promise.all([import('./src/sending.js'), import('./src/providers.js'), import('./src/ses-region-state.js')]);
+      const resolved = await resolveRegionRuntime(runtime);
+      const actor = { workspaceId: runtime.config.workspaceId, environment: 'test' as const, permissions: ['manage' as const], domains: [], keyId: `user_${manager!.userId}` };
+      const request = { from: 'sender@example.com', to: [address()], cc: [], bcc: [], replyTo: [], region: CF, subject: 'Re: synthetic', text: 'Synthetic only.', attachments: [] };
+      const queued = await queueMailboxEmail(resolved, runtime.db, actor, { ...request, headers: [{ Name: 'In-Reply-To', Value: '<a@example.com>' }, { Name: 'References', Value: '<a@example.com>' }, { Name: 'Auto-Submitted', Value: 'auto-replied' }, { Name: 'X-Synthetic', Value: '1' }] });
+      assert.equal(queued.snapshot.region, CF);
+      await assert.rejects(queueMailboxEmail(resolved, runtime.db, actor, { ...request, headers: [{ Name: 'Sender', Value: 'other@example.com' }] }), { code: 'PROVIDER_HEADER_UNSUPPORTED' });
+      assert.throws(() => assertCloudflareHeaders([{ Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=Yes' }]), { code: 'PROVIDER_HEADER_UNSUPPORTED' });
+      // Cloudflare's 50-recipient cap counts to, cc and bcc together (the public schema has the same cap).
+      const { assertCloudflareRequest } = await import('./src/providers.js');
+      const many = (n: number) => Array.from({ length: n }, (_, i) => `r${i}@example.com`);
+      assert.throws(() => assertCloudflareRequest({ kind: 'transactional', to: many(40), cc: many(10), bcc: ['extra@example.com'], replyTo: [], attachments: [] }), { code: 'VALIDATION_FAILED', field: 'to' });
+      assertCloudflareRequest({ kind: 'transactional', to: 'one@example.com', cc: many(40), bcc: many(9), replyTo: [], attachments: [] });
+      assert.throws(() => assertCloudflareHeaders([{ Name: 'Precedence', Value: 'first-class' }]), { code: 'PROVIDER_HEADER_UNSUPPORTED' });
+      assertCloudflareHeaders([{ Name: 'List-Unsubscribe', Value: '<https://example.com/u>, <mailto:u@example.com>' }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }, { Name: 'Precedence', Value: 'bulk' }]);
+      // Test keys always dispatch through the in-process simulator, whatever the region.
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const accepted = ok(await local('POST', '/v1/emails/send', mail({ region: CF, replyTo: [address()] })), 202);
+      await dispatchDue(runtime, 'test', CF);
+      const sent = ok(await local('GET', `/v1/emails/${accepted.id}`));
+      assert.equal(sent.status, 'accepted');
+      assert.match(sent.providerId, /^sim_/);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id = $1 AND region = $2", [runtime.config.workspaceId, CF])).rows[0].n, 2);
+    });
+  });
+
+  test('live dispatch maps Cloudflare acceptance, throttling, daily limits, suppression and internal errors', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, jobs }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      runtime.config.liveEnabled = true;
+      await enableCloudflare(local);
+      error(await local('POST', '/v1/emails/send', mail({ region: CF }), 'live'), 409, 'CLOUDFLARE_EMAIL_NOT_CONFIGURED');
+      const fake = fakeSender([{ messageId: ' <accepted-1@example.com> ' }, 'E_RATE_LIMIT_EXCEEDED', 'E_RATE_LIMIT_EXCEEDED', { messageId: '<retried@example.com>' }, 'E_RECIPIENT_SUPPRESSED', 'E_INTERNAL_SERVER_ERROR', 'E_DAILY_LIMIT_EXCEEDED']);
+      runtime.cloudflareEmail = fake.sender;
+      const stored = async (emailId: string) => (await db.query('SELECT status, error_code, provider_id, dispatch_version, scheduled_at FROM sending_emails WHERE id = $1', [emailId])).rows[0];
+      const replyTo = address();
+      const first = ok(await local('POST', '/v1/emails/send', mail({ region: CF, fromName: 'Synthetic Ops', replyTo: [replyTo], html: '<p>Hello</p>' }), 'live'), 202);
+      await dispatchDue(runtime, 'live', CF);
+      assert.deepEqual([(await stored(first.id)).status, (await stored(first.id)).provider_id], ['accepted', 'accepted-1@example.com'], 'The provider message ID is stored without angle brackets.');
+      const message = fake.sent[0]!;
+      assert.deepEqual(message.from, { email: 'sender@example.com', name: 'Synthetic Ops' });
+      assert.equal(message.replyTo, replyTo);
+      assert.equal(message.html, '<p>Hello</p>');
+      assert.ok(!('headers' in message) && !('attachments' in message) && !('cc' in message));
+
+      const throttled = ok(await local('POST', '/v1/emails/send', mail({ region: CF }), 'live'), 202);
+      const before = Date.now();
+      await dispatchDue(runtime, 'live', CF);
+      let row = await stored(throttled.id);
+      assert.deepEqual([row.status, row.error_code, row.dispatch_version], ['queued', 'CLOUDFLARE_THROTTLED', 1]);
+      assert.ok(new Date(row.scheduled_at).getTime() >= before + 2000 && new Date(row.scheduled_at).getTime() <= Date.now() + 2000);
+      await db.query('UPDATE sending_emails SET scheduled_at = clock_timestamp() WHERE id = $1', [throttled.id]);
+      await dispatchDue(runtime, 'live', CF);
+      row = await stored(throttled.id);
+      assert.deepEqual([row.status, row.error_code, row.dispatch_version], ['queued', 'CLOUDFLARE_THROTTLED', 2]);
+      const attempts = (await db.query("SELECT data->>'attempt' AS attempt FROM sending_email_events WHERE email_id = $1 AND type = 'provider_throttled' ORDER BY created_at", [throttled.id])).rows.map(event => event.attempt);
+      assert.deepEqual(attempts, ['1', '2'], 'Each rate-limit retry counts toward the five-attempt cap.');
+      await db.query('UPDATE sending_emails SET scheduled_at = clock_timestamp() WHERE id = $1', [throttled.id]);
+      await dispatchDue(runtime, 'live', CF);
+      assert.deepEqual([(await stored(throttled.id)).status, (await stored(throttled.id)).provider_id], ['accepted', 'retried@example.com']);
+
+      for (const [status, code] of [['rejected', 'CLOUDFLARE_RECIPIENT_SUPPRESSED'], ['acceptance_unknown', 'CLOUDFLARE_ACCEPTANCE_UNKNOWN']]) {
+        const email = ok(await local('POST', '/v1/emails/send', mail({ region: CF }), 'live'), 202);
+        const calls = fake.sent.length;
+        await dispatchDue(runtime, 'live', CF);
+        assert.deepEqual([(await stored(email.id)).status, (await stored(email.id)).error_code], [status, code]);
+        await dispatchDue(runtime, 'live', CF);
+        assert.equal(fake.sent.length, calls + 1, 'Terminal and uncertain outcomes are never resent.');
+      }
+
+      // The daily limit requeues for about 15 minutes and holds the shard instead of spinning through the queue.
+      const daily = ok(await local('POST', '/v1/emails/send', mail({ region: CF }), 'live'), 202);
+      const gate = initialGate();
+      await dispatchDue(runtime, 'live', CF, { gate });
+      row = await stored(daily.id);
+      assert.deepEqual([row.status, row.error_code], ['queued', 'CLOUDFLARE_DAILY_LIMIT']);
+      assert.ok(new Date(row.scheduled_at).getTime() > Date.now() + 14 * 60000);
+      assert.ok((gate.holdUntil ?? 0) > Date.now() + 14 * 60000);
+      const held = ok(await local('POST', '/v1/emails/send', mail({ region: CF }), 'live'), 202);
+      const calls = fake.sent.length;
+      await dispatchDue(runtime, 'live', CF, { gate });
+      assert.equal(fake.sent.length, calls, 'A held shard releases its leases without calling the provider.');
+      assert.equal((await stored(held.id)).status, 'queued');
+      assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'Live Cloudflare acceptance never fabricates feedback.');
+    });
+  });
+
+  test('delivery events translate to canonical feedback, verify the account, deduplicate and drive status and suppression', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { ingestCloudflareEvents } = await import('./src/adapters/cloudflare-email.js');
+      runtime.config.liveEnabled = true;
+      // An SES account binding must not apply to Cloudflare events, which carry no SES sending account.
+      runtime.config.awsAccountId = '111122223333';
+      runtime.config.cloudflare = { ...runtime.config.cloudflare!, accountId: ACCOUNT };
+      await enableCloudflare(local);
+      const names = ['delivered', 'hard', 'soft', 'deferred', 'complained', 'suppressed', 'late'] as const;
+      const providerIds = Object.fromEntries(names.map(name => [name, `${name}-${unique('cf')}@example.com`]));
+      const recipients = Object.fromEntries(names.map(name => [name, address()]));
+      // Dispatch order within a batch is not fixed, so the fake answers by recipient.
+      runtime.cloudflareEmail = { send: async message => ({ messageId: `<${providerIds[names.find(name => recipients[name] === message.to[0])!]}>` }) };
+      const emails: Record<string, string> = {};
+      const event = (type: string, name: string, extra: Json = {}, account = ACCOUNT) => ({
+        type: `cf.email.sending.message.${type}`, source: { type: 'email.sending', zoneId: 'synthetic-zone', domain: 'example.com' },
+        payload: { eventId: unique('evt'), messageId: `<${providerIds[name]}>`, sender: 'sender@example.com', recipient: recipients[name], terminal: true,
+          delivery: { status: type, smtpStatusCode: 250, smtpEnhancedStatusCode: '2.0.0', smtpResponse: '250 synthetic', deliveryTimeMs: 42 }, ...extra },
+        metadata: { accountId: account, eventSubscriptionId: 'synthetic-subscription', eventSchemaVersion: 1, eventTimestamp: new Date().toISOString() },
+      });
+      // A delivery event that arrives before acceptance is recorded keeps a deferred recovery job.
+      const early = event('delivered', 'late');
+      assert.deepEqual(await ingestCloudflareEvents(runtime, [JSON.stringify(early)]), ['ack']);
+      for (const name of names) emails[name] = ok(await local('POST', '/v1/emails/send', mail({ region: CF, to: recipients[name] }), 'live'), 202).id;
+      await dispatchDue(runtime, 'live', CF);
+      for (const name of names) assert.equal(ok(await local('GET', `/v1/emails/${emails[name]}`, undefined, 'live')).providerId, providerIds[name]);
+      await run('operation.ses');
+
+      const delivered = event('delivered', 'delivered');
+      const decisions = await ingestCloudflareEvents(runtime, [
+        delivered, JSON.stringify(delivered), event('bounced', 'hard', { bounce: { type: 'hard', classification: 'General', reason: '550 no such user' } }),
+        event('bounced', 'soft', { terminal: false, bounce: { type: 'soft', classification: 'MailboxFull', reason: '452 full' } }),
+        event('deferred', 'deferred', { terminal: false }), event('complained', 'complained', { complaint: { type: 'abuse' } }),
+        event('rejected', 'suppressed', { rejection: { reason: 'suppressed', party: 'cloudflare', detail: 'Recipient previously bounced' } }),
+        event('delivered', 'hard', {}, 'ffffffffffffffffffffffffffffffff'), { type: 'cf.email.routing.message.received' }, 'not json',
+      ]);
+      assert.deepEqual(decisions, Array(10).fill('ack'));
+      const status = async (name: string) => ok(await local('GET', `/v1/emails/${emails[name]}`, undefined, 'live')).status;
+      assert.deepEqual(await Promise.all(names.map(status)), ['delivered', 'bounced', 'delayed', 'delayed', 'complained', 'suppressed', 'delivered']);
+      const count = async (name: string, type: string) => (await db.query('SELECT count(*)::int AS n FROM sending_email_events WHERE email_id = $1 AND type = $2', [emails[name], type])).rows[0].n;
+      assert.equal(await count('delivered', 'delivery'), 1, 'A redelivered event is deduplicated by its event ID.');
+      assert.equal(await count('late', 'delivery'), 1);
+      assert.equal(await count('hard', 'delivery'), 0, 'Events from another Cloudflare account are ignored.');
+      const contact = async (name: string) => (await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE workspace_id = $1 AND environment = $2 AND email = $3', [runtime.config.workspaceId, 'live', recipients[name]])).rows[0];
+      assert.deepEqual(await contact('hard'), { suppressed: true, suppression_reason: 'hard_bounce' });
+      assert.deepEqual(await contact('complained'), { suppressed: true, suppression_reason: 'complaint' });
+      assert.equal(await contact('soft'), undefined, 'Soft bounces and deferrals never suppress.');
+      const outcomes = (await db.query('SELECT id, event_outcomes FROM sending_emails WHERE id = ANY($1)', [[emails.suppressed, emails.hard]])).rows;
+      assert.equal(outcomes.find(row => row.id === emails.suppressed).event_outcomes, 0, 'A Cloudflare-suppressed recipient never counts as accepted or bounced.');
+      assert.equal(outcomes.find(row => row.id === emails.hard).event_outcomes, 5);
+      const published = (await db.query("SELECT type, region, data->>'bounceType' AS bounce FROM operation_events WHERE workspace_id = $1 AND data->>'emailId' = $2", [runtime.config.workspaceId, emails.hard])).rows;
+      assert.deepEqual(published, [{ type: 'email.bounced', region: CF, bounce: 'Permanent' }]);
+      const receipts = (await db.query('SELECT topic_arn FROM operation_sns_receipts WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
+      assert.equal(receipts.length, 7, 'One receipt per distinct accepted event: ignored and duplicate events add none.');
+      assert.ok(receipts.every(receipt => receipt.topic_arn === 'urn:opensend:cloudflare-email:example.com'));
+    });
+  });
+
+  test('the Node REST transport sends snake_case bodies and maps Cloudflare API failures onto binding codes', async () => {
+    const { restSender } = await import('./src/adapters/cloudflare-email.js');
+    const replies: Array<[number, Json]> = [
+      [200, { success: true, errors: [], result: { message_id: '<rest@example.com>', delivered: [], permanent_bounces: [], queued: [], suppressed_recipients: [] } }],
+      [429, { success: false, errors: [{ code: 10004, message: 'Throttled' }] }], [400, { success: false, errors: [{ code: 10200, message: 'Too big' }] }],
+      [403, { success: false, errors: [{ code: 10203, message: 'Sending disabled' }] }], [401, { success: false, errors: [{ code: 10101, message: 'Bad token' }] }],
+      [400, { success: false, errors: [{ code: 10001, message: 'Recipient is suppressed' }] }], [400, { success: false, errors: [{ code: 10001, message: 'Invalid schema' }] }],
+      [503, { success: false, errors: [{ code: 10100, message: 'Unavailable' }] }],
+    ];
+    const requests: Array<{ url: string; authorization: string | null; body: Json }> = [];
+    const guard = globalThis.fetch;
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization'), body: JSON.parse(String(init?.body)) });
+      const [status, body] = replies.shift()!;
+      return Response.json(body, { status });
+    };
+    try {
+      const sender = restSender({ accountId: ACCOUNT, apiToken: 'synthetic-token' });
+      const message = { from: { email: 'sender@example.com', name: 'Synthetic' }, to: ['to@example.com'], replyTo: 'reply@example.com', subject: 'Synthetic', text: 'Synthetic only.',
+        attachments: [{ content: new TextEncoder().encode('logo'), filename: 'logo.png', type: 'image/png', disposition: 'inline' as const, contentId: 'logo' }] };
+      assert.deepEqual(await sender.send(message), { messageId: '<rest@example.com>' });
+      assert.equal(requests[0]!.url, `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/email/sending/send`);
+      assert.equal(requests[0]!.authorization, 'Bearer synthetic-token');
+      assert.deepEqual(requests[0]!.body, { to: ['to@example.com'], subject: 'Synthetic', text: 'Synthetic only.', from: { address: 'sender@example.com', name: 'Synthetic' }, reply_to: 'reply@example.com',
+        attachments: [{ filename: 'logo.png', type: 'image/png', disposition: 'inline', content: Buffer.from('logo').toString('base64'), content_id: 'logo' }] });
+      for (const [code, retryable] of [['E_RATE_LIMIT_EXCEEDED', false], ['E_CONTENT_TOO_LARGE', false], ['E_SENDING_DISABLED', false], ['E_UNAUTHORIZED', false], ['E_RECIPIENT_SUPPRESSED', false], ['E_VALIDATION_ERROR', false], ['E_INTERNAL_SERVER_ERROR', true]] as const) {
+        await assert.rejects(sender.send(message), (failure: any) => failure.code === code && failure.retryable === retryable && !String(failure.message).includes('@'));
+      }
+    } finally { globalThis.fetch = guard; }
+  });
+
+  test('sending domains report readiness from public DNS without SES calls; MAIL FROM and receiving are refused', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      await enableCloudflare(local);
+      const records: Record<string, Json[]> = {
+        'MX cf-bounce.ready.example.com': [{ type: 15, data: '10 route1.mx.cloudflare.net.' }],
+        'TXT cf-bounce.ready.example.com': [{ type: 16, data: '"v=spf1 include:_spf.mx.cloudflare.net ~all"' }],
+        'TXT cf-bounce._domainkey.ready.example.com': [{ type: 16, data: '"v=DKIM1; h=sha256; k=rsa; " "p=MIGfSynthetic"' }],
+        'MX cf-bounce.pending.example.com': [{ type: 15, data: '10 route2.mx.cloudflare.net.' }],
+      };
+      const lookups: string[] = [];
+      // Swapped by hand (not t.mock) so the fixture's network guard is restored exactly afterwards.
+      const guard = globalThis.fetch;
+      globalThis.fetch = async (input: string | URL | Request) => {
+        const url = new URL(String(input));
+        assert.equal(url.hostname, 'cloudflare-dns.com', 'Only DNS-over-HTTPS lookups are allowed.');
+        const key = `${url.searchParams.get('type')} ${url.searchParams.get('name')}`;
+        lookups.push(key);
+        return Response.json({ Status: 0, Answer: (records[key] ?? []).map(answer => ({ name: url.searchParams.get('name'), ...answer })) });
+      };
+      try {
+        const ready = ok(await local('POST', '/v1/domains', { name: 'ready.example.com', region: CF }, 'live'), 201);
+        assert.deepEqual([ready.ready, ready.verified, ready.verificationStatus, ready.dkimStatus, ready.mailFromDomain, ready.mailFromStatus, ready.dnsStatus], [true, true, 'SUCCESS', 'SUCCESS', 'cf-bounce.ready.example.com', 'SUCCESS', 'available']);
+        assert.ok(ready.dns.some((record: Json) => record.type === 'MX' && record.value === 'route1.mx.cloudflare.net'));
+        assert.ok(ready.dns.some((record: Json) => record.type === 'TXT' && /wrangler email sending enable ready\.example\.com/.test(record.value)));
+        const pending = ok(await local('POST', '/v1/domains', { name: 'pending.example.com', region: CF }, 'live'), 201);
+        assert.deepEqual([pending.ready, pending.verificationStatus, pending.dkimStatus, pending.mailFromStatus], [false, 'PENDING', 'PENDING', 'PENDING']);
+        const listed = page(await local('GET', `/v1/domains?region=${CF}&refresh=false`, undefined, 'live'));
+        assert.deepEqual(listed.map(domain => [domain.name, domain.ready]).sort(), [['pending.example.com', false], ['ready.example.com', true]]);
+        assert.equal(ok(await local('POST', `/v1/domains/${ready.id}/verify`, undefined, 'live')).ready, true);
+        error(await local('POST', `/v1/domains/${ready.id}/mail-from`, { mailFromDomain: 'bounce.ready.example.com' }, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+        error(await local('POST', `/mailbox/v1/domains/${ready.id}/enable`, {}, 'live'), 422, 'PROVIDER_OPERATION_UNSUPPORTED');
+        assert.ok(lookups.length >= 12 && lookups.every(lookup => /cf-bounce/.test(lookup)));
+      } finally { globalThis.fetch = guard; }
+    });
+  });
+});

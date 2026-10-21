@@ -1758,7 +1758,7 @@ export const getSesSettings = <ThrowOnError extends boolean = false>(options?: O
 });
 
 /**
- * Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.
+ * Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Domains in the `cloudflare` region are always checked over public DNS for the records Cloudflare Email Service publishes when the domain is onboarded. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.
  */
 export const listDomains = <ThrowOnError extends boolean = false>(options?: Options<ListDomainsData, ThrowOnError>): RequestResult<ListDomainsResponses, ListDomainsErrors, ThrowOnError> => (options?.client ?? client).get<ListDomainsResponses, ListDomainsErrors, ThrowOnError>({
     security: [
@@ -2102,7 +2102,7 @@ export const getMetrics = <ThrowOnError extends boolean = false>(options?: Optio
 });
 
 /**
- * Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration.
+ * Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration. The reserved region `cloudflare` is Cloudflare Email Service; its discoveryStatus is ready when a live transport is configured, otherwise blocked.
  */
 export const listRegions = <ThrowOnError extends boolean = false>(options?: Options<ListRegionsData, ThrowOnError>): RequestResult<ListRegionsResponses, ListRegionsErrors, ThrowOnError> => (options?.client ?? client).get<ListRegionsResponses, ListRegionsErrors, ThrowOnError>({
     security: [
@@ -2123,7 +2123,7 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
 });
 
 /**
- * Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.
+ * Enable/disable a region (an SES region or `cloudflare`) or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes provider resources or historical mail.
  */
 export const configureRegion = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionData, ThrowOnError>): RequestResult<ConfigureRegionResponses, ConfigureRegionErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionResponses, ConfigureRegionErrors, ThrowOnError>({
     security: [
@@ -2148,7 +2148,7 @@ export const configureRegion = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache.
+ * Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.
  */
 export const discoverRegion = <ThrowOnError extends boolean = false>(options: Options<DiscoverRegionData, ThrowOnError>): RequestResult<DiscoverRegionResponses, DiscoverRegionErrors, ThrowOnError> => (options.client ?? client).get<DiscoverRegionResponses, DiscoverRegionErrors, ThrowOnError>({
     security: [
@@ -2169,7 +2169,7 @@ export const discoverRegion = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.
+ * Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.
  */
 export const provisionRegion = <ThrowOnError extends boolean = false>(options: Options<ProvisionRegionData, ThrowOnError>): RequestResult<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError> => (options.client ?? client).post<ProvisionRegionResponses, ProvisionRegionErrors, ThrowOnError>({
     security: [
@@ -2194,7 +2194,7 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.
+ * Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.
  */
 export const configureRegionAutoValidation = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionAutoValidationData, ThrowOnError>): RequestResult<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError>({
     security: [

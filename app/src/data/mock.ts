@@ -57,9 +57,12 @@ function demoReputation(region: string): NonNullable<SesDiscovery['reputation']>
 function regionSetup(state: DemoState): NonNullable<DemoState['regionSetup']> {
   if (!state.regionSetup) {
     const reports = Object.fromEntries(state.regions.map(region => [region.id, demoDiscovery(state, region.id, true)]))
-    state.regionSetup = { catalog: { defaultRegion: state.regions[0]!.id, data: state.regions.map((region, index) => ({ region: region.id, enabled: true, isDefault: index === 0, discoveryStatus: reports[region.id]!.status, lastDiscoveredAt: reports[region.id]!.checkedAt, provisionJobId: null, provisionStatus: null, provisionError: null })) }, reports }
+    state.regionSetup = { catalog: { defaultRegion: state.regions[0]!.id, data: state.regions.map((region, index) => ({ region: region.id, provider: region.id === 'cloudflare' ? 'cloudflare' as const : 'ses' as const, enabled: true, isDefault: index === 0, discoveryStatus: reports[region.id]!.status, lastDiscoveredAt: reports[region.id]!.checkedAt, provisionJobId: null, provisionStatus: null, provisionError: null })) }, reports }
   }
   return state.regionSetup
+}
+function sesOnly(region: string) {
+  if (region === 'cloudflare') throw new ApiError('Cloudflare Email Service has nothing to discover or provision.', 'PROVIDER_OPERATION_UNSUPPORTED', {}, undefined, 422)
 }
 function enabledRegion(state: DemoState, region: string): RegionCatalogEntry {
   const row = regionSetup(state).catalog.data.find(row => row.region === region)
@@ -76,6 +79,7 @@ function saveDiscovery(state: DemoState, report: SesDiscovery) {
 function catalog(state: DemoState, advance = false): RegionCatalog {
   const setup = regionSetup(state)
   for (const row of setup.catalog.data) {
+    row.provider ??= row.region === 'cloudflare' ? 'cloudflare' : 'ses'
     // Only catalog polling advances explicitly queued demo jobs; discovery never provisions.
     if (advance && row.provisionStatus === 'pending') {
       row.provisionStatus = 'running'
@@ -286,6 +290,7 @@ function validateDraft(value: unknown): Record<string, any> {
 function validateCampaign(state: DemoState, input: CampaignInput, existing?: Campaign, requireComplete = false): CampaignInput {
   enabledRegion(state, input.regionId)
   checkRegion(state, input.regionId)
+  if (input.regionId === 'cloudflare') throw new ApiError('Cloudflare Email Service only permits transactional email; send marketing through an SES region.', 'PROVIDER_STREAM_UNSUPPORTED', {}, undefined, 422)
   if (requireComplete && !input.listId) invalid('listId', 'Choose a recipient list before continuing.')
   if (input.listId) find(state.lists, input.listId, 'List')
   if (input.segmentId) find(state.segments, input.segmentId, 'Segment')
@@ -487,7 +492,8 @@ export function createMockApi(): OpenSendApi {
     regions: {
       list: signal => run(signal, true, s => catalog(s, true)),
       configure: (region, input, signal) => run(signal, true, s => {
-        if (region.length > 32 || !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region) || /^(cn-|us-gov-|us-iso)/.test(region)) invalid('region', 'Enter a commercial AWS region ID, such as ap-southeast-1.')
+        const cloudflare = region === 'cloudflare'
+        if (!cloudflare && (region.length > 32 || !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region) || /^(cn-|us-gov-|us-iso)/.test(region))) invalid('region', 'Enter a commercial AWS region ID, such as ap-southeast-1, or cloudflare.')
         if (!isRecord(input) || Object.keys(input).some(key => !['enabled', 'makeDefault'].includes(key)) || (input.enabled !== undefined && typeof input.enabled !== 'boolean') || (input.makeDefault !== undefined && typeof input.makeDefault !== 'boolean') || (input.enabled === undefined && input.makeDefault !== true)) invalid('region', 'Choose enabled or makeDefault.')
         const setup = regionSetup(s)
         let row = setup.catalog.data.find(row => row.region === region)
@@ -498,8 +504,9 @@ export function createMockApi(): OpenSendApi {
         if (!row) {
           if (setup.catalog.data.length >= 40) throw new ApiError('At most 40 SES regions may be configured.', 'REGION_LIMIT_EXCEEDED')
           // Keep internal quota/history profiles; configuration never grants production access.
-          s.regions.push({ id: region, name: CONNECTABLE_REGIONS[region] ?? region, access: 'sandbox', health: 'healthy', sendingEnabled: true, sent24h: 0, dailyQuota: 200, maxSendRate: 1, bounceRate: 0, complaintRate: 0, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: false })
-          row = { region, enabled: false, isDefault: false, discoveryStatus: 'not_discovered', lastDiscoveredAt: null, provisionJobId: null, provisionStatus: null, provisionError: null }
+          s.regions.push({ id: region, name: cloudflare ? 'Cloudflare Email Service' : CONNECTABLE_REGIONS[region] ?? region, access: 'sandbox', health: 'healthy', sendingEnabled: true, sent24h: 0, dailyQuota: 200, maxSendRate: 1, bounceRate: 0, complaintRate: 0, suppression: ['BOUNCE', 'COMPLAINT'], ipPool: 'Shared', vdmEnabled: false })
+          // Demo Cloudflare is simulated, so it reports ready like a configured transport.
+          row = { region, provider: cloudflare ? 'cloudflare' : 'ses', enabled: false, isDefault: false, discoveryStatus: cloudflare ? 'ready' : 'not_discovered', lastDiscoveredAt: null, provisionJobId: null, provisionStatus: null, provisionError: null }
           setup.catalog.data.push(row)
         }
         if (input.enabled !== undefined) row.enabled = input.enabled
@@ -510,6 +517,7 @@ export function createMockApi(): OpenSendApi {
         return catalog(s)
       }),
       discover: (region, options, signal) => run(signal, true, s => {
+        sesOnly(region)
         enabledRegion(s, region)
         const cached = regionSetup(s).reports[region]
         if (cached && !options?.refresh && Date.now() - Date.parse(cached.checkedAt) < DISCOVERY_TTL) return cached
@@ -517,12 +525,14 @@ export function createMockApi(): OpenSendApi {
         return saveDiscovery(s, demoDiscovery(s, region, cached?.resources.transactional.exists === true && cached.resources.marketing.exists === true && cached.resources.topic.exists === true, cached?.resources.topic.subscription ?? 'missing'))
       }),
       provision: (region, signal) => run(signal, true, s => {
+        sesOnly(region)
         const row = enabledRegion(s, region)
         if (row.provisionJobId && (row.provisionStatus === 'pending' || row.provisionStatus === 'running')) return { jobId: row.provisionJobId, status: row.provisionStatus }
         row.provisionJobId = id('demo_job'); row.provisionStatus = 'pending'; row.provisionError = null
         return { jobId: row.provisionJobId, status: 'pending' as const }
       }),
       updateAutoValidation: (region, stream, mode, signal) => run(signal, true, s => {
+        sesOnly(region)
         enabledRegion(s, region)
         const report = regionSetup(s).reports[region]
         if (!report?.resources[stream].owned) throw new ApiError('Provision this region before configuring Auto Validation.', 'RESOURCE_OWNERSHIP_CONFLICT')

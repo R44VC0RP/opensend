@@ -10,7 +10,7 @@ export type TimeRange = '24h' | '7d' | '30d'
 export interface PageRequest { page?: number; pageSize?: number; search?: string; regionId?: RegionId; status?: string; stream?: string; listId?: string; segmentId?: string; cursor?: string; to?: string; from?: string }
 export interface PageResult<T> { items: T[]; total?: number; nextCursor?: string | null; page: number; pageSize: number; facets?: Record<string, number> }
 export interface RegionCatalogEntry {
-  region: string; enabled: boolean; isDefault: boolean
+  region: string; provider: 'ses' | 'cloudflare'; enabled: boolean; isDefault: boolean
   discoveryStatus: 'not_discovered' | 'discovering' | 'stale' | 'ready' | 'needs_provisioning' | 'blocked'
   lastDiscoveredAt: string | null; provisionJobId: string | null
   provisionStatus: 'pending' | 'running' | 'completed' | 'failed' | null; provisionError: string | null

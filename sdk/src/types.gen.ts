@@ -344,7 +344,7 @@ export type SendEmailInput = {
     bcc?: Array<string>;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Defaults to the installation’s persisted default region when omitted. An enabled SES region, or `cloudflare` for Cloudflare Email Service: transactional only (no marketing kind, templates or tracking), one replyTo address and at most 5 MiB per message; violations return 422 PROVIDER_STREAM_UNSUPPORTED, PROVIDER_TEMPLATE_UNSUPPORTED, PROVIDER_TRACKING_UNSUPPORTED or VALIDATION_FAILED, or 413 ENCODED_MESSAGE_TOO_LARGE.
      */
     region?: string;
     kind?: 'transactional' | 'marketing';
@@ -1171,6 +1171,10 @@ export type RegionCatalog = {
     defaultRegion: string;
     data: Array<{
         region: string;
+        /**
+         * Sending provider: Amazon SES, or Cloudflare Email Service for the reserved region `cloudflare` (transactional only, nothing to discover or provision).
+         */
+        provider: 'ses' | 'cloudflare';
         enabled: boolean;
         isDefault: boolean;
         discoveryStatus: 'not_discovered' | 'discovering' | 'stale' | 'ready' | 'needs_provisioning' | 'blocked';

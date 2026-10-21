@@ -19,6 +19,7 @@ import { resolveRegionRuntime } from './ses-region-state.js';
 import type { FeedbackItem, Mode } from './core.js';
 import { ingestFeedbackBatch } from './operations.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
+import { cloudflareSender, ingestCloudflareEvents } from './adapters/cloudflare-email.js';
 export { DispatcherShard } from './dispatcher-do.js';
 
 // Nudges every shard for one environment/region. Objects are created near the database on first use.
@@ -71,7 +72,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), cloudflareEmail: cloudflareSender(config, env.EMAIL), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally { await client.end(); }
 }
 export default {
@@ -123,6 +124,15 @@ export default {
         const outcomes = await ingestFeedbackBatch(await resolveRegionRuntime(runtime), messages.map(message => message.body));
         for (const [index, message] of messages.entries()) outcomes[index]?.ok ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
         log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
+      });
+      return;
+    }
+    if (batch.queue === 'opensend-cloudflare-events') {
+      // Cloudflare Email Service delivery events (one Queues event subscription per sending domain). Invalid
+      // events are acknowledged and logged; ingestion failures retry individually like opensend-feedback.
+      await withRuntime(env, async runtime => {
+        const decisions = await ingestCloudflareEvents(await resolveRegionRuntime(runtime), batch.messages.map(message => message.body));
+        for (const [index, message] of batch.messages.entries()) decisions[index] === 'ack' ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
       });
       return;
     }

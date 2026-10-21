@@ -1729,7 +1729,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 40,
-            "description": "Defaults to the installation’s persisted default region when omitted."
+            "description": "Defaults to the installation’s persisted default region when omitted. An enabled SES region, or `cloudflare` for Cloudflare Email Service: transactional only (no marketing kind, templates or tracking), one replyTo address and at most 5 MiB per message; violations return 422 PROVIDER_STREAM_UNSUPPORTED, PROVIDER_TEMPLATE_UNSUPPORTED, PROVIDER_TRACKING_UNSUPPORTED or VALIDATION_FAILED, or 413 ENCODED_MESSAGE_TOO_LARGE."
           },
           "kind": {
             "type": "string",
@@ -4929,6 +4929,14 @@
                 "region": {
                   "type": "string"
                 },
+                "provider": {
+                  "type": "string",
+                  "enum": [
+                    "ses",
+                    "cloudflare"
+                  ],
+                  "description": "Sending provider: Amazon SES, or Cloudflare Email Service for the reserved region `cloudflare` (transactional only, nothing to discover or provision)."
+                },
                 "enabled": {
                   "type": "boolean"
                 },
@@ -4980,6 +4988,7 @@
               },
               "required": [
                 "region",
+                "provider",
                 "enabled",
                 "isDefault",
                 "discoveryStatus",
@@ -23248,7 +23257,7 @@
     "/v1/domains": {
       "get": {
         "operationId": "listDomains",
-        "description": "Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.",
+        "description": "Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Domains in the `cloudflare` region are always checked over public DNS for the records Cloudflare Email Service publishes when the domain is onboarded. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.",
         "tags": [
           "Domains"
         ],
@@ -26456,7 +26465,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration.",
+        "description": "Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration. The reserved region `cloudflare` is Cloudflare Email Service; its discoveryStatus is ready when a live transport is configured, otherwise blocked.",
         "responses": {
           "200": {
             "description": "Success",
@@ -26600,13 +26609,13 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.",
+        "description": "Enable/disable a region (an SES region or `cloudflare`) or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes provider resources or historical mail.",
         "parameters": [
           {
             "schema": {
               "type": "string",
               "maxLength": 32,
-              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+              "pattern": "^(?:[a-z]{2}(?:-[a-z]+)+-\\d|cloudflare)$"
             },
             "required": true,
             "name": "region",
@@ -26766,13 +26775,13 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache.",
+        "description": "Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.",
         "parameters": [
           {
             "schema": {
               "type": "string",
               "maxLength": 32,
-              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+              "pattern": "^(?:[a-z]{2}(?:-[a-z]+)+-\\d|cloudflare)$"
             },
             "required": true,
             "name": "region",
@@ -26934,13 +26943,13 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.",
+        "description": "Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.",
         "parameters": [
           {
             "schema": {
               "type": "string",
               "maxLength": 32,
-              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+              "pattern": "^(?:[a-z]{2}(?:-[a-z]+)+-\\d|cloudflare)$"
             },
             "required": true,
             "name": "region",
@@ -27100,13 +27109,13 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.",
+        "description": "Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation. SES regions only: the cloudflare region returns 422 PROVIDER_OPERATION_UNSUPPORTED.",
         "parameters": [
           {
             "schema": {
               "type": "string",
               "maxLength": 32,
-              "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+              "pattern": "^(?:[a-z]{2}(?:-[a-z]+)+-\\d|cloudflare)$"
             },
             "required": true,
             "name": "region",
