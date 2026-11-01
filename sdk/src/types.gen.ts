@@ -366,6 +366,12 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
+     * Up to 10 extra MIME headers, keyed by name: In-Reply-To and References (one or more Message-IDs in angle brackets, such as <id@example.com>, separated by spaces) to thread a reply, and X- extension headers. Values are one line of printable ASCII with at least one visible character, at most 996 characters with the name. Header names are case-insensitive and may appear once. OpenSend writes every other header itself, so From, To, Subject, Date, MIME and Content-* headers, List-Unsubscribe, DKIM-Signature and the like are rejected with HEADER_NOT_ALLOWED. Message-ID is rejected with MESSAGE_ID_UNSUPPORTED because SES assigns every message its own; read messageId from the email once SES accepts it. X-SES-* headers are SES sending instructions and are rejected.
+     */
+    headers?: {
+        [key: string]: string;
+    };
+    /**
      * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
@@ -393,6 +399,10 @@ export type Email = {
     subject: string;
     status: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
     providerId: string | null;
+    /**
+     * The Message-ID header recipients receive, without angle brackets. SES replaces any Message-ID with providerId@region.amazonses.com (email.amazonses.com in us-east-1), so this is null until SES accepts the message. Put it in angle brackets in In-Reply-To and References to thread a reply to this email. Simulated test mail gets the same form from its sim_ provider ID.
+     */
+    messageId: string | null;
     simulated: boolean;
     attemptStartedAt: string | null;
     errorCode: string | null;

@@ -6,7 +6,7 @@ import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMe
 import { recordEvents, type MailboxEventInput, type MailboxEventType } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, normalizeSubject, rememberMessageIds, snippetOf, type Scope } from './mailbox-store.js';
-import { queueMailboxEmail, storeAttachmentBytes } from './sending.js';
+import { queueMailboxEmail, sesMessageId, storeAttachmentBytes } from './sending.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
@@ -18,9 +18,6 @@ export type AttachmentInput = { content: string; filename: string; contentType?:
 type ResolvedAttachment = { filename: string; contentType: string; disposition: 'attachment' | 'inline'; contentId: string | null; bytes: Uint8Array; sendingAttachmentId?: string };
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
-
-/** SES replaces Message-ID with <providerId@email.amazonses.com> (us-east-1) or <providerId@region.amazonses.com>. */
-export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
 
 /** Resolves attachment inputs to bytes before any transaction: inline base64, received attachments (matt_) or uploaded sending attachments. */
 export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, items: AttachmentInput[]): Promise<ResolvedAttachment[]> {

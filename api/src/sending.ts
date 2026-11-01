@@ -78,11 +78,12 @@ const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(
 const Region = z.string().min(1).max(40);
 const AttachmentIds = z.array(z.string().min(1).max(120)).max(20).default([]);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
+const CustomHeaders = z.record(z.string().min(1).max(126), z.string().min(1).max(995)).describe('Up to 10 extra MIME headers, keyed by name: In-Reply-To and References (one or more Message-IDs in angle brackets, such as <id@example.com>, separated by spaces) to thread a reply, and X- extension headers. Values are one line of printable ASCII with at least one visible character, at most 996 characters with the name. Header names are case-insensitive and may appear once. OpenSend writes every other header itself, so From, To, Subject, Date, MIME and Content-* headers, List-Unsubscribe, DKIM-Signature and the like are rejected with HEADER_NOT_ALLOWED. Message-ID is rejected with MESSAGE_ID_UNSUPPORTED because SES assigns every message its own; read messageId from the email once SES accepts it. X-SES-* headers are SES sending instructions and are rejected.');
 const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
   region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.').optional(),
-  attachments: AttachmentIds, tracking: z.boolean().optional(),
+  attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
   screen: z.boolean().optional().describe('Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.'),
 }).strict().superRefine((v, ctx) => {
   if (v.template ? (v.subject !== undefined || v.html !== undefined || v.text !== undefined) : (!v.subject || (!v.html && !v.text))) ctx.addIssue({ code: 'custom', message: 'Provide subject and html/text, or template, but not both.' });
@@ -92,7 +93,8 @@ const SendInput = z.object({
 }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
-const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
+const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(),
+  messageId: z.string().nullable().describe('The Message-ID header recipients receive, without angle brackets. SES replaces any Message-ID with providerId@region.amazonses.com (email.amazonses.com in us-east-1), so this is null until SES accepts the message. Put it in angle brackets in In-Reply-To and References to thread a reply to this email. Simulated test mail gets the same form from its sim_ provider ID.'), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), environment: z.enum(['live', 'test']), simulated: z.boolean() }).openapi('EmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), environment: z.enum(['live', 'test']), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
@@ -150,7 +152,7 @@ const CampaignStats = z.object({
 const CampaignState = Campaign.pick({ id: true, environment: true, revision: true, updatedAt: true, status: true, reviewId: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
-const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject, status, region, email/campaign/provider IDs, error code, simulation state and timestamps (use kind to filter by stream). Sender name, Reply-To, message content and event payloads are not searched.').openapi('ListEmailsQuery');
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters and environment. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject, status, region, email/campaign/provider IDs, Message-ID (without angle brackets), error code, simulation state and timestamps (use kind to filter by stream). Sender name, Reply-To, message content and event payloads are not searched.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), status: CampaignStatus.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters and environment. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).openapi('CampaignAudienceCounts');
 const Review = AudienceCounts.extend({ id: z.string(), campaignId: z.string(), revision: z.number().int(), contentHash: z.string(), createdAt: z.string() }).openapi('CampaignReview');
@@ -180,7 +182,9 @@ const emailColumns = {
   providerId: emails.providerId, simulated: emails.simulated, attemptStartedAt: emails.attemptStartedAt,
   errorCode: emails.errorCode, scheduledAt: emails.scheduledAt, createdAt: emails.createdAt, updatedAt: emails.updatedAt,
 };
-function emailView(row: z.input<typeof Email>) { return Email.parse(row); }
+function emailView(row: Omit<z.input<typeof Email>, 'messageId'>) { return Email.parse({ ...row, messageId: row.providerId ? sesMessageId(row.providerId, row.region) : null }); }
+/** SES replaces Message-ID with <providerId@email.amazonses.com> (us-east-1) or <providerId@region.amazonses.com>. */
+export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
 // Draft sync polling reads only state columns, without materializing drafts or aggregating email counts.
 const campaignStateColumns = {
   id: campaigns.id, environment: campaigns.environment, revision: campaigns.revision, updatedAt: campaigns.updatedAt,
@@ -501,7 +505,28 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
     snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
   }
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
-  snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+  snapshot.headers = [...snapshot.headers, { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+}
+// SES MessageHeader limits, which also keep `Name: Value` within the 998-byte SMTP line limit unfolded.
+const singleLineHeader = (header: { Name: string; Value: string }) => /^[!-9;-~]{1,126}$/.test(header.Name) && /^[ -~]*[!-~][ -~]*$/.test(header.Value) && header.Value.length <= 995 && header.Name.length + header.Value.length <= 996;
+const MESSAGE_ID_LIST = /^<[\x21-\x3b\x3d\x3f-\x7e]+>(?: +<[\x21-\x3b\x3d\x3f-\x7e]+>)*$/;
+const THREADING_HEADERS = new Map([['in-reply-to', 'In-Reply-To'], ['references', 'References']]);
+/** Caller headers are limited to threading and X- extensions: OpenSend writes every other header, SES assigns Message-ID, and X-SES-* headers instruct SES. */
+function customHeaders(headers: Record<string, string> | undefined): EmailSnapshot['headers'] {
+  const entries = Object.entries(headers ?? {});
+  if (entries.length > 10) throw new ApiError(422, 'TOO_MANY_HEADERS', 'At most 10 custom headers per message.', 'headers');
+  const seen = new Set<string>();
+  return entries.map(([name, value]) => {
+    const lower = name.toLowerCase(), field = `headers.${name}`, threading = THREADING_HEADERS.get(lower);
+    if (lower === 'message-id') throw new ApiError(422, 'MESSAGE_ID_UNSUPPORTED', 'SES assigns every message its own Message-ID. Read messageId from the email once SES accepts it.', field);
+    if (!threading && (!/^x-[a-z0-9-]{1,120}$/i.test(name) || lower.startsWith('x-ses-'))) throw new ApiError(422, 'HEADER_NOT_ALLOWED', `${name} cannot be set. Custom headers are In-Reply-To, References and X- headers other than X-SES-*.`, field);
+    if (seen.has(lower)) throw new ApiError(422, 'DUPLICATE_HEADER', `${name} appears more than once; header names are case-insensitive.`, field);
+    seen.add(lower);
+    const header = { Name: threading ?? name, Value: value };
+    if (!singleLineHeader(header)) throw new ApiError(422, 'INVALID_HEADER_VALUE', `${name} must be one line of printable ASCII with at least one visible character, at most 996 characters with its name.`, field);
+    if (threading && !MESSAGE_ID_LIST.test(value)) throw new ApiError(422, 'INVALID_MESSAGE_ID', `${threading} must be one or more Message-IDs in angle brackets, such as <id@example.com>, separated by spaces.`, field);
+    return header;
+  });
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false, htmlValidated = false): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
@@ -509,7 +534,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
     sender(runtime, a, input.from, input.region);
   }
-  const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
+  const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: customHeaders(input.headers), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
   if (!htmlValidated) validateHtmlUrls(snapshot.html);
   if (input.template) {
@@ -531,8 +556,9 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
       const normalized = rendered.RenderedTemplate.replace(/\r?\n/g, '\r\n');
       const split = normalized.indexOf('\r\n\r\n');
       if (split < 0) throw new ApiError(422, 'INVALID_RENDERED_MIME', 'SES rendered content has no MIME header/body separator.');
-      const headers = normalized.slice(0, split).split(/\r\n(?![ \t])/).filter(h => !/^(?:from|to|cc|bcc|reply-to|return-path|date|message-id):/i.test(h));
-      snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers].join('\r\n') + normalized.slice(split);
+      const custom = new Set(snapshot.headers.map(header => header.Name.toLowerCase()));
+      const headers = normalized.slice(0, split).split(/\r\n(?![ \t])/).filter(h => !/^(?:from|to|cc|bcc|reply-to|return-path|date|message-id):/i.test(h) && !(h.includes(':') && custom.has(h.slice(0, h.indexOf(':')).trim().toLowerCase())));
+      snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers, ...snapshot.headers.map(header => `${header.Name}: ${header.Value}`)].join('\r\n') + normalized.slice(split);
     }
   }
   if (input.kind === 'marketing' && !preview) {
@@ -584,7 +610,7 @@ export type MailboxSendRequest = { from: string; fromName?: string; to: string[]
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest) {
   const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: false });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
-  for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
+  for (const header of request.headers) if (!singleLineHeader(header)) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
   await checkPending(db, a, 1);
   const snapshot = await prepare(runtime, db, a, parsed.data);
   snapshot.headers = [...snapshot.headers, ...request.headers];
@@ -661,9 +687,9 @@ export function registerSending(app: App) {
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
       // Search only row columns: snapshot fields (sender name, stream, reply-to) detoasted every stored message body
-      // in scope (~800 MB). Stream has its own filter (kind).
+      // in scope (~800 MB). Stream has its own filter (kind). The Message-ID term repeats sesMessageId; NULL until accepted.
       search ? sql`(
-        concat_ws(' ', ${emails.id}, ${emails.campaignId}, ${emails.providerId}, ${emails.from}, ${emails.subject}, ${emails.status}, ${emails.region}, ${emails.errorCode}, ${emails.createdAt}::text, ${emails.updatedAt}::text, ${emails.scheduledAt}::text, ${emails.attemptStartedAt}::text, to_char(${emails.createdAt} AT TIME ZONE 'UTC', 'Mon DD YYYY HH24:MI:SS'), CASE WHEN ${emails.simulated} THEN 'simulated test' ELSE 'live' END) ILIKE ${search}
+        concat_ws(' ', ${emails.id}, ${emails.campaignId}, ${emails.providerId}, ${emails.providerId} || '@' || CASE WHEN ${emails.region} = 'us-east-1' THEN 'email' ELSE ${emails.region} END || '.amazonses.com', ${emails.from}, ${emails.subject}, ${emails.status}, ${emails.region}, ${emails.errorCode}, ${emails.createdAt}::text, ${emails.updatedAt}::text, ${emails.scheduledAt}::text, ${emails.attemptStartedAt}::text, to_char(${emails.createdAt} AT TIME ZONE 'UTC', 'Mon DD YYYY HH24:MI:SS'), CASE WHEN ${emails.simulated} THEN 'simulated test' ELSE 'live' END) ILIKE ${search}
         OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(${emails.to} || ${emails.cc} || ${emails.bcc}) AS recipient(address) WHERE recipient.address ILIKE ${search})
       )` : undefined,
     )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
