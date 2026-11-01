@@ -1498,16 +1498,22 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     ], 'The snapshot every dispatch attempt reads keeps the headers, with threading names canonicalized.');
     const delivered = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'delivered');
     assert.equal(delivered.messageId, `${delivered.providerId}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com`);
+    assert.deepEqual(page(await http('GET', `/v1/emails?search=${encodeURIComponent(delivered.messageId)}`, key.secret)).map(email => email.id), [queued.id], 'Search finds an email by the Message-ID a reply names.');
 
     const batch = ok(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ headers: { 'X-Batch-Item': 'first' } }), mail()] }), 202);
     assert.deepEqual(await storedHeaders(batch.data[0].id), [{ Name: 'X-Batch-Item', Value: 'first' }]);
     assert.deepEqual(await storedHeaders(batch.data[1].id), []);
+    const marketing = ok(await http('POST', '/v1/emails/send', key.secret, mail({ kind: 'marketing', headers: { 'X-Campaign-Ref': 'spring' } })), 202);
+    assert.deepEqual((await storedHeaders(marketing.id)).map((header: Json) => header.Name), ['X-Campaign-Ref', 'List-Unsubscribe', 'List-Unsubscribe-Post'], 'Unsubscribe headers join custom headers on marketing mail.');
 
     const rejected: [Record<string, string>, string][] = [
       [{ 'Message-ID': '<own@mail.example.com>' }, 'MESSAGE_ID_UNSUPPORTED'],
       ...['From', 'to', 'Cc', 'Bcc', 'Reply-To', 'Sender', 'Subject', 'Date', 'MIME-Version', 'Content-Type', 'Content-Transfer-Encoding', 'Return-Path', 'DKIM-Signature', 'List-Unsubscribe', 'List-Unsubscribe-Post', 'Received', 'X-SES-CONFIGURATION-SET', 'x-ses-source-arn']
         .map(name => [{ [name]: 'value' }, 'HEADER_NOT_ALLOWED'] as [Record<string, string>, string]),
       [{ 'X-Ticket-Id\r\nBcc': 'victim@example.com' }, 'HEADER_NOT_ALLOWED'],
+      [{ constructor: 'value' }, 'HEADER_NOT_ALLOWED'],
+      [{ toString: 'value' }, 'HEADER_NOT_ALLOWED'],
+      [{ 'X-Ticket-Id': '   ' }, 'INVALID_HEADER_VALUE'],
       [{ 'X-Ticket-Id': 'ticket-42\r\nBcc: victim@example.com' }, 'INVALID_HEADER_VALUE'],
       [{ 'X-Ticket-Id': 'caf\u00e9' }, 'INVALID_HEADER_VALUE'],
       [{ 'X-Ticket-Id': 'a'.repeat(986) }, 'INVALID_HEADER_VALUE'],
@@ -1520,7 +1526,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     for (const [invalid, code] of rejected) error(await http('POST', '/v1/emails/send', key.secret, mail({ headers: invalid })), 422, code);
     assert.equal(error(await http('POST', '/v1/emails/send', key.secret, mail({ headers: { 'Message-ID': '<own@mail.example.com>' } })), 422).field, 'headers.Message-ID');
     error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail(), mail({ headers: { Bcc: 'victim@example.com' } })] }), 422, 'HEADER_NOT_ALLOWED');
-    assert.equal((await db.query('SELECT count(*)::int AS count FROM sending_emails WHERE actor_key_id = $1', [key.id])).rows[0].count, 3, 'Rejected headers create no mail, even beside a valid batch item.');
+    assert.equal((await db.query('SELECT count(*)::int AS count FROM sending_emails WHERE actor_key_id = $1', [key.id])).rows[0].count, 4, 'Rejected headers create no mail, even beside a valid batch item.');
   });
 });
 

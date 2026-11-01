@@ -366,7 +366,7 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Up to 10 extra MIME headers, keyed by name: In-Reply-To and References (one or more Message-IDs in angle brackets, such as <id@example.com>, separated by spaces) to thread a reply, and X- extension headers. Values are one line of printable ASCII, at most 996 characters with the name. Header names are case-insensitive and may appear once. OpenSend writes every other header itself, so From, To, Subject, Date, MIME and Content-* headers, List-Unsubscribe, DKIM-Signature and the like are rejected with HEADER_NOT_ALLOWED. Message-ID is rejected with MESSAGE_ID_UNSUPPORTED because SES assigns every message its own; read messageId from the email once SES accepts it. X-SES-* headers are SES sending instructions and are rejected.
+     * Up to 10 extra MIME headers, keyed by name: In-Reply-To and References (one or more Message-IDs in angle brackets, such as <id@example.com>, separated by spaces) to thread a reply, and X- extension headers. Values are one line of printable ASCII with at least one visible character, at most 996 characters with the name. Header names are case-insensitive and may appear once. OpenSend writes every other header itself, so From, To, Subject, Date, MIME and Content-* headers, List-Unsubscribe, DKIM-Signature and the like are rejected with HEADER_NOT_ALLOWED. Message-ID is rejected with MESSAGE_ID_UNSUPPORTED because SES assigns every message its own; read messageId from the email once SES accepts it. X-SES-* headers are SES sending instructions and are rejected.
      */
     headers?: {
         [key: string]: string;
