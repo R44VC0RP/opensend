@@ -45,6 +45,29 @@ const message = await getEmail({
 
 The auth callback supplies the API key only to the bearer scheme; dashboard cookie authentication is not needed for SDK calls. Pass a client instance rather than mutating global client configuration in a multi-tenant server. Keep API keys out of browser bundles. This client submits requests; it does not turn `202 queued` into a delivery guarantee or automatically replay sends. Reuse a stable idempotency key for deliberate retries.
 
+## Reply in a thread
+
+Pass `In-Reply-To` and `References` in `headers` so the reply joins the recipient's conversation. `X-` headers are also accepted; OpenSend rejects headers it writes itself. SES assigns every message its own Message-ID, so `Message-ID` can't be set. Once SES accepts a message, `getEmail` returns the assigned value as `messageId`, without angle brackets. Store it to match the recipient's answer, whose `In-Reply-To` names it.
+
+```ts
+const reply = await sendEmail({
+  client,
+  headers: { 'Idempotency-Key': 'ticket-42-reply-3' },
+  body: {
+    region: 'us-east-1',
+    from: 'support@example.com',
+    to: ['customer@example.com'],
+    subject: 'Re: Refund request',
+    text: 'Your refund is on its way.',
+    headers: {
+      'In-Reply-To': '<question-2@mail.example.com>',
+      References: '<question-1@mail.example.com> <answer-1@email.amazonses.com> <question-2@mail.example.com>',
+    },
+  },
+  throwOnError: true,
+});
+```
+
 ## Upload local and generated attachments
 
 Use a short-lived `createAgentToken` token to upload a local file without putting its bytes in model context:

@@ -1480,6 +1480,48 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('POST', '/v1/emails/batch', key.secret, { emails: [] }), 422);
     error(await http('POST', '/v1/emails/send', key.secret, { from: 'sender@example.com', to: address(), region: REGION, template: { name: unique('missing-template'), data: { firstName: '<script>safe</script>' } } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
   });
+
+  test('custom threading and X- headers are stored once for dispatch and replays, the delivered email exposes its Message-ID, and headers OpenSend or SES control are rejected', async t => {
+    const key = await keyFixture(t);
+    const db = await fixtureDatabase(t);
+    const storedHeaders = async (emailId: string) => (await db.query(`SELECT snapshot->'headers' AS headers FROM sending_emails WHERE id = $1`, [emailId])).rows[0]?.headers;
+    const headers = { 'in-reply-to': '<question-1@mail.example.com>', References: '<root@mail.example.com> <question-1@mail.example.com>', 'X-Ticket-Id': 'ticket-42' };
+    const payload = mail({ headers });
+    const idempotency = { 'Idempotency-Key': unique('headers') };
+    const queued = ok(await http('POST', '/v1/emails/send', key.secret, payload, idempotency), 202);
+    assert.equal(ok(await http('POST', '/v1/emails/send', key.secret, payload, idempotency), 202).id, queued.id, 'An exact replay returns the original email.');
+    error(await http('POST', '/v1/emails/send', key.secret, { ...payload, headers: { ...headers, 'X-Ticket-Id': 'ticket-43' } }, idempotency), 409, 'IDEMPOTENCY_CONFLICT');
+    assert.deepEqual(await storedHeaders(queued.id), [
+      { Name: 'In-Reply-To', Value: '<question-1@mail.example.com>' },
+      { Name: 'References', Value: '<root@mail.example.com> <question-1@mail.example.com>' },
+      { Name: 'X-Ticket-Id', Value: 'ticket-42' },
+    ], 'The snapshot every dispatch attempt reads keeps the headers, with threading names canonicalized.');
+    const delivered = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'delivered');
+    assert.equal(delivered.messageId, `${delivered.providerId}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com`);
+
+    const batch = ok(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ headers: { 'X-Batch-Item': 'first' } }), mail()] }), 202);
+    assert.deepEqual(await storedHeaders(batch.data[0].id), [{ Name: 'X-Batch-Item', Value: 'first' }]);
+    assert.deepEqual(await storedHeaders(batch.data[1].id), []);
+
+    const rejected: [Record<string, string>, string][] = [
+      [{ 'Message-ID': '<own@mail.example.com>' }, 'MESSAGE_ID_UNSUPPORTED'],
+      ...['From', 'to', 'Cc', 'Bcc', 'Reply-To', 'Sender', 'Subject', 'Date', 'MIME-Version', 'Content-Type', 'Content-Transfer-Encoding', 'Return-Path', 'DKIM-Signature', 'List-Unsubscribe', 'List-Unsubscribe-Post', 'Received', 'X-SES-CONFIGURATION-SET', 'x-ses-source-arn']
+        .map(name => [{ [name]: 'value' }, 'HEADER_NOT_ALLOWED'] as [Record<string, string>, string]),
+      [{ 'X-Ticket-Id\r\nBcc': 'victim@example.com' }, 'HEADER_NOT_ALLOWED'],
+      [{ 'X-Ticket-Id': 'ticket-42\r\nBcc: victim@example.com' }, 'INVALID_HEADER_VALUE'],
+      [{ 'X-Ticket-Id': 'caf\u00e9' }, 'INVALID_HEADER_VALUE'],
+      [{ 'X-Ticket-Id': 'a'.repeat(986) }, 'INVALID_HEADER_VALUE'],
+      [{ 'In-Reply-To': 'question-1@mail.example.com' }, 'INVALID_MESSAGE_ID'],
+      [{ 'In-Reply-To': '<question 1@mail.example.com>' }, 'INVALID_MESSAGE_ID'],
+      [{ References: '<root@mail.example.com>, <question-1@mail.example.com>' }, 'INVALID_MESSAGE_ID'],
+      [{ 'X-Ticket-Id': 'ticket-42', 'x-ticket-id': 'ticket-43' }, 'DUPLICATE_HEADER'],
+      [Object.fromEntries(Array.from({ length: 11 }, (_, index) => [`X-Extra-${index}`, 'value'])), 'TOO_MANY_HEADERS'],
+    ];
+    for (const [invalid, code] of rejected) error(await http('POST', '/v1/emails/send', key.secret, mail({ headers: invalid })), 422, code);
+    assert.equal(error(await http('POST', '/v1/emails/send', key.secret, mail({ headers: { 'Message-ID': '<own@mail.example.com>' } })), 422).field, 'headers.Message-ID');
+    error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail(), mail({ headers: { Bcc: 'victim@example.com' } })] }), 422, 'HEADER_NOT_ALLOWED');
+    assert.equal((await db.query('SELECT count(*)::int AS count FROM sending_emails WHERE actor_key_id = $1', [key.id])).rows[0].count, 3, 'Rejected headers create no mail, even beside a valid batch item.');
+  });
 });
 
 describe('Private attachment assets and campaign revisions', () => {
@@ -3620,6 +3662,55 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
       assert.ok(sent.includes(outage));
       assert.equal(classified.length, 3);
+    });
+  });
+
+  test('MOCK SES TRANSPORT: custom headers reach SES on simple, template and inline-image MIME, and the email reports the Message-ID SES assigned', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const [{ SESv2Client, SendEmailCommand, GetAccountCommand, GetEmailTemplateCommand, TestRenderEmailTemplateCommand }, { dispatchDue }, { credentialFingerprint, discoveryTarget }, { inlineMessage }] = await Promise.all([
+        import('@aws-sdk/client-sesv2'), import('./src/dispatcher.js'), import('./src/ses-region-state.js'), import('./src/sending.js'),
+      ]);
+      // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
+      runtime.config.liveEnabled = true;
+      runtime.config.aws = { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' };
+      const topic = `arn:aws:sns:${REGION}:111122223333:synthetic-feedback`;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id, region, report, credentials_fingerprint, public_url, trusted_account_id, trusted_topic_arn)
+        VALUES ($1, $2, $3, $4, $5, '111122223333', $6)`, [runtime.config.workspaceId, REGION,
+        JSON.stringify({ provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }),
+        await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      const template = { Subject: 'Ticket update', Text: 'Hi {{name}}' };
+      const requests = new Map<string, Json>();
+      t.mock.method(SESv2Client.prototype, 'send', async (command: any) => {
+        if (command instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        if (command instanceof GetEmailTemplateCommand) return { TemplateName: command.input.TemplateName, TemplateContent: template };
+        if (command instanceof TestRenderEmailTemplateCommand) return { RenderedTemplate: 'Subject: Ticket update\r\nMIME-Version: 1.0\r\nIn-Reply-To: <template@mail.example.com>\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nHi Ana\r\n' };
+        assert.ok(command instanceof SendEmailCommand, 'Only account, template and SendEmail calls are expected.');
+        const emailId = command.input.EmailTags!.find((tag: Json) => tag.Name === 'opensend_email_id')!.Value!;
+        requests.set(emailId, command.input);
+        return { MessageId: `live-${emailId}` };
+      });
+      const headers = { 'In-Reply-To': '<question-1@mail.example.com>', References: '<root@mail.example.com> <question-1@mail.example.com>', 'X-Ticket-Id': 'ticket-42' };
+      const expected = Object.entries(headers).map(([Name, Value]) => ({ Name, Value }));
+      const simple = ok(await local('POST', '/v1/emails/send', mail({ headers }), 'live'), 202).id as string;
+      const templated = ok(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: REGION, template: { name: 'ticket-update', data: { name: 'Ana' } }, headers }, 'live'), 202).id as string;
+      assert.equal(ok(await local('GET', `/v1/emails/${simple}`, undefined, 'live')).messageId, null, 'Message-ID is unknown until SES accepts the message.');
+      await dispatchDue(runtime, 'live', REGION);
+
+      assert.deepEqual(requests.get(simple)?.Content?.Simple?.Headers, expected);
+      const raw = new TextDecoder().decode(requests.get(templated)?.Content?.Raw?.Data);
+      const rawHeaders = raw.slice(0, raw.indexOf('\r\n\r\n')).split('\r\n');
+      for (const header of expected) assert.ok(rawHeaders.includes(`${header.Name}: ${header.Value}`), `Template MIME is missing ${header.Name}.`);
+      assert.equal(rawHeaders.filter(line => /^in-reply-to:/i.test(line)).length, 1, 'A caller header replaces the rendered template’s own copy.');
+      const domain = REGION === 'us-east-1' ? 'email' : REGION;
+      assert.equal(ok(await local('GET', `/v1/emails/${simple}`, undefined, 'live')).messageId, `live-${simple}@${domain}.amazonses.com`);
+      assert.equal(ok(await local('GET', `/v1/emails/${templated}`, undefined, 'live')).messageId, `live-${templated}@${domain}.amazonses.com`);
+
+      // HTML with inline images is built by OpenSend instead of SES Simple; it writes the same headers.
+      const pixel = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64'));
+      const mime = Buffer.from(inlineMessage({ from: 'sender@example.com', to: ['ana@example.com'], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional', subject: 'Ticket update', html: '<p><img src="cid:logo"></p>', attachments: [], tracking: false, headers: expected },
+        [{ FileName: 'logo.png', RawContent: pixel, ContentType: 'image/png', ContentDisposition: 'INLINE', ContentTransferEncoding: 'BASE64', ContentId: 'logo' }])).toString('utf8');
+      const mimeHeaders = mime.slice(0, mime.indexOf('\r\n\r\n')).split('\r\n');
+      for (const header of expected) assert.ok(mimeHeaders.includes(`${header.Name}: ${header.Value}`), `Inline-image MIME is missing ${header.Name}.`);
     });
   });
 });
