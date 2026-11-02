@@ -1,12 +1,12 @@
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
-import { attachments as sendingAttachments } from './db/sending.js';
+import { attachments as sendingAttachments, emails } from './db/sending.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxRegions, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, type MailboxEventInput, type MailboxEventType } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, normalizeSubject, rememberMessageIds, snippetOf, type Scope } from './mailbox-store.js';
-import { queueMailboxEmail, storeAttachmentBytes } from './sending.js';
+import { queueMailboxEmail, storeAttachmentBytes, type SendRequest } from './sending.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
@@ -23,14 +23,14 @@ type MessageRow = typeof mailMessages.$inferSelect;
 export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
 
 /** Resolves attachment inputs to bytes before any transaction: inline base64, received attachments (matt_) or uploaded sending attachments. */
-export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, items: AttachmentInput[]): Promise<ResolvedAttachment[]> {
+export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, items: AttachmentInput[], db: DbExecutor = runtime.db): Promise<ResolvedAttachment[]> {
   const out: ResolvedAttachment[] = [];
   for (const item of items) {
     if ('content' in item) {
       if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.content) || item.content.length % 4) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `Attachment ${item.filename} must be standard padded base64.`, 'attachments');
       out.push({ filename: item.filename, contentType: item.contentType ?? 'application/octet-stream', disposition: item.disposition ?? 'attachment', contentId: item.contentId ?? null, bytes: new Uint8Array(Buffer.from(item.content, 'base64')) });
     } else if (item.id.startsWith('matt_')) {
-      const [file] = await runtime.db.select({ file: mailAttachments, region: mailMessages.region }).from(mailAttachments).innerJoin(mailMessages, eq(mailMessages.id, mailAttachments.messageId))
+      const [file] = await db.select({ file: mailAttachments, region: mailMessages.region }).from(mailAttachments).innerJoin(mailMessages, eq(mailMessages.id, mailAttachments.messageId))
         .innerJoin(mailboxMessages, and(eq(mailboxMessages.messageId, mailAttachments.messageId), eq(mailboxMessages.mailboxId, mailbox.id))).where(eq(mailAttachments.id, item.id));
       if (!file?.region) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', `Attachment ${item.id} was not found in this mailbox.`, 'attachments');
       const s3 = mailboxS3(runtime, file.region);
@@ -40,7 +40,7 @@ export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, 
       } catch { throw new ApiError(503, 'ATTACHMENT_UNAVAILABLE', `Attachment ${item.id} could not be read from storage.`, 'attachments', true); }
       finally { s3.destroy(); }
     } else {
-      const [row] = await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId, mailbox.workspaceId), eq(sendingAttachments.environment, 'live'), eq(sendingAttachments.id, item.id)));
+      const [row] = await db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId, mailbox.workspaceId), eq(sendingAttachments.environment, 'live'), eq(sendingAttachments.id, item.id)));
       if (!row) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', `Attachment ${item.id} was not found.`, 'attachments');
       const stored = await runtime.storage.get(row.storageKey);
       if (!stored) throw new ApiError(503, 'ATTACHMENT_UNAVAILABLE', `Attachment ${item.id} could not be read from storage.`, 'attachments', true);
@@ -51,18 +51,20 @@ export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, 
   return out;
 }
 
-/** References stays one header line of at most 995 characters: keep the first ID and as many recent IDs as fit (RFC 5322 §3.6.4). */
+/** Keep the root and most recent IDs within SES's 996-byte combined header name/value limit. */
 export function referencesHeader(ids: string[]) {
-  const unique = [...new Set(ids)].map(value => `<${value}>`);
-  if (unique.join(' ').length <= 995) return unique.join(' ');
+  const max = 996 - 'References'.length;
+  const unique = [...new Set(ids)].map(value => `<${value}>`).filter(value => value.length <= max);
+  if (unique.join(' ').length <= max) return unique.join(' ');
   const [first, ...rest] = unique; const kept: string[] = [];
-  for (const value of rest.reverse()) { if ([first, value, ...kept].join(' ').length > 995) break; kept.unshift(value); }
+  for (const value of rest.reverse()) { if ([first, value, ...kept].join(' ').length > max) break; kept.unshift(value); }
   return [first, ...kept].join(' ');
 }
 
 export type OutgoingMessage = {
   mailbox: MailboxRow; actor: Actor; scope: Scope; from: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[];
   subject: string; text?: string; html?: string; attachments: ResolvedAttachment[];
+  fromName?: string; region?: string; tracking?: boolean; screen?: boolean;
   threadId?: string; inReplyTo: string | null; references: string[]; autoSubmitted?: 'auto-generated' | 'auto-replied'; headers: { name: string; value: string }[];
 };
 
@@ -94,10 +96,12 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const own = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, message.mailbox.id), inArray(mailboxAddresses.address, recipients)));
   if (own.length) throw new ApiError(422, 'SELF_SEND', `A mailbox cannot send to its own address (${own[0]!.address}).`, 'to');
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_send:${message.mailbox.id}`}))`);
+  if (message.mailbox.expiresAt && Date.parse(message.mailbox.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   await enforceLimits(tx, message);
   const [domain] = await tx.select().from(mailboxDomains).where(eq(mailboxDomains.id, message.mailbox.domainId));
   const [region] = domain ? await tx.select().from(mailboxRegions).where(and(eq(mailboxRegions.workspaceId, message.scope.workspaceId), eq(mailboxRegions.region, domain.region))) : [];
   if (!domain || !region?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
+  if (message.region && domain.region !== message.region) throw new ApiError(422, 'MAILBOX_REGION_MISMATCH', 'Tracked mail must use the mailbox region.', 'region');
   const messageRowId = id('msg');
   const sendingIds: string[] = [];
   const files: (typeof mailAttachments.$inferInsert)[] = [];
@@ -114,13 +118,15 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
       files.push({ id: attachmentId, ...message.scope, messageId: messageRowId, filename: file.filename, contentType: file.contentType, sizeBytes: file.bytes.byteLength, contentId: file.contentId, disposition: file.disposition, sha256: sha, bucket: region.bucket, storageKey: key });
     }
   } finally { s3.destroy(); }
+  const references = referencesHeader(message.references);
   const headers = [
     ...(message.inReplyTo ? [{ Name: 'In-Reply-To', Value: `<${message.inReplyTo}>` }] : []),
-    ...(message.references.length ? [{ Name: 'References', Value: referencesHeader(message.references) }] : []),
+    ...(references ? [{ Name: 'References', Value: references }] : []),
     ...(message.autoSubmitted ? [{ Name: 'Auto-Submitted', Value: message.autoSubmitted }] : []),
     ...message.headers.map(header => ({ Name: header.name, Value: header.value })),
   ];
-  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: message.mailbox.displayName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers });
+  const fromName = message.fromName ?? message.mailbox.displayName;
+  const { emailId } = await queueMailboxEmail(runtime, tx, message.actor, { from: message.from, fromName: fromName ?? undefined, to: message.to, cc: message.cc, bcc: message.bcc, replyTo: message.replyTo, region: domain.region, subject: message.subject, html: message.html, text: message.text, attachments: sendingIds, headers, tracking: message.tracking, screen: message.screen });
   const now = new Date().toISOString();
   let threadId = message.threadId;
   if (!threadId) { threadId = id('thr'); await tx.insert(mailThreads).values({ id: threadId, ...message.scope, subject: normalizeSubject(message.subject).slice(0, 998), messageCount: 0, lastMessageAt: now }); }
@@ -128,7 +134,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const address = (value: string): MailAddress => ({ name: null, address: value });
   const [row] = await tx.insert(mailMessages).values({
     id: messageRowId, ...message.scope, direction: 'outbound', threadId, region: domain.region, domainId: domain.id, sendingEmailId: emailId, senderMailboxId: message.mailbox.id,
-    inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName: message.mailbox.displayName,
+    inReplyTo: message.inReplyTo, references: message.references, subject: message.subject, fromAddress: message.from, fromName,
     to: message.to.map(address), cc: message.cc.map(address), bcc: message.bcc.map(address), replyTo: message.replyTo.map(address), envelopeFrom: message.from, envelopeTo: recipients,
     sentAt: now, receivedAt: now, text: message.text ?? (message.html ? htmlToPlain(message.html) : null), html: message.html ?? null, snippet: snippetOf(message.text, message.html),
     headers: headers.map(header => ({ name: header.Name, value: header.Value })), attachmentCount: files.length, status: 'queued', automated: !!message.autoSubmitted,
@@ -137,6 +143,25 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
   const queued = await recordEvents(tx, message.scope.workspaceId, message.scope.environment, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
+}
+
+/** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */
+export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest) {
+  if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for mailbox sends.', 'replyMailboxId');
+  const scope = { workspaceId: actor.workspaceId, environment: actor.environment };
+  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share');
+  if (!target) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
+  if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox receiving domain must be active before starting a tracked conversation.', 'replyMailboxId');
+  const { mailbox } = target;
+  const owned = new Set((await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address));
+  if (!owned.has(input.from.toLowerCase()) || input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'From and Reply-To must belong to the selected mailbox.', 'replyMailboxId');
+  const { message, runnable } = await sendFromMailbox(runtime, tx, {
+    mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
+    region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,
+    attachments: await resolveAttachments(runtime, mailbox, input.attachments.map(id => ({ id })), tx), inReplyTo: null, references: [], headers: [],
+  });
+  if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
+  return { id: message.sendingEmailId!, status: 'queued' as const, environment: scope.environment, simulated: false, mailboxMessageId: message.id, threadId: message.threadId };
 }
 
 /** Reply recipients: Reply-To (or From) of an inbound message; the original recipients of an outbound one. */
@@ -154,6 +179,16 @@ export function assertReplyable(original: MessageRow, to: string[], allowAutomat
   if (blocked) throw new ApiError(409, 'REPLY_TO_NO_REPLY', `${blocked} does not accept replies. Set allowAutomated=true to send anyway.`, 'to');
 }
 export const replySubject = (subject: string, prefix: 'Re' | 'Fwd') => `${prefix}: ${normalizeSubject(subject) || '(no subject)'}`.slice(0, 998);
+
+/** Mailbox sync can lag provider acceptance. Never put an OpenSend ID on the wire or silently send an unthreaded follow-up. */
+export async function replyParentId(db: DbExecutor, original: MessageRow) {
+  if (original.messageId || original.direction !== 'outbound') return original.messageId;
+  if (original.sendingEmailId) {
+    const [sent] = await db.select({ providerId: emails.providerId, region: emails.region }).from(emails).where(and(eq(emails.id, original.sendingEmailId), eq(emails.workspaceId, original.workspaceId), eq(emails.environment, original.environment)));
+    if (sent?.providerId) return sesMessageId(sent.providerId, sent.region);
+  }
+  throw new ApiError(409, 'REPLY_TARGET_NOT_ACCEPTED', 'The original outbound email has no provider Message-ID. Wait for acceptance or reply to an earlier received message.');
+}
 
 /** Forward body: optional note, a header summary and the original content. */
 export function forwardBody(original: MessageRow, note: { text?: string; html?: string }) {

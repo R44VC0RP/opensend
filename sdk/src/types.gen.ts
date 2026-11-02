@@ -329,11 +329,16 @@ export type TemplateImageImport = {
     contentId?: string;
 };
 
-export type EmailQueued = {
+/**
+ * When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox.
+ */
+export type SingleEmailQueued = {
     id: string;
     status: 'queued';
     environment: 'live' | 'test';
     simulated: boolean;
+    mailboxMessageId?: string;
+    threadId?: string;
 };
 
 export type SendEmailInput = {
@@ -369,14 +374,60 @@ export type SendEmailInput = {
      * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
+    /**
+     * Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends.
+     */
+    replyMailboxId?: string;
 };
 
 export type EmailBatchQueued = {
     data: Array<EmailQueued>;
 };
 
+export type EmailQueued = {
+    id: string;
+    status: 'queued';
+    environment: 'live' | 'test';
+    simulated: boolean;
+};
+
 export type SendEmailBatchInput = {
-    emails: Array<SendEmailInput>;
+    emails: Array<BatchSendEmailItem>;
+};
+
+export type BatchSendEmailItem = {
+    from: string;
+    fromName?: string;
+    to: string | Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    replyTo?: Array<string>;
+    /**
+     * Defaults to the installation’s persisted default region when omitted.
+     */
+    region?: string;
+    kind?: 'transactional' | 'marketing';
+    subject?: string;
+    html?: string;
+    text?: string;
+    /**
+     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.
+     */
+    template?: {
+        name: string;
+        /**
+         * JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters.
+         */
+        data?: {
+            [key: string]: unknown;
+        };
+    };
+    attachments?: Array<string>;
+    tracking?: boolean;
+    /**
+     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
+     */
+    screen?: boolean;
 };
 
 export type Email = {
@@ -1449,6 +1500,10 @@ export type Mailbox = {
     origin: 'api' | 'auto';
     createdAt: string;
     updatedAt: string;
+    /**
+     * UTC lease expiry, or null for a permanent mailbox. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes the mailbox.
+     */
+    expiresAt: string | null;
     stats: {
         threads: number;
         unreadThreads: number;
@@ -1468,6 +1523,10 @@ export type Mailbox = {
 export type CreateMailbox = {
     address: string;
     displayName?: string | null;
+    /**
+     * Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
+     */
+    ttlSeconds?: number;
     aliases?: Array<string>;
     /**
      * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
@@ -1546,6 +1605,13 @@ export type MailboxThreadDetail = MailboxThread & {
 export type MailboxMessage = MailboxMessageSummary & {
     bcc: Array<MailboxAddress>;
     replyTo: Array<MailboxAddress>;
+    /**
+     * OpenSend transactional email ID for an outbound mailbox send; null for received mail.
+     */
+    emailId: string | null;
+    /**
+     * RFC Message-ID without brackets, not the OpenSend message ID (id).
+     */
     messageId: string | null;
     inReplyTo: string | null;
     references: Array<string>;
@@ -2013,6 +2079,13 @@ export type StoredMessage = {
     automated: boolean;
     bcc: Array<MailboxAddress>;
     replyTo: Array<MailboxAddress>;
+    /**
+     * OpenSend transactional email ID for an outbound mailbox send; null for received mail.
+     */
+    emailId: string | null;
+    /**
+     * RFC Message-ID without brackets, not the OpenSend message ID (id).
+     */
     messageId: string | null;
     inReplyTo: string | null;
     references: Array<string>;
@@ -5544,7 +5617,7 @@ export type SendEmailResponses = {
     /**
      * Success
      */
-    202: EmailQueued;
+    202: SingleEmailQueued;
 };
 
 export type SendEmailResponse = SendEmailResponses[keyof SendEmailResponses];

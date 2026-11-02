@@ -14,6 +14,7 @@ import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
+import { queueTrackedMailboxSend } from './mailbox-send.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
@@ -89,11 +90,13 @@ const SendInput = z.object({
   if ((Array.isArray(v.to) ? v.to.length : 1) + v.cc.length + v.bcc.length > 50) ctx.addIssue({ code: 'custom', message: 'At most 50 recipients across to/cc/bcc.' });
   if (v.kind === 'marketing' && ((Array.isArray(v.to) ? v.to.length : 1) !== 1 || v.cc.length || v.bcc.length)) ctx.addIssue({ code: 'custom', message: 'Marketing messages require exactly one To recipient and no Cc/Bcc.' });
   if (v.template && (v.attachments.length || v.kind === 'marketing')) ctx.addIssue({ code: 'custom', message: 'Stored templates currently support transactional messages without attachments only.' });
-}).openapi('SendEmailInput');
+}).openapi('BatchSendEmailItem');
+const SingleSendInput = SendInput.safeExtend({ replyMailboxId: z.string().min(1).max(120).optional().describe('Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends.') }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), environment: z.enum(['live', 'test']), simulated: z.boolean() }).openapi('EmailQueued');
+const SingleReceipt = z.object({ ...Receipt.shape, mailboxMessageId: z.string().optional(), threadId: z.string().optional() }).describe('When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), environment: z.enum(['live', 'test']), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
 const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
@@ -170,7 +173,7 @@ const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string
 const CampaignQueued = z.object({ id: z.string(), status: z.enum(['scheduled', 'sending']), queued: z.number().int(), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), status: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
-type SendRequest = z.infer<typeof SendInput>;
+export type SendRequest = z.infer<typeof SendInput>;
 const now = () => new Date().toISOString();
 // Metadata routes must not materialize HTML, raw MIME or template data from the immutable snapshot.
 const emailColumns = {
@@ -579,10 +582,10 @@ export async function storeAttachmentBytes(runtime: Runtime, db: DbExecutor, a: 
   if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
   return storeValidatedAttachment(runtime, db, a, validateAttachment(parsed.data, bytes), bytes, await bytesDigest(bytes));
 }
-export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string; subject: string; html?: string; text?: string; attachments: string[]; headers: { Name: string; Value: string }[] };
+export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Actor, request: MailboxSendRequest) {
-  const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: false });
+  const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
   await checkPending(db, a, 1);
@@ -630,8 +633,14 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 }
 
 export function registerSending(app: App) {
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SendInput) }, responses: { 202: response(Receipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
+    if (input.replyMailboxId) {
+      if (a.environment !== 'live' || a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use an unrestricted live manage credential, or send through the mailbox API with a scoped mailbox key.');
+      const mailboxId = input.replyMailboxId;
+      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, mailboxId, input));
+      return c.json(SingleReceipt.parse(result), 202);
+    }
     const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); return queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });

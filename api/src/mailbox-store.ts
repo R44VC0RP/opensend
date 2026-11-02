@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { ApiError, id, type DbExecutor, type Mode } from './core.js';
 import { emails } from './db/sending.js';
 import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailMessageIds, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
@@ -67,9 +67,14 @@ export function validateRule(rule: string, domain: string) {
   return value;
 }
 
-/** Creates a mailbox with its primary address and aliases. Addresses are unique across mailboxes. */
-export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits> }) {
+export function checkTemporaryMailboxRouting(input: { aliases?: string[]; rules?: string[] }) {
+  if (input.aliases?.length || input.rules?.length) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes do not support aliases or wildcard rules.', input.aliases?.length ? 'aliases' : 'rules');
+}
+
+/** Creates a mailbox with its primary address and aliases. Addresses stay reserved until deletion. */
+export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits>; ttlSeconds?: number }) {
   const address = input.address.trim().toLowerCase();
+  if (input.ttlSeconds !== undefined) checkTemporaryMailboxRouting(input);
   const aliases = [...new Set((input.aliases ?? []).map(value => value.trim().toLowerCase()))].filter(value => value !== address);
   for (const value of [address, ...aliases]) if (!ADDRESS.test(value) || !value.endsWith(`@${input.domainName}`)) throw new ApiError(422, 'ADDRESS_DOMAIN_MISMATCH', `Addresses must be valid and end in @${input.domainName}.`, 'address');
   const rules = [...new Set((input.rules ?? []).map(rule => validateRule(rule, input.domainName)))];
@@ -77,39 +82,51 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   const taken = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, all)));
   if (taken.length) throw new ApiError(409, 'ADDRESS_TAKEN', `${taken[0]!.address} already belongs to a mailbox.`, 'address');
   const mailboxId = id('mbx');
-  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin, sendLimits: input.sendLimits ?? {} }).returning();
+  // Start the lease after acquiring the address lock, not at transaction start before any wait.
+  const lease = input.ttlSeconds === undefined ? {} : { createdAt: sql`statement_timestamp()`, updatedAt: sql`statement_timestamp()`, expiresAt: sql`statement_timestamp() + ${input.ttlSeconds}::int * interval '1 second'` };
+  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin, sendLimits: input.sendLimits ?? {}, ...lease }).returning();
   await tx.insert(mailboxAddresses).values(all.map((value, index) => ({ ...scope, address: value, mailboxId, kind: index === 0 ? 'primary' as const : 'alias' as const })));
   return row!;
 }
 
 /** Resolves envelope recipients to mailboxes: exact address/alias, plus-address base, wildcard rules, then the domain catch-all. */
-export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: string[], options: { allowCreate: boolean }) {
+export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: string[], options: { allowCreate: boolean; receivedAt: string }) {
   const mailboxIds = new Set<string>(), unrouted: string[] = [], created: string[] = [];
+  let blockedByLease = false;
   const domainNames = [...new Set(recipients.map(value => value.split('@')[1] ?? ''))].filter(Boolean);
-  if (!domainNames.length) return { mailboxIds: [], unrouted, created };
+  if (!domainNames.length) return { mailboxIds: [], unrouted, created, blockedByLease };
   const domains = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, scope.workspaceId), eq(mailboxDomains.environment, scope.environment), inArray(mailboxDomains.name, domainNames), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active'])));
   for (const recipient of recipients) {
     const [local = '', host = ''] = recipient.split('@');
     const domain = domains.find(row => row.name === host);
     if (!domain) continue;
     const candidates = [...new Set([recipient, local.includes('+') ? `${local.split('+')[0]}@${host}` : recipient])];
-    const exact = await tx.select({ address: mailboxAddresses.address, mailboxId: mailboxAddresses.mailboxId }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, candidates)));
-    const hit = exact.find(row => row.address === recipient) ?? exact[0];
-    if (hit) { mailboxIds.add(hit.mailboxId); continue; }
-    const ruled = await tx.select({ id: mailboxes.id, rules: mailboxes.rules }).from(mailboxes).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.domainId, domain.id), sql`jsonb_array_length(${mailboxes.rules}) > 0`)).orderBy(mailboxes.createdAt);
+    // An inactive lease is still an owner, not a miss: never fall through to a rule, plus-base or catch-all.
+    const routeOwnedAddress = async () => {
+      const rows = await tx.select({ address: mailboxAddresses.address, mailboxId: mailboxAddresses.mailboxId,
+        receives: sql<boolean>`${mailboxes.expiresAt} IS NULL OR (${mailboxes.createdAt} <= ${options.receivedAt}::timestamptz AND ${mailboxes.expiresAt} > greatest(statement_timestamp(), ${options.receivedAt}::timestamptz))`,
+      }).from(mailboxAddresses).innerJoin(mailboxes, eq(mailboxes.id, mailboxAddresses.mailboxId)).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, candidates)));
+      const owner = rows.find(row => row.address === recipient) ?? rows[0];
+      if (!owner) return false;
+      if (owner.receives) mailboxIds.add(owner.mailboxId);
+      else { unrouted.push(recipient); blockedByLease = true; }
+      return true;
+    };
+    if (await routeOwnedAddress()) continue;
+    const ruled = await tx.select({ id: mailboxes.id, rules: mailboxes.rules }).from(mailboxes).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.domainId, domain.id), isNull(mailboxes.expiresAt), sql`jsonb_array_length(${mailboxes.rules}) > 0`)).orderBy(mailboxes.createdAt);
     const matched = ruled.find(row => row.rules.some(rule => ruleMatches(rule, recipient)));
     if (matched) { mailboxIds.add(matched.id); continue; }
     if (domain.catchAll === 'create_mailbox' && options.allowCreate && ADDRESS.test(recipient)) {
       // Serialize creation per address so concurrent deliveries share one mailbox.
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_address:${scope.workspaceId}:${recipient}`}))`);
-      const [again] = await tx.select({ mailboxId: mailboxAddresses.mailboxId }).from(mailboxAddresses).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), eq(mailboxAddresses.address, recipient)));
-      const mailboxId = again?.mailboxId ?? (await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: recipient, origin: 'auto' })).id;
-      if (!again) created.push(mailboxId);
+      if (await routeOwnedAddress()) continue;
+      const mailboxId = (await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: recipient, origin: 'auto' })).id;
+      created.push(mailboxId);
       mailboxIds.add(mailboxId); continue;
     }
     unrouted.push(recipient);
   }
-  return { mailboxIds: [...mailboxIds], unrouted, created };
+  return { mailboxIds: [...mailboxIds], unrouted, created, blockedByLease };
 }
 
 /** Finds the conversation for a message from In-Reply-To/References, or starts one. Serialized per workspace. */

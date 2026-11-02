@@ -1,9 +1,9 @@
 import PostalMime, { type Address, type Email } from 'postal-mime';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { mailAttachments, mailboxDomains, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
+import { mailAttachments, mailboxDomains, mailboxes, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents, recordEvents, type MailboxEventInput } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3, RAW_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { assignThread, attachToMailboxes, messageIdList, normalizeMessageId, rememberMessageIds, routeRecipients, snippetOf, type Scope } from './mailbox-store.js';
@@ -103,7 +103,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const references = messageIdList(email?.references);
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
-  const receivedAt = notification.receipt?.timestamp && Number.isFinite(Date.parse(notification.receipt.timestamp)) ? new Date(notification.receipt.timestamp).toISOString() : new Date().toISOString();
+  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
+  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
@@ -162,12 +163,15 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
       if (attachments.length) await tx.insert(mailAttachments).values(attachments).onConflictDoNothing();
       await rememberMessageIds(tx, scope, target.id, threadId, [messageId]);
     }
-    const routed = await routeRecipients(tx, scope, receipt.recipients, { allowCreate: !spam });
+    // Don't attach a delayed receipt (or its deduplicated original) to a lease created after it arrived.
+    const firstReceivedAt = Date.parse(receivedAt) < Date.parse(target.receivedAt) ? receivedAt : target.receivedAt;
+    const routed = await routeRecipients(tx, scope, receipt.recipients, { allowCreate: !spam, receivedAt: firstReceivedAt });
     let mailboxIds = routed.mailboxIds;
     // Replies addressed elsewhere (for example a forwarded thread) stay with the mailboxes already in the conversation,
-    // but only from an authenticated sender: In-Reply-To and References are forgeable.
+    // but only from an authenticated sender: In-Reply-To and References are forgeable. Temporary identities require
+    // an addressed delivery; an inactive lease is a reserved destination, not an invitation to find another mailbox.
     const authenticated = verdicts.dmarc === 'PASS' || (verdicts.spf === 'PASS' && verdicts.dkim === 'PASS');
-    if (!mailboxIds.length && authenticated) mailboxIds = (await tx.selectDistinct({ id: mailboxThreads.mailboxId }).from(mailboxThreads).where(eq(mailboxThreads.threadId, target.threadId))).map(row => row.id);
+    if (!mailboxIds.length && !routed.blockedByLease && authenticated) mailboxIds = (await tx.selectDistinct({ id: mailboxThreads.mailboxId }).from(mailboxThreads).innerJoin(mailboxes, eq(mailboxes.id, mailboxThreads.mailboxId)).where(and(eq(mailboxThreads.threadId, target.threadId), isNull(mailboxes.expiresAt)))).map(row => row.id);
     if (routed.unrouted.length) await tx.insert(mailUnrouted).values(routed.unrouted.map(address => ({ ...scope, messageId: target!.id, address }))).onConflictDoNothing();
     const added = await attachToMailboxes(tx, scope, target, mailboxIds);
     for (const mailboxId of routed.created) events.push({ type: 'mailbox.created', mailboxId, data: { origin: 'auto' } });

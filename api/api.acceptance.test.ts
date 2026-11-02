@@ -1,7 +1,7 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import pg from 'pg';
 
 // Run against the actual server and normal background-job runner with npm test.
@@ -2782,7 +2782,7 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
 async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime: import('./src/core.js').Runtime;
   db: pg.Client;
-  local: (method: string, path: string, body?: Json, environment?: 'test' | 'live') => Promise<Reply>;
+  local: (method: string, path: string, body?: Json, environment?: 'test' | 'live', headers?: Record<string, string>) => Promise<Reply>;
   run: (type: string) => Promise<void>;
   jobs: (type: string) => Promise<Json[]>;
 }) => Promise<void>) {
@@ -2808,9 +2808,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
       await ensureRegionSettings(runtime.db, runtime.config);
-      async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'test'): Promise<Reply> {
+      async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'test', headers: Record<string, string> = {}): Promise<Reply> {
         const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
-          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}) },
+          headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
           ...(body ? { body: JSON.stringify(body) } : {}),
         }), runtime);
         return { status: response.status, body: await response.json(), headers: response.headers };
@@ -2843,6 +2843,92 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('support mailboxes: track by receipt ID, route the customer reply, verify its webhook and enforce expiry', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { mailboxEventJobs } = await import('./src/mailbox-events.js');
+      const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:fixture`;
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION,
+        { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status) VALUES($1,$2,'live',$3,'example.com',$4,'active')`, [unique('domain'), scope, unique('verified'), REGION]);
+      const sends = new Map<string, any>();
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; sends.set(id, cmd.input); return { MessageId: `fixture-${id}` };
+      });
+      const create = async (body: Json) => ok(await local('POST', '/mailbox/v1/mailboxes', body, 'live'), 201);
+      const support = await create({ address: 'support@example.com' }), temporary = await create({ address: 'case-42@example.com', ttlSeconds: 3600 });
+      assert.equal(support.expiresAt, null); assert.ok(Date.parse(temporary.expiresAt) > Date.now());
+      const root = '/mailbox/v1/mailboxes', path = (box: string, id: string) => `${root}/${box}/messages/${id}/reply`;
+      error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
+      error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
+      const scoped = ok(await local('POST', '/mailbox/v1/keys', { name: 'support fixture', mailboxIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
+      const agent = { authorization: `Bearer ${scoped.secret}` };
+      const webhook = ok(await local('POST', '/mailbox/v1/webhooks', { url: 'https://example.com/support-hook', mailboxIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
+      const payload = { from: support.address, to: 'customer@example.net', subject: 'Case 42', text: 'An update', replyMailboxId: support.id }, idem = { 'Idempotency-Key': 'fixture-case-42' };
+      error(await local('POST', '/v1/emails/send', payload, 'test'), 403);
+      error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address }, 'live'), 422);
+      error(await local('POST', '/v1/emails/send', { ...payload, replyTo: [temporary.address] }, 'live'), 422);
+      await db.query(`UPDATE mailbox_domains SET status='waiting_for_mx' WHERE workspace_id=$1`, [scope]);
+      error(await local('POST', '/v1/emails/send', payload, 'live'), 409, 'MAILBOX_DOMAIN_NOT_READY');
+      await db.query(`UPDATE mailbox_domains SET status='active' WHERE workspace_id=$1`, [scope]);
+      const sent = ok(await local('POST', '/v1/emails/send', payload, 'live', idem), 202);
+      assert.deepEqual(ok(await local('POST', '/v1/emails/send', payload, 'live', idem), 202), sent);
+      assert.match(sent.id, /^email_/); assert.match(sent.mailboxMessageId, /^msg_/); assert.match(sent.threadId, /^thr_/);
+      error(await local('POST', path(temporary.id, sent.id), { text: 'other mailbox' }, 'live'), 404);
+      error(await local('POST', path(temporary.id, sent.id), { text: 'other mailbox' }, 'live', agent), 404);
+      const ordinary = ok(await local('POST', '/v1/emails/send', { from: support.address, to: 'customer@example.net', subject: 'Private', text: 'Not part of the inbox' }, 'live'), 202);
+      assert.equal(ordinary.threadId, undefined); error(await local('POST', path(support.id, ordinary.id), { text: 'not linked' }, 'live', agent), 404);
+      error(await local('POST', path(support.id, sent.id), { text: 'too soon' }, 'live', agent), 409, 'REPLY_TARGET_NOT_ACCEPTED');
+      await dispatchDue(runtime, 'live', REGION);
+      const wire = `fixture-${sent.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com`;
+      const followup = ok(await local('POST', path(support.id, sent.id), { text: 'Follow up' }, 'live', agent), 202);
+      assert.equal(followup.inReplyTo, wire); assert.equal(followup.threadId, sent.threadId);
+
+      let mime = '';
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => { assert.ok(cmd instanceof GetObjectCommand); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      async function receive(to: string, timestamp = new Date().toISOString()) {
+        const receiptId = unique('fixture'), inboundId = `${receiptId}@example.net`;
+        mime = `From: Customer <customer@example.net>\r\nTo: ${to}\r\nSubject: Re: Case 42\r\nMessage-ID: <${inboundId}>\r\nIn-Reply-To: <${wire}>\r\nReferences: <${wire}>\r\n\r\nThank you.`;
+        const message = { notificationType: 'Received', mail: { messageId: receiptId, source: 'customer@example.net' }, receipt: { timestamp, recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey: `raw/${receiptId}`, topicArn: topic } } };
+        await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message });
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, environment: 'live', attempts: 1 });
+        return inboundId;
+      }
+      const inboundId = await receive(support.address), deliveries = await jobs('mailbox.webhook'); assert.equal(deliveries.length, 1);
+      let event: Json | undefined;
+      const hook = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+        assert.equal(url, 'https://example.com/support-hook'); const headers = new Headers(init.headers), body = String(init.body);
+        const signature = createHmac('sha256', Buffer.from(webhook.secret.slice(6), 'base64')).update(`${headers.get('webhook-id')}.${headers.get('webhook-timestamp')}.${body}`).digest('base64');
+        assert.equal(headers.get('webhook-signature'), `v1,${signature}`); event = JSON.parse(body); return new Response(null, { status: 204 });
+      });
+      try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, environment: 'live', attempts: 1 }); } finally { hook.mock.restore(); }
+      assert.equal(event?.threadId, sent.threadId); assert.equal(event?.mailboxId, support.id); assert.equal(event?.type, 'message.received');
+      const reply = ok(await local('POST', path(support.id, event!.messageId), { text: 'You are welcome' }, 'live', agent), 202);
+      await dispatchDue(runtime, 'live', REGION);
+      assert.equal(reply.threadId, sent.threadId); assert.deepEqual(sends.get(reply.emailId).Destination.ToAddresses, ['customer@example.net']);
+      assert.deepEqual(sends.get(reply.emailId).Content.Simple.Headers, [{ Name: 'In-Reply-To', Value: `<${inboundId}>` }, { Name: 'References', Value: `<${wire}> <${inboundId}>` }]);
+
+      await receive(temporary.address, new Date(Date.parse(temporary.createdAt) - 60_000).toISOString());
+      assert.equal(ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data.length, 0, 'Delayed receipts from before creation are not claimed.');
+      await receive(temporary.address);
+      await db.query(`UPDATE mailboxes SET expires_at=now()-interval '1 second' WHERE id=$1`, [temporary.id]);
+      const prior = ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data;
+      await receive(temporary.address); await receive('case-42+late@example.com');
+      assert.equal(prior.length, 1); assert.deepEqual(ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data, prior);
+      assert.equal((await jobs('mailbox.webhook')).length, 1, 'Late replies addressed to a retired mailbox must not trigger the support webhook through their forged or forwarded References.');
+      error(await local('POST', `${root}/${temporary.id}/messages`, { to: ['user@example.net'], subject: 'late', text: 'late' }, 'live'), 409);
+      error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address, replyMailboxId: temporary.id }, 'live'), 409);
+      error(await local('POST', root, { address: temporary.address }, 'live'), 409);
+    });
+  });
+
   test('attachment and template uploads accept JSON scalars and reject malformed file content', async t => {
     await simulatedSesFixture(t, async ({ runtime, local }) => {
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
