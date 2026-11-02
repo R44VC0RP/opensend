@@ -6,10 +6,10 @@ import { google, verifyGoogleIdToken } from 'better-auth/social-providers';
 import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, exists, gt, ne, sql } from 'drizzle-orm';
 import { ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
-import { authAccount, authUser, googleAuthSchema } from './db/google-auth.js';
+import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 
 function configured(runtime: Runtime) {
   return Boolean(runtime.config.googleClientId && runtime.config.googleClientSecret && runtime.config.authSecret);
@@ -24,13 +24,22 @@ export function approvedGoogleIdentity(runtime: Runtime, email: unknown, emailVe
     (typeof hostedDomain === 'string' && hostedDomain !== '' && runtime.config.allowedDomains.includes(hostedDomain.toLowerCase()));
 }
 
-export async function isApprovedUser(runtime: Runtime, userId: string, db: DbExecutor = runtime.db): Promise<boolean> {
-  if (!configured(runtime)) return false;
-  const [user] = await db.select({ email: authUser.email, emailVerified: authUser.emailVerified, googleHostedDomain: authUser.googleHostedDomain })
+async function approvedUser(runtime: Runtime, userId: string, db: DbExecutor, session?: { id: string; token: string }) {
+  if (!configured(runtime)) return null;
+  // Better Auth's signed cookie authenticates the presented session, not its continued validity.
+  // Read the current session, Google link and identity in one query even on a warm cookie-cache hit.
+  const liveSession = session && exists(db.select({ id: authSession.id }).from(authSession).where(and(
+    eq(authSession.id, session.id), eq(authSession.token, session.token), eq(authSession.userId, authUser.id), gt(authSession.expiresAt, sql`now()`),
+  )));
+  const [user] = await db.select({ email: authUser.email, name: authUser.name, emailVerified: authUser.emailVerified, googleHostedDomain: authUser.googleHostedDomain })
     .from(authUser).innerJoin(authAccount, and(eq(authAccount.userId, authUser.id), eq(authAccount.providerId, 'google'), ne(authAccount.accountId, '')))
-    .where(eq(authUser.id, userId)).limit(1).for('share');
+    .where(and(eq(authUser.id, userId), liveSession)).limit(1).for('share');
   // With a transaction executor, hold the approved user/account through dispatch's claim.
-  return Boolean(user && approvedGoogleIdentity(runtime, user.email, user.emailVerified, user.googleHostedDomain));
+  return user && approvedGoogleIdentity(runtime, user.email, user.emailVerified, user.googleHostedDomain) ? user : null;
+}
+
+export async function isApprovedUser(runtime: Runtime, userId: string, db: DbExecutor = runtime.db): Promise<boolean> {
+  return Boolean(await approvedUser(runtime, userId, db));
 }
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
@@ -72,7 +81,7 @@ export function createAuth(runtime: Runtime) {
       },
     },
     user: {
-      additionalFields: { googleHostedDomain: { type: 'string', required: false, input: false } },
+      additionalFields: { googleHostedDomain: { type: 'string', required: false, input: false, returned: false } },
       changeEmail: { enabled: false }, deleteUser: { enabled: false },
       validateUserInfo: ({ user, source }, context) => {
         const profile = source.oauth?.profile;
@@ -145,10 +154,12 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, returnHeaders: true }));
     applyHeaders(result.headers);
     const session = result.response;
-    if (!session || !approvedGoogleIdentity(runtime, session.user.email, session.user.emailVerified, session.user.googleHostedDomain)) return null;
+    if (!session) return null;
+    const user = await measure('approval-db', () => approvedUser(runtime, session.user.id, runtime.db, session.session));
+    if (!user) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
-    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: session.user.email, name: session.user.name };
+    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: user.email, name: user.name };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     log('warn', { operation: 'dashboard-session', code: 'AUTH_UNAVAILABLE' });

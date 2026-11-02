@@ -52,6 +52,8 @@ export function createApp() {
   });
   app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
   app.use('/v1/*', async (c, next) => {
+    // Inbound authenticates its own address-scoped keys as well as live administrators.
+    if (c.req.path.startsWith('/v1/inbound/')) return next();
     const configured = async () => {
       const globalCampaignRead = c.req.method === 'GET' && /^\/v1\/campaigns(?:\/[^/]+(?:\/(?:state|preview))?)?$/.test(c.req.path) && !new URL(c.req.url).searchParams.has('region');
       // SES callbacks use a 30 s per-isolate cache; the SNS route re-resolves fresh before rejecting an unknown topic.

@@ -1,6 +1,6 @@
 # opensend
 
-Self-hosted transactional email, newsletters, and campaigns with Amazon SES. One installation, Google-only sign-in, and one public API shared by the dashboard, SDK, and MCP server. No passwords, teams, or browser-side API-secret setup.
+Self-hosted transactional email, newsletters, campaigns, and inbound conversations with Amazon SES. Use **Inbound** to manage receiving addresses, read threads, and reply. One installation, Google-only sign-in, and one public API shared by the dashboard, SDK, and MCP server.
 
 ![opensend dashboard showing sending activity, delivery metrics, and recent campaigns](docs/images/dashboard.png)
 

@@ -2,7 +2,7 @@
 
 import { client } from './client.gen.js';
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client/index.js';
-import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignReviewData, GetCampaignReviewErrors, GetCampaignReviewResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, MailboxCheckDomainData, MailboxCheckDomainErrors, MailboxCheckDomainResponses, MailboxCreateData, MailboxCreateErrors, MailboxCreateKeyData, MailboxCreateKeyErrors, MailboxCreateKeyResponses, MailboxCreateResponses, MailboxCreateSubdomainData, MailboxCreateSubdomainErrors, MailboxCreateSubdomainResponses, MailboxCreateWebhookData, MailboxCreateWebhookErrors, MailboxCreateWebhookResponses, MailboxDeleteData, MailboxDeleteErrors, MailboxDeleteResponses, MailboxDeleteThreadData, MailboxDeleteThreadErrors, MailboxDeleteThreadResponses, MailboxDeleteWebhookData, MailboxDeleteWebhookErrors, MailboxDeleteWebhookResponses, MailboxDisableDomainData, MailboxDisableDomainErrors, MailboxDisableDomainResponses, MailboxEnableDomainData, MailboxEnableDomainErrors, MailboxEnableDomainResponses, MailboxForwardMessageData, MailboxForwardMessageErrors, MailboxForwardMessageResponses, MailboxGetAttachmentData, MailboxGetAttachmentErrors, MailboxGetAttachmentResponses, MailboxGetData, MailboxGetDomainData, MailboxGetDomainErrors, MailboxGetDomainResponses, MailboxGetErrors, MailboxGetMessageData, MailboxGetMessageErrors, MailboxGetMessageResponses, MailboxGetRawMessageData, MailboxGetRawMessageErrors, MailboxGetRawMessageResponses, MailboxGetResponses, MailboxGetStoredMessageData, MailboxGetStoredMessageErrors, MailboxGetStoredMessageResponses, MailboxGetSubdomainData, MailboxGetSubdomainErrors, MailboxGetSubdomainResponses, MailboxGetThreadData, MailboxGetThreadErrors, MailboxGetThreadResponses, MailboxGetWebhookData, MailboxGetWebhookErrors, MailboxGetWebhookResponses, MailboxListAllEventsData, MailboxListAllEventsErrors, MailboxListAllEventsResponses, MailboxListContactsData, MailboxListContactsErrors, MailboxListContactsResponses, MailboxListData, MailboxListDomainsData, MailboxListDomainsErrors, MailboxListDomainsResponses, MailboxListErrors, MailboxListEventsData, MailboxListEventsErrors, MailboxListEventsResponses, MailboxListKeysData, MailboxListKeysErrors, MailboxListKeysResponses, MailboxListLabelsData, MailboxListLabelsErrors, MailboxListLabelsResponses, MailboxListMessagesData, MailboxListMessagesErrors, MailboxListMessagesResponses, MailboxListResponses, MailboxListStoredMessagesData, MailboxListStoredMessagesErrors, MailboxListStoredMessagesResponses, MailboxListSubdomainsData, MailboxListSubdomainsErrors, MailboxListSubdomainsResponses, MailboxListThreadsData, MailboxListThreadsErrors, MailboxListThreadsResponses, MailboxListUnroutedData, MailboxListUnroutedErrors, MailboxListUnroutedResponses, MailboxListWebhookDeliveriesData, MailboxListWebhookDeliveriesErrors, MailboxListWebhookDeliveriesResponses, MailboxListWebhooksData, MailboxListWebhooksErrors, MailboxListWebhooksResponses, MailboxRemoveSubdomainData, MailboxRemoveSubdomainErrors, MailboxRemoveSubdomainResponses, MailboxReplyToMessageData, MailboxReplyToMessageErrors, MailboxReplyToMessageResponses, MailboxReplyToThreadData, MailboxReplyToThreadErrors, MailboxReplyToThreadResponses, MailboxRevokeKeyData, MailboxRevokeKeyErrors, MailboxRevokeKeyResponses, MailboxRotateWebhookSecretData, MailboxRotateWebhookSecretErrors, MailboxRotateWebhookSecretResponses, MailboxSendMessageData, MailboxSendMessageErrors, MailboxSendMessageResponses, MailboxUpdateData, MailboxUpdateDomainData, MailboxUpdateDomainErrors, MailboxUpdateDomainResponses, MailboxUpdateErrors, MailboxUpdateMessageData, MailboxUpdateMessageErrors, MailboxUpdateMessageResponses, MailboxUpdateMessagesData, MailboxUpdateMessagesErrors, MailboxUpdateMessagesResponses, MailboxUpdateResponses, MailboxUpdateSubdomainData, MailboxUpdateSubdomainErrors, MailboxUpdateSubdomainResponses, MailboxUpdateThreadData, MailboxUpdateThreadErrors, MailboxUpdateThreadResponses, MailboxUpdateThreadsData, MailboxUpdateThreadsErrors, MailboxUpdateThreadsResponses, MailboxUpdateWebhookData, MailboxUpdateWebhookErrors, MailboxUpdateWebhookResponses, MailboxUploadAttachmentData, MailboxUploadAttachmentErrors, MailboxUploadAttachmentResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, StartCampaignReviewData, StartCampaignReviewErrors, StartCampaignReviewResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
+import type { AddListMembersData, AddListMembersErrors, AddListMembersResponses, ApplyAudiencePlanData, ApplyAudiencePlanErrors, ApplyAudiencePlanResponses, CancelCampaignData, CancelCampaignErrors, CancelCampaignResponses, CheckInboundDomainData, CheckInboundDomainErrors, CheckInboundDomainResponses, CommitContactImportData, CommitContactImportErrors, CommitContactImportResponses, ConfigureDomainMailFromData, ConfigureDomainMailFromErrors, ConfigureDomainMailFromResponses, ConfigureRegionAutoValidationData, ConfigureRegionAutoValidationErrors, ConfigureRegionAutoValidationResponses, ConfigureRegionData, ConfigureRegionErrors, ConfigureRegionResponses, CreateAgentTokenData, CreateAgentTokenErrors, CreateAgentTokenResponses, CreateApiKeyData, CreateApiKeyErrors, CreateApiKeyResponses, CreateCampaignData, CreateCampaignErrors, CreateCampaignResponses, CreateCampaignTemplateData, CreateCampaignTemplateErrors, CreateCampaignTemplateResponses, CreateContactData, CreateContactErrors, CreateContactListData, CreateContactListErrors, CreateContactListResponses, CreateContactResponses, CreateDomainData, CreateDomainErrors, CreateDomainResponses, CreateInboundAddressData, CreateInboundAddressErrors, CreateInboundAddressResponses, CreateInboundKeyData, CreateInboundKeyErrors, CreateInboundKeyResponses, CreateInboundSubdomainData, CreateInboundSubdomainErrors, CreateInboundSubdomainResponses, CreateInboundThreadData, CreateInboundThreadErrors, CreateInboundThreadResponses, CreateInboundWebhookData, CreateInboundWebhookErrors, CreateInboundWebhookResponses, CreateSegmentData, CreateSegmentErrors, CreateSegmentResponses, CreateWebhookData, CreateWebhookErrors, CreateWebhookResponses, DeleteAttachmentData, DeleteAttachmentErrors, DeleteAttachmentResponses, DeleteCampaignData, DeleteCampaignErrors, DeleteCampaignResponses, DeleteCampaignTemplateData, DeleteCampaignTemplateErrors, DeleteCampaignTemplateResponses, DeleteContactData, DeleteContactErrors, DeleteContactListData, DeleteContactListErrors, DeleteContactListResponses, DeleteContactResponses, DeleteInboundAddressData, DeleteInboundAddressErrors, DeleteInboundAddressResponses, DeleteInboundWebhookData, DeleteInboundWebhookErrors, DeleteInboundWebhookResponses, DeleteSegmentData, DeleteSegmentErrors, DeleteSegmentResponses, DeleteTemplateAssetData, DeleteTemplateAssetErrors, DeleteTemplateAssetResponses, DeleteWebhookData, DeleteWebhookErrors, DeleteWebhookResponses, DisableInboundDomainData, DisableInboundDomainErrors, DisableInboundDomainResponses, DiscoverRegionData, DiscoverRegionErrors, DiscoverRegionResponses, EnableInboundDomainData, EnableInboundDomainErrors, EnableInboundDomainResponses, GetAttachmentContentData, GetAttachmentContentErrors, GetAttachmentContentResponses, GetAttachmentData, GetAttachmentErrors, GetAttachmentResponses, GetCampaignContentGuideData, GetCampaignContentGuideErrors, GetCampaignContentGuideResponses, GetCampaignData, GetCampaignErrors, GetCampaignResponses, GetCampaignReviewData, GetCampaignReviewErrors, GetCampaignReviewResponses, GetCampaignStateData, GetCampaignStateErrors, GetCampaignStateResponses, GetCampaignStatsData, GetCampaignStatsErrors, GetCampaignStatsResponses, GetCampaignTemplateData, GetCampaignTemplateErrors, GetCampaignTemplateResponses, GetContactData, GetContactErrors, GetContactImportData, GetContactImportErrors, GetContactImportResponses, GetContactListData, GetContactListErrors, GetContactListResponses, GetContactResponses, GetCurrentIdentityData, GetCurrentIdentityErrors, GetCurrentIdentityResponses, GetDomainData, GetDomainErrors, GetDomainResponses, GetEmailContentData, GetEmailContentErrors, GetEmailContentResponses, GetEmailData, GetEmailErrors, GetEmailResponses, GetInboundAddressData, GetInboundAddressErrors, GetInboundAddressResponses, GetInboundAttachmentData, GetInboundAttachmentErrors, GetInboundAttachmentResponses, GetInboundDomainData, GetInboundDomainErrors, GetInboundDomainResponses, GetInboundMessageData, GetInboundMessageErrors, GetInboundMessageResponses, GetInboundSubdomainData, GetInboundSubdomainErrors, GetInboundSubdomainResponses, GetInboundThreadData, GetInboundThreadErrors, GetInboundThreadResponses, GetInboundWebhookData, GetInboundWebhookErrors, GetInboundWebhookResponses, GetMetricsData, GetMetricsErrors, GetMetricsResponses, GetSegmentData, GetSegmentErrors, GetSegmentResponses, GetSesSettingsData, GetSesSettingsErrors, GetSesSettingsResponses, GetTemplateAssetContentData, GetTemplateAssetContentErrors, GetTemplateAssetContentResponses, GetTemplateAssetData, GetTemplateAssetErrors, GetTemplateAssetResponses, GetWebhookData, GetWebhookDeliveryData, GetWebhookDeliveryErrors, GetWebhookDeliveryResponses, GetWebhookErrors, GetWebhookResponses, GetWorkspaceSettingsData, GetWorkspaceSettingsErrors, GetWorkspaceSettingsResponses, ImportTemplateImageData, ImportTemplateImageErrors, ImportTemplateImageResponses, ListAgentTokensData, ListAgentTokensErrors, ListAgentTokensResponses, ListApiKeysData, ListApiKeysErrors, ListApiKeysResponses, ListCampaignsData, ListCampaignsErrors, ListCampaignsResponses, ListCampaignTemplatesData, ListCampaignTemplatesErrors, ListCampaignTemplatesResponses, ListContactConsentEventsData, ListContactConsentEventsErrors, ListContactConsentEventsResponses, ListContactImportsData, ListContactImportsErrors, ListContactImportsResponses, ListContactListsData, ListContactListsErrors, ListContactListsResponses, ListContactsData, ListContactsErrors, ListContactsResponses, ListDomainsData, ListDomainsErrors, ListDomainsResponses, ListEmailEventsData, ListEmailEventsErrors, ListEmailEventsResponses, ListEmailsData, ListEmailsErrors, ListEmailsResponses, ListInboundAddressesData, ListInboundAddressesErrors, ListInboundAddressesResponses, ListInboundDomainsData, ListInboundDomainsErrors, ListInboundDomainsResponses, ListInboundEventsData, ListInboundEventsErrors, ListInboundEventsResponses, ListInboundKeysData, ListInboundKeysErrors, ListInboundKeysResponses, ListInboundMessagesData, ListInboundMessagesErrors, ListInboundMessagesResponses, ListInboundSubdomainsData, ListInboundSubdomainsErrors, ListInboundSubdomainsResponses, ListInboundThreadsData, ListInboundThreadsErrors, ListInboundThreadsResponses, ListInboundWebhookDeliveriesData, ListInboundWebhookDeliveriesErrors, ListInboundWebhookDeliveriesResponses, ListInboundWebhooksData, ListInboundWebhooksErrors, ListInboundWebhooksResponses, ListListMembersData, ListListMembersErrors, ListListMembersResponses, ListMcpConnectionsData, ListMcpConnectionsErrors, ListMcpConnectionsResponses, ListRegionsData, ListRegionsErrors, ListRegionsResponses, ListSegmentsData, ListSegmentsErrors, ListSegmentsResponses, ListWebhookDeliveriesData, ListWebhookDeliveriesErrors, ListWebhookDeliveriesResponses, ListWebhooksData, ListWebhooksErrors, ListWebhooksResponses, MailboxCheckDomainData, MailboxCheckDomainErrors, MailboxCheckDomainResponses, MailboxCreateData, MailboxCreateErrors, MailboxCreateKeyData, MailboxCreateKeyErrors, MailboxCreateKeyResponses, MailboxCreateResponses, MailboxCreateSubdomainData, MailboxCreateSubdomainErrors, MailboxCreateSubdomainResponses, MailboxCreateWebhookData, MailboxCreateWebhookErrors, MailboxCreateWebhookResponses, MailboxDeleteData, MailboxDeleteErrors, MailboxDeleteResponses, MailboxDeleteThreadData, MailboxDeleteThreadErrors, MailboxDeleteThreadResponses, MailboxDeleteWebhookData, MailboxDeleteWebhookErrors, MailboxDeleteWebhookResponses, MailboxDisableDomainData, MailboxDisableDomainErrors, MailboxDisableDomainResponses, MailboxEnableDomainData, MailboxEnableDomainErrors, MailboxEnableDomainResponses, MailboxForwardMessageData, MailboxForwardMessageErrors, MailboxForwardMessageResponses, MailboxGetAttachmentData, MailboxGetAttachmentErrors, MailboxGetAttachmentResponses, MailboxGetData, MailboxGetDomainData, MailboxGetDomainErrors, MailboxGetDomainResponses, MailboxGetErrors, MailboxGetMessageData, MailboxGetMessageErrors, MailboxGetMessageResponses, MailboxGetRawMessageData, MailboxGetRawMessageErrors, MailboxGetRawMessageResponses, MailboxGetResponses, MailboxGetStoredMessageData, MailboxGetStoredMessageErrors, MailboxGetStoredMessageResponses, MailboxGetSubdomainData, MailboxGetSubdomainErrors, MailboxGetSubdomainResponses, MailboxGetThreadData, MailboxGetThreadErrors, MailboxGetThreadResponses, MailboxGetWebhookData, MailboxGetWebhookErrors, MailboxGetWebhookResponses, MailboxListAllEventsData, MailboxListAllEventsErrors, MailboxListAllEventsResponses, MailboxListContactsData, MailboxListContactsErrors, MailboxListContactsResponses, MailboxListData, MailboxListDomainsData, MailboxListDomainsErrors, MailboxListDomainsResponses, MailboxListErrors, MailboxListEventsData, MailboxListEventsErrors, MailboxListEventsResponses, MailboxListKeysData, MailboxListKeysErrors, MailboxListKeysResponses, MailboxListLabelsData, MailboxListLabelsErrors, MailboxListLabelsResponses, MailboxListMessagesData, MailboxListMessagesErrors, MailboxListMessagesResponses, MailboxListResponses, MailboxListStoredMessagesData, MailboxListStoredMessagesErrors, MailboxListStoredMessagesResponses, MailboxListSubdomainsData, MailboxListSubdomainsErrors, MailboxListSubdomainsResponses, MailboxListThreadsData, MailboxListThreadsErrors, MailboxListThreadsResponses, MailboxListUnroutedData, MailboxListUnroutedErrors, MailboxListUnroutedResponses, MailboxListWebhookDeliveriesData, MailboxListWebhookDeliveriesErrors, MailboxListWebhookDeliveriesResponses, MailboxListWebhooksData, MailboxListWebhooksErrors, MailboxListWebhooksResponses, MailboxRemoveSubdomainData, MailboxRemoveSubdomainErrors, MailboxRemoveSubdomainResponses, MailboxReplyToMessageData, MailboxReplyToMessageErrors, MailboxReplyToMessageResponses, MailboxReplyToThreadData, MailboxReplyToThreadErrors, MailboxReplyToThreadResponses, MailboxRevokeKeyData, MailboxRevokeKeyErrors, MailboxRevokeKeyResponses, MailboxRotateWebhookSecretData, MailboxRotateWebhookSecretErrors, MailboxRotateWebhookSecretResponses, MailboxSendMessageData, MailboxSendMessageErrors, MailboxSendMessageResponses, MailboxUpdateData, MailboxUpdateDomainData, MailboxUpdateDomainErrors, MailboxUpdateDomainResponses, MailboxUpdateErrors, MailboxUpdateMessageData, MailboxUpdateMessageErrors, MailboxUpdateMessageResponses, MailboxUpdateMessagesData, MailboxUpdateMessagesErrors, MailboxUpdateMessagesResponses, MailboxUpdateResponses, MailboxUpdateSubdomainData, MailboxUpdateSubdomainErrors, MailboxUpdateSubdomainResponses, MailboxUpdateThreadData, MailboxUpdateThreadErrors, MailboxUpdateThreadResponses, MailboxUpdateThreadsData, MailboxUpdateThreadsErrors, MailboxUpdateThreadsResponses, MailboxUpdateWebhookData, MailboxUpdateWebhookErrors, MailboxUpdateWebhookResponses, MailboxUploadAttachmentData, MailboxUploadAttachmentErrors, MailboxUploadAttachmentResponses, PauseCampaignData, PauseCampaignErrors, PauseCampaignResponses, PlanAudienceMutationData, PlanAudienceMutationErrors, PlanAudienceMutationResponses, PreviewCampaignData, PreviewCampaignErrors, PreviewCampaignResponses, PreviewCampaignTemplateData, PreviewCampaignTemplateErrors, PreviewCampaignTemplateResponses, PreviewContactImportData, PreviewContactImportErrors, PreviewContactImportResponses, PreviewSegmentData, PreviewSegmentErrors, PreviewSegmentResponses, ProvisionRegionData, ProvisionRegionErrors, ProvisionRegionResponses, PublishCampaignTemplateData, PublishCampaignTemplateErrors, PublishCampaignTemplateResponses, QueryAudienceData, QueryAudienceErrors, QueryAudienceResponses, ReceiveSesSnsEventData, ReceiveSesSnsEventErrors, ReceiveSesSnsEventResponses, RemoveInboundSubdomainData, RemoveInboundSubdomainErrors, RemoveInboundSubdomainResponses, RemoveListMemberData, RemoveListMemberErrors, RemoveListMemberResponses, RenderCampaignPreviewImageData, RenderCampaignPreviewImageErrors, RenderCampaignPreviewImageResponses, RenderCampaignTemplatePreviewImageData, RenderCampaignTemplatePreviewImageErrors, RenderCampaignTemplatePreviewImageResponses, ReplyToInboundThreadData, ReplyToInboundThreadErrors, ReplyToInboundThreadResponses, ResumeCampaignData, ResumeCampaignErrors, ResumeCampaignResponses, RetryWebhookDeliveryData, RetryWebhookDeliveryErrors, RetryWebhookDeliveryResponses, RevealWebhookSecretData, RevealWebhookSecretErrors, RevealWebhookSecretResponses, RevokeAgentTokenData, RevokeAgentTokenErrors, RevokeAgentTokenResponses, RevokeApiKeyData, RevokeApiKeyErrors, RevokeApiKeyResponses, RevokeInboundKeyData, RevokeInboundKeyErrors, RevokeInboundKeyResponses, RevokeMcpConnectionData, RevokeMcpConnectionErrors, RevokeMcpConnectionResponses, RotateInboundWebhookSecretData, RotateInboundWebhookSecretErrors, RotateInboundWebhookSecretResponses, RotateWebhookSecretData, RotateWebhookSecretErrors, RotateWebhookSecretResponses, ScheduleCampaignData, ScheduleCampaignErrors, ScheduleCampaignResponses, SendCampaignData, SendCampaignErrors, SendCampaignResponses, SendEmailBatchData, SendEmailBatchErrors, SendEmailBatchResponses, SendEmailData, SendEmailErrors, SendEmailResponses, SetCampaignArchivedData, SetCampaignArchivedErrors, SetCampaignArchivedResponses, SetCampaignPacingData, SetCampaignPacingErrors, SetCampaignPacingResponses, SetCampaignTemplateArchivedData, SetCampaignTemplateArchivedErrors, SetCampaignTemplateArchivedResponses, StartCampaignReviewData, StartCampaignReviewErrors, StartCampaignReviewResponses, TestCampaignData, TestCampaignErrors, TestCampaignResponses, TestWebhookData, TestWebhookErrors, TestWebhookResponses, UnsubscribeByLinkData, UnsubscribeByLinkErrors, UnsubscribeByLinkResponses, UnsubscribeOneClickData, UnsubscribeOneClickErrors, UnsubscribeOneClickResponses, UpdateCampaignData, UpdateCampaignErrors, UpdateCampaignResponses, UpdateCampaignTemplateData, UpdateCampaignTemplateErrors, UpdateCampaignTemplateResponses, UpdateContactConsentData, UpdateContactConsentErrors, UpdateContactConsentResponses, UpdateContactData, UpdateContactErrors, UpdateContactListData, UpdateContactListErrors, UpdateContactListResponses, UpdateContactResponses, UpdateInboundAddressData, UpdateInboundAddressErrors, UpdateInboundAddressResponses, UpdateInboundDomainData, UpdateInboundDomainErrors, UpdateInboundDomainResponses, UpdateInboundSubdomainData, UpdateInboundSubdomainErrors, UpdateInboundSubdomainResponses, UpdateInboundThreadData, UpdateInboundThreadErrors, UpdateInboundThreadResponses, UpdateInboundWebhookData, UpdateInboundWebhookErrors, UpdateInboundWebhookResponses, UpdateSegmentData, UpdateSegmentErrors, UpdateSegmentResponses, UpdateWebhookData, UpdateWebhookErrors, UpdateWebhookResponses, UpdateWorkspaceSettingsData, UpdateWorkspaceSettingsErrors, UpdateWorkspaceSettingsResponses, UploadAttachmentData, UploadAttachmentErrors, UploadAttachmentResponses, UploadTemplateAssetData, UploadTemplateAssetErrors, UploadTemplateAssetResponses, VerifyDomainData, VerifyDomainErrors, VerifyDomainResponses } from './types.gen.js';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -2464,9 +2464,373 @@ export const mailboxUpdateSubdomain = <ThrowOnError extends boolean = false>(opt
 });
 
 /**
- * List mailboxes
+ * List domains and their receiving status
+ */
+export const listInboundDomains = <ThrowOnError extends boolean = false>(options?: Options<ListInboundDomainsData, ThrowOnError>): RequestResult<ListInboundDomainsResponses, ListInboundDomainsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundDomainsResponses, ListInboundDomainsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains',
+    ...options
+});
+
+export const getInboundDomain = <ThrowOnError extends boolean = false>(options: Options<GetInboundDomainData, ThrowOnError>): RequestResult<GetInboundDomainResponses, GetInboundDomainErrors, ThrowOnError> => (options.client ?? client).get<GetInboundDomainResponses, GetInboundDomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}',
+    ...options
+});
+
+export const updateInboundDomain = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundDomainData, ThrowOnError>): RequestResult<UpdateInboundDomainResponses, UpdateInboundDomainErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundDomainResponses, UpdateInboundDomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Check MX records now
  *
- * Mailbox keys see only the mailboxes they are scoped to.
+ * Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.
+ */
+export const checkInboundDomain = <ThrowOnError extends boolean = false>(options: Options<CheckInboundDomainData, ThrowOnError>): RequestResult<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/check',
+    ...options
+});
+
+/**
+ * Enable receiving for a verified domain
+ *
+ * Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: an OpenSend S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.
+ */
+export const enableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<EnableInboundDomainData, ThrowOnError>): RequestResult<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<EnableInboundDomainResponses, EnableInboundDomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/enable',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Stop receiving for a domain
+ *
+ * Removes the domain from the OpenSend receipt rule. Receiving addresses and stored messages are kept.
+ */
+export const disableInboundDomain = <ThrowOnError extends boolean = false>(options: Options<DisableInboundDomainData, ThrowOnError>): RequestResult<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<DisableInboundDomainResponses, DisableInboundDomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/disable',
+    ...options
+});
+
+/**
+ * List receiving subdomains
+ */
+export const listInboundSubdomains = <ThrowOnError extends boolean = false>(options: Options<ListInboundSubdomainsData, ThrowOnError>): RequestResult<ListInboundSubdomainsResponses, ListInboundSubdomainsErrors, ThrowOnError> => (options.client ?? client).get<ListInboundSubdomainsResponses, ListInboundSubdomainsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/subdomains',
+    ...options
+});
+
+/**
+ * Add a receiving subdomain
+ *
+ * Starts receiving mail for name.example.com under a receiving example.com, with no DNS change or SES verification per subdomain. The first subdomain adds the wildcard recipient (.example.com) to the receipt rule, which takes up to a minute; later ones are live immediately. Publish the returned *.example.com MX record once. Receiving addresses can then be created on the subdomain. Re-adding a removed subdomain restores it.
+ */
+export const createInboundSubdomain = <ThrowOnError extends boolean = false>(options: Options<CreateInboundSubdomainData, ThrowOnError>): RequestResult<CreateInboundSubdomainResponses, CreateInboundSubdomainErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundSubdomainResponses, CreateInboundSubdomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/subdomains',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Stop receiving for a subdomain
+ *
+ * New mail to the subdomain is dropped at ingest. Its receiving addresses and stored messages are kept, and adding the subdomain again restores it. The parent keeps its wildcard recipient, so adding subdomains later is instant; turn it off with PATCH /v1/inbound/domains/{id} acceptSubdomains=false.
+ */
+export const removeInboundSubdomain = <ThrowOnError extends boolean = false>(options: Options<RemoveInboundSubdomainData, ThrowOnError>): RequestResult<RemoveInboundSubdomainResponses, RemoveInboundSubdomainErrors, ThrowOnError> => (options.client ?? client).delete<RemoveInboundSubdomainResponses, RemoveInboundSubdomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}',
+    ...options
+});
+
+export const getInboundSubdomain = <ThrowOnError extends boolean = false>(options: Options<GetInboundSubdomainData, ThrowOnError>): RequestResult<GetInboundSubdomainResponses, GetInboundSubdomainErrors, ThrowOnError> => (options.client ?? client).get<GetInboundSubdomainResponses, GetInboundSubdomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}',
+    ...options
+});
+
+export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundSubdomainData, ThrowOnError>): RequestResult<UpdateInboundSubdomainResponses, UpdateInboundSubdomainErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundSubdomainResponses, UpdateInboundSubdomainErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List receivable addresses
+ *
+ * An address key sees only addresses it can access.
+ */
+export const listInboundAddresses = <ThrowOnError extends boolean = false>(options?: Options<ListInboundAddressesData, ThrowOnError>): RequestResult<ListInboundAddressesResponses, ListInboundAddressesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundAddressesResponses, ListInboundAddressesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/addresses',
+    ...options
+});
+
+/**
+ * Create a receivable address
+ *
+ * Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ */
+export const createInboundAddress = <ThrowOnError extends boolean = false>(options: Options<CreateInboundAddressData, ThrowOnError>): RequestResult<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/addresses',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.
+ */
+export const deleteInboundAddress = <ThrowOnError extends boolean = false>(options: Options<DeleteInboundAddressData, ThrowOnError>): RequestResult<DeleteInboundAddressResponses, DeleteInboundAddressErrors, ThrowOnError> => (options.client ?? client).delete<DeleteInboundAddressResponses, DeleteInboundAddressErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/addresses/{addressId}',
+    ...options
+});
+
+/**
+ * Read a receivable address
+ */
+export const getInboundAddress = <ThrowOnError extends boolean = false>(options: Options<GetInboundAddressData, ThrowOnError>): RequestResult<GetInboundAddressResponses, GetInboundAddressErrors, ThrowOnError> => (options.client ?? client).get<GetInboundAddressResponses, GetInboundAddressErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/addresses/{addressId}',
+    ...options
+});
+
+/**
+ * Admin only. Only supplied fields change. The address, public sender and expiry are immutable.
+ */
+export const updateInboundAddress = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundAddressData, ThrowOnError>): RequestResult<UpdateInboundAddressResponses, UpdateInboundAddressErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundAddressResponses, UpdateInboundAddressErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/addresses/{addressId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * List receivable addresses
+ *
+ * An address key sees only addresses it can access.
+ *
+ * @deprecated
  */
 export const mailboxList = <ThrowOnError extends boolean = false>(options?: Options<MailboxListData, ThrowOnError>): RequestResult<MailboxListResponses, MailboxListErrors, ThrowOnError> => (options?.client ?? client).get<MailboxListResponses, MailboxListErrors, ThrowOnError>({
     security: [
@@ -2487,9 +2851,11 @@ export const mailboxList = <ThrowOnError extends boolean = false>(options?: Opti
 });
 
 /**
- * Create a mailbox
+ * Create a receivable address
  *
- * Admin only. The address must be on a domain with receiving enabled. Permanent mailboxes claim earlier unrouted mail for their addresses or rules; temporary mailboxes start empty. Expiry stops new delivery and sending without deleting the address or its history.
+ * Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ *
+ * @deprecated
  */
 export const mailboxCreate = <ThrowOnError extends boolean = false>(options: Options<MailboxCreateData, ThrowOnError>): RequestResult<MailboxCreateResponses, MailboxCreateErrors, ThrowOnError> => (options.client ?? client).post<MailboxCreateResponses, MailboxCreateErrors, ThrowOnError>({
     security: [
@@ -2514,7 +2880,9 @@ export const mailboxCreate = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Admin only, including for expired mailboxes. Deletes the mailbox, releases its addresses and removes its per-mailbox state. Stored messages are kept; future mail to its addresses follows normal routing.
+ * Admin only. Releases this address and removes its per-address state. Stored messages are kept; future mail follows normal routing.
+ *
+ * @deprecated
  */
 export const mailboxDelete = <ThrowOnError extends boolean = false>(options: Options<MailboxDeleteData, ThrowOnError>): RequestResult<MailboxDeleteResponses, MailboxDeleteErrors, ThrowOnError> => (options.client ?? client).delete<MailboxDeleteResponses, MailboxDeleteErrors, ThrowOnError>({
     security: [
@@ -2534,6 +2902,11 @@ export const mailboxDelete = <ThrowOnError extends boolean = false>(options: Opt
     ...options
 });
 
+/**
+ * Read a receivable address
+ *
+ * @deprecated
+ */
 export const mailboxGet = <ThrowOnError extends boolean = false>(options: Options<MailboxGetData, ThrowOnError>): RequestResult<MailboxGetResponses, MailboxGetErrors, ThrowOnError> => (options.client ?? client).get<MailboxGetResponses, MailboxGetErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -2553,7 +2926,9 @@ export const mailboxGet = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
- * Admin only. The address and lease expiry cannot change. On permanent mailboxes, aliases and rules replace the current lists; temporary mailboxes cannot add either.
+ * Admin only. Only supplied fields change. The address, public sender and expiry are immutable.
+ *
+ * @deprecated
  */
 export const mailboxUpdate = <ThrowOnError extends boolean = false>(options: Options<MailboxUpdateData, ThrowOnError>): RequestResult<MailboxUpdateResponses, MailboxUpdateErrors, ThrowOnError> => (options.client ?? client).patch<MailboxUpdateResponses, MailboxUpdateErrors, ThrowOnError>({
     security: [
@@ -2912,6 +3287,194 @@ export const mailboxGetAttachment = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
+ * List visible conversations
+ *
+ * Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.
+ */
+export const listInboundThreads = <ThrowOnError extends boolean = false>(options?: Options<ListInboundThreadsData, ThrowOnError>): RequestResult<ListInboundThreadsResponses, ListInboundThreadsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundThreadsResponses, ListInboundThreadsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/threads',
+    ...options
+});
+
+/**
+ * Start a conversation from an inbound address
+ */
+export const createInboundThread = <ThrowOnError extends boolean = false>(options: Options<CreateInboundThreadData, ThrowOnError>): RequestResult<CreateInboundThreadResponses, CreateInboundThreadErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundThreadResponses, CreateInboundThreadErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/threads',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Read a visible conversation
+ *
+ * Returns the most recent visible messages (default 25, maximum 100), oldest first within the page. Ties use message ID. Pass nextCursor as cursor for the older page. Body previews are capped at 8192 characters; getInboundMessage retrieves stored text and attachment metadata. State and counts are scoped to visible addresses.
+ */
+export const getInboundThread = <ThrowOnError extends boolean = false>(options: Options<GetInboundThreadData, ThrowOnError>): RequestResult<GetInboundThreadResponses, GetInboundThreadErrors, ThrowOnError> => (options.client ?? client).get<GetInboundThreadResponses, GetInboundThreadErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/threads/{threadId}',
+    ...options
+});
+
+/**
+ * Mark a conversation read, star, archive or label it for one address
+ */
+export const updateInboundThread = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundThreadData, ThrowOnError>): RequestResult<UpdateInboundThreadResponses, UpdateInboundThreadErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundThreadResponses, UpdateInboundThreadErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/threads/{threadId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Search received and sent messages
+ *
+ * Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.
+ */
+export const listInboundMessages = <ThrowOnError extends boolean = false>(options?: Options<ListInboundMessagesData, ThrowOnError>): RequestResult<ListInboundMessagesResponses, ListInboundMessagesErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundMessagesResponses, ListInboundMessagesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/messages',
+    ...options
+});
+
+/**
+ * Read a visible message
+ */
+export const getInboundMessage = <ThrowOnError extends boolean = false>(options: Options<GetInboundMessageData, ThrowOnError>): RequestResult<GetInboundMessageResponses, GetInboundMessageErrors, ThrowOnError> => (options.client ?? client).get<GetInboundMessageResponses, GetInboundMessageErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/messages/{messageId}',
+    ...options
+});
+
+/**
+ * Download an attachment from a visible message
+ */
+export const getInboundAttachment = <ThrowOnError extends boolean = false>(options: Options<GetInboundAttachmentData, ThrowOnError>): RequestResult<GetInboundAttachmentResponses, GetInboundAttachmentErrors, ThrowOnError> => (options.client ?? client).get<GetInboundAttachmentResponses, GetInboundAttachmentErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/messages/{messageId}/attachments/{attachmentId}',
+    ...options
+});
+
+/**
+ * Reply in a visible conversation
+ *
+ * Replies to the newest visible message in either direction, breaking time ties by descending message ID. addressId restricts the target and sending address; provide it when the target is linked to more than one visible address. Set replyToMessageId to select an older visible message in this thread. For reviewed replies, pin both IDs and expectedRecipients. A recipient mismatch or a pending outbound parent without a provider Message-ID returns 409.
+ */
+export const replyToInboundThread = <ThrowOnError extends boolean = false>(options: Options<ReplyToInboundThreadData, ThrowOnError>): RequestResult<ReplyToInboundThreadResponses, ReplyToInboundThreadErrors, ThrowOnError> => (options.client ?? client).post<ReplyToInboundThreadResponses, ReplyToInboundThreadErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/threads/{threadId}/reply',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
  * Upload an attachment to send later
  *
  * Stores a file (base64, 8 MiB) and returns an attachment_… ID for the attachments field of send, reply and forward. Unused uploads are deleted after 30 days.
@@ -3063,6 +3626,29 @@ export const mailboxListAllEvents = <ThrowOnError extends boolean = false>(optio
     ...options
 });
 
+/**
+ * Poll events for the receiving addresses this key can read
+ *
+ * Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.
+ */
+export const listInboundEvents = <ThrowOnError extends boolean = false>(options?: Options<ListInboundEventsData, ThrowOnError>): RequestResult<ListInboundEventsResponses, ListInboundEventsErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundEventsResponses, ListInboundEventsErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/events',
+    ...options
+});
+
 export const mailboxListKeys = <ThrowOnError extends boolean = false>(options?: Options<MailboxListKeysData, ThrowOnError>): RequestResult<MailboxListKeysResponses, MailboxListKeysErrors, ThrowOnError> => (options?.client ?? client).get<MailboxListKeysResponses, MailboxListKeysErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -3084,7 +3670,7 @@ export const mailboxListKeys = <ThrowOnError extends boolean = false>(options?: 
 /**
  * Create a key for an agent
  *
- * Scope the key to specific mailboxes, or omit mailboxIds for every mailbox. read lists and reads mail, send sends and replies, modify changes read/archive/label state. The secret is returned once.
+ * Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.
  */
 export const mailboxCreateKey = <ThrowOnError extends boolean = false>(options: Options<MailboxCreateKeyData, ThrowOnError>): RequestResult<MailboxCreateKeyResponses, MailboxCreateKeyErrors, ThrowOnError> => (options.client ?? client).post<MailboxCreateKeyResponses, MailboxCreateKeyErrors, ThrowOnError>({
     security: [
@@ -3126,6 +3712,69 @@ export const mailboxRevokeKey = <ThrowOnError extends boolean = false>(options: 
     ...options
 });
 
+export const listInboundKeys = <ThrowOnError extends boolean = false>(options?: Options<ListInboundKeysData, ThrowOnError>): RequestResult<ListInboundKeysResponses, ListInboundKeysErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundKeysResponses, ListInboundKeysErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/keys',
+    ...options
+});
+
+/**
+ * Create a key for an agent
+ *
+ * Scope this credential to specific receiving addresses. If the filter is omitted it applies to every address, including future ones. The secret is returned once.
+ */
+export const createInboundKey = <ThrowOnError extends boolean = false>(options: Options<CreateInboundKeyData, ThrowOnError>): RequestResult<CreateInboundKeyResponses, CreateInboundKeyErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundKeyResponses, CreateInboundKeyErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/keys',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const revokeInboundKey = <ThrowOnError extends boolean = false>(options: Options<RevokeInboundKeyData, ThrowOnError>): RequestResult<RevokeInboundKeyResponses, RevokeInboundKeyErrors, ThrowOnError> => (options.client ?? client).post<RevokeInboundKeyResponses, RevokeInboundKeyErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/keys/{id}/revoke',
+    ...options
+});
+
 export const mailboxListWebhooks = <ThrowOnError extends boolean = false>(options?: Options<MailboxListWebhooksData, ThrowOnError>): RequestResult<MailboxListWebhooksResponses, MailboxListWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<MailboxListWebhooksResponses, MailboxListWebhooksErrors, ThrowOnError>({
     security: [
         { scheme: 'bearer', type: 'http' },
@@ -3145,7 +3794,7 @@ export const mailboxListWebhooks = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Subscribe to mailbox events
+ * Subscribe to inbound events
  *
  * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.
  */
@@ -3262,6 +3911,145 @@ export const mailboxListWebhookDeliveries = <ThrowOnError extends boolean = fals
         }
     ],
     url: '/mailbox/v1/webhooks/{id}/deliveries',
+    ...options
+});
+
+export const listInboundWebhooks = <ThrowOnError extends boolean = false>(options?: Options<ListInboundWebhooksData, ThrowOnError>): RequestResult<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError> => (options?.client ?? client).get<ListInboundWebhooksResponses, ListInboundWebhooksErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks',
+    ...options
+});
+
+/**
+ * Subscribe to inbound events
+ *
+ * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.
+ */
+export const createInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateInboundWebhookData, ThrowOnError>): RequestResult<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const deleteInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<DeleteInboundWebhookData, ThrowOnError>): RequestResult<DeleteInboundWebhookResponses, DeleteInboundWebhookErrors, ThrowOnError> => (options.client ?? client).delete<DeleteInboundWebhookResponses, DeleteInboundWebhookErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks/{id}',
+    ...options
+});
+
+export const getInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<GetInboundWebhookData, ThrowOnError>): RequestResult<GetInboundWebhookResponses, GetInboundWebhookErrors, ThrowOnError> => (options.client ?? client).get<GetInboundWebhookResponses, GetInboundWebhookErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks/{id}',
+    ...options
+});
+
+export const updateInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<UpdateInboundWebhookData, ThrowOnError>): RequestResult<UpdateInboundWebhookResponses, UpdateInboundWebhookErrors, ThrowOnError> => (options.client ?? client).patch<UpdateInboundWebhookResponses, UpdateInboundWebhookErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks/{id}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+export const rotateInboundWebhookSecret = <ThrowOnError extends boolean = false>(options: Options<RotateInboundWebhookSecretData, ThrowOnError>): RequestResult<RotateInboundWebhookSecretResponses, RotateInboundWebhookSecretErrors, ThrowOnError> => (options.client ?? client).post<RotateInboundWebhookSecretResponses, RotateInboundWebhookSecretErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks/{id}/rotate-secret',
+    ...options
+});
+
+export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = false>(options: Options<ListInboundWebhookDeliveriesData, ThrowOnError>): RequestResult<ListInboundWebhookDeliveriesResponses, ListInboundWebhookDeliveriesErrors, ThrowOnError> => (options.client ?? client).get<ListInboundWebhookDeliveriesResponses, ListInboundWebhookDeliveriesErrors, ThrowOnError>({
+    security: [
+        { scheme: 'bearer', type: 'http' },
+        {
+            in: 'cookie',
+            name: 'opensend.session_token',
+            type: 'apiKey'
+        },
+        {
+            in: 'cookie',
+            name: '__Secure-opensend.session_token',
+            type: 'apiKey'
+        }
+    ],
+    url: '/v1/inbound/webhooks/{id}/deliveries',
     ...options
 });
 

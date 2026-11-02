@@ -157,15 +157,15 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
 }
 
 /** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */
-export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest) {
-  if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for mailbox sends.', 'replyMailboxId');
+export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest, field: 'replyAddressId' | 'replyMailboxId') {
+  if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for tracked sends.', field);
   const scope = { workspaceId: actor.workspaceId, environment: actor.environment };
   const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
-  if (!target) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
-  if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox receiving domain must be active before starting a tracked conversation.', 'replyMailboxId');
+  if (!target) throw new ApiError(404, 'NOT_FOUND', 'Receivable address was not found.');
+  if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The receiving domain must be active before starting a tracked conversation.', field);
   const { mailbox } = target;
   const owned = new Set((await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address));
-  if (!owned.has(input.from.toLowerCase()) || input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'From and Reply-To must belong to the selected mailbox.', 'replyMailboxId');
+  if (!owned.has(input.from.toLowerCase()) || input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'From and Reply-To must belong to the selected receivable address.', field);
   const { message, runnable } = await sendFromMailbox(runtime, tx, {
     mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,

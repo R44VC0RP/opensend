@@ -68,16 +68,16 @@ export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: str
 export interface Domain { dnsStatus?: 'available' | 'unavailable'; dnsUnavailableReason?: string | null; id: string; regionId: RegionId; name: string; status: 'verified' | 'pending' | 'issue'; dkimStatus?: 'verified' | 'pending' | 'failed'; mailFromDomain?: string | null; mailFromStatus: 'verified' | 'pending' | 'not_configured' | 'failed'; records: DnsRecord[]; createdAt: ISODate }
 export type MailboxDomainStatus = 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed'
 export interface MailboxDomain {
-  id: string; name: string; region: RegionId; status: MailboxDomainStatus; catchAll: 'create_mailbox' | 'store'
+  id: string; name: string; region: RegionId; status: MailboxDomainStatus; catchAll: 'create_address' | 'store'
   dns: { type: 'MX'; name: string; value: string; priority: number }[]
   mx: { state: 'active' | 'missing' | 'conflict' | 'mixed' | 'wrong_region' | 'null_mx' | 'cname' | 'error'; message: string; providers: string[]; checkedAt: ISODate } | null
-  lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; mailboxCount: number
+  lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; addressCount: number
 }
-export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null } }
+export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null }
 export interface MailAddress { name: string | null; address: string }
 export type MailboxPermission = 'read' | 'send' | 'modify'
-export const mailboxEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const
-export type MailboxEventType = typeof mailboxEventTypes[number]
+export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'address.created', 'address.deleted'] as const
+export type MailboxEventType = typeof inboundEventTypes[number]
 export interface MailboxKey { id: string; name: string; prefix: string; mailboxIds: string[] | null; permissions: MailboxPermission[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface MailboxKeyInput { name: string; mailboxIds: string[] | null; permissions: MailboxPermission[] }
 export interface MailboxWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; mailboxIds: string[] | null; paused: boolean; createdAt: ISODate; updatedAt: ISODate }
@@ -99,6 +99,30 @@ export interface MailboxMessage {
 export interface MailboxThreadDetail extends MailboxThread { messages: MailboxMessage[] }
 export interface MailboxThreadPatch { read?: boolean; archived?: boolean; starred?: boolean; trashed?: boolean; spam?: boolean; addLabels?: string[]; removeLabels?: string[] }
 export interface MailboxReplyInput { text: string; replyAll?: boolean; allowAutomated?: boolean; idempotencyKey?: string }
+// Inbound is thread-first: a conversation can be visible through several receiving addresses.
+export type InboundAddress = Mailbox
+export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
+export interface InboundAddressPatch { displayName?: string | null; aliases?: string[] }
+export type InboundThreadView = MailboxThreadView
+export interface InboundThread { id: string; subject: string; snippet: string; lastMessageAt: ISODate; addressIds: string[]; messageCount: number }
+export interface InboundMessage {
+  id: string; threadId: string; addressIds: string[]; direction: 'inbound' | 'outbound'; status: string
+  from: MailAddress; to: MailAddress[]; cc: MailAddress[]; replyTo: MailAddress[]; subject: string; snippet: string
+  text: string; replyText: string; receivedAt: ISODate; bodyTruncated: boolean; attachmentCount: number
+  emailId: string | null; messageId: string | null; inReplyTo: string | null; references: string[]
+  /** Read state for the requested address scope; absent on older API responses. */
+  read?: boolean
+}
+export interface InboundAttachment { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }
+export interface InboundMessageDetail extends InboundMessage { html: string | null; attachments: InboundAttachment[] }
+export interface InboundAddressState { addressId: string; unreadCount: number; archived: boolean; starred: boolean; trashed: boolean; spam: boolean; labels: string[] }
+export interface InboundThreadPatch { addressId?: string; read?: boolean; starred?: boolean; archived?: boolean; trashed?: boolean; spam?: boolean; addLabels?: string[]; removeLabels?: string[] }
+export interface InboundRecipients { to: string[]; cc: string[]; bcc: string[] }
+export interface InboundThreadDetail extends InboundThread { messages: InboundMessage[]; nextCursor: string | null; addressStates?: InboundAddressState[] }
+export interface InboundReplyInput { text: string; addressId?: string; replyToMessageId?: string; replyAll?: boolean; allowAutomated?: boolean; expectedRecipients?: InboundRecipients; idempotencyKey: string }
+export interface InboundThreadInput { addressId: string; to: string[]; subject: string; text: string; idempotencyKey: string }
+export interface InboundWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; createdAt: ISODate; updatedAt: ISODate }
+export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null }
 export interface ReceivedEmail {
   id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; cc: MailAddress[]; subject: string; snippet: string
   sentAt: ISODate | null; receivedAt: ISODate; attachmentCount: number; spam: boolean; automated: boolean; region: RegionId | null
@@ -163,6 +187,27 @@ export interface OpenSendApi {
     deleteWebhook(id: string, signal?: AbortSignal): Promise<void>
     rotateWebhookSecret(id: string, signal?: AbortSignal): Promise<{ secret: string }>
     webhookDeliveries(id: string, cursor?: string, signal?: AbortSignal): Promise<CursorItems<MailboxWebhookDelivery>> }
+  inbound: {
+    addresses(input: { search?: string; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<InboundAddress>>
+    address(id: string, signal?: AbortSignal): Promise<InboundAddress>
+    createAddress(input: InboundAddressInput, signal?: AbortSignal): Promise<InboundAddress>
+    updateAddress(id: string, patch: InboundAddressPatch, signal?: AbortSignal): Promise<InboundAddress>
+    deleteAddress(id: string, signal?: AbortSignal): Promise<void>
+    threads(input: { addressId?: string; q?: string; view: InboundThreadView; cursor?: string }, signal?: AbortSignal): Promise<CursorItems<InboundThread>>
+    thread(id: string, input: { addressId?: string; cursor?: string }, signal?: AbortSignal): Promise<InboundThreadDetail>
+    updateThread(threadId: string, patch: InboundThreadPatch, signal?: AbortSignal): Promise<InboundAddressState>
+    message(id: string, input: { addressId?: string }, signal?: AbortSignal): Promise<InboundMessageDetail>
+    attachmentUrl(messageId: string, attachmentId: string, input: { addressId?: string }, signal?: AbortSignal): Promise<{ url: string; expiresAt: ISODate }>
+    reply(threadId: string, input: InboundReplyInput, signal?: AbortSignal): Promise<InboundMessage>
+    startThread(input: InboundThreadInput, signal?: AbortSignal): Promise<InboundMessage>
+    webhooks(signal?: AbortSignal): Promise<InboundWebhook[]>
+    webhook(id: string, signal?: AbortSignal): Promise<InboundWebhook>
+    createWebhook(input: InboundWebhookInput, signal?: AbortSignal): Promise<{ webhook: InboundWebhook; secret: string }>
+    updateWebhook(id: string, patch: Partial<InboundWebhookInput> & { paused?: boolean }, signal?: AbortSignal): Promise<InboundWebhook>
+    deleteWebhook(id: string, signal?: AbortSignal): Promise<void>
+    rotateWebhookSecret(id: string, signal?: AbortSignal): Promise<{ secret: string }>
+    webhookDeliveries(id: string, cursor?: string, signal?: AbortSignal): Promise<CursorItems<MailboxWebhookDelivery>>
+  }
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 

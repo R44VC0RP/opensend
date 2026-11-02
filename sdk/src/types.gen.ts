@@ -330,13 +330,19 @@ export type TemplateImageImport = {
 };
 
 /**
- * When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox.
+ * For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.
  */
 export type SingleEmailQueued = {
     id: string;
     status: 'queued';
     environment: 'live' | 'test';
     simulated: boolean;
+    inboundMessageId?: string;
+    /**
+     * Legacy alias for inboundMessageId.
+     *
+     * @deprecated
+     */
     mailboxMessageId?: string;
     threadId?: string;
 };
@@ -375,7 +381,13 @@ export type SendEmailInput = {
      */
     screen?: boolean;
     /**
-     * Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends.
+     * Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted live manage permission; From and Reply-To must belong to the address.
+     */
+    replyAddressId?: string;
+    /**
+     * Legacy spelling of replyAddressId.
+     *
+     * @deprecated
      */
     replyMailboxId?: string;
 };
@@ -1482,6 +1494,245 @@ export type UpdateMailboxSubdomain = {
     };
 };
 
+export type InboundDomainList = {
+    data: Array<InboundDomain>;
+};
+
+export type InboundDomain = {
+    /**
+     * OpenSend domain ID.
+     */
+    id: string;
+    name: string;
+    region: string;
+    status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+    /**
+     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.
+     */
+    catchAll: 'create_address' | 'store';
+    /**
+     * Records to publish for receiving.
+     */
+    dns: Array<{
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    }>;
+    mx: InboundMxReport;
+    lastError: string | null;
+    enabledAt: string | null;
+    checkedAt: string | null;
+    subdomains: {
+        /**
+         * Whether the receipt rule also matches every subdomain.
+         */
+        enabled: boolean;
+        /**
+         * Receiving subdomains.
+         */
+        count: number;
+        /**
+         * The wildcard MX record subdomains need, published once.
+         */
+        dns: Array<{
+            type: 'MX';
+            name: string;
+            value: string;
+            priority: number;
+        }>;
+    };
+    addressCount: number;
+};
+
+export type InboundMxReport = {
+    state: 'active' | 'missing' | 'conflict' | 'mixed' | 'wrong_region' | 'null_mx' | 'cname' | 'error';
+    expected: {
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    };
+    records: Array<{
+        priority: number;
+        host: string;
+        provider: string | null;
+    }>;
+    providers: Array<string>;
+    message: string;
+    checkedAt: string;
+} | null;
+
+export type EnableInboundDomain = {
+    catchAll?: 'create_address' | 'store';
+    force?: boolean;
+};
+
+export type UpdateInboundDomain = {
+    catchAll?: 'create_address' | 'store';
+    /**
+     * Whether the receipt rule also matches every subdomain (.example.com). Turned on by the first subdomain and kept on after that.
+     */
+    acceptSubdomains?: boolean;
+};
+
+export type InboundSubdomainPage = {
+    data: Array<InboundSubdomain>;
+    nextCursor: string | null;
+};
+
+export type InboundSubdomain = {
+    /**
+     * Subdomain ID (mdom_…).
+     */
+    id: string;
+    /**
+     * Full host, e.g. acme.example.com.
+     */
+    name: string;
+    /**
+     * OpenSend domain ID of the parent.
+     */
+    parentDomainId: string;
+    parentName: string;
+    status: 'active' | 'disabled';
+    /**
+     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.
+     */
+    catchAll: 'create_address' | 'store';
+    metadata: {
+        [key: string]: unknown;
+    };
+    /**
+     * The parent’s wildcard MX record, which receives this subdomain.
+     */
+    dns: Array<{
+        type: 'MX';
+        name: string;
+        value: string;
+        priority: number;
+    }>;
+    mx: InboundMxReport;
+    createdAt: string;
+    updatedAt: string;
+    addressCount: number;
+};
+
+export type CreateInboundSubdomain = {
+    /**
+     * A label (acme) or the full host (acme.example.com).
+     */
+    name: string;
+    /**
+     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     */
+    catchAll?: 'create_address' | 'store';
+    metadata?: {
+        [key: string]: unknown;
+    };
+};
+
+export type UpdateInboundSubdomain = {
+    catchAll?: 'create_address' | 'store';
+    metadata?: {
+        [key: string]: unknown;
+    };
+};
+
+export type InboundAddressPage = {
+    data: Array<InboundAddress>;
+    nextCursor: string | null;
+};
+
+export type InboundAddress = {
+    id: string;
+    address: string;
+    displayName: string | null;
+    domain: string;
+    aliases: Array<string>;
+    rules: Array<string>;
+    /**
+     * Send-only address used as the default From. Null to send from the receiving address.
+     */
+    publicAddress: string | null;
+    metadata: {
+        [key: string]: unknown;
+    };
+    origin: 'api' | 'auto';
+    createdAt: string;
+    updatedAt: string;
+    /**
+     * UTC lease expiry, or null for a permanent address. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes it.
+     */
+    expiresAt: string | null;
+    stats: {
+        threads: number;
+        unreadThreads: number;
+        lastMessageAt: string | null;
+    };
+    /**
+     * Outbound limits that guard against runaway agents and reply loops.
+     */
+    sendLimits: {
+        perHour: number;
+        perDay: number;
+        perRecipientPerHour: number;
+        perThreadPer10Minutes: number;
+    };
+};
+
+export type CreateInboundAddress = {
+    address: string;
+    displayName?: string | null;
+    /**
+     * Permanent addresses only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in the receiving region. Does not change routing or MX.
+     */
+    publicAddress?: string;
+    /**
+     * Lease duration in seconds, 60–2592000 (30 days). Omit for a permanent address. Temporary addresses accept plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
+     */
+    ttlSeconds?: number;
+    aliases?: Array<string>;
+    /**
+     * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
+     */
+    rules?: Array<string>;
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     */
+    sendLimits?: {
+        perHour?: number;
+        perDay?: number;
+        perRecipientPerHour?: number;
+        perThreadPer10Minutes?: number;
+    };
+};
+
+export type UpdateInboundAddress = {
+    displayName?: string | null;
+    aliases?: Array<string>;
+    rules?: Array<string>;
+    metadata?: {
+        [key: string]: unknown;
+    };
+    /**
+     * Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending.
+     */
+    sendLimits?: {
+        perHour?: number;
+        perDay?: number;
+        perRecipientPerHour?: number;
+        perThreadPer10Minutes?: number;
+    };
+};
+
+export type MailboxOk = {
+    ok: true;
+};
+
 export type MailboxPage = {
     data: Array<Mailbox>;
     nextCursor: string | null;
@@ -1495,7 +1746,7 @@ export type Mailbox = {
     aliases: Array<string>;
     rules: Array<string>;
     /**
-     * Send-only address used as the default From. Null when the mailbox sends from its receiving address by default.
+     * Send-only address used as the default From. Null to send from the receiving address.
      */
     publicAddress: string | null;
     metadata: {
@@ -1505,7 +1756,7 @@ export type Mailbox = {
     createdAt: string;
     updatedAt: string;
     /**
-     * UTC lease expiry, or null for a permanent mailbox. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes the mailbox.
+     * UTC lease expiry, or null for a permanent address. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes it.
      */
     expiresAt: string | null;
     stats: {
@@ -1528,11 +1779,11 @@ export type CreateMailbox = {
     address: string;
     displayName?: string | null;
     /**
-     * Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX.
+     * Permanent addresses only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in the receiving region. Does not change routing or MX.
      */
     publicAddress?: string;
     /**
-     * Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
+     * Lease duration in seconds, 60–2592000 (30 days). Omit for a permanent address. Temporary addresses accept plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
      */
     ttlSeconds?: number;
     aliases?: Array<string>;
@@ -1557,9 +1808,6 @@ export type CreateMailbox = {
 export type UpdateMailbox = {
     displayName?: string | null;
     aliases?: Array<string>;
-    /**
-     * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
-     */
     rules?: Array<string>;
     metadata?: {
         [key: string]: unknown;
@@ -1573,10 +1821,6 @@ export type UpdateMailbox = {
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
     };
-};
-
-export type MailboxOk = {
-    ok: true;
 };
 
 export type MailboxThreadPage = {
@@ -1776,6 +2020,235 @@ export type MailboxAttachmentDownload = MailboxAttachment & {
     expiresAt: string;
 };
 
+export type InboundThreadPage = {
+    data: Array<InboundThread>;
+    nextCursor: string | null;
+};
+
+export type InboundThread = {
+    id: string;
+    subject: string;
+    snippet: string;
+    lastMessageAt: string;
+    addressIds: Array<string>;
+    /**
+     * Distinct messages visible within the requested address scope.
+     */
+    messageCount: number;
+};
+
+export type InboundThreadDetail = InboundThread & {
+    messages: Array<InboundMessage>;
+    addressStates: Array<InboundThreadAddressState>;
+    nextCursor: string | null;
+};
+
+export type InboundMessage = {
+    id: string;
+    threadId: string;
+    addressIds: Array<string>;
+    direction: 'inbound' | 'outbound';
+    status: string;
+    from: {
+        name: string | null;
+        address: string;
+    };
+    to: Array<{
+        name: string | null;
+        address: string;
+    }>;
+    cc: Array<{
+        name: string | null;
+        address: string;
+    }>;
+    replyTo: Array<{
+        name: string | null;
+        address: string;
+    }>;
+    subject: string;
+    snippet: string;
+    text: string;
+    replyText: string;
+    receivedAt: string;
+    bodyTruncated: boolean;
+    attachmentCount: number;
+    read: boolean;
+    errorCode: string | null;
+    emailId: string | null;
+    /**
+     * RFC Message-ID, not the OpenSend message ID (id).
+     */
+    messageId: string | null;
+    inReplyTo: string | null;
+    references: Array<string>;
+};
+
+export type InboundThreadAddressState = {
+    addressId: string;
+    unreadCount: number;
+    archived: boolean;
+    starred: boolean;
+    trashed: boolean;
+    spam: boolean;
+    labels: Array<string>;
+};
+
+export type InboundMessagePage = {
+    data: Array<{
+        id: string;
+        threadId: string;
+        addressIds: Array<string>;
+        direction: 'inbound' | 'outbound';
+        status: string;
+        subject: string;
+        snippet: string;
+        receivedAt: string;
+        attachmentCount: number;
+        from: {
+            name: string | null;
+            address: string;
+        };
+    }>;
+    nextCursor: string | null;
+};
+
+export type InboundMessageDetail = InboundMessage & {
+    html: string | null;
+    attachments: Array<{
+        id: string;
+        filename: string;
+        contentType: string;
+        size: number;
+        disposition: string;
+        contentId: string | null;
+    }>;
+};
+
+export type InboundAttachmentDownload = {
+    url: string;
+    expiresAt: string;
+};
+
+export type UpdateInboundThread = {
+    read?: boolean;
+    archived?: boolean;
+    starred?: boolean;
+    trashed?: boolean;
+    spam?: boolean;
+    addLabels?: Array<string>;
+    removeLabels?: Array<string>;
+    /**
+     * Opaque inbound address ID (mbx_…).
+     */
+    addressId?: string;
+};
+
+export type CreateInboundThread = {
+    /**
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     */
+    from?: string;
+    text?: string;
+    html?: string;
+    /**
+     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     */
+    attachments?: Array<MailboxAttachmentInput>;
+    replyTo?: Array<string>;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.
+     */
+    autoSubmitted?: 'auto-generated' | 'auto-replied';
+    to: Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    subject: string;
+    /**
+     * Opaque inbound address ID (mbx_…).
+     */
+    addressId: string;
+};
+
+export type MailboxAttachmentInput = {
+    filename: string;
+    /**
+     * Standard padded base64.
+     */
+    content: string;
+    contentType?: string;
+    disposition?: 'attachment' | 'inline';
+    contentId?: string;
+} | {
+    /**
+     * A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).
+     */
+    id: string;
+};
+
+export type ReplyToInboundThread = {
+    /**
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     */
+    from?: string;
+    text?: string;
+    html?: string;
+    /**
+     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     */
+    attachments?: Array<MailboxAttachmentInput>;
+    replyTo?: Array<string>;
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
+     * Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.
+     */
+    autoSubmitted?: 'auto-generated' | 'auto-replied';
+    /**
+     * Also copy everyone else on the original message.
+     */
+    replyAll?: boolean;
+    /**
+     * Override the computed recipients.
+     */
+    to?: Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    /**
+     * Defaults to "Re: <original subject>".
+     */
+    subject?: string;
+    /**
+     * Append the original message as quoted text.
+     */
+    quote?: boolean;
+    /**
+     * Reply even when the original is automated or the recipient is a no-reply address.
+     */
+    allowAutomated?: boolean;
+    /**
+     * Opaque inbound address ID (mbx_…).
+     */
+    addressId?: string;
+    /**
+     * OpenSend message ID (msg_…) of a visible message in this thread.
+     */
+    replyToMessageId?: string;
+    /**
+     * Check the final To, Cc and Bcc against these reviewed address sets; never overrides recipients. A mismatch returns 409 INBOUND_RECIPIENTS_CHANGED.
+     */
+    expectedRecipients?: {
+        to: Array<string>;
+        cc: Array<string>;
+        bcc: Array<string>;
+    };
+};
+
 export type MailboxUploadedAttachment = {
     id: string;
     filename: string;
@@ -1817,22 +2290,6 @@ export type MailboxSendInput = {
     cc?: Array<string>;
     bcc?: Array<string>;
     subject: string;
-};
-
-export type MailboxAttachmentInput = {
-    filename: string;
-    /**
-     * Standard padded base64.
-     */
-    content: string;
-    contentType?: string;
-    disposition?: 'attachment' | 'inline';
-    contentId?: string;
-} | {
-    /**
-     * A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).
-     */
-    id: string;
 };
 
 export type MailboxReplyInput = {
@@ -1925,12 +2382,36 @@ export type MailboxEvent = {
     cursor: string;
     type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
     createdAt: string;
-    mailboxId: string | null;
     threadId: string | null;
     messageId: string | null;
     data: {
         [key: string]: unknown;
     };
+    mailboxId: string | null;
+};
+
+export type InboundEventPage = {
+    data: Array<InboundEvent>;
+    /**
+     * Pass as after on the next call.
+     */
+    cursor: string;
+};
+
+export type InboundEvent = {
+    id: string;
+    cursor: string;
+    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'address.created' | 'address.deleted';
+    createdAt: string;
+    threadId: string | null;
+    messageId: string | null;
+    data: {
+        [key: string]: unknown;
+    };
+    /**
+     * Receiving address ID at the time of the event; null for workspace events.
+     */
+    addressId: string | null;
 };
 
 export type MailboxKeySecret = MailboxKey & {
@@ -1950,12 +2431,38 @@ export type MailboxKey = {
 
 export type CreateMailboxKey = {
     name: string;
-    mailboxIds?: Array<string>;
     permissions?: Array<'read' | 'send' | 'modify'>;
+    mailboxIds?: Array<string>;
 };
 
 export type MailboxKeyPage = {
     data: Array<MailboxKey>;
+    nextCursor: string | null;
+};
+
+export type InboundKeySecret = InboundKey & {
+    secret: string;
+};
+
+export type InboundKey = {
+    id: string;
+    name: string;
+    prefix: string;
+    permissions: Array<'read' | 'send' | 'modify'>;
+    createdAt: string;
+    lastUsedAt: string | null;
+    revokedAt: string | null;
+    addressIds: Array<string> | null;
+};
+
+export type CreateInboundKey = {
+    name: string;
+    permissions?: Array<'read' | 'send' | 'modify'>;
+    addressIds?: Array<string>;
+};
+
+export type InboundKeyPage = {
+    data: Array<InboundKey>;
     nextCursor: string | null;
 };
 
@@ -1968,21 +2475,21 @@ export type MailboxWebhook = {
     url: string;
     description: string;
     eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
-    mailboxIds: Array<string> | null;
     paused: boolean;
     createdAt: string;
     updatedAt: string;
+    mailboxIds: Array<string> | null;
 };
 
 export type CreateMailboxWebhook = {
     url: string;
     description?: string;
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    paused?: boolean;
     /**
-     * Only events for these mailboxes; null for all.
+     * Only events for these receiving addresses; null for all.
      */
     mailboxIds?: Array<string> | null;
-    paused?: boolean;
 };
 
 export type MailboxWebhookList = {
@@ -1993,11 +2500,11 @@ export type UpdateMailboxWebhook = {
     url?: string;
     description?: string;
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    paused?: boolean;
     /**
-     * Only events for these mailboxes; null for all.
+     * Only events for these receiving addresses; null for all.
      */
     mailboxIds?: Array<string> | null;
-    paused?: boolean;
 };
 
 export type MailboxWebhookRotatedSecret = {
@@ -2019,6 +2526,56 @@ export type MailboxWebhookDelivery = {
     lastError: string | null;
     createdAt: string;
     updatedAt: string;
+};
+
+export type InboundWebhookSecret = InboundWebhook & {
+    secret: string;
+};
+
+export type InboundWebhook = {
+    id: string;
+    url: string;
+    description: string;
+    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    paused: boolean;
+    createdAt: string;
+    updatedAt: string;
+    addressIds: Array<string> | null;
+};
+
+export type CreateInboundWebhook = {
+    url: string;
+    description?: string;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    paused?: boolean;
+    /**
+     * Only events for these receiving addresses; null for all.
+     */
+    addressIds?: Array<string> | null;
+};
+
+export type InboundWebhookList = {
+    data: Array<InboundWebhook>;
+};
+
+export type UpdateInboundWebhook = {
+    url?: string;
+    description?: string;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'address.created' | 'address.deleted'>;
+    paused?: boolean;
+    /**
+     * Only events for these receiving addresses; null for all.
+     */
+    addressIds?: Array<string> | null;
+};
+
+export type InboundWebhookRotatedSecret = {
+    secret: string;
+};
+
+export type InboundWebhookDeliveryPage = {
+    data: Array<MailboxWebhookDelivery>;
+    nextCursor: string | null;
 };
 
 export type StoredMessagePage = {
@@ -9995,6 +10552,1021 @@ export type MailboxUpdateSubdomainResponses = {
 
 export type MailboxUpdateSubdomainResponse = MailboxUpdateSubdomainResponses[keyof MailboxUpdateSubdomainResponses];
 
+export type ListInboundDomainsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/domains';
+};
+
+export type ListInboundDomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundDomainsError = ListInboundDomainsErrors[keyof ListInboundDomainsErrors];
+
+export type ListInboundDomainsResponses = {
+    /**
+     * Success
+     */
+    200: InboundDomainList;
+};
+
+export type ListInboundDomainsResponse = ListInboundDomainsResponses[keyof ListInboundDomainsResponses];
+
+export type GetInboundDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}';
+};
+
+export type GetInboundDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundDomainError = GetInboundDomainErrors[keyof GetInboundDomainErrors];
+
+export type GetInboundDomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundDomain;
+};
+
+export type GetInboundDomainResponse = GetInboundDomainResponses[keyof GetInboundDomainResponses];
+
+export type UpdateInboundDomainData = {
+    body: UpdateInboundDomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}';
+};
+
+export type UpdateInboundDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundDomainError = UpdateInboundDomainErrors[keyof UpdateInboundDomainErrors];
+
+export type UpdateInboundDomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundDomain;
+};
+
+export type UpdateInboundDomainResponse = UpdateInboundDomainResponses[keyof UpdateInboundDomainResponses];
+
+export type CheckInboundDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/check';
+};
+
+export type CheckInboundDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CheckInboundDomainError = CheckInboundDomainErrors[keyof CheckInboundDomainErrors];
+
+export type CheckInboundDomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundDomain;
+};
+
+export type CheckInboundDomainResponse = CheckInboundDomainResponses[keyof CheckInboundDomainResponses];
+
+export type EnableInboundDomainData = {
+    body: EnableInboundDomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/enable';
+};
+
+export type EnableInboundDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type EnableInboundDomainError = EnableInboundDomainErrors[keyof EnableInboundDomainErrors];
+
+export type EnableInboundDomainResponses = {
+    /**
+     * Success
+     */
+    202: InboundDomain;
+};
+
+export type EnableInboundDomainResponse = EnableInboundDomainResponses[keyof EnableInboundDomainResponses];
+
+export type DisableInboundDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/disable';
+};
+
+export type DisableInboundDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DisableInboundDomainError = DisableInboundDomainErrors[keyof DisableInboundDomainErrors];
+
+export type DisableInboundDomainResponses = {
+    /**
+     * Success
+     */
+    202: InboundDomain;
+};
+
+export type DisableInboundDomainResponse = DisableInboundDomainResponses[keyof DisableInboundDomainResponses];
+
+export type ListInboundSubdomainsData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        status?: 'active' | 'disabled' | 'all';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/domains/{id}/subdomains';
+};
+
+export type ListInboundSubdomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundSubdomainsError = ListInboundSubdomainsErrors[keyof ListInboundSubdomainsErrors];
+
+export type ListInboundSubdomainsResponses = {
+    /**
+     * Success
+     */
+    200: InboundSubdomainPage;
+};
+
+export type ListInboundSubdomainsResponse = ListInboundSubdomainsResponses[keyof ListInboundSubdomainsResponses];
+
+export type CreateInboundSubdomainData = {
+    body: CreateInboundSubdomain;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/subdomains';
+};
+
+export type CreateInboundSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboundSubdomainError = CreateInboundSubdomainErrors[keyof CreateInboundSubdomainErrors];
+
+export type CreateInboundSubdomainResponses = {
+    /**
+     * Success
+     */
+    201: InboundSubdomain;
+};
+
+export type CreateInboundSubdomainResponse = CreateInboundSubdomainResponses[keyof CreateInboundSubdomainResponses];
+
+export type RemoveInboundSubdomainData = {
+    body?: never;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type RemoveInboundSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RemoveInboundSubdomainError = RemoveInboundSubdomainErrors[keyof RemoveInboundSubdomainErrors];
+
+export type RemoveInboundSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundSubdomain;
+};
+
+export type RemoveInboundSubdomainResponse = RemoveInboundSubdomainResponses[keyof RemoveInboundSubdomainResponses];
+
+export type GetInboundSubdomainData = {
+    body?: never;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type GetInboundSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundSubdomainError = GetInboundSubdomainErrors[keyof GetInboundSubdomainErrors];
+
+export type GetInboundSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundSubdomain;
+};
+
+export type GetInboundSubdomainResponse = GetInboundSubdomainResponses[keyof GetInboundSubdomainResponses];
+
+export type UpdateInboundSubdomainData = {
+    body: UpdateInboundSubdomain;
+    path: {
+        id: string;
+        subdomainId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/domains/{id}/subdomains/{subdomainId}';
+};
+
+export type UpdateInboundSubdomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundSubdomainError = UpdateInboundSubdomainErrors[keyof UpdateInboundSubdomainErrors];
+
+export type UpdateInboundSubdomainResponses = {
+    /**
+     * Success
+     */
+    200: InboundSubdomain;
+};
+
+export type UpdateInboundSubdomainResponse = UpdateInboundSubdomainResponses[keyof UpdateInboundSubdomainResponses];
+
+export type ListInboundAddressesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        domain?: string;
+        origin?: 'api' | 'auto';
+        q?: string;
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/addresses';
+};
+
+export type ListInboundAddressesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundAddressesError = ListInboundAddressesErrors[keyof ListInboundAddressesErrors];
+
+export type ListInboundAddressesResponses = {
+    /**
+     * Success
+     */
+    200: InboundAddressPage;
+};
+
+export type ListInboundAddressesResponse = ListInboundAddressesResponses[keyof ListInboundAddressesResponses];
+
+export type CreateInboundAddressData = {
+    body: CreateInboundAddress;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/addresses';
+};
+
+export type CreateInboundAddressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboundAddressError = CreateInboundAddressErrors[keyof CreateInboundAddressErrors];
+
+export type CreateInboundAddressResponses = {
+    /**
+     * Success
+     */
+    201: InboundAddress;
+};
+
+export type CreateInboundAddressResponse = CreateInboundAddressResponses[keyof CreateInboundAddressResponses];
+
+export type DeleteInboundAddressData = {
+    body?: never;
+    path: {
+        addressId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/addresses/{addressId}';
+};
+
+export type DeleteInboundAddressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteInboundAddressError = DeleteInboundAddressErrors[keyof DeleteInboundAddressErrors];
+
+export type DeleteInboundAddressResponses = {
+    /**
+     * Success
+     */
+    200: MailboxOk;
+};
+
+export type DeleteInboundAddressResponse = DeleteInboundAddressResponses[keyof DeleteInboundAddressResponses];
+
+export type GetInboundAddressData = {
+    body?: never;
+    path: {
+        addressId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/addresses/{addressId}';
+};
+
+export type GetInboundAddressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundAddressError = GetInboundAddressErrors[keyof GetInboundAddressErrors];
+
+export type GetInboundAddressResponses = {
+    /**
+     * Success
+     */
+    200: InboundAddress;
+};
+
+export type GetInboundAddressResponse = GetInboundAddressResponses[keyof GetInboundAddressResponses];
+
+export type UpdateInboundAddressData = {
+    body: UpdateInboundAddress;
+    path: {
+        addressId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/addresses/{addressId}';
+};
+
+export type UpdateInboundAddressErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundAddressError = UpdateInboundAddressErrors[keyof UpdateInboundAddressErrors];
+
+export type UpdateInboundAddressResponses = {
+    /**
+     * Success
+     */
+    200: InboundAddress;
+};
+
+export type UpdateInboundAddressResponse = UpdateInboundAddressResponses[keyof UpdateInboundAddressResponses];
+
 export type MailboxListData = {
     body?: never;
     path?: never;
@@ -11235,6 +12807,563 @@ export type MailboxGetAttachmentResponses = {
 
 export type MailboxGetAttachmentResponse = MailboxGetAttachmentResponses[keyof MailboxGetAttachmentResponses];
 
+export type ListInboundThreadsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+        /**
+         * Opaque cursor from the preceding page, with the same filters.
+         */
+        cursor?: string;
+        limit?: number;
+        view?: 'all' | 'inbox' | 'archive' | 'starred' | 'trash' | 'spam';
+        q?: string;
+    };
+    url: '/v1/inbound/threads';
+};
+
+export type ListInboundThreadsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundThreadsError = ListInboundThreadsErrors[keyof ListInboundThreadsErrors];
+
+export type ListInboundThreadsResponses = {
+    /**
+     * Success
+     */
+    200: InboundThreadPage;
+};
+
+export type ListInboundThreadsResponse = ListInboundThreadsResponses[keyof ListInboundThreadsResponses];
+
+export type CreateInboundThreadData = {
+    body: CreateInboundThread;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/threads';
+};
+
+export type CreateInboundThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboundThreadError = CreateInboundThreadErrors[keyof CreateInboundThreadErrors];
+
+export type CreateInboundThreadResponses = {
+    /**
+     * Queued, not yet delivered.
+     */
+    202: InboundMessage;
+};
+
+export type CreateInboundThreadResponse = CreateInboundThreadResponses[keyof CreateInboundThreadResponses];
+
+export type GetInboundThreadData = {
+    body?: never;
+    path: {
+        threadId: string;
+    };
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+        /**
+         * Opaque cursor from the preceding page, with the same filters.
+         */
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/threads/{threadId}';
+};
+
+export type GetInboundThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundThreadError = GetInboundThreadErrors[keyof GetInboundThreadErrors];
+
+export type GetInboundThreadResponses = {
+    /**
+     * Success
+     */
+    200: InboundThreadDetail;
+};
+
+export type GetInboundThreadResponse = GetInboundThreadResponses[keyof GetInboundThreadResponses];
+
+export type UpdateInboundThreadData = {
+    body: UpdateInboundThread;
+    path: {
+        threadId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/threads/{threadId}';
+};
+
+export type UpdateInboundThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundThreadError = UpdateInboundThreadErrors[keyof UpdateInboundThreadErrors];
+
+export type UpdateInboundThreadResponses = {
+    /**
+     * Success
+     */
+    200: InboundThreadAddressState;
+};
+
+export type UpdateInboundThreadResponse = UpdateInboundThreadResponses[keyof UpdateInboundThreadResponses];
+
+export type ListInboundMessagesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+        /**
+         * Opaque cursor from the preceding page, with the same filters.
+         */
+        cursor?: string;
+        limit?: number;
+        threadId?: string;
+        direction?: 'inbound' | 'outbound';
+        q?: string;
+    };
+    url: '/v1/inbound/messages';
+};
+
+export type ListInboundMessagesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundMessagesError = ListInboundMessagesErrors[keyof ListInboundMessagesErrors];
+
+export type ListInboundMessagesResponses = {
+    /**
+     * Success
+     */
+    200: InboundMessagePage;
+};
+
+export type ListInboundMessagesResponse = ListInboundMessagesResponses[keyof ListInboundMessagesResponses];
+
+export type GetInboundMessageData = {
+    body?: never;
+    path: {
+        messageId: string;
+    };
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+        includeHtml?: 'true' | 'false';
+    };
+    url: '/v1/inbound/messages/{messageId}';
+};
+
+export type GetInboundMessageErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundMessageError = GetInboundMessageErrors[keyof GetInboundMessageErrors];
+
+export type GetInboundMessageResponses = {
+    /**
+     * Success
+     */
+    200: InboundMessageDetail;
+};
+
+export type GetInboundMessageResponse = GetInboundMessageResponses[keyof GetInboundMessageResponses];
+
+export type GetInboundAttachmentData = {
+    body?: never;
+    path: {
+        messageId: string;
+        attachmentId: string;
+    };
+    query?: {
+        /**
+         * Opaque inbound address ID (mbx_…).
+         */
+        addressId?: string;
+    };
+    url: '/v1/inbound/messages/{messageId}/attachments/{attachmentId}';
+};
+
+export type GetInboundAttachmentErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundAttachmentError = GetInboundAttachmentErrors[keyof GetInboundAttachmentErrors];
+
+export type GetInboundAttachmentResponses = {
+    /**
+     * Success
+     */
+    200: InboundAttachmentDownload;
+};
+
+export type GetInboundAttachmentResponse = GetInboundAttachmentResponses[keyof GetInboundAttachmentResponses];
+
+export type ReplyToInboundThreadData = {
+    body: ReplyToInboundThread;
+    headers?: {
+        /**
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        threadId: string;
+    };
+    query?: never;
+    url: '/v1/inbound/threads/{threadId}/reply';
+};
+
+export type ReplyToInboundThreadErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ReplyToInboundThreadError = ReplyToInboundThreadErrors[keyof ReplyToInboundThreadErrors];
+
+export type ReplyToInboundThreadResponses = {
+    /**
+     * Queued, not yet delivered.
+     */
+    202: InboundMessage;
+};
+
+export type ReplyToInboundThreadResponse = ReplyToInboundThreadResponses[keyof ReplyToInboundThreadResponses];
+
 export type MailboxUploadAttachmentData = {
     body: MailboxAttachmentUpload;
     path: {
@@ -11664,6 +13793,89 @@ export type MailboxListAllEventsResponses = {
 
 export type MailboxListAllEventsResponse = MailboxListAllEventsResponses[keyof MailboxListAllEventsResponses];
 
+export type ListInboundEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Cursor from a previous response. Omit to start at the current end of the log.
+         */
+        after?: string;
+        /**
+         * Seconds to wait for new events when none are ready (long-poll).
+         */
+        wait?: number | null;
+        /**
+         * Comma-separated event types.
+         */
+        types?: string;
+        limit?: number;
+        /**
+         * Include only this receiving address.
+         */
+        addressId?: string;
+        /**
+         * Comma-separated receiving address IDs. Use instead of addressId.
+         */
+        addressIds?: string;
+    };
+    url: '/v1/inbound/events';
+};
+
+export type ListInboundEventsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundEventsError = ListInboundEventsErrors[keyof ListInboundEventsErrors];
+
+export type ListInboundEventsResponses = {
+    /**
+     * Success
+     */
+    200: InboundEventPage;
+};
+
+export type ListInboundEventsResponse = ListInboundEventsResponses[keyof ListInboundEventsResponses];
+
 export type MailboxListKeysData = {
     body?: never;
     path?: never;
@@ -11852,6 +14064,195 @@ export type MailboxRevokeKeyResponses = {
 };
 
 export type MailboxRevokeKeyResponse = MailboxRevokeKeyResponses[keyof MailboxRevokeKeyResponses];
+
+export type ListInboundKeysData = {
+    body?: never;
+    path?: never;
+    query?: {
+        includeRevoked?: 'true' | 'false';
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/keys';
+};
+
+export type ListInboundKeysErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundKeysError = ListInboundKeysErrors[keyof ListInboundKeysErrors];
+
+export type ListInboundKeysResponses = {
+    /**
+     * Success
+     */
+    200: InboundKeyPage;
+};
+
+export type ListInboundKeysResponse = ListInboundKeysResponses[keyof ListInboundKeysResponses];
+
+export type CreateInboundKeyData = {
+    body: CreateInboundKey;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/keys';
+};
+
+export type CreateInboundKeyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboundKeyError = CreateInboundKeyErrors[keyof CreateInboundKeyErrors];
+
+export type CreateInboundKeyResponses = {
+    /**
+     * Success
+     */
+    201: InboundKeySecret;
+};
+
+export type CreateInboundKeyResponse = CreateInboundKeyResponses[keyof CreateInboundKeyResponses];
+
+export type RevokeInboundKeyData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/keys/{id}/revoke';
+};
+
+export type RevokeInboundKeyErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RevokeInboundKeyError = RevokeInboundKeyErrors[keyof RevokeInboundKeyErrors];
+
+export type RevokeInboundKeyResponses = {
+    /**
+     * Success
+     */
+    200: InboundKey;
+};
+
+export type RevokeInboundKeyResponse = RevokeInboundKeyResponses[keyof RevokeInboundKeyResponses];
 
 export type MailboxListWebhooksData = {
     body?: never;
@@ -12292,6 +14693,446 @@ export type MailboxListWebhookDeliveriesResponses = {
 };
 
 export type MailboxListWebhookDeliveriesResponse = MailboxListWebhookDeliveriesResponses[keyof MailboxListWebhookDeliveriesResponses];
+
+export type ListInboundWebhooksData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/webhooks';
+};
+
+export type ListInboundWebhooksErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundWebhooksError = ListInboundWebhooksErrors[keyof ListInboundWebhooksErrors];
+
+export type ListInboundWebhooksResponses = {
+    /**
+     * Success
+     */
+    200: InboundWebhookList;
+};
+
+export type ListInboundWebhooksResponse = ListInboundWebhooksResponses[keyof ListInboundWebhooksResponses];
+
+export type CreateInboundWebhookData = {
+    body: CreateInboundWebhook;
+    path?: never;
+    query?: never;
+    url: '/v1/inbound/webhooks';
+};
+
+export type CreateInboundWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateInboundWebhookError = CreateInboundWebhookErrors[keyof CreateInboundWebhookErrors];
+
+export type CreateInboundWebhookResponses = {
+    /**
+     * Success
+     */
+    201: InboundWebhookSecret;
+};
+
+export type CreateInboundWebhookResponse = CreateInboundWebhookResponses[keyof CreateInboundWebhookResponses];
+
+export type DeleteInboundWebhookData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}';
+};
+
+export type DeleteInboundWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteInboundWebhookError = DeleteInboundWebhookErrors[keyof DeleteInboundWebhookErrors];
+
+export type DeleteInboundWebhookResponses = {
+    /**
+     * Success
+     */
+    200: MailboxOk;
+};
+
+export type DeleteInboundWebhookResponse = DeleteInboundWebhookResponses[keyof DeleteInboundWebhookResponses];
+
+export type GetInboundWebhookData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}';
+};
+
+export type GetInboundWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetInboundWebhookError = GetInboundWebhookErrors[keyof GetInboundWebhookErrors];
+
+export type GetInboundWebhookResponses = {
+    /**
+     * Success
+     */
+    200: InboundWebhook;
+};
+
+export type GetInboundWebhookResponse = GetInboundWebhookResponses[keyof GetInboundWebhookResponses];
+
+export type UpdateInboundWebhookData = {
+    body: UpdateInboundWebhook;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}';
+};
+
+export type UpdateInboundWebhookErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateInboundWebhookError = UpdateInboundWebhookErrors[keyof UpdateInboundWebhookErrors];
+
+export type UpdateInboundWebhookResponses = {
+    /**
+     * Success
+     */
+    200: InboundWebhook;
+};
+
+export type UpdateInboundWebhookResponse = UpdateInboundWebhookResponses[keyof UpdateInboundWebhookResponses];
+
+export type RotateInboundWebhookSecretData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/inbound/webhooks/{id}/rotate-secret';
+};
+
+export type RotateInboundWebhookSecretErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RotateInboundWebhookSecretError = RotateInboundWebhookSecretErrors[keyof RotateInboundWebhookSecretErrors];
+
+export type RotateInboundWebhookSecretResponses = {
+    /**
+     * Success
+     */
+    200: InboundWebhookRotatedSecret;
+};
+
+export type RotateInboundWebhookSecretResponse = RotateInboundWebhookSecretResponses[keyof RotateInboundWebhookSecretResponses];
+
+export type ListInboundWebhookDeliveriesData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        cursor?: string;
+        limit?: number;
+    };
+    url: '/v1/inbound/webhooks/{id}/deliveries';
+};
+
+export type ListInboundWebhookDeliveriesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListInboundWebhookDeliveriesError = ListInboundWebhookDeliveriesErrors[keyof ListInboundWebhookDeliveriesErrors];
+
+export type ListInboundWebhookDeliveriesResponses = {
+    /**
+     * Success
+     */
+    200: InboundWebhookDeliveryPage;
+};
+
+export type ListInboundWebhookDeliveriesResponse = ListInboundWebhookDeliveriesResponses[keyof ListInboundWebhookDeliveriesResponses];
 
 export type MailboxListStoredMessagesData = {
     body?: never;

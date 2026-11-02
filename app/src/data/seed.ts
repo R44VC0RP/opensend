@@ -28,20 +28,28 @@ export interface DemoState {
   mailboxThreads?: MailboxThreadDetail[]
   mailboxKeys?: MailboxKey[]
   mailboxWebhooks?: (MailboxWebhook & { deliveries: MailboxWebhookDelivery[] })[]
+  /** Inbound message ID → every receiving address it is visible through. Unlisted messages belong to their own mailboxId. */
+  inboundLinks?: Record<string, string[]>
+  inboundIdempotency?: Record<string, { body: string; result: unknown }>
+  /** Per-address conversation state for addresses other than the thread's own mailboxId, keyed `threadId:addressId`. */
+  inboundStates?: Record<string, { unreadCount: number; archived: boolean; starred: boolean; trashed: boolean; spam: boolean; labels: string[] }>
 }
+
+// One demo message reached two addresses (To support, Cc billing), so replying needs an explicit address.
+export const demoInboundLinks = (): Record<string, string[]> => ({ msg_plan_1: ['mbx_billing', 'mbx_support'] })
 
 export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailboxDomains: MailboxDomain[] } {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
   const mailbox = (id: string, address: string, displayName: string | null, threads: number, unreadThreads: number, hours: number | null, origin: Mailbox['origin'] = 'api', aliases: string[] = []): Mailbox =>
-    ({ id, address, displayName, domain: address.split('@')[1]!, aliases, rules: [], origin, createdAt: ago(20 * 24), updatedAt: ago(24), stats: { threads, unreadThreads, lastMessageAt: hours === null ? null : ago(hours) } })
+    ({ id, address, displayName, domain: address.split('@')[1]!, aliases, rules: [], origin, createdAt: ago(20 * 24), updatedAt: ago(24), stats: { threads, unreadThreads, lastMessageAt: hours === null ? null : ago(hours) } , publicAddress: null, expiresAt: null })
   return {
     mailboxes: [
-      mailbox('mbx_support', 'support@mail.acme.com', 'Support agent', 128, 6, 0.2, 'api', ['help@mail.acme.com']),
+      { ...mailbox('mbx_support', 'support@mail.acme.com', 'Support agent', 128, 6, 0.2, 'api', ['help@mail.acme.com']), publicAddress: 'support@acme.com' },
       mailbox('mbx_billing', 'billing@mail.acme.com', 'Billing agent', 42, 1, 3),
       mailbox('mbx_sales', 'sales@mail.acme.com', 'Sales agent', 17, 0, 26),
       mailbox('mbx_jordan', 'jordan@mail.acme.com', null, 3, 1, 50, 'auto'),
     ],
-    mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), mailboxCount: 4 }],
+    mailboxDomains: [{ id: 'dom_mail', name: 'mail.acme.com', region: 'us-east-1', status: 'active', catchAll: 'create_address', dns: [{ type: 'MX', name: 'mail.acme.com', value: 'inbound-smtp.us-east-1.amazonaws.com', priority: 10 }], mx: { state: 'active', message: 'MX points to Amazon SES in this region. Mail is being received.', providers: ['Amazon SES'], checkedAt: ago(0.5) }, lastError: null, enabledAt: ago(20 * 24), checkedAt: ago(0.5), addressCount: 4 }],
   }
 }
 
@@ -82,7 +90,7 @@ export function demoMailboxThreads(now = Date.now()): MailboxThreadDetail[] {
     message('thr_refund', 'msg_ref_1', 27, 'inbound', leo, support, 'Refund request', 'Hello,\nI was charged twice this month. Please refund the duplicate payment.'),
     message('thr_refund', 'msg_ref_2', 26, 'outbound', support, leo, 'Re: Refund request', 'Hi Leo,\nSorry about that. The duplicate charge is refunded and should appear in 3–5 business days.', { inReplyTo: 'msg_ref_1@mail.example.net', references: ['msg_ref_1@mail.example.net'] }),
   ]
-  const plan = [message('thr_plan', 'msg_plan_1', 1.5, 'inbound', ana, support, 'Can I change my plan?', 'Hi! We’d like to move from the monthly to the annual plan. Is that possible mid-cycle?', { read: false })]
+  const plan = [message('thr_plan', 'msg_plan_1', 1.5, 'inbound', ana, support, 'Can I change my plan?', 'Hi! We’d like to move from the monthly to the annual plan. Is that possible mid-cycle?', { read: false, cc: [{ name: 'Billing agent', address: 'billing@mail.acme.com' }] })]
   const welcome = [message('thr_welcome', 'msg_wel_1', 72, 'outbound', support, ana, 'Welcome aboard', 'Hi Ana,\nWelcome to Acme! Reply to this email any time you need help.')]
   return [
     thread('thr_invoice', 'Where is my invoice?', invoice, { labels: ['billing'] }),
