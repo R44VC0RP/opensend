@@ -2489,7 +2489,7 @@ export const mailboxList = <ThrowOnError extends boolean = false>(options?: Opti
 /**
  * Create a mailbox
  *
- * The address must be on a domain with receiving enabled. Mail already stored for the address, its aliases or rules is linked to the new mailbox.
+ * Admin only. The address must be on a domain with receiving enabled. Permanent mailboxes claim earlier unrouted mail for their addresses or rules; temporary mailboxes start empty. Expiry stops new delivery and sending without deleting the address or its history.
  */
 export const mailboxCreate = <ThrowOnError extends boolean = false>(options: Options<MailboxCreateData, ThrowOnError>): RequestResult<MailboxCreateResponses, MailboxCreateErrors, ThrowOnError> => (options.client ?? client).post<MailboxCreateResponses, MailboxCreateErrors, ThrowOnError>({
     security: [
@@ -2514,7 +2514,7 @@ export const mailboxCreate = <ThrowOnError extends boolean = false>(options: Opt
 });
 
 /**
- * Deletes the mailbox, its addresses and its per-mailbox state. Stored messages are kept; future mail to its addresses follows the domain catch-all setting.
+ * Admin only, including for expired mailboxes. Deletes the mailbox, releases its addresses and removes its per-mailbox state. Stored messages are kept; future mail to its addresses follows normal routing.
  */
 export const mailboxDelete = <ThrowOnError extends boolean = false>(options: Options<MailboxDeleteData, ThrowOnError>): RequestResult<MailboxDeleteResponses, MailboxDeleteErrors, ThrowOnError> => (options.client ?? client).delete<MailboxDeleteResponses, MailboxDeleteErrors, ThrowOnError>({
     security: [
@@ -2553,7 +2553,7 @@ export const mailboxGet = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
- * aliases and rules replace the current lists. The primary address cannot change.
+ * Admin only. The address and lease expiry cannot change. On permanent mailboxes, aliases and rules replace the current lists; temporary mailboxes cannot add either.
  */
 export const mailboxUpdate = <ThrowOnError extends boolean = false>(options: Options<MailboxUpdateData, ThrowOnError>): RequestResult<MailboxUpdateResponses, MailboxUpdateErrors, ThrowOnError> => (options.client ?? client).patch<MailboxUpdateResponses, MailboxUpdateErrors, ThrowOnError>({
     security: [
@@ -2941,7 +2941,7 @@ export const mailboxUploadAttachment = <ThrowOnError extends boolean = false>(op
 /**
  * Reply to a message
  *
- * Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.
+ * Reply by mailbox message ID (msg_…, including the messageId in a received webhook) or transactional email ID (email_… from a send tracked in this mailbox). The service sets In-Reply-To and References. Outbound parents without a provider ID return 409 instead of starting an unthreaded follow-up. Replies go to Reply-To (or From) of inbound mail, or to the original recipients of your own sent mail. Loop guards and Idempotency-Key apply.
  */
 export const mailboxReplyToMessage = <ThrowOnError extends boolean = false>(options: Options<MailboxReplyToMessageData, ThrowOnError>): RequestResult<MailboxReplyToMessageResponses, MailboxReplyToMessageErrors, ThrowOnError> => (options.client ?? client).post<MailboxReplyToMessageResponses, MailboxReplyToMessageErrors, ThrowOnError>({
     security: [

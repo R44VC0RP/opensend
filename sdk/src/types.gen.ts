@@ -329,11 +329,16 @@ export type TemplateImageImport = {
     contentId?: string;
 };
 
-export type EmailQueued = {
+/**
+ * When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox.
+ */
+export type SingleEmailQueued = {
     id: string;
     status: 'queued';
     environment: 'live' | 'test';
     simulated: boolean;
+    mailboxMessageId?: string;
+    threadId?: string;
 };
 
 export type SendEmailInput = {
@@ -369,14 +374,60 @@ export type SendEmailInput = {
      * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
+    /**
+     * Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends.
+     */
+    replyMailboxId?: string;
 };
 
 export type EmailBatchQueued = {
     data: Array<EmailQueued>;
 };
 
+export type EmailQueued = {
+    id: string;
+    status: 'queued';
+    environment: 'live' | 'test';
+    simulated: boolean;
+};
+
 export type SendEmailBatchInput = {
-    emails: Array<SendEmailInput>;
+    emails: Array<BatchSendEmailItem>;
+};
+
+export type BatchSendEmailItem = {
+    from: string;
+    fromName?: string;
+    to: string | Array<string>;
+    cc?: Array<string>;
+    bcc?: Array<string>;
+    replyTo?: Array<string>;
+    /**
+     * Defaults to the installation’s persisted default region when omitted.
+     */
+    region?: string;
+    kind?: 'transactional' | 'marketing';
+    subject?: string;
+    html?: string;
+    text?: string;
+    /**
+     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.
+     */
+    template?: {
+        name: string;
+        /**
+         * JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters.
+         */
+        data?: {
+            [key: string]: unknown;
+        };
+    };
+    attachments?: Array<string>;
+    tracking?: boolean;
+    /**
+     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
+     */
+    screen?: boolean;
 };
 
 export type Email = {
@@ -1443,12 +1494,20 @@ export type Mailbox = {
     domain: string;
     aliases: Array<string>;
     rules: Array<string>;
+    /**
+     * Send-only address used as the default From. Null when the mailbox sends from its receiving address by default.
+     */
+    publicAddress: string | null;
     metadata: {
         [key: string]: unknown;
     };
     origin: 'api' | 'auto';
     createdAt: string;
     updatedAt: string;
+    /**
+     * UTC lease expiry, or null for a permanent mailbox. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes the mailbox.
+     */
+    expiresAt: string | null;
     stats: {
         threads: number;
         unreadThreads: number;
@@ -1468,6 +1527,14 @@ export type Mailbox = {
 export type CreateMailbox = {
     address: string;
     displayName?: string | null;
+    /**
+     * Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX.
+     */
+    publicAddress?: string;
+    /**
+     * Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
+     */
+    ttlSeconds?: number;
     aliases?: Array<string>;
     /**
      * Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.
@@ -1546,6 +1613,13 @@ export type MailboxThreadDetail = MailboxThread & {
 export type MailboxMessage = MailboxMessageSummary & {
     bcc: Array<MailboxAddress>;
     replyTo: Array<MailboxAddress>;
+    /**
+     * OpenSend transactional email ID for an outbound mailbox send; null for received mail.
+     */
+    emailId: string | null;
+    /**
+     * RFC Message-ID without brackets, not the OpenSend message ID (id).
+     */
     messageId: string | null;
     inReplyTo: string | null;
     references: Array<string>;
@@ -1721,7 +1795,7 @@ export type MailboxAttachmentUpload = {
 
 export type MailboxSendInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1763,7 +1837,7 @@ export type MailboxAttachmentInput = {
 
 export type MailboxReplyInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1807,7 +1881,7 @@ export type MailboxReplyInput = {
 
 export type MailboxForwardInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1849,7 +1923,7 @@ export type MailboxEventPage = {
 export type MailboxEvent = {
     id: string;
     cursor: string;
-    type: 'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
+    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
     createdAt: string;
     mailboxId: string | null;
     threadId: string | null;
@@ -1893,7 +1967,7 @@ export type MailboxWebhook = {
     id: string;
     url: string;
     description: string;
-    eventTypes: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     mailboxIds: Array<string> | null;
     paused: boolean;
     createdAt: string;
@@ -1903,7 +1977,7 @@ export type MailboxWebhook = {
 export type CreateMailboxWebhook = {
     url: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
@@ -1918,7 +1992,7 @@ export type MailboxWebhookList = {
 export type UpdateMailboxWebhook = {
     url?: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
@@ -2013,6 +2087,13 @@ export type StoredMessage = {
     automated: boolean;
     bcc: Array<MailboxAddress>;
     replyTo: Array<MailboxAddress>;
+    /**
+     * OpenSend transactional email ID for an outbound mailbox send; null for received mail.
+     */
+    emailId: string | null;
+    /**
+     * RFC Message-ID without brackets, not the OpenSend message ID (id).
+     */
     messageId: string | null;
     inReplyTo: string | null;
     references: Array<string>;
@@ -5544,7 +5625,7 @@ export type SendEmailResponses = {
     /**
      * Success
      */
-    202: EmailQueued;
+    202: SingleEmailQueued;
 };
 
 export type SendEmailResponse = SendEmailResponses[keyof SendEmailResponses];

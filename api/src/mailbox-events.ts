@@ -1,11 +1,12 @@
-import { and, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNotNull, max, sql } from 'drizzle-orm';
 import { ApiError, id, log, type DbExecutor, type JobHandler, type Mode, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { mailboxEvents, mailboxWebhookDeliveries, mailboxWebhooks } from './db/mailbox.js';
 import { MAX_ATTEMPTS } from './jobs.js';
 import { decrypt, hmac, webhookUrl } from './operations.js';
+import { lockMailboxLane } from './mailbox-store.js';
 
-export const mailboxEventTypes = ['message.received', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const;
+export const mailboxEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const;
 export type MailboxEventType = typeof mailboxEventTypes[number];
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 export type MailboxEvent = { id: string; cursor: string; type: MailboxEventType; createdAt: string; mailboxId: string | null; threadId: string | null; messageId: string | null; data: Record<string, unknown> };
@@ -14,13 +15,13 @@ export const eventView = (row: typeof mailboxEvents.$inferSelect): MailboxEvent 
 export const webhookSecretBinding = (workspaceId: string, environment: Mode, webhookId: string) => `${workspaceId}:${environment}:mailbox:${webhookId}`;
 
 /**
- * Appends events and queues matching webhook deliveries in the caller's transaction. Writers take one
- * workspace advisory lock first, so sequence numbers commit in order and cursors never skip a row.
+ * Appends events and queues matching webhook deliveries in the caller's transaction. Writers lock the
+ * installation's event lane first, so sequence numbers commit in order and cursors never skip a row.
  * Call this last in a transaction to keep the lock short. Returns the number of queued jobs.
  */
 export async function recordEvents(tx: DbExecutor, workspaceId: string, environment: Mode, items: MailboxEventInput[]): Promise<number> {
   if (!items.length) return 0;
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_events:${workspaceId}`}))`);
+  await lockMailboxLane(tx, 'events');
   const rows = await tx.insert(mailboxEvents).values(items.map(item => ({ workspaceId, environment, type: item.type, mailboxId: item.mailboxId, threadId: item.threadId ?? null, messageId: item.messageId ?? null, data: item.data ?? {} }))).returning();
   const endpoints = await tx.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, workspaceId), eq(mailboxWebhooks.environment, environment), eq(mailboxWebhooks.paused, false)));
   let queued = 0;
@@ -34,15 +35,19 @@ export async function recordEvents(tx: DbExecutor, workspaceId: string, environm
   return queued;
 }
 
-/** Events after a cursor, optionally limited to mailboxes (null = all). */
-export async function readEvents(db: DbExecutor, workspaceId: string, environment: Mode, input: { after: number; mailboxIds: string[] | null; types?: string[]; limit: number }) {
-  if (input.mailboxIds && !input.mailboxIds.length) return [];
-  return db.select().from(mailboxEvents).where(and(eq(mailboxEvents.workspaceId, workspaceId), eq(mailboxEvents.environment, environment), gt(mailboxEvents.seq, input.after),
-    input.mailboxIds ? inArray(mailboxEvents.mailboxId, input.mailboxIds) : undefined, input.types?.length ? inArray(mailboxEvents.type, input.types) : undefined)).orderBy(mailboxEvents.seq).limit(input.limit);
+type EventScope = { mailboxIds: string[] | null; includeStored: boolean };
+function visibleEvents(workspaceId: string, environment: Mode, { mailboxIds, includeStored }: EventScope) {
+  // All mailboxes is not workspace access: mailbox keys cannot see null-mailbox events.
+  return and(eq(mailboxEvents.workspaceId, workspaceId), eq(mailboxEvents.environment, environment),
+    mailboxIds !== null ? inArray(mailboxEvents.mailboxId, mailboxIds) : includeStored ? undefined : isNotNull(mailboxEvents.mailboxId));
 }
-export async function latestCursor(db: DbExecutor, workspaceId: string, environment: Mode) {
-  const result = await db.execute<{ seq: string | null }>(sql`SELECT max(seq)::text AS seq FROM mailbox_events WHERE workspace_id = ${workspaceId} AND environment = ${environment}`);
-  return Number(result.rows[0]?.seq ?? 0);
+export async function readEvents(db: DbExecutor, workspaceId: string, environment: Mode, input: EventScope & { after: number; types?: string[]; limit: number }) {
+  return db.select().from(mailboxEvents).where(and(visibleEvents(workspaceId, environment, input), gt(mailboxEvents.seq, input.after),
+    input.types?.length ? inArray(mailboxEvents.type, input.types) : undefined)).orderBy(mailboxEvents.seq).limit(input.limit);
+}
+export async function latestCursor(db: DbExecutor, workspaceId: string, environment: Mode, scope: EventScope) {
+  const [result] = await db.select({ seq: max(mailboxEvents.seq) }).from(mailboxEvents).where(visibleEvents(workspaceId, environment, scope));
+  return result?.seq ?? 0;
 }
 
 const webhookJob: JobHandler = async (runtime, payload, job) => {
@@ -51,6 +56,10 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   const [endpoint] = await runtime.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, job.workspaceId), eq(mailboxWebhooks.id, delivery.webhookId)));
   const where = eq(mailboxWebhookDeliveries.id, delivery.id);
   if (!endpoint) { await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'ENDPOINT_DELETED', updatedAt: new Date().toISOString() }).where(where); return; }
+  // The subscription may have narrowed since this delivery was queued.
+  if (delivery.payload.type === 'message.stored' && (endpoint.mailboxIds !== null || !endpoint.eventTypes.includes('message.stored'))) {
+    await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'SUBSCRIPTION_CHANGED', updatedAt: new Date().toISOString() }).where(where); return;
+  }
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
     const url = webhookUrl(runtime, endpoint.url);

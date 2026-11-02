@@ -230,13 +230,13 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
 }
 
 // Origin authorization (permissions, sender domains, Google approval, MCP grants) is evaluated once
-// per actor/domain per run and cached briefly; durable API key revocation is re-checked inside the
+// per actor/domain (exact sender for mailbox keys) and cached briefly; durable API key revocation is re-checked inside the
 // claim statement under a shared row lock, so a revoked key never sends after revocation commits.
 type OriginCache = Map<string, { allowed: boolean; until: number }>;
 async function originDecisions(runtime: Runtime, a: Actor, prepared: Prepared[], cache: OriginCache): Promise<Map<string, boolean>> {
   const decisions = new Map<string, boolean>();
   for (const item of prepared) {
-    const key = `${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
+    const key = originKey(item);
     if (decisions.has(key)) continue;
     const cached = cache.get(key);
     if (cached && cached.until > Date.now()) { decisions.set(key, cached.allowed); continue; }
@@ -246,7 +246,7 @@ async function originDecisions(runtime: Runtime, a: Actor, prepared: Prepared[],
   }
   return decisions;
 }
-const originKey = (item: Prepared) => `${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
+const originKey = (item: Prepared) => `${item.mail.actorKeyId}\u0000${(item.mail.actorKeyId.startsWith('mbk_') ? item.snapshot.from : item.snapshot.from.split('@')[1]!).toLowerCase()}`;
 
 // One statement elects every row in the group: key revocation under FOR SHARE, consent locks, campaign
 // cancellation, unsubscribe tokens and attempt events. Rows flip queued → attempting here, so the group
@@ -539,4 +539,3 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
 export async function dispatchDue(runtime: Runtime, environment: Mode, region: string, overrides: Partial<DispatcherOptions> = {}) {
   return runDispatcher(runtime, { environment, region, lanes: 1, ...overrides });
 }
-

@@ -1634,6 +1634,199 @@
         ],
         "additionalProperties": false
       },
+      "SingleEmailQueued": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          "environment": {
+            "type": "string",
+            "enum": [
+              "live",
+              "test"
+            ]
+          },
+          "simulated": {
+            "type": "boolean"
+          },
+          "mailboxMessageId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "environment",
+          "simulated"
+        ],
+        "description": "When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox."
+      },
+      "SendEmailInput": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[\\x21-\\x7e]+$"
+          },
+          "fromName": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 254,
+                "pattern": "^[\\x21-\\x7e]+$"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 254,
+                  "pattern": "^[\\x21-\\x7e]+$"
+                },
+                "minItems": 1,
+                "maxItems": 50
+              }
+            ]
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "maxItems": 49,
+            "default": []
+          },
+          "bcc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "maxItems": 49,
+            "default": []
+          },
+          "replyTo": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254,
+              "pattern": "^[\\x21-\\x7e]+$"
+            },
+            "maxItems": 10,
+            "default": []
+          },
+          "region": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "description": "Defaults to the installation’s persisted default region when omitted."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "transactional",
+              "marketing"
+            ],
+            "default": "transactional"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998
+          },
+          "html": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 524288
+          },
+          "template": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-zA-Z0-9_-]+$"
+              },
+              "data": {
+                "type": "object",
+                "additionalProperties": {},
+                "default": {},
+                "description": "JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters."
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "description": "Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template."
+          },
+          "attachments": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "maxItems": 20,
+            "default": []
+          },
+          "tracking": {
+            "type": "boolean"
+          },
+          "screen": {
+            "type": "boolean",
+            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured."
+          },
+          "replyMailboxId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends."
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "EmailBatchQueued": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EmailQueued"
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
       "EmailQueued": {
         "type": "object",
         "properties": {
@@ -1664,7 +1857,24 @@
           "simulated"
         ]
       },
-      "SendEmailInput": {
+      "SendEmailBatchInput": {
+        "type": "object",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchSendEmailItem"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "emails"
+        ],
+        "additionalProperties": false
+      },
+      "BatchSendEmailItem": {
         "type": "object",
         "properties": {
           "from": {
@@ -1797,37 +2007,6 @@
         "required": [
           "from",
           "to"
-        ],
-        "additionalProperties": false
-      },
-      "EmailBatchQueued": {
-        "type": "object",
-        "properties": {
-          "data": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmailQueued"
-            }
-          }
-        },
-        "required": [
-          "data"
-        ]
-      },
-      "SendEmailBatchInput": {
-        "type": "object",
-        "properties": {
-          "emails": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SendEmailInput"
-            },
-            "minItems": 1,
-            "maxItems": 100
-          }
-        },
-        "required": [
-          "emails"
         ],
         "additionalProperties": false
       },
@@ -6046,6 +6225,13 @@
               "type": "string"
             }
           },
+          "publicAddress": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send-only address used as the default From. Null when the mailbox sends from its receiving address by default."
+          },
           "metadata": {
             "type": "object",
             "additionalProperties": {}
@@ -6062,6 +6248,14 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "UTC lease expiry, or null for a permanent mailbox. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes the mailbox."
           },
           "stats": {
             "type": "object",
@@ -6117,10 +6311,12 @@
           "domain",
           "aliases",
           "rules",
+          "publicAddress",
           "metadata",
           "origin",
           "createdAt",
           "updatedAt",
+          "expiresAt",
           "stats",
           "sendLimits"
         ]
@@ -6139,6 +6335,18 @@
               "null"
             ],
             "maxLength": 200
+          },
+          "publicAddress": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+            "description": "Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX."
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation."
           },
           "aliases": {
             "type": "array",
@@ -6429,11 +6637,19 @@
                   "$ref": "#/components/schemas/MailboxAddress"
                 }
               },
+              "emailId": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "OpenSend transactional email ID for an outbound mailbox send; null for received mail."
+              },
               "messageId": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "RFC Message-ID without brackets, not the OpenSend message ID (id)."
               },
               "inReplyTo": {
                 "type": [
@@ -6512,6 +6728,7 @@
             "required": [
               "bcc",
               "replyTo",
+              "emailId",
               "messageId",
               "inReplyTo",
               "references",
@@ -7057,7 +7274,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7095,7 +7312,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7227,7 +7444,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7265,7 +7482,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7350,7 +7567,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7388,7 +7605,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7492,6 +7709,7 @@
             "type": "string",
             "enum": [
               "message.received",
+              "message.stored",
               "message.queued",
               "message.sent",
               "message.delivered",
@@ -7718,6 +7936,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -7781,6 +8000,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -7795,7 +8015,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 12,
+            "maxItems": 13,
             "default": [
               "message.received"
             ]
@@ -7849,8 +8069,7 @@
           },
           "description": {
             "type": "string",
-            "maxLength": 500,
-            "default": ""
+            "maxLength": 500
           },
           "eventTypes": {
             "type": "array",
@@ -7858,6 +8077,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -7872,10 +8092,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 12,
-            "default": [
-              "message.received"
-            ]
+            "maxItems": 13
           },
           "mailboxIds": {
             "type": [
@@ -7889,12 +8106,10 @@
             },
             "minItems": 1,
             "maxItems": 500,
-            "default": null,
             "description": "Only events for these mailboxes; null for all."
           },
           "paused": {
-            "type": "boolean",
-            "default": false
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -8211,11 +8426,19 @@
               "$ref": "#/components/schemas/MailboxAddress"
             }
           },
+          "emailId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenSend transactional email ID for an outbound mailbox send; null for received mail."
+          },
           "messageId": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "RFC Message-ID without brackets, not the OpenSend message ID (id)."
           },
           "inReplyTo": {
             "type": [
@@ -8384,6 +8607,7 @@
           "automated",
           "bcc",
           "replyTo",
+          "emailId",
           "messageId",
           "inReplyTo",
           "references",
@@ -17745,7 +17969,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EmailQueued"
+                  "$ref": "#/components/schemas/SingleEmailQueued"
                 }
               }
             }
@@ -29256,7 +29480,7 @@
           "Mailboxes"
         ],
         "summary": "Create a mailbox",
-        "description": "The address must be on a domain with receiving enabled. Mail already stored for the address, its aliases or rules is linked to the new mailbox.",
+        "description": "Admin only. The address must be on a domain with receiving enabled. Permanent mailboxes claim earlier unrouted mail for their addresses or rules; temporary mailboxes start empty. Expiry stops new delivery and sending without deleting the address or its history.",
         "security": [
           {
             "bearerAuth": []
@@ -29563,7 +29787,7 @@
         "tags": [
           "Mailboxes"
         ],
-        "description": "aliases and rules replace the current lists. The primary address cannot change.",
+        "description": "Admin only. The address and lease expiry cannot change. On permanent mailboxes, aliases and rules replace the current lists; temporary mailboxes cannot add either.",
         "security": [
           {
             "bearerAuth": []
@@ -29727,7 +29951,7 @@
         "tags": [
           "Mailboxes"
         ],
-        "description": "Deletes the mailbox, its addresses and its per-mailbox state. Stored messages are kept; future mail to its addresses follows the domain catch-all setting.",
+        "description": "Admin only, including for expired mailboxes. Deletes the mailbox, releases its addresses and removes its per-mailbox state. Stored messages are kept; future mail to its addresses follows normal routing.",
         "security": [
           {
             "bearerAuth": []
@@ -32610,7 +32834,7 @@
           "Mailbox messages"
         ],
         "summary": "Reply to a message",
-        "description": "Replies in the same conversation with In-Reply-To and References set. Replies go to Reply-To (or From) of an inbound message, or to the original recipients of your own sent message. Automated originals (auto-replies, bounces, bulk) and no-reply recipients are refused unless allowAutomated=true. Supports Idempotency-Key.",
+        "description": "Reply by mailbox message ID (msg_…, including the messageId in a received webhook) or transactional email ID (email_… from a send tracked in this mailbox). The service sets In-Reply-To and References. Outbound parents without a provider ID return 409 instead of starting an unthreaded follow-up. Replies go to Reply-To (or From) of inbound mail, or to the original recipients of your own sent mail. Loop guards and Idempotency-Key apply.",
         "security": [
           {
             "bearerAuth": []
@@ -34699,12 +34923,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateWebhook } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateWebhook({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"description\": \"\",\n    \"eventTypes\": [\n      \"message.received\"\n    ],\n    \"mailboxIds\": null,\n    \"paused\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateWebhook } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateWebhook({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/webhooks/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"description\": \"\",\n  \"eventTypes\": [\n    \"message.received\"\n  ],\n  \"mailboxIds\": null,\n  \"paused\": false\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/webhooks/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       },

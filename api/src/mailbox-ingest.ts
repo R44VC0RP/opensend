@@ -3,10 +3,10 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { mailAttachments, mailboxDomains, mailboxRegions, mailboxThreads, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
+import { mailAttachments, mailboxDomains, mailboxRegions, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents, recordEvents, type MailboxEventInput } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3, RAW_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
-import { assignThread, attachToMailboxes, messageIdList, normalizeMessageId, rememberMessageIds, routeRecipients, snippetOf, type Scope } from './mailbox-store.js';
+import { assignThread, attachToMailboxes, lockMailboxLane, messageIdList, normalizeMessageId, rememberMessageIds, routeRecipients, snippetOf, type Scope } from './mailbox-store.js';
 
 const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MIME only (Worker memory).
 const BODY_LIMIT = 1_000_000;
@@ -103,7 +103,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const references = messageIdList(email?.references);
   const subject = (email?.subject ?? common.subject ?? '').slice(0, 998);
   const text = cap(email?.text), html = cap(email?.html);
-  const receivedAt = notification.receipt?.timestamp && Number.isFinite(Date.parse(notification.receipt.timestamp)) ? new Date(notification.receipt.timestamp).toISOString() : new Date().toISOString();
+  const sesTimestamp = [notification.receipt?.timestamp, notification.mail?.timestamp].find(value => value && Number.isFinite(Date.parse(value)));
+  const receivedAt = sesTimestamp ? new Date(sesTimestamp).toISOString() : receipt.createdAt;
   const sentAt = email?.date && Number.isFinite(Date.parse(email.date)) ? new Date(email.date).toISOString() : null;
 
   // Attachments are uploaded before the database commit with deterministic keys, so retries overwrite rather than duplicate.
@@ -129,6 +130,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   }
 
   const runnable = await runtime.db.transaction(async tx => {
+    // Recheck receipt/content identity after taking the lane, not before: concurrent SMTP copies must not publish two stored events.
+    await lockMailboxLane(tx, 'ingest');
     const events: MailboxEventInput[] = [];
     const done = () => tx.update(mailReceipts).set({ status: 'processed', error: null, processedAt: new Date().toISOString() }).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
     const [existingRow] = await tx.select({ id: mailMessages.id }).from(mailMessages).where(eq(mailMessages.id, messageRowId));
@@ -161,15 +164,14 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
       target = row!;
       if (attachments.length) await tx.insert(mailAttachments).values(attachments).onConflictDoNothing();
       await rememberMessageIds(tx, scope, target.id, threadId, [messageId]);
+      events.push({ type: 'message.stored', mailboxId: null, threadId, messageId: target.id });
     }
-    const routed = await routeRecipients(tx, scope, receipt.recipients, { allowCreate: !spam });
-    let mailboxIds = routed.mailboxIds;
-    // Replies addressed elsewhere (for example a forwarded thread) stay with the mailboxes already in the conversation,
-    // but only from an authenticated sender: In-Reply-To and References are forgeable.
-    const authenticated = verdicts.dmarc === 'PASS' || (verdicts.spf === 'PASS' && verdicts.dkim === 'PASS');
-    if (!mailboxIds.length && authenticated) mailboxIds = (await tx.selectDistinct({ id: mailboxThreads.mailboxId }).from(mailboxThreads).where(eq(mailboxThreads.threadId, target.threadId))).map(row => row.id);
+    // Don't attach a delayed receipt (or its deduplicated original) to a lease created after it arrived.
+    const firstReceivedAt = Date.parse(receivedAt) < Date.parse(target.receivedAt) ? receivedAt : target.receivedAt;
+    const routed = await routeRecipients(tx, scope, receipt.recipients, { allowCreate: !spam, receivedAt: firstReceivedAt });
+    // References select a conversation, not its readers. Even a DKIM-authenticated sender can supply a copied ID.
     if (routed.unrouted.length) await tx.insert(mailUnrouted).values(routed.unrouted.map(address => ({ ...scope, messageId: target!.id, address }))).onConflictDoNothing();
-    const added = await attachToMailboxes(tx, scope, target, mailboxIds);
+    const added = await attachToMailboxes(tx, scope, target, routed.mailboxIds);
     for (const mailboxId of routed.created) events.push({ type: 'mailbox.created', mailboxId, data: { origin: 'auto' } });
     for (const mailboxId of added) events.push({ type: 'message.received', mailboxId, threadId: target.threadId, messageId: target.id, data: { from: { name: target.fromName, address: target.fromAddress }, subject: target.subject, snippet: target.snippet, attachmentCount: target.attachmentCount, spam: target.spam, automated: target.automated } });
     await done();

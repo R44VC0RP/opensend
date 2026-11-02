@@ -9,7 +9,7 @@ import '../settings/settings.css'
 import './mailboxes.css'
 
 const eventInfo: Record<MailboxEventType, string> = {
-  'message.received': 'New mail arrived in a mailbox', 'message.queued': 'A mailbox queued an outgoing message', 'message.sent': 'SES accepted an outgoing message',
+  'message.received': 'New mail arrived in a mailbox', 'message.stored': 'Every new inbound message, including unrouted mail. Requires Every mailbox.', 'message.queued': 'A mailbox queued an outgoing message', 'message.sent': 'SES accepted an outgoing message',
   'message.delivered': 'The recipient server accepted it', 'message.delayed': 'Delivery is being retried', 'message.bounced': 'The message bounced',
   'message.complained': 'The recipient reported spam', 'message.failed': 'The message was rejected, suppressed or canceled', 'message.updated': 'Read state or message labels changed',
   'thread.updated': 'A conversation was archived, starred, trashed or relabeled', 'mailbox.created': 'A mailbox was created (including automatically)', 'mailbox.deleted': 'A mailbox was deleted',
@@ -31,12 +31,12 @@ function WebhookFields({ input, onChange, mailboxes, errors, apiError, disabled 
       <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint="The host must be in the deployment’s webhook allowlist (WEBHOOK_ALLOWED_HOSTS)."><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder="https://agents.acme.com/hooks/mail" /></Field>
     </div>
     <Field label="Mailboxes" htmlFor="mailbox-webhook-scope" error={errors.mailboxIds || fieldError(apiError, 'mailboxIds')} hint={input.mailboxIds === null ? 'Includes mailboxes created later.' : undefined}>
-      <Select id="mailbox-webhook-scope" value={input.mailboxIds === null ? 'all' : 'selected'} disabled={disabled} onValueChange={value => onChange({ ...input, mailboxIds: value === 'all' ? null : [] })} options={[{ value: 'all', label: 'Every mailbox' }, { value: 'selected', label: 'Selected mailboxes' }]} />
+      <Select id="mailbox-webhook-scope" value={input.mailboxIds === null ? 'all' : 'selected'} disabled={disabled} onValueChange={value => onChange({ ...input, mailboxIds: value === 'all' ? null : [], eventTypes: value === 'all' ? input.eventTypes : input.eventTypes.filter(type => type !== 'message.stored') })} options={[{ value: 'all', label: 'Every mailbox' }, { value: 'selected', label: 'Selected mailboxes' }]} />
     </Field>
     {input.mailboxIds !== null && <div className="settings-choices" role="group" aria-label="Mailboxes">{!mailboxes?.length ? <p className="muted">No mailboxes yet.</p> : mailboxes.map(mailbox => <Checkbox key={mailbox.id} label={mailbox.address} disabled={disabled} checked={input.mailboxIds!.includes(mailbox.id)} onCheckedChange={checked => onChange({ ...input, mailboxIds: checked ? [...input.mailboxIds!, mailbox.id] : input.mailboxIds!.filter(id => id !== mailbox.id) })} />)}</div>}
     <fieldset className="mailbox-webhook-events" disabled={disabled}>
       <legend className="ui-field__label">Events</legend>
-      {mailboxEventTypes.map(type => <Checkbox key={type} label={<span className="settings-cell-stack"><code>{type}</code><span className="ui-field__hint">{eventInfo[type]}</span></span>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
+      {mailboxEventTypes.map(type => <Checkbox key={type} disabled={type === 'message.stored' && input.mailboxIds !== null} label={<span className="settings-cell-stack"><code>{type}</code><span className="ui-field__hint">{eventInfo[type]}</span></span>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
       {(errors.eventTypes || fieldError(apiError, 'eventTypes')) && <p className="ui-field__error" role="alert">{errors.eventTypes || fieldError(apiError, 'eventTypes')}</p>}
     </fieldset>
   </div>
