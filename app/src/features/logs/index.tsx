@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowUpRight, ChevronRight, Download, Paperclip, Search } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
@@ -58,7 +58,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
     </>}
   </div>
 }
-const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'from', label: 'Sender', width: '20%' }, { key: 'to', label: 'Recipient', width: '18%' }, { key: 'mailbox', label: 'Mailbox', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'open', label: '', width: 28 }]
+const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'from', label: 'Sender', width: '20%' }, { key: 'to', label: 'Recipient', width: '18%' }, { key: 'mailbox', label: 'Address', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'open', label: '', width: 28 }]
 const mailboxLabel = (row: ReceivedEmail) => row.mailboxes.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
 function ReceivedLogs({ regionId }: { regionId: string }) {
   const api = useApi()
@@ -71,7 +71,7 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
   if (api.environment === 'test') return <div className="logs-page"><LogsHeader regionId={regionId} view="received" /><Alert tone="info">Received mail is live-only. Switch to live mode to see it.</Alert></div>
   return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>
-      <Button disabled={!query.data?.length} onClick={() => downloadCsv('opensend-received-page.csv', [['Received at', 'From', 'To', 'Mailbox', 'Subject', 'Spam', 'Region'], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', row.region ?? ''])])}><Download size={16} />Export page</Button>
+      <Button disabled={!query.data?.length} onClick={() => downloadCsv('opensend-received-page.csv', [['Received at', 'From', 'To', 'Address', 'Subject', 'Spam', 'Region'], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', row.region ?? ''])])}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<ReceivedEmail> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/received/${row.id}`)} columns={[
@@ -82,7 +82,7 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
         { ...receivedColumns[4]!, render: row => row.mailboxes.length ? <span title={mailboxLabel(row)}>{mailboxLabel(row)}</span> : <span className="muted">Unrouted</span> },
         { ...receivedColumns[5]!, render: row => <span className="received-subject" title={row.subject}>{row.attachmentCount > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}{row.subject || <span className="muted">(no subject)</span>}</span> },
         { ...receivedColumns[6]!, render: () => <ChevronRight size={14} aria-hidden /> },
-      ]} empty={<EmptyState title={search ? 'No received mail matches' : 'No received mail yet'} description={search ? undefined : 'Enable mailboxes on a domain to start receiving.'} action={search ? <Button onClick={() => { setSearch(''); pagination.reset() }}>Clear search</Button> : <Link to="/mailboxes">Open Mailboxes</Link>} />} />
+      ]} empty={<EmptyState title={search ? 'No received mail matches' : 'No received mail yet'} description={search ? undefined : 'Enable receiving on a domain to start.'} action={search ? <Button onClick={() => { setSearch(''); pagination.reset() }}>Clear search</Button> : <Link to="/inbound">Open Inbound</Link>} />} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={pageSize} nextCursor={query.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, query.data?.nextCursor)} />}
     </>}
   </div>
@@ -105,8 +105,8 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const hasHtml = html.trim().length > 0
   const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => email.verdicts[key])
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.spam ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" />} />
-    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Mailbox</dt><dd>{email.mailboxes.length ? email.mailboxes.map(mailbox => mailbox.address).join(', ') : 'Unrouted'}</dd></div></dl>
-    {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new mailbox.</Alert>}
+    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Address</dt><dd>{email.mailboxes.length ? email.mailboxes.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/inbound?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div></dl>
+    {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />
       {view === 'preview' ? hasHtml ? <EmailPreview html={html} title="Received message preview" remoteImages /> : email.text ? <pre className="plain-text-preview">{email.text}</pre> : <EmptyState title="This message has no body" />

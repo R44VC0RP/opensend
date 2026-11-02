@@ -1,6 +1,6 @@
 {
   "name": "opensend-js",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript SDK for the self-hosted OpenSend email API",
   "type": "module",
   "engines": {

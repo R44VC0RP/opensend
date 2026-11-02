@@ -6,13 +6,31 @@ import { MAX_ATTEMPTS } from './jobs.js';
 import { decrypt, hmac, webhookUrl } from './operations.js';
 import { lockMailboxLane } from './mailbox-store.js';
 
-export const mailboxEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated', 'mailbox.created', 'mailbox.deleted'] as const;
+const sharedEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'message.updated', 'thread.updated'] as const;
+export const mailboxEventTypes = [...sharedEventTypes, 'mailbox.created', 'mailbox.deleted'] as const;
+export const inboundEventTypes = [...sharedEventTypes, 'address.created', 'address.deleted'] as const;
 export type MailboxEventType = typeof mailboxEventTypes[number];
+// The log keeps its original vocabulary. Only these two lifecycle types have API aliases.
+export const storedEventType = (type: string) => type === 'address.created' ? 'mailbox.created' : type === 'address.deleted' ? 'mailbox.deleted' : type;
+export const inboundEventType = (type: MailboxEventType): typeof inboundEventTypes[number] => type === 'mailbox.created' ? 'address.created' : type === 'mailbox.deleted' ? 'address.deleted' : type;
+export function configuredEventType(eventTypes: string[], type: string) {
+  const stored = storedEventType(type);
+  return eventTypes.find(requested => storedEventType(requested) === stored);
+}
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 export type MailboxEvent = { id: string; cursor: string; type: MailboxEventType; createdAt: string; mailboxId: string | null; threadId: string | null; messageId: string | null; data: Record<string, unknown> };
 
 export const eventView = (row: typeof mailboxEvents.$inferSelect): MailboxEvent => ({ id: `mev_${row.seq}`, cursor: String(row.seq), type: row.type as MailboxEventType, createdAt: new Date(row.createdAt).toISOString(), mailboxId: row.mailboxId, threadId: row.threadId, messageId: row.messageId, data: row.data });
 export const webhookSecretBinding = (workspaceId: string, environment: Mode, webhookId: string) => `${workspaceId}:${environment}:mailbox:${webhookId}`;
+
+// Snapshot the address from the event itself, never from current routing or subscription state.
+function webhookPayload(event: Record<string, unknown>) {
+  return !('addressId' in event) && (typeof event.mailboxId === 'string' || event.mailboxId === null) ? { ...event, addressId: event.mailboxId } : event;
+}
+function subscribedWireType(endpoint: typeof mailboxWebhooks.$inferSelect, type: unknown, mailboxId: unknown) {
+  if (typeof type !== 'string' || (endpoint.mailboxIds !== null && (type === 'message.stored' || typeof mailboxId !== 'string' || !endpoint.mailboxIds.includes(mailboxId)))) return undefined;
+  return configuredEventType(endpoint.eventTypes, type);
+}
 
 /**
  * Appends events and queues matching webhook deliveries in the caller's transaction. Writers lock the
@@ -26,9 +44,11 @@ export async function recordEvents(tx: DbExecutor, workspaceId: string, environm
   const endpoints = await tx.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, workspaceId), eq(mailboxWebhooks.environment, environment), eq(mailboxWebhooks.paused, false)));
   let queued = 0;
   for (const row of rows) for (const endpoint of endpoints) {
-    if (!endpoint.eventTypes.includes(row.type) || (endpoint.mailboxIds && (!row.mailboxId || !endpoint.mailboxIds.includes(row.mailboxId)))) continue;
+    const type = subscribedWireType(endpoint, row.type, row.mailboxId);
+    if (!type) continue;
     const deliveryId = id('mwd');
-    await tx.insert(mailboxWebhookDeliveries).values({ id: deliveryId, workspaceId, environment, webhookId: endpoint.id, eventSeq: row.seq, payload: eventView(row) }).onConflictDoNothing();
+    // Freeze the requested spelling along with the rest of the delivery, before any retries or subscription edits.
+    await tx.insert(mailboxWebhookDeliveries).values({ id: deliveryId, workspaceId, environment, webhookId: endpoint.id, eventSeq: row.seq, payload: webhookPayload({ ...eventView(row), type }) }).onConflictDoNothing();
     await tx.insert(jobs).values({ id: id('job'), type: 'mailbox.webhook', workspaceId, environment, payload: { deliveryId } });
     queued++;
   }
@@ -43,7 +63,7 @@ function visibleEvents(workspaceId: string, environment: Mode, { mailboxIds, inc
 }
 export async function readEvents(db: DbExecutor, workspaceId: string, environment: Mode, input: EventScope & { after: number; types?: string[]; limit: number }) {
   return db.select().from(mailboxEvents).where(and(visibleEvents(workspaceId, environment, input), gt(mailboxEvents.seq, input.after),
-    input.types?.length ? inArray(mailboxEvents.type, input.types) : undefined)).orderBy(mailboxEvents.seq).limit(input.limit);
+    input.types?.length ? inArray(mailboxEvents.type, input.types.map(storedEventType)) : undefined)).orderBy(mailboxEvents.seq).limit(input.limit);
 }
 export async function latestCursor(db: DbExecutor, workspaceId: string, environment: Mode, scope: EventScope) {
   const [result] = await db.select({ seq: max(mailboxEvents.seq) }).from(mailboxEvents).where(visibleEvents(workspaceId, environment, scope));
@@ -51,20 +71,21 @@ export async function latestCursor(db: DbExecutor, workspaceId: string, environm
 }
 
 const webhookJob: JobHandler = async (runtime, payload, job) => {
-  const [delivery] = await runtime.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, job.workspaceId), eq(mailboxWebhookDeliveries.id, String(payload.deliveryId))));
+  const [delivery] = await runtime.db.select().from(mailboxWebhookDeliveries).where(and(eq(mailboxWebhookDeliveries.workspaceId, job.workspaceId), eq(mailboxWebhookDeliveries.environment, job.environment), eq(mailboxWebhookDeliveries.id, String(payload.deliveryId))));
   if (!delivery || delivery.status === 'delivered') return;
-  const [endpoint] = await runtime.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, job.workspaceId), eq(mailboxWebhooks.id, delivery.webhookId)));
+  const [endpoint] = await runtime.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, job.workspaceId), eq(mailboxWebhooks.environment, job.environment), eq(mailboxWebhooks.id, delivery.webhookId)));
   const where = eq(mailboxWebhookDeliveries.id, delivery.id);
   if (!endpoint) { await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'ENDPOINT_DELETED', updatedAt: new Date().toISOString() }).where(where); return; }
   // The subscription may have narrowed since this delivery was queued.
-  if (delivery.payload.type === 'message.stored' && (endpoint.mailboxIds !== null || !endpoint.eventTypes.includes('message.stored'))) {
+  if (!subscribedWireType(endpoint, delivery.payload.type, delivery.payload.mailboxId)) {
     await runtime.db.update(mailboxWebhookDeliveries).set({ status: 'failed', lastError: 'SUBSCRIPTION_CHANGED', updatedAt: new Date().toISOString() }).where(where); return;
   }
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
     const url = webhookUrl(runtime, endpoint.url);
     const secret = await decrypt(runtime, endpoint.encryptedSecret, webhookSecretBinding(job.workspaceId, job.environment, endpoint.id));
-    const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
+    // Pending pre-upgrade snapshots only have mailboxId. Add the alias on the wire without rewriting history.
+    const body = JSON.stringify(webhookPayload(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
     const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body, redirect: 'manual', signal: AbortSignal.timeout(5000) });
     statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';

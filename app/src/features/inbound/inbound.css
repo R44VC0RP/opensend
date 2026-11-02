@@ -2,13 +2,15 @@
 .mailbox-domains li { display: inline-flex; align-items: center; gap: var(--space-8); }
 .mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
 
-/* Mailbox reader: conversations on the left, the open conversation on the right. */
+/* Inbound reader: conversations on the left, the open conversation on the right. */
 .mailbox-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .mailbox-title { display: inline-flex; align-items: baseline; gap: var(--space-12); min-width: 0; }
 .mailbox-title .muted { font-size: var(--text-sm); font-weight: 400; }
 .mailbox-layout { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); margin-top: var(--space-4); border-top: 1px solid var(--color-border); }
 .mailbox-list { display: flex; flex-direction: column; min-height: 0; padding-right: var(--space-16); border-right: 1px solid var(--color-border); }
 .mailbox-list .ui-tabs { padding-top: var(--space-8); }
+.inbound-filter { padding-top: var(--space-12); }
+.inbound-filter .ui-select-trigger { width: 100%; }
 .mailbox-search { width: 100%; min-width: 0; margin: var(--space-12) 0 var(--space-8); }
 .mailbox-search .ui-input { width: 100%; }
 .mailbox-list__summary { margin: 0 0 var(--space-4); font-size: var(--text-xs); }
@@ -25,6 +27,7 @@
 .mailbox-thread-row__count { flex: none; min-width: 20px; height: 18px; padding: 0 6px; border-radius: 9px; background: var(--color-hover); color: var(--color-muted); font-size: 11px; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .mailbox-thread-row[data-selected] .mailbox-thread-row__count { background: var(--color-surface); }
 .mailbox-thread-row__time { flex: none; min-width: 52px; color: var(--color-muted); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
+.inbound-thread-row__subject { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-text); font-weight: 500; }
 .mailbox-thread-row__subject, .mailbox-thread-row__snippet { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .mailbox-thread-row__subject { font-size: var(--text-sm); line-height: 20px; }
 .mailbox-thread-row__snippet { color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; }
@@ -43,6 +46,8 @@
 .mailbox-conversation__title p { margin: 0; font-size: var(--text-xs); }
 .mailbox-conversation__actions { flex: none; gap: 2px; margin-top: -2px; }
 .mailbox-back { display: none; }
+.inbound-scope-note { margin: calc(-1 * var(--space-8)) 0 0; font-size: var(--text-xs); }
+.inbound-older { display: flex; justify-content: center; }
 
 /* The thread rail links each message to the next, so replies read as one conversation. */
 .mailbox-messages { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-12); margin: 0; padding: 0 0 0 var(--space-24); list-style: none; }
@@ -70,12 +75,23 @@
 .mailbox-attachments button { display: inline-flex; align-items: center; gap: var(--space-6); height: 28px; padding: 0 var(--space-8); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 .mailbox-attachments button:hover { background: var(--color-hover); }
 .mailbox-attachments .muted { font-variant-numeric: tabular-nums; }
+.mailbox-message__attachments-note { display: flex; align-items: center; gap: var(--space-6); margin: 0; padding: 0 var(--space-16) var(--space-16); font-size: var(--text-xs); }
+/* The message a reply will answer gets the accent ring the composer refers to. */
+.mailbox-message[data-reply-target] .mailbox-message__card { border-color: var(--color-accent); }
 
 /* The reply box stays reachable at the bottom of long conversations; it grows when focused. */
 .mailbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16) var(--space-24); border-top: 1px solid var(--color-border); background: var(--color-surface); }
 .mailbox-composer textarea { min-height: 44px; height: 44px; resize: none; background: var(--color-surface); transition: height var(--motion-duration, 120ms); }
 .mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; resize: vertical; }
 .mailbox-composer__to { font-size: var(--text-xs); color: var(--color-muted); overflow-wrap: anywhere; }
+.mailbox-composer__to.muted { margin: 0; }
+.inbound-composer__target { display: flex; align-items: center; gap: var(--space-4); min-height: 24px; }
+/* The reviewed recipients: the exact From, To and Cc the API checks before queueing the reply. */
+.inbound-recipients-review { display: grid; gap: 2px; }
+.inbound-recipients { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: var(--space-8); margin: 0; color: var(--color-text); }
+.inbound-recipients__label { color: var(--color-muted); }
+.inbound-recipients-review > p.mailbox-composer__to:not(.inbound-recipients) { margin: 0; }
+.mailbox-composer .ui-field { gap: var(--space-4); }
 .mailbox-composer__actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
 
 @media (max-width: 900px) {
@@ -87,7 +103,7 @@
   .mailbox-back { display: inline-flex; margin-left: calc(-1 * var(--space-8)); }
 }
 
-/* Mailbox webhooks and keys: two-line checkbox labels align the box with the first line. */
+/* Inbound webhooks and keys: two-line checkbox labels align the box with the first line. */
 .mailbox-webhook-events { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
 .mailbox-webhook-events legend { margin-bottom: var(--space-8); padding: 0; }
 .mailbox-webhook-events code { font-size: var(--text-xs); }

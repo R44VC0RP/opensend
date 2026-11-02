@@ -1,6 +1,7 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, MailboxDomain, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
-import { createSeed, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, MailboxWebhook, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
+import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
 const STORAGE_KEY = 'opensend.demo.v1'
@@ -109,7 +110,37 @@ function domainName(value: unknown): string {
 // Every live domain has a receiving state; domains that never enabled mailboxes report "off".
 function mailboxDomains(state: DemoState): MailboxDomain[] {
   const enabled = state.mailboxDomains ??= demoMailboxes().mailboxDomains
-  return state.domains.map(domain => enabled.find(row => row.id === domain.id) ?? { id: domain.id, name: domain.name, region: domain.regionId, status: 'off', catchAll: 'create_mailbox', dns: [{ type: 'MX', name: domain.name, value: `inbound-smtp.${domain.regionId}.amazonaws.com`, priority: 10 }], mx: null, lastError: null, enabledAt: null, checkedAt: null, mailboxCount: 0 })
+  return state.domains.map(domain => enabled.find(row => row.id === domain.id) ?? { id: domain.id, name: domain.name, region: domain.regionId, status: 'off', catchAll: 'create_address', dns: [{ type: 'MX', name: domain.name, value: `inbound-smtp.${domain.regionId}.amazonaws.com`, priority: 10 }], mx: null, lastError: null, enabledAt: null, checkedAt: null, addressCount: 0 })
+}
+// Demo inbound projection: a message is visible through every address it is linked to.
+const inboundLinks = (state: DemoState, message: MailboxMessage) => (state.inboundLinks ??= demoInboundLinks())[message.id] ?? [message.mailboxId]
+const inboundVisible = (state: DemoState, row: MailboxThreadDetail, addressId?: string) => row.messages.filter(message => !addressId || inboundLinks(state, message).includes(addressId))
+function inboundMessage(state: DemoState, message: MailboxMessage): InboundMessage {
+  const { id, threadId, direction, status, from, to, cc, replyTo, subject, snippet, text, replyText, receivedAt, bodyTruncated, attachmentCount, messageId, inReplyTo, references } = message
+  return { id, threadId, addressIds: inboundLinks(state, message), direction, status, from, to, cc, replyTo, subject, snippet, text, replyText, receivedAt, bodyTruncated, attachmentCount, emailId: null, messageId, inReplyTo, references, read: message.read }
+}
+type DemoInboundState = NonNullable<DemoState['inboundStates']>[string]
+const inboundScope = (state: DemoState, row: MailboxThreadDetail, addressId?: string) => [...new Set(inboundVisible(state, row, addressId).flatMap(message => addressId ? [addressId] : inboundLinks(state, message)))].sort()
+// The thread's own mailbox keeps its legacy flags; any other linked address has its own demo state.
+function inboundState(state: DemoState, row: MailboxThreadDetail, addressId: string): DemoInboundState {
+  if (addressId === row.mailboxId) return { unreadCount: row.unreadCount, archived: row.archived, starred: row.starred, trashed: row.trashed, spam: row.spam, labels: row.labels }
+  return (state.inboundStates ??= {})[`${row.id}:${addressId}`] ??= { unreadCount: inboundVisible(state, row, addressId).filter(m => m.direction === 'inbound' && !m.read).length, archived: false, starred: false, trashed: false, spam: false, labels: [] }
+}
+function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: string): InboundThread | null {
+  const visible = inboundVisible(state, row, addressId)
+  const last = visible.at(-1)
+  if (!last) return null
+  return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
+}
+const inboundWebhook = ({ mailboxIds, deliveries: _d, ...webhook }: MailboxWebhook & { deliveries?: unknown }): InboundWebhook => ({ ...webhook, addressIds: mailboxIds })
+// Demo idempotency mirrors the API: the same key and body returns the first result; a different body is rejected.
+function inboundOnce<T>(state: DemoState, key: string, body: unknown, create: () => T): T {
+  const seen = (state.inboundIdempotency ??= {})[key]
+  const fingerprint = JSON.stringify(body)
+  if (seen) { if (seen.body !== fingerprint) throw new ApiError('This Idempotency-Key was already used with a different request.', 'IDEMPOTENCY_KEY_REUSED', {}, undefined, 422); return seen.result as T }
+  const result = create()
+  state.inboundIdempotency[key] = { body: fingerprint, result }
+  return result
 }
 function find<T extends { id: string }>(items: T[], value: string, label: string): T {
   const item = items.find(row => row.id === value)
@@ -885,6 +916,121 @@ export function createMockApi(): OpenSendApi {
         return { webhook: view, secret: `whsec_demo${id('s').slice(-16)}` }
       }),
       updateWebhook: (webhookId, patch, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, { updatedAt: now() }); const { deliveries: _d, ...view } = row; return view }),
+      deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
+      rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
+      webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
+    },
+    inbound: {
+      addresses: (input, signal) => run(signal, false, s => {
+        const search = input.search?.trim().toLowerCase()
+        return Object.assign((s.mailboxes ??= demoMailboxes().mailboxes).filter(row => !search || row.address.includes(search) || row.displayName?.toLowerCase().includes(search)), { nextCursor: null })
+      }),
+      address: (addressId, signal) => run(signal, false, s => find(s.mailboxes ??= demoMailboxes().mailboxes, addressId, 'Address')),
+      createAddress: (input, signal) => run(signal, true, s => {
+        const address = email(input.address, 'address')
+        const domain = address.split('@')[1]!
+        if (!mailboxDomains(s).some(row => row.name === domain && !['off', 'disabled'].includes(row.status))) invalid('address', `Enable receiving on ${domain} first.`)
+        const rows = s.mailboxes ??= demoMailboxes().mailboxes
+        if (rows.some(row => row.address === address || row.aliases.includes(address) || row.publicAddress === address)) invalid('address', 'That address is already in use.')
+        if (input.publicAddress !== undefined && input.ttlSeconds !== undefined) invalid('publicAddress', 'Temporary addresses cannot have a public sender address.')
+        const publicAddress = input.publicAddress === undefined ? null : email(input.publicAddress, 'publicAddress')
+        if (publicAddress && (publicAddress.split('@')[0] !== address.split('@')[0] || !domain.endsWith(`.${publicAddress.split('@')[1]}`))) invalid('publicAddress', `Use ${address.split('@')[0]}@ on a parent domain of ${domain}.`)
+        if (input.ttlSeconds !== undefined && (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 60 || input.ttlSeconds > 2_592_000)) invalid('ttlSeconds', 'Choose a lifetime between 1 minute and 30 days.')
+        if (input.ttlSeconds !== undefined && input.aliases?.length) invalid('aliases', 'Temporary addresses cannot have aliases.')
+        const row: Mailbox = { id: id('mbx'), address, displayName: input.displayName?.trim() || null, domain, aliases: input.aliases ?? [], rules: [], origin: 'api', createdAt: now(), updatedAt: now(), stats: { threads: 0, unreadThreads: 0, lastMessageAt: null }, publicAddress, expiresAt: input.ttlSeconds === undefined ? null : new Date(Date.now() + input.ttlSeconds * 1000).toISOString() }
+        rows.unshift(row)
+        return row
+      }),
+      updateAddress: (addressId, patch, signal) => run(signal, true, s => {
+        const row = find(s.mailboxes ??= demoMailboxes().mailboxes, addressId, 'Address')
+        if (patch.displayName !== undefined) row.displayName = patch.displayName?.trim() || null
+        if (patch.aliases !== undefined && row.expiresAt && patch.aliases.length) invalid('aliases', 'Temporary addresses cannot have aliases.')
+        if (patch.aliases !== undefined) row.aliases = patch.aliases.map(alias => email(alias, 'aliases'))
+        row.updatedAt = now()
+        return row
+      }),
+      deleteAddress: (addressId, signal) => run(signal, true, s => { const rows = s.mailboxes ??= demoMailboxes().mailboxes; rows.splice(rows.indexOf(find(rows, addressId, 'Address')), 1) }),
+      threads: (input, signal) => run(signal, false, s => {
+        const search = input.q?.trim().toLowerCase()
+        const matches = (state: DemoInboundState) => input.view === 'all' || (input.view === 'trash' ? state.trashed : !state.trashed && (input.view === 'inbox' ? !state.archived && !state.spam : input.view === 'archive' ? state.archived : input.view === 'starred' ? state.starred : state.spam))
+        const rows = (s.mailboxThreads ??= demoMailboxThreads()).filter(row => inboundScope(s, row, input.addressId).some(addressId => matches(inboundState(s, row, addressId)))
+          && (!search || inboundVisible(s, row, input.addressId).some(m => `${m.subject} ${m.from.address} ${m.from.name} ${m.text}`.toLowerCase().includes(search))))
+        const threads = rows.map(row => inboundThread(s, row, input.addressId)).filter(row => row !== null).sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt))
+        return Object.assign(threads, { nextCursor: null })
+      }),
+      thread: (threadId, input, signal) => run(signal, false, s => {
+        const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread')
+        const summary = inboundThread(s, row, input.addressId)
+        if (!summary) throw new ApiError('Thread was not found.', 'NOT_FOUND', {}, undefined, 404)
+        return { ...summary, messages: inboundVisible(s, row, input.addressId).map(message => inboundMessage(s, message)), nextCursor: null, addressStates: inboundScope(s, row, input.addressId).map(addressId => ({ addressId, ...inboundState(s, row, addressId) })) }
+      }),
+      updateThread: (threadId, { addressId: requested, ...patch }, signal) => run(signal, true, s => {
+        const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread')
+        const scope = inboundScope(s, row, requested)
+        if (!scope.length) throw new ApiError('Thread was not found.', 'NOT_FOUND', {}, undefined, 404)
+        if (scope.length !== 1) throw new ApiError('This conversation is visible through several addresses. Choose one with addressId.', 'ADDRESS_REQUIRED', { addressId: 'Choose an address.' }, undefined, 409)
+        const addressId = scope[0]!
+        const state = inboundState(s, row, addressId)
+        const messages = inboundVisible(s, row, addressId)
+        if (addressId === row.mailboxId) {
+          if (patch.read === true) messages.forEach(m => { m.read = true })
+          if (patch.read === false) { const latest = [...messages].reverse().find(m => m.direction === 'inbound'); if (latest) latest.read = false }
+          row.unreadCount = messages.filter(m => !m.read && m.direction === 'inbound').length
+        } else if (patch.read !== undefined) state.unreadCount = patch.read ? 0 : 1
+        for (const flag of ['archived', 'starred', 'trashed', 'spam'] as const) if (patch[flag] !== undefined) state[flag] = patch[flag]!
+        state.labels = [...new Set([...state.labels.filter(item => !patch.removeLabels?.includes(item)), ...(patch.addLabels ?? [])])]
+        if (addressId === row.mailboxId) Object.assign(row, { archived: state.archived, starred: state.starred, trashed: state.trashed, spam: state.spam, labels: state.labels })
+        return { addressId, ...inboundState(s, row, addressId) }
+      }),
+      message: (messageId, input, signal) => run(signal, false, s => {
+        const row = (s.mailboxThreads ??= demoMailboxThreads()).find(item => item.messages.some(m => m.id === messageId))
+        const message = row ? inboundVisible(s, row, input.addressId).find(m => m.id === messageId) : undefined
+        if (!message) throw new ApiError('Message was not found.', 'NOT_FOUND', {}, undefined, 404)
+        return { ...inboundMessage(s, message), html: message.html, attachments: message.attachments.map(({ id, filename, contentType, size, disposition, contentId }) => ({ id, filename, contentType, size, disposition, contentId })) }
+      }),
+      attachmentUrl: (_messageId, attachmentId, _input, signal) => run(signal, false, () => { throw new ApiError(`Attachment downloads are unavailable in demo mode (${attachmentId}).`, 'UNSUPPORTED_OPERATION') }),
+      reply: (threadId, { idempotencyKey, ...input }, signal) => run(signal, true, s => inboundOnce(s, idempotencyKey, { threadId, ...input }, () => {
+        const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread')
+        const visible = inboundVisible(s, row, input.addressId)
+        const original = input.replyToMessageId ? visible.find(message => message.id === input.replyToMessageId) : visible.at(-1)
+        if (!original) throw new ApiError('There is no visible reply target in this conversation.', 'NOT_FOUND', {}, undefined, 404)
+        const linked = inboundLinks(s, original)
+        if (!input.addressId && linked.length !== 1) throw new ApiError('This message is linked to multiple addresses. Choose the sending address with addressId.', 'ADDRESS_REQUIRED', { addressId: 'Choose the sending address.' }, undefined, 409)
+        text(input.text, 'text', 524288)
+        const address = find(s.mailboxes ??= demoMailboxes().mailboxes, input.addressId ?? linked[0]!, 'Address')
+        const recipients = replyRecipients(original, ownAddressesOf(address), input.replyAll ?? false)
+        const same = (a: string[], b: string[]) => { const x = new Set(a.map(v => v.toLowerCase())), y = new Set(b.map(v => v.toLowerCase())); return x.size === y.size && [...x].every(v => y.has(v)) }
+        if (input.expectedRecipients && !(['to', 'cc', 'bcc'] as const).every(field => same(input.expectedRecipients![field], recipients[field]))) throw new ApiError('The reply recipients differ from those reviewed. Review To, Cc and Bcc before sending.', 'INBOUND_RECIPIENTS_CHANGED', { expectedRecipients: 'Review the recipients again.' }, undefined, 409)
+        if (!recipients.to.length) invalid('to', 'This reply has no recipients.')
+        const named = (value: string) => [original.from, ...original.replyTo, ...original.to, ...original.cc].find(person => person.address.toLowerCase() === value) ?? { name: null, address: value }
+        // Deterministic simulation only: no email is sent.
+        const reply: MailboxMessage = { ...original, id: id('msg'), mailboxId: address.id, direction: 'outbound', status: 'delivered', read: true, labels: [], from: senderOf(address), to: recipients.to.map(named), cc: recipients.cc.map(named), bcc: [], replyTo: [],
+          subject: original.subject.startsWith('Re:') ? original.subject : `Re: ${original.subject}`, text: input.text, replyText: input.text, snippet: input.text.slice(0, 200), html: null, attachments: [], attachmentCount: 0, sentAt: now(), receivedAt: now(), inReplyTo: original.messageId,
+          references: [...original.references, ...(original.messageId ? [original.messageId] : [])], messageId: `${id('demo')}@mail.example.net`, verdicts: {}, automated: false, spam: false }
+        row.messages.push(reply); row.messageCount++; row.lastMessageAt = reply.receivedAt; row.snippet = reply.snippet
+        return inboundMessage(s, reply)
+      })),
+      startThread: ({ idempotencyKey, ...input }, signal) => run(signal, true, s => inboundOnce(s, idempotencyKey, input, () => {
+        const address = find(s.mailboxes ??= demoMailboxes().mailboxes, input.addressId, 'Address')
+        if (!input.to.length) invalid('to', 'Add at least one recipient.')
+        const to = input.to.map(value => ({ name: null, address: email(value, 'to') }))
+        const subject = text(input.subject, 'subject', 998), body = text(input.text, 'text', 524288)
+        const threadId = id('thr'), at = now()
+        // Deterministic simulation only: no email is sent.
+        const message: MailboxMessage = { id: id('msg'), threadId, mailboxId: address.id, direction: 'outbound', status: 'delivered', errorCode: null, read: true, labels: [], from: senderOf(address), to, cc: [], bcc: [], replyTo: [], subject, snippet: body.slice(0, 200),
+          sentAt: at, receivedAt: at, attachmentCount: 0, spam: false, automated: false, messageId: `${id('demo')}@mail.example.net`, inReplyTo: null, references: [], text: body, replyText: body, html: null, bodyTruncated: false, attachments: [], verdicts: {} }
+        ;(s.mailboxThreads ??= demoMailboxThreads()).unshift({ id: threadId, mailboxId: address.id, subject, snippet: message.snippet, participants: [message.from, ...to], messageCount: 1, unreadCount: 0, lastMessageAt: at, lastInboundAt: null, archived: false, starred: false, spam: false, trashed: false, labels: [], messages: [message] })
+        return inboundMessage(s, message)
+      })),
+      webhooks: signal => run(signal, false, s => (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(inboundWebhook)),
+      webhook: (webhookId, signal) => run(signal, false, s => inboundWebhook(find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'))),
+      createWebhook: ({ addressIds, ...input }, signal) => run(signal, true, s => {
+        try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
+        const webhook = { id: id('mwh'), ...input, mailboxIds: addressIds, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
+        ;(s.mailboxWebhooks ??= demoMailboxAccess().webhooks).unshift(webhook)
+        return { webhook: inboundWebhook(webhook), secret: `whsec_demo${id('s').slice(-16)}` }
+      }),
+      updateWebhook: (webhookId, { addressIds, ...patch }, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, addressIds === undefined ? {} : { mailboxIds: addressIds }, { updatedAt: now() }); return inboundWebhook(row) }),
       deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
       rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
       webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),

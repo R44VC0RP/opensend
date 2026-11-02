@@ -886,6 +886,114 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
   });
 
+  test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
+    const { token } = await oauthGrant(t, await fixtureDatabase(t), `${writableScope} opensend:live`);
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { mailMessages, mailAttachments } = await import('./src/db/mailbox.js');
+      const { attachToMailboxes } = await import('./src/mailbox-store.js');
+      const scope = { workspaceId: runtime.config.workspaceId, environment: 'live' as const }, topic = `arn:aws:sns:${REGION}:111122223333:inbound-test`;
+      runtime.config.liveEnabled = true; runtime.config.aws = { accessKeyId:'synthetic-fixture', secretAccessKey:'synthetic-fixture' };
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`,[scope.workspaceId,REGION,{ provisioned:true,account:{id:'111122223333',sendingEnabled:true},resources:{topic:{arn:topic},transactional:{sendingEnabled:true},marketing:{sendingEnabled:true}} },await credentialFingerprint(runtime.config),discoveryTarget(runtime.config),topic]);
+      await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'synthetic',$3)`,[scope.workspaceId,REGION,topic]);
+      const domainId = unique('dom');
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','example.com',$3)`, [domainId,scope.workspaceId,REGION]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status) VALUES($1,$2,'live',$3,'example.com',$4,'active')`,[unique('mdom'),scope.workspaceId,domainId,REGION]);
+      const sent = new Map<string, any>();
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled:true, SendQuota:{ MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0 } };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x=>x.Name==='opensend_email_id')!.Value!;sent.set(id,cmd.input);return { MessageId:`ses-${id}` };
+      });
+      const base = '/v1/inbound', get = (p:string, h?:Record<string,string>) => local('GET',base+p,undefined,'live',h), post = (p:string, body:Json, h?:Record<string,string>) => local('POST',base+p,body,'live',h);
+      const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
+      const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
+      const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent.response; };
+      const tools = (await mcp('tools/list',{})).tools.map((x:Json)=>x.name);
+      for (const name of ['saveInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','sendInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
+      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','enableInboundDomain']) assert.ok(!tools.includes(admin));
+      const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
+      const legacyHook = ok(await local('POST','/mailbox/v1/webhooks',{url:'https://example.com/mailboxes',eventTypes:['mailbox.created','mailbox.deleted']},'live'),201);
+      const a=await success('saveInboundAddress',{action:'create',body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
+      const b=ok(await post('/addresses',{address:'billing@example.com'}),201);
+      const updated=await success('saveInboundAddress',{action:'update',addressId:a.id,body:{displayName:'Customer support'},confirm:true});assert.deepEqual(updated.aliases,['help@example.com']);assert.deepEqual(updated.metadata,{purpose:'support'});
+      assert.equal((await success('getInboundAddress',{addressId:a.id})).id,a.id);
+      const domain = ok(await get(`/domains/${domainId}`));
+      assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'create_address'); assert.ok(!('mailboxCount' in domain));
+      assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'store'},'live')).catchAll,'store');
+      assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'create_address'},'live')).catchAll,'create_address');
+      assert.equal(ok(await local('GET',`/mailbox/v1/domains/${domainId}`,undefined,'live')).catchAll,'create_mailbox');
+      const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
+      assert.deepEqual(ok(await get('/addresses',h)).data.map((x:Json)=>x.id),[a.id]);error(await get(`/addresses/${b.id}`,h),404);error(await post('/addresses',{address:'denied@example.com'},h),403);
+      error(await local('GET',`${base}/addresses`,undefined,'test'),403);
+      const startArgs={mode:'start',body:{addressId:a.id,to:['customer@example.net'],subject:'Invoice',text:'Opening message'},idempotencyKey:'thread-start',confirm:true};
+      assert.equal((await tool('sendInboundThread',{...startArgs,confirm:false})).isError,true);
+      const first=await success('sendInboundThread',startArgs);assert.equal(first.status,'queued');assert.match(first.threadId,/^thr_/);assert.equal((await success('sendInboundThread',startArgs)).id,first.id);
+      const threadId=first.threadId,path=`/threads/${threadId}`;
+      async function deliver(id:string, addresses:string[], subject:string, at:string) {
+        const [row]=await runtime.db.insert(mailMessages).values({id,...scope,direction:'inbound',threadId,region:REGION,fromAddress:'sender@example.net',to:[],replyTo:[{name:null,address:'reply@example.net'}],subject,text:subject,snippet:subject,messageId:`${id}@example.net`,receivedAt:at}).returning();
+        await attachToMailboxes(runtime.db,scope,row!,addresses);
+      }
+      // The same conversation reaches billing later. Membership never grants historical messages retroactively.
+      const shared=unique('msg'),hidden=unique('msg'); const later=new Date(Date.now()+1000).toISOString();
+      await deliver(shared,[a.id,b.id],'Shared invoice',later);
+      const both=await success('getInboundThread',{threadId});assert.equal(both.messageCount,2);assert.deepEqual(new Set(both.addressIds),new Set([a.id,b.id]));
+      error(await post(`${path}/reply`,{text:'ambiguous'}),409,'ADDRESS_REQUIRED');
+      error(await local('PATCH',base+path,{read:true},'live'),409,'ADDRESS_REQUIRED');
+      error(await local('PATCH',base+path,{read:true},'live',h),403);
+      const marked = await success('updateInboundThread',{threadId,body:{addressId:a.id,read:true,starred:true},confirm:true});
+      assert.equal(marked.addressId,a.id); assert.equal(marked.unreadCount,0);
+      assert.equal(ok(await get(path,h)).messages.at(-1).read,true);
+      assert.equal(ok(await get(`${path}?addressId=${b.id}`)).messages.at(-1).read,false);
+      assert.deepEqual(ok(await get(`/threads?view=starred&addressId=${b.id}`)).data,[]);
+      await deliver(hidden,[b.id],'billing-private-needle',new Date(Date.now()+2000).toISOString());
+      assert.equal((await success('listInboundThreads',{q:'invoice'})).data.length,1);
+      const support=ok(await get(path,h));assert.deepEqual(support.messages.map((m:Json)=>m.id),[first.id,shared]);assert.equal(support.snippet,'Shared invoice');assert.deepEqual(support.addressIds,[a.id]);assert.ok(!JSON.stringify(support).includes(hidden));
+      assert.deepEqual(ok(await get('/threads?q=billing-private-needle',h)).data,[]);error(await get(`/messages/${hidden}`,h),404);error(await post(`${path}/reply`,{replyToMessageId:hidden,text:'hidden'},h),404);
+      assert.equal((await success('getInboundMessage',{messageId:shared})).text,'Shared invoice');
+      assert.deepEqual(ok(await get('/messages?q=billing-private-needle',h)).data,[]);
+      assert.deepEqual((await success('listInboundMessages',{q:'billing-private-needle'})).data.map((x:Json)=>x.id),[hidden]);
+      const unassigned = unique('msg'); await deliver(unassigned,[],'Unassigned storage',later);
+      assert.deepEqual(ok(await get('/messages?q=Unassigned')).data.map((m:Json)=>m.addressIds),[[]]);
+      assert.deepEqual(ok(await get('/messages?q=Unassigned',h)).data,[]);
+      error(await get(`/messages/${unassigned}`,h),404); error(await get(`/messages/${unassigned}?addressId=${a.id}`),404);
+      error(await post(`${path}/reply`,{replyToMessageId:unassigned,text:'not routed'}),404);
+      const fileId = unique('att');
+      await runtime.db.insert(mailAttachments).values({id:fileId,...scope,messageId:hidden,filename:'invoice.txt',contentType:'text/plain',sizeBytes:42,disposition:'attachment',sha256:'0'.repeat(64),bucket:'inbound-fixture',storageKey:'invoice.txt'});
+      await db.query('UPDATE mail_messages SET text=$1, html=$2, attachment_count=1 WHERE id=$3',['a'.repeat(9000),'<p>Invoice</p>',hidden]);
+      const preview = ok(await get(path)).messages.find((m:Json)=>m.id===hidden);
+      assert.equal(preview.text.length,8192); assert.equal(preview.bodyTruncated,true);
+      const detail = ok(await get(`/messages/${hidden}?includeHtml=true`));
+      assert.equal(detail.text.length,9000); assert.equal(detail.html,'<p>Invoice</p>'); assert.deepEqual(detail.attachments.map((f:Json)=>f.id),[fileId]);
+      const file = `/messages/${hidden}/attachments/${fileId}`;
+      error(await get(file,h),404); error(await get(`/messages/${shared}/attachments/${fileId}`),404);
+      assert.equal(new URL(ok(await get(file)).url).searchParams.get('X-Amz-Expires'),'300');
+      const page=ok(await get(`${path}?limit=1`,h));assert.equal(page.messages[0].id,shared);assert.ok(page.nextCursor);assert.equal(ok(await get(`${path}?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`,h)).messages[0].id,first.id);
+      const replayHeaders={...h,'Idempotency-Key':'latest-visible'};const reply=ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202);assert.equal(reply.inReplyTo,`${shared}@example.net`);
+      const reviewed={mode:'reply',threadId,idempotencyKey:'confirmed-reply',confirm:true,body:{addressId:a.id,replyToMessageId:shared,text:'This is the approved answer',expectedRecipients:{to:['reply@example.net'],cc:[],bcc:[]}}};
+      const mismatched=await tool('sendInboundThread',{...reviewed,body:{...reviewed.body,expectedRecipients:{to:['reply@example.net'],cc:['extra@example.net'],bcc:[]}}});assert.equal(mismatched.structuredContent.error.code,'INBOUND_RECIPIENTS_CHANGED');
+      const confirmed=await success('sendInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
+      const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
+      assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('sendInboundThread',reviewed)).id,confirmed.id);
+      await dispatchDue(runtime,'live',REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
+      const solo=ok(await post('/threads',{addressId:a.id,to:['followup@example.net'],subject:'Only outbound',text:'First'},h),202);await dispatchDue(runtime,'live',REGION);
+      const followup=ok(await post(`/threads/${solo.threadId}/reply`,{text:'Following up'},h),202);assert.equal(followup.inReplyTo,`ses-${solo.emailId}@${REGION==='us-east-1'?'email':REGION}.amazonses.com`);assert.equal(followup.to[0].address,'followup@example.net');
+      const hook=ok(await post('/webhooks',{url:'https://example.com/inbound',addressIds:[a.id],eventTypes:['message.queued']}),201);assert.deepEqual(hook.addressIds,[a.id]);assert.ok(!('mailboxIds' in hook));
+      assert.ok(ok(await get(`/events?after=0&addressId=${a.id}`,h)).data.every((x:Json)=>x.addressId===a.id && !('mailboxId' in x)));
+      assert.equal((await success('deleteInboundAddress',{addressId:b.id,confirm:true})).ok,true);error(await get(`/addresses/${b.id}`),404);
+      const lifecycle = ok(await get('/events?after=0&types=address.created,address.deleted')).data;
+      const legacy = ok(await local('GET','/mailbox/v1/events?after=0&types=mailbox.created,mailbox.deleted',undefined,'live')).data;
+      assert.deepEqual(lifecycle.map((e:Json)=>e.id),legacy.map((e:Json)=>e.id));
+      assert.deepEqual(lifecycle.map((e:Json)=>e.type),['address.created','address.created','address.deleted']);
+      const deliveries = (await db.query('SELECT webhook_id,payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 ORDER BY event_seq',[scope.workspaceId])).rows;
+      for (const [hookId,prefix] of [[canonicalHook.id,'address'],[legacyHook.id,'mailbox']]) {
+        const bodies=deliveries.filter(d=>d.webhook_id===hookId).map(d=>d.payload);
+        assert.deepEqual(bodies.map(e=>e.type),[`${prefix}.created`,`${prefix}.created`,`${prefix}.deleted`]); assert.equal(bodies.at(-1).addressId,b.id);
+      }
+    });
+  });
+
   test('hosted MCP read-only OAuth hides writes and revoked consent immediately denies the token', async t => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');

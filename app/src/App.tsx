@@ -10,7 +10,7 @@ const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
 const loadDeveloper = () => import('./features/developer')
 const loadDocs = () => import('./features/docs')
-const loadMailboxes = () => import('./features/mailboxes')
+const loadInbound = () => import('./features/inbound')
 const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
 const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
@@ -34,10 +34,15 @@ const WebhooksPage = lazy(() => loadSettings().then(m => ({ default: m.WebhooksP
 const WebhookDetailPage = lazy(() => loadSettings().then(m => ({ default: m.WebhookDetailPage })))
 const DeveloperPage = lazy(() => loadDeveloper().then(m => ({ default: m.DeveloperPage })))
 const DocsPage = lazy(() => loadDocs().then(m => ({ default: m.DocsPage })))
-const MailboxesPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxesPage })))
-const MailboxDetailPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxDetailPage })))
-const MailboxWebhooksPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxWebhooksPage })))
-const MailboxWebhookDetailPage = lazy(() => loadMailboxes().then(m => ({ default: m.MailboxWebhookDetailPage })))
+const InboundPage = lazy(() => loadInbound().then(m => ({ default: m.InboundPage })))
+const InboundAddressesPage = lazy(() => loadInbound().then(m => ({ default: m.InboundAddressesPage })))
+const InboundAddressDetailPage = lazy(() => loadInbound().then(m => ({ default: m.InboundAddressDetailPage })))
+const InboundWebhooksPage = lazy(() => loadInbound().then(m => ({ default: m.InboundWebhooksPage })))
+const InboundWebhookDetailPage = lazy(() => loadInbound().then(m => ({ default: m.InboundWebhookDetailPage })))
+const LegacyMailboxesRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxesRedirect })))
+const LegacyMailboxRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxRedirect })))
+const LegacyMailboxWebhooksRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhooksRedirect })))
+const LegacyMailboxWebhookRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhookRedirect })))
 
 const initialPath = window.location.pathname
 if (initialPath === '/') void loadOverview()
@@ -48,7 +53,7 @@ else if (['/contacts', '/lists', '/segments'].some(path => initialPath.startsWit
 else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) void loadSettings()
 else if (initialPath.startsWith('/developer')) void loadDeveloper()
 else if (initialPath.startsWith('/docs')) void loadDocs()
-else if (initialPath.startsWith('/mailboxes')) void loadMailboxes()
+else if (['/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) void loadInbound()
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }
@@ -60,7 +65,8 @@ export function App() {
   return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
-    <Route path="mailboxes" element={<MailboxesPage />} /><Route path="mailboxes/webhooks" element={<MailboxWebhooksPage />} /><Route path="mailboxes/webhooks/:id" element={<MailboxWebhookDetailPage />} /><Route path="mailboxes/:id" element={<MailboxDetailPage />} />
+    <Route path="inbound" element={<InboundPage />} /><Route path="inbound/addresses" element={<InboundAddressesPage />} /><Route path="inbound/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="inbound/webhooks" element={<InboundWebhooksPage />} /><Route path="inbound/webhooks/:id" element={<InboundWebhookDetailPage />} />
+    <Route path="mailboxes" element={<LegacyMailboxesRedirect />} /><Route path="mailboxes/webhooks" element={<LegacyMailboxWebhooksRedirect />} /><Route path="mailboxes/webhooks/:id" element={<LegacyMailboxWebhookRedirect />} /><Route path="mailboxes/:id" element={<LegacyMailboxRedirect />} />
     <Route path="campaigns" element={<CampaignsPage />} /><Route path="campaigns/new" element={<CampaignEditorPage />} /><Route path="campaigns/:id/edit" element={<CampaignEditorPage />} /><Route path="campaigns/:id/review" element={<CampaignReviewPage />} />
     <Route path="templates" element={<TemplatesPage />} /><Route path="templates/:id" element={<TemplateEditorPage />} />
     <Route path="contacts" element={<ContactsPage />} /><Route path="contacts/:id" element={<ContactDetailPage />} />

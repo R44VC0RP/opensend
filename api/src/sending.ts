@@ -91,12 +91,13 @@ const SendInput = z.object({
   if (v.kind === 'marketing' && ((Array.isArray(v.to) ? v.to.length : 1) !== 1 || v.cc.length || v.bcc.length)) ctx.addIssue({ code: 'custom', message: 'Marketing messages require exactly one To recipient and no Cc/Bcc.' });
   if (v.template && (v.attachments.length || v.kind === 'marketing')) ctx.addIssue({ code: 'custom', message: 'Stored templates currently support transactional messages without attachments only.' });
 }).openapi('BatchSendEmailItem');
-const SingleSendInput = SendInput.safeExtend({ replyMailboxId: z.string().min(1).max(120).optional().describe('Opt in to a mailbox conversation for this transactional send. Requires unrestricted live manage permission; from and any Reply-To addresses must belong to this mailbox. Use explicit subject and text/html, not a stored template. Leave unset for ordinary sends.') }).openapi('SendEmailInput');
+const ReplyAddressId = z.string().min(1).max(120).optional();
+const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted live manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }) }).refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' }).openapi('SendEmailInput');
 const BatchInput = z.object({ emails: z.array(SendInput).min(1).max(100) }).strict().openapi('SendEmailBatchInput');
 const Status = z.enum(['queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated']);
 const Email = z.object({ id: z.string(), environment: z.enum(['live', 'test']), region: z.string(), campaignId: z.string().nullable(), from: z.string(), fromName: z.string().nullable(), kind: z.enum(['transactional', 'marketing']), to: z.array(z.string()), cc: z.array(z.string()), bcc: z.array(z.string()), subject: z.string(), status: Status, providerId: z.string().nullable(), simulated: z.boolean(), attemptStartedAt: z.string().nullable(), errorCode: z.string().nullable(), scheduledAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('Email');
 const Receipt = z.object({ id: z.string(), status: z.literal('queued'), environment: z.enum(['live', 'test']), simulated: z.boolean() }).openapi('EmailQueued');
-const SingleReceipt = z.object({ ...Receipt.shape, mailboxMessageId: z.string().optional(), threadId: z.string().optional() }).describe('When replyMailboxId was supplied, id is the transactional email ID; mailboxMessageId and threadId identify the same send in the mailbox.').openapi('SingleEmailQueued');
+const SingleReceipt = z.object({ ...Receipt.shape, inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), environment: z.enum(['live', 'test']), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
 const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
@@ -635,11 +636,11 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
 export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', tags: ['Emails'], security, request: { headers: IdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
-    if (input.replyMailboxId) {
-      if (a.environment !== 'live' || a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use an unrestricted live manage credential, or send through the mailbox API with a scoped mailbox key.');
-      const mailboxId = input.replyMailboxId;
-      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, mailboxId, input));
-      return c.json(SingleReceipt.parse(result), 202);
+    const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
+    if (replyAddressId) {
+      if (a.environment !== 'live' || a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use unrestricted live manage permission, or start a thread with a scoped inbound key.');
+      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId'));
+      return c.json(SingleReceipt.parse({ ...result, inboundMessageId: result.mailboxMessageId }), 202);
     }
     const result = await idempotent(c, a, input, async db => { await checkPending(db, a, 1); return queueEmail(db, a, await prepare(c.env, db, a, input), undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);

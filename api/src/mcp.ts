@@ -54,9 +54,10 @@ function rpcError(status: number, code: number, message: string, id: string | nu
 async function serve(app: App, request: Request, runtime: Runtime, actor: Actor, catalog: ReadonlyMap<string, McpOperation>): Promise<Response> {
   const base = new URL(runtime.config.publicUrl);
   const allowWrites = actor.permissions.some(p => p === 'send' || p === 'manage');
+  const allowInbound = actor.environment === 'live' && actor.permissions.includes('manage') && !actor.domains.length;
   const credential = request.headers.get('authorization')?.match(/^(?:Bearer|DPoP)\s+(.+)$/i)?.[1];
   const redact = (text: string) => credential ? text.split(credential).join('[REDACTED]') : text;
-  const operations = new Map([...catalog].filter(([, op]) => allowWrites || !op.write));
+  const operations = new Map([...catalog].filter(([, op]) => (!op.inbound || allowInbound) && (allowWrites || !op.write)));
   const pending = new Set<Promise<CallToolResult>>();
   const servers: Server[] = [];
   let accepting = true;

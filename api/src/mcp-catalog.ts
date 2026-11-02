@@ -5,7 +5,7 @@ import type { App } from './core.js';
 type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
-export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
+export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
@@ -38,7 +38,7 @@ function reference(spec: ObjectValue, value: ObjectValue): ObjectValue {
   }
   return value;
 }
-function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValue, write: boolean): Tool['inputSchema'] {
+function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValue, write: boolean): Tool['inputSchema'] | undefined {
   const properties: ObjectValue = Object.create(null);
   const required: string[] = [];
   const parameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p));
@@ -49,16 +49,24 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
     if (p.required || p.in === 'path') required.push(p.name);
   }
   if (parameters.some(p => !['path', 'query', 'header'].includes(p.in) || (p.in === 'header' && p.name.toLowerCase() !== 'idempotency-key'))) invalid('Unsupported API parameter location.');
+  if (operation.operationId === 'replyToInboundThread' && !operation.requestBody) return undefined;
   if (operation.requestBody) {
     const body = reference(spec, operation.requestBody);
     if (!object(body.content?.['application/json']?.schema)) invalid('Only JSON API request bodies are supported.');
     properties.body = body.content['application/json'].schema;
-    if (body.required) required.push('body');
+    if (operation.operationId === 'replyToInboundThread') {
+      const input = reference(spec, properties.body);
+      const reviewed = ['addressId', 'replyToMessageId', 'expectedRecipients'];
+      if (!reviewed.every(field => Object.hasOwn(input.properties ?? {}, field))) return undefined;
+      properties.body = { ...input, required: [...new Set([...(input.required ?? []), ...reviewed])] };
+    }
+    if (body.required || operation.operationId === 'replyToInboundThread') required.push('body');
   }
   if (write) {
     properties.confirm = { type: 'boolean', const: true, description: 'Explicit authorization to perform this write. Required; not a dry run.' };
     properties.idempotencyKey = { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$', description: 'Forwarded as Idempotency-Key. Reuse the same value when reconciling an uncertain write; the API decides which operations support it.' };
     required.push('confirm');
+    if (operation.operationId === 'createInboundThread' || operation.operationId === 'replyToInboundThread') required.push('idempotencyKey');
   }
   return localSchema(spec, { type: 'object', properties, additionalProperties: false, ...(required.length ? { required } : {}) });
 }
@@ -370,6 +378,14 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   }, pageOutput()));
   add(actionTool('sendEmail', `Send one email or a batch. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, { single: need('sendEmail', raw), batch: need('sendEmailBatch', raw) }, 'mode'));
 
+  // Keep mailbox content off outbound-only grants, including all existing read grants.
+  const inbound = (operation: McpOperation) => add(Object.freeze({ ...operation, inbound: true }));
+  for (const name of ['listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents']) inbound(need(name));
+  inbound(actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail.', { create: need('createInboundAddress'), update: need('updateInboundAddress') }));
+  const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
+  if (combined.has('replyToInboundThread')) threadSends.reply = need('replyToInboundThread');
+  inbound(actionTool('sendInboundThread', `Queue real mail now from a receiving address. For replies, read the thread first. Pin body.addressId, body.replyToMessageId and body.expectedRecipients to the reviewed address, message and exact To/Cc/Bcc; do not guess recipients from participants. Never split a send across threads to bypass the 50-person limit. Reuse the same idempotencyKey only for a retry of the same confirmed send. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, threadSends, 'mode'));
+
   add(actionTool('getAttachment', 'Retrieve attachment metadata or its private canonical base64 content.', { metadata: need('getAttachment', raw), content: need('getAttachmentContent', raw) }, 'include'));
   direct('uploadAttachment', 'Upload small attachment content already available as canonical base64. For a local file, create a short-lived agent token and use npx opensend-js upload so file bytes bypass model context.', 'uploadAttachment');
   direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
@@ -409,10 +425,12 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const write = method !== 'get';
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
       const queryParameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p)).filter(p => p.in === 'query').map(p => p.name as string);
+      const input = inputSchema(spec, item as ObjectValue, operation, write);
+      if (!input) continue;
       const tool: Tool = {
         name,
         description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions and environment are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
-        inputSchema: inputSchema(spec, item as ObjectValue, operation, write),
+        inputSchema: input,
         outputSchema: outputSchema(spec, operation),
         annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true },
       };

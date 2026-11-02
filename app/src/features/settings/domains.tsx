@@ -4,7 +4,7 @@ import { Alert, Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState
 import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
-import { receivingStatus } from '../mailboxes/status'
+import { receivingStatus } from '../inbound/status'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
 
@@ -136,7 +136,7 @@ const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state
 
 function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
-  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Mailbox setup started')
+  const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started')
   const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off')
   const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked')
   const [conflict, setConflict] = useState<string | null>(null)
@@ -145,25 +145,25 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     try { await enable.mutateAsync(false) }
     catch (error) { if (error instanceof ApiError && error.code === 'MX_CONFLICT') { enable.reset(); setConflict(error.message.replace(/ Retry with force=true to continue anyway\. \[MX_CONFLICT\].*$/, '')) } }
   }
-  if (receiving.error) return <section className="section stack"><SectionHeader title="Mailboxes" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
+  if (receiving.error) return <section className="section stack"><SectionHeader title="Inbound" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
   const state = receiving.data
   const on = !!state && !['off', 'disabled'].includes(state.status)
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Mailboxes</h2><p className="muted">Receive mail on {domainName} and manage mailboxes through the mailbox API.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Inbound</h2><p className="muted">Receive mail on {domainName} and read it as conversations in <Link to="/inbound">Inbound</Link>.</p></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
-      </> : <Button variant="primary" disabled={!verified || !state} loading={enable.isPending} onClick={start}>Enable mailboxes</Button>}</div>
+      </> : <Button variant="primary" disabled={!verified || !state} loading={enable.isPending} onClick={start}>Enable receiving</Button>}</div>
     </div>
     <MutationError error={enable.error ?? disable.error ?? check.error} />
-    {!verified && !on && <p className="muted">Verify the domain before enabling mailboxes.</p>}
+    {!verified && !on && <p className="muted">Verify the domain before enabling receiving.</p>}
     {state && status && on && <>
       <dl className="settings-facts settings-account-summary">
         <div><dt>Receiving</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
-        <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_mailbox' ? 'Create a mailbox' : 'Store as unrouted'}</dd></div>
-        <div><dt>Mailboxes</dt><dd><Link to="/mailboxes">{state.mailboxCount}</Link></dd></div>
+        <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_address' ? 'Create an address' : 'Store as unrouted'}</dd></div>
+        <div><dt>Addresses</dt><dd><Link to="/inbound/addresses">{state.addressCount}</Link></dd></div>
         <div><dt>Region</dt><dd>{state.region}</dd></div>
       </dl>
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
@@ -171,8 +171,8 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
       {state.mx && state.status !== 'provisioning' && <Alert tone={mxTone(state.mx.state)}>{state.mx.message}</Alert>}
       <DnsRecordTable records={records} />
     </>}
-    <ConfirmDialog open={!!conflict} onOpenChange={open => { if (!open) setConflict(null) }} title={`Move mail for ${domainName}?`} description={`${conflict ?? ''} Existing mailboxes at that provider stop receiving mail once the MX record changes.`} confirmLabel="Enable anyway" danger onConfirm={() => enable.mutateAsync(true)} />
-    <ConfirmDialog open={disableOpen} onOpenChange={setDisableOpen} title={`Stop receiving on ${domainName}?`} description="SES stops accepting mail for this domain. Mailboxes and stored messages are kept." confirmLabel="Turn off" danger onConfirm={() => disable.mutateAsync()} />
+    <ConfirmDialog open={!!conflict} onOpenChange={open => { if (!open) setConflict(null) }} title={`Move mail for ${domainName}?`} description={`${conflict ?? ''} Mail stops arriving at that provider once the MX record changes.`} confirmLabel="Enable anyway" danger onConfirm={() => enable.mutateAsync(true)} />
+    <ConfirmDialog open={disableOpen} onOpenChange={setDisableOpen} title={`Stop receiving on ${domainName}?`} description="SES stops accepting mail for this domain. Addresses and stored messages are kept." confirmLabel="Turn off" danger onConfirm={() => disable.mutateAsync()} />
   </section>
 }
 
