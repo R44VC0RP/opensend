@@ -1,9 +1,16 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { ApiError, id, type DbExecutor, type Mode } from './core.js';
 import { emails } from './db/sending.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailMessageIds, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
+import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailboxWriteLanes, mailMessageIds, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 
 export type Scope = { workspaceId: string; environment: Mode };
+/** SES assigns the wire Message-ID independently of OpenSend's durable receipt. */
+export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
+/** These three seeded rows replace runtime advisory locks on pooled/Hyperdrive connections. */
+export async function lockMailboxLane(tx: DbExecutor, lane: typeof mailboxWriteLanes.$inferSelect.lane) {
+  const [row] = await tx.select({ lane: mailboxWriteLanes.lane }).from(mailboxWriteLanes).where(eq(mailboxWriteLanes.lane, lane)).for('no key update');
+  if (!row) throw new ApiError(503, 'MAILBOX_SCHEMA_NOT_READY', 'Apply the mailbox schema migrations before receiving mail.');
+}
 export const ADDRESS = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
 /** Message-IDs compare without angle brackets or surrounding whitespace; case is preserved (RFC 5322 local parts are case-sensitive). */
@@ -92,24 +99,23 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
 /** Resolves envelope recipients to mailboxes: exact address/alias, plus-address base, wildcard rules, then the domain catch-all. */
 export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: string[], options: { allowCreate: boolean; receivedAt: string }) {
   const mailboxIds = new Set<string>(), unrouted: string[] = [], created: string[] = [];
-  let blockedByLease = false;
   const domainNames = [...new Set(recipients.map(value => value.split('@')[1] ?? ''))].filter(Boolean);
-  if (!domainNames.length) return { mailboxIds: [], unrouted, created, blockedByLease };
+  if (!domainNames.length) return { mailboxIds: [], unrouted, created };
   const domains = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, scope.workspaceId), eq(mailboxDomains.environment, scope.environment), inArray(mailboxDomains.name, domainNames), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active'])));
   for (const recipient of recipients) {
     const [local = '', host = ''] = recipient.split('@');
     const domain = domains.find(row => row.name === host);
     if (!domain) continue;
     const candidates = [...new Set([recipient, local.includes('+') ? `${local.split('+')[0]}@${host}` : recipient])];
-    // An inactive lease is still an owner, not a miss: never fall through to a rule, plus-base or catch-all.
+    // An inactive lease or send-only address is reserved, not a miss: don't route it or auto-create another owner.
     const routeOwnedAddress = async () => {
       const rows = await tx.select({ address: mailboxAddresses.address, mailboxId: mailboxAddresses.mailboxId,
-        receives: sql<boolean>`${mailboxes.expiresAt} IS NULL OR (${mailboxes.createdAt} <= ${options.receivedAt}::timestamptz AND ${mailboxes.expiresAt} > greatest(statement_timestamp(), ${options.receivedAt}::timestamptz))`,
+        receives: sql<boolean>`${mailboxAddresses.kind} <> 'public' AND (${mailboxes.expiresAt} IS NULL OR (${mailboxes.createdAt} <= ${options.receivedAt}::timestamptz AND ${mailboxes.expiresAt} > greatest(statement_timestamp(), ${options.receivedAt}::timestamptz)))`,
       }).from(mailboxAddresses).innerJoin(mailboxes, eq(mailboxes.id, mailboxAddresses.mailboxId)).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, candidates)));
       const owner = rows.find(row => row.address === recipient) ?? rows[0];
       if (!owner) return false;
       if (owner.receives) mailboxIds.add(owner.mailboxId);
-      else { unrouted.push(recipient); blockedByLease = true; }
+      else unrouted.push(recipient);
       return true;
     };
     if (await routeOwnedAddress()) continue;
@@ -117,8 +123,8 @@ export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: 
     const matched = ruled.find(row => row.rules.some(rule => ruleMatches(rule, recipient)));
     if (matched) { mailboxIds.add(matched.id); continue; }
     if (domain.catchAll === 'create_mailbox' && options.allowCreate && ADDRESS.test(recipient)) {
-      // Serialize creation per address so concurrent deliveries share one mailbox.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_address:${scope.workspaceId}:${recipient}`}))`);
+      // Only misses that would create an address need to coordinate with admin creation.
+      await lockMailboxLane(tx, 'address');
       if (await routeOwnedAddress()) continue;
       const mailboxId = (await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: recipient, origin: 'auto' })).id;
       created.push(mailboxId);
@@ -126,29 +132,27 @@ export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: 
     }
     unrouted.push(recipient);
   }
-  return { mailboxIds: [...mailboxIds], unrouted, created, blockedByLease };
+  return { mailboxIds: [...mailboxIds], unrouted, created };
 }
 
-/** Finds the conversation for a message from In-Reply-To/References, or starts one. Serialized per workspace. */
+/** Finds the conversation for a message from In-Reply-To/References, or starts one. Caller holds the ingest lane. */
 export async function assignThread(tx: DbExecutor, scope: Scope, input: { inReplyTo: string | null; references: string[]; subject: string; at: string; messageId?: string | null }) {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mail_thread:${scope.workspaceId}`}))`);
   // The message's own Message-ID comes last: it matches when one of our mailboxes sent it to another (internal delivery),
   // so the recipient's copy joins the sender's conversation instead of starting a new one.
   const candidates = [...new Set([input.inReplyTo, ...[...input.references].reverse(), input.messageId].filter((value): value is string => !!value))].slice(0, 101);
   let threadId: string | undefined;
   if (candidates.length) {
     const rows = await tx.select({ messageId: mailMessageIds.messageId, threadId: mailMessageIds.threadId }).from(mailMessageIds).where(and(eq(mailMessageIds.workspaceId, scope.workspaceId), eq(mailMessageIds.environment, scope.environment), inArray(mailMessageIds.messageId, candidates)));
-    threadId = candidates.map(candidate => rows.find(row => row.messageId === candidate)?.threadId).find(Boolean);
-    // Replies can arrive before the outbound sync records SES's Message-ID; match the SES provider ID directly.
-    const providerIds = candidates.map(candidate => candidate.match(/^([^@]+)@(?:[a-z0-9-]+\.)?amazonses\.com$/i)?.[1]).filter((value): value is string => !!value);
-    if (!threadId && providerIds.length) {
-      const sent = await tx.select({ sesMessageId: mailMessages.sesMessageId, threadId: mailMessages.threadId }).from(mailMessages).where(and(eq(mailMessages.workspaceId, scope.workspaceId), eq(mailMessages.environment, scope.environment), eq(mailMessages.direction, 'outbound'), inArray(mailMessages.sesMessageId, providerIds)));
-      threadId = providerIds.map(value => sent.find(row => row.sesMessageId === value)?.threadId).find(Boolean);
-      if (!threadId) {
-        const [pending] = await tx.select({ threadId: mailMessages.threadId }).from(mailMessages).innerJoin(emails, and(eq(emails.id, mailMessages.sendingEmailId), eq(emails.workspaceId, mailMessages.workspaceId))).where(and(eq(mailMessages.workspaceId, scope.workspaceId), eq(mailMessages.environment, scope.environment), inArray(emails.providerId, providerIds))).limit(1);
-        threadId = pending?.threadId;
-      }
+    const matches = new Map(rows.map(row => [row.messageId, row.threadId]));
+    // A recently accepted parent must beat an older, already indexed References entry, even before outbound sync.
+    const firstKnown = candidates.findIndex(candidate => matches.has(candidate));
+    const pendingCandidates = firstKnown < 0 ? candidates : candidates.slice(0, firstKnown);
+    const providerIds = pendingCandidates.flatMap(candidate => candidate.match(/^([^@]+)@[a-z0-9-]+\.amazonses\.com$/i)?.slice(1) ?? []);
+    if (providerIds.length) {
+      const pending = await tx.select({ threadId: mailMessages.threadId, providerId: emails.providerId, region: emails.region }).from(emails).innerJoin(mailMessages, and(eq(mailMessages.sendingEmailId, emails.id), eq(mailMessages.workspaceId, emails.workspaceId), eq(mailMessages.environment, emails.environment))).where(and(eq(emails.workspaceId, scope.workspaceId), eq(emails.environment, scope.environment), inArray(emails.providerId, providerIds)));
+      for (const row of pending) if (row.providerId) matches.set(sesMessageId(row.providerId, row.region), row.threadId);
     }
+    threadId = candidates.map(candidate => matches.get(candidate)).find(Boolean);
   }
   if (!threadId) {
     threadId = id('thr');

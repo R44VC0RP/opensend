@@ -6225,6 +6225,13 @@
               "type": "string"
             }
           },
+          "publicAddress": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send-only address used as the default From. Null when the mailbox sends from its receiving address by default."
+          },
           "metadata": {
             "type": "object",
             "additionalProperties": {}
@@ -6304,6 +6311,7 @@
           "domain",
           "aliases",
           "rules",
+          "publicAddress",
           "metadata",
           "origin",
           "createdAt",
@@ -6327,6 +6335,12 @@
               "null"
             ],
             "maxLength": 200
+          },
+          "publicAddress": {
+            "type": "string",
+            "maxLength": 254,
+            "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+            "description": "Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX."
           },
           "ttlSeconds": {
             "type": "integer",
@@ -7260,7 +7274,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7298,7 +7312,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7430,7 +7444,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7468,7 +7482,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7553,7 +7567,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Send as the primary address (default) or one of the mailbox aliases."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
           },
           "text": {
             "type": "string",
@@ -7591,7 +7605,7 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^X-[A-Za-z0-9-]{1,120}$"
+                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
                 },
                 "value": {
                   "type": "string",
@@ -7695,6 +7709,7 @@
             "type": "string",
             "enum": [
               "message.received",
+              "message.stored",
               "message.queued",
               "message.sent",
               "message.delivered",
@@ -7921,6 +7936,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -7984,6 +8000,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -7998,7 +8015,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 12,
+            "maxItems": 13,
             "default": [
               "message.received"
             ]
@@ -8052,8 +8069,7 @@
           },
           "description": {
             "type": "string",
-            "maxLength": 500,
-            "default": ""
+            "maxLength": 500
           },
           "eventTypes": {
             "type": "array",
@@ -8061,6 +8077,7 @@
               "type": "string",
               "enum": [
                 "message.received",
+                "message.stored",
                 "message.queued",
                 "message.sent",
                 "message.delivered",
@@ -8075,10 +8092,7 @@
               ]
             },
             "minItems": 1,
-            "maxItems": 12,
-            "default": [
-              "message.received"
-            ]
+            "maxItems": 13
           },
           "mailboxIds": {
             "type": [
@@ -8092,12 +8106,10 @@
             },
             "minItems": 1,
             "maxItems": 500,
-            "default": null,
             "description": "Only events for these mailboxes; null for all."
           },
           "paused": {
-            "type": "boolean",
-            "default": false
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -34911,12 +34923,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateWebhook } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateWebhook({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"description\": \"\",\n    \"eventTypes\": [\n      \"message.received\"\n    ],\n    \"mailboxIds\": null,\n    \"paused\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { mailboxUpdateWebhook } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await mailboxUpdateWebhook({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/webhooks/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"description\": \"\",\n  \"eventTypes\": [\n    \"message.received\"\n  ],\n  \"mailboxIds\": null,\n  \"paused\": false\n}'"
+            "source": "curl --request PATCH \\\n  --url 'https://opensend.anoma.ly/mailbox/v1/webhooks/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       },

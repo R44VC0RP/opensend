@@ -2843,6 +2843,25 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('mailbox event cursors do not skip concurrent writers committing in different transactions', async t => {
+    const { drizzle } = await import('drizzle-orm/node-postgres');
+    const { recordEvents, readEvents } = await import('./src/mailbox-events.js');
+    const first = await fixtureDatabase(t), second = await fixtureDatabase(t), observer = await fixtureDatabase(t);
+    const scope = unique('event-order'), read = (after: number) => readEvents(drizzle(observer),scope,'live',{ after, mailboxIds:null, includeStored:true, types:['message.stored'], limit:5 });
+    const publish = (conn: pg.Client, id: string) => recordEvents(drizzle(conn),scope,'live',[{ type:'message.stored', mailboxId:null, messageId:id }]);
+    await first.query('BEGIN'); await second.query('BEGIN');
+    try {
+      await second.query("SET LOCAL lock_timeout='5s'"); const pid = (await second.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await publish(first,'first'); const writing = publish(second,'second'); void writing.catch(() => {});
+      let waiting = false; const deadline = Date.now() + 3000;
+      while (!waiting && Date.now() < deadline) { waiting = (await observer.query('SELECT cardinality(pg_blocking_pids($1)) > 0 AS waiting',[pid])).rows[0].waiting; if (!waiting) await new Promise(r => setTimeout(r,10)); }
+      assert.ok(waiting,'Another publisher must wait for the first commit.'); assert.deepEqual(await read(0),[]);
+      await first.query('COMMIT'); await writing;
+      const [visible] = await read(0); assert.equal(visible?.messageId,'first');
+      await second.query('COMMIT'); assert.deepEqual((await read(visible!.seq)).map(row => row.messageId),['second']);
+    } finally { await first.query('ROLLBACK'); await second.query('ROLLBACK'); await observer.query('DELETE FROM mailbox_events WHERE workspace_id=$1',[scope]); }
+  });
+
   test('support mailboxes: track by receipt ID, route the customer reply, verify its webhook and enforce expiry', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
@@ -2926,6 +2945,102 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('POST', `${root}/${temporary.id}/messages`, { to: ['user@example.net'], subject: 'late', text: 'late' }, 'live'), 409);
       error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address, replyMailboxId: temporary.id }, 'live'), 409);
       error(await local('POST', root, { address: temporary.address }, 'live'), 409);
+    });
+  });
+
+  test('forwarded support: query every stored inbound message and reply to the selected message as the public address', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-fixture`;
+      const domainId = unique('domain'), publicAddress = 'support@example.com', address = 'support@inbox.example.com';
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','example.com',$3),($4,$2,'live','inbox.example.com',$3)`, [unique('dom'),scope,REGION,domainId]);
+      await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope,REGION,topic]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status,catch_all) VALUES($1,$2,'live',$3,'inbox.example.com',$4,'active','store')`, [unique('mdom'),scope,domainId,REGION]);
+      const outgoing = new Map<string, any>(); let verified = false, dkim = false;
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetEmailIdentityCommand) { assert.equal(cmd.input.EmailIdentity, 'example.com'); return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: verified, VerificationStatus: verified ? 'SUCCESS' : 'PENDING', DkimAttributes: { Status: dkim ? 'SUCCESS' : 'PENDING', SigningEnabled: dkim } }; }
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; outgoing.set(id, cmd.input); return { MessageId: `synthetic-${id}` };
+      });
+      const base = '/mailbox/v1', mailboxes = `${base}/mailboxes`;
+      const post = (path: string, body: Json, headers?: Record<string, string>) => local('POST', path, body, 'live', headers);
+      const get = (path: string, headers?: Record<string, string>) => local('GET', path, undefined, 'live', headers);
+      error(await post(mailboxes, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_NOT_VERIFIED');
+      verified = true; error(await post(mailboxes, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_DKIM_NOT_READY');
+      dkim = true; error(await post(mailboxes, { address, publicAddress:'billing@example.com' }),422,'PUBLIC_ADDRESS_MISMATCH');
+      const box = ok(await post(mailboxes, { address, publicAddress }), 201); assert.equal(box.publicAddress, publicAddress);
+      const inbox = `${mailboxes}/${box.id}/messages`;
+      const agent = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'support agent', mailboxIds: [box.id], permissions: ['read','send'] }), 201).secret}` };
+      const reader = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'all mailbox reader', permissions: ['read'] }), 201).secret}` };
+      const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'] }), 201);
+      const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', mailboxIds: [box.id], eventTypes: ['message.received'] }), 201);
+      const raw = new Map<string,string>();
+      t.mock.method(S3Client.prototype,'send', async (cmd: any) => { assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      async function receive(to: string, mime: string) {
+        const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
+        assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,environment:'live',attempts:1});
+      }
+      const mime = (id: string, body: string, extra: string[]) => [`From: Customer <from@example.net>`,`To: ${publicAddress}`,'Subject: Widget issue',`Message-ID: <${id}@example.net>`,...extra,'',body].join('\r\n');
+      const firstMime = mime('initial','original zebra',['Reply-To: first@example.net']);
+      await receive(address,firstMime);
+      await receive(address,mime('selected','second zebra',['In-Reply-To: <initial@example.net>','Reply-To: case-owner@example.net','Cc: colleague@example.net, case-owner@example.net','Bcc: private@example.net']));
+      await receive(address,mime('latest','third zebra',['In-Reply-To: <selected@example.net>','References: <initial@example.net>\r\n <selected@example.net>','Reply-To: different@example.net']));
+      await receive('unassigned@inbox.example.com',mime('unrouted','unrouted zebra',['In-Reply-To: <selected@example.net>']));
+      await receive(address,firstMime); // Separate SMTP receipt, identical logical message.
+      const all = ok(await get(`${base}/messages?q=zebra`)).data; assert.equal(all.length,4);
+      const byMailbox = ok(await get(`${inbox}?direction=inbound&q=zebra&limit=2`,agent)); assert.equal(byMailbox.data.length,2); assert.ok(byMailbox.nextCursor);
+      const page2 = ok(await get(`${inbox}?direction=inbound&q=zebra&limit=2&cursor=${encodeURIComponent(byMailbox.nextCursor)}`,agent));
+      const ids = [...byMailbox.data,...page2.data].map(m=>m.id); assert.equal(new Set(ids).size,3); assert.equal(page2.nextCursor,null);
+      const selected = all.find((m: Json)=>m.snippet==='second zebra')!, unrouted = all.find((m: Json)=>m.snippet==='unrouted zebra')!;
+      const detail = ok(await get(`${inbox}/${selected.id}`,agent)); assert.equal(detail.text.trim(),'second zebra'); assert.equal(detail.messageId,'selected@example.net');
+      assert.equal(ok(await get(`${inbox}?threadId=${detail.threadId}&direction=inbound`,agent)).data.length,3);
+      error(await get(`${inbox}/${unrouted.id}`,agent),404); error(await get(`${base}/messages/${unrouted.id}`,reader),403);
+      assert.equal(ok(await get(`${base}/messages/${unrouted.id}`)).text.trim(),'unrouted zebra');
+      const globalEvents = ok(await get(`${base}/events?types=message.stored&after=0`)).data;
+      assert.deepEqual(new Set(globalEvents.map((e: Json)=>e.messageId)),new Set(all.map((m: Json)=>m.id))); assert.equal(globalEvents.length,4);
+      for (const key of [agent,reader]) assert.equal(ok(await get(`${base}/events?types=message.stored&after=0`,key)).data.length,0);
+      error(await post(`${base}/webhooks`,{ url:'https://example.com/invalid-scope', eventTypes:['message.stored'], mailboxIds:[box.id] }),422,'INVALID_EVENT_SCOPE');
+      const deliveries = (await db.query(`SELECT id, webhook_id, payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1`,[scope])).rows;
+      assert.equal(deliveries.filter(d=>d.webhook_id===allHook.id).length,4); assert.equal(deliveries.filter(d=>d.webhook_id===boxHook.id).length,3);
+      assert.equal((await jobs('mailbox.webhook')).length,7);
+      const delivery = deliveries.find(d => d.webhook_id === allHook.id && d.payload.messageId === unrouted.id)!;
+      const { mailboxEventJobs } = await import('./src/mailbox-events.js');
+      let attempts = 0;
+      const receiver = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+        const h = new Headers(init.headers), body = String(init.body), event = JSON.parse(body);
+        assert.equal(url, 'https://example.com/all'); assert.equal(event.type, 'message.stored'); assert.equal(event.mailboxId, null); assert.equal(event.id, delivery.payload.id);
+        assert.equal(h.get('webhook-id'), event.id); assert.equal(h.get('webhook-signature'), 'v1,' + createHmac('sha256', Buffer.from(allHook.secret.slice(6),'base64')).update(`${event.id}.${h.get('webhook-timestamp')}.${body}`).digest('base64'));
+        return new Response(null, { status: ++attempts === 1 ? 503 : 204 });
+      });
+      const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,environment:'live',attempts:attempt });
+      try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { receiver.mock.restore(); }
+      const replyPath = `${inbox}/${selected.id}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
+      error(await post(replyPath,{ text:'unauthorized',from:'sales@example.com' },agent),422);
+      error(await post(replyPath,{ text:'no provider overrides',headers:[{name:'X-SeS-CONFIGURATION-SET',value:'override'}] },agent),422);
+      const reply = ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202);
+      assert.equal(ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202).id,reply.id);
+      const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
+      await dispatchDue(runtime,'live',REGION);
+      assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
+      const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
+      assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
+      assert.equal(wire.Content.Simple.Subject.Data,'Re: Widget issue');
+      assert.deepEqual(wire.Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<selected@example.net>'},{Name:'References',Value:'<initial@example.net> <selected@example.net>'}]);
+      // Some clients return only the direct parent. No mailbox sync or subject match should be required.
+      await receive(address,mime('answered','fourth zebra',[`In-Reply-To: <synthetic-${reply.emailId}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`]).replace('Subject: Widget issue','Subject: A different subject'));
+      const continued = ok(await get(`${inbox}?direction=inbound&q=fourth`,agent)).data;
+      assert.equal(continued.length,1); assert.equal(continued[0].threadId,detail.threadId);
+      await receive(address,mime('separate','separate case',[`In-Reply-To: <synthetic-${tracked.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`,'References: <selected@example.net>']));
+      const separate = ok(await get(`${inbox}?direction=inbound&q=separate`,agent)).data;
+      assert.equal(separate.length,1); assert.equal(separate[0].threadId,tracked.threadId,'A direct, not-yet-synced SES parent takes priority over a known older reference.');
     });
   });
 

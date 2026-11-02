@@ -5,7 +5,7 @@ import { attachments as sendingAttachments, emails } from './db/sending.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxRegions, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, type MailboxEventInput, type MailboxEventType } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3 } from './mailbox-setup.js';
-import { attachToMailboxes, htmlToPlain, normalizeSubject, rememberMessageIds, snippetOf, type Scope } from './mailbox-store.js';
+import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, rememberMessageIds, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import { queueMailboxEmail, storeAttachmentBytes, type SendRequest } from './sending.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
@@ -18,9 +18,6 @@ export type AttachmentInput = { content: string; filename: string; contentType?:
 type ResolvedAttachment = { filename: string; contentType: string; disposition: 'attachment' | 'inline'; contentId: string | null; bytes: Uint8Array; sendingAttachmentId?: string };
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
-
-/** SES replaces Message-ID with <providerId@email.amazonses.com> (us-east-1) or <providerId@region.amazonses.com>. */
-export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
 
 /** Resolves attachment inputs to bytes before any transaction: inline base64, received attachments (matt_) or uploaded sending attachments. */
 export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, items: AttachmentInput[], db: DbExecutor = runtime.db): Promise<ResolvedAttachment[]> {
@@ -51,14 +48,26 @@ export async function resolveAttachments(runtime: Runtime, mailbox: MailboxRow, 
   return out;
 }
 
-/** Keep the root and most recent IDs within SES's 996-byte combined header name/value limit. */
+const wireId = (v: string, header: string) => /^[\x21-\x3b\x3d\x3f-\x7e]+$/.test(v) && v.length + 2 + header.length <= 996;
+
+/** RFC 5322 §3.6.4: inherit References, or the parent's single In-Reply-To when References is absent. */
+export function replyReferences(original: MessageRow, parentId: string | null) {
+  const raw = original.headers.filter(h => h.name.toLowerCase() === 'in-reply-to').map(h => h.value).join(' ');
+  const previous = raw ? messageIdList(raw) : original.inReplyTo ? [original.inReplyTo] : [];
+  const ancestors = original.references.length ? original.references : previous.length === 1 ? previous : [];
+  return [...ancestors.filter(id => id !== parentId && wireId(id, 'References')), ...(parentId ? [parentId] : [])];
+}
+
+/** Preserve the immediate parent first, then the root and newest ancestors that fit on the SES header line. */
 export function referencesHeader(ids: string[]) {
   const max = 996 - 'References'.length;
-  const unique = [...new Set(ids)].map(value => `<${value}>`).filter(value => value.length <= max);
+  const unique = [...new Set(ids.filter(id => wireId(id, 'References')))].map(value => `<${value}>`);
   if (unique.join(' ').length <= max) return unique.join(' ');
-  const [first, ...rest] = unique; const kept: string[] = [];
-  for (const value of rest.reverse()) { if ([first, value, ...kept].join(' ').length > max) break; kept.unshift(value); }
-  return [first, ...kept].join(' ');
+  const root = unique[0]!, kept = [unique.at(-1)!];
+  if (root.length + 1 + kept[0]!.length > max) return kept[0]!;
+  let length = root.length + 1 + kept[0]!.length;
+  for (const ancestor of unique.slice(1, -1).reverse()) if (length + 1 + ancestor.length <= max) { kept.unshift(ancestor); length += 1 + ancestor.length; }
+  return [root, ...kept].join(' ');
 }
 
 export type OutgoingMessage = {
@@ -68,7 +77,7 @@ export type OutgoingMessage = {
   threadId?: string; inReplyTo: string | null; references: string[]; autoSubmitted?: 'auto-generated' | 'auto-replied'; headers: { name: string; value: string }[];
 };
 
-/** Enforces per-mailbox limits and loop guards. Serialized per mailbox by the caller's advisory lock. */
+/** Enforces per-mailbox limits and loop guards. Caller holds the mailbox row lock. */
 async function enforceLimits(tx: DbExecutor, message: OutgoingMessage) {
   const limits = sendLimitsFor(message.mailbox);
   const counts = await tx.execute<{ hour: number; day: number }>(sql`SELECT count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour, count(*)::int AS day
@@ -93,10 +102,12 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const recipients = [...message.to, ...message.cc, ...message.bcc];
   if (!recipients.length) throw new ApiError(422, 'RECIPIENT_REQUIRED', 'Add at least one recipient.', 'to');
   if (recipients.length > 50) throw new ApiError(422, 'TOO_MANY_RECIPIENTS', 'At most 50 recipients across to, cc and bcc.', 'to');
-  const own = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, message.mailbox.id), inArray(mailboxAddresses.address, recipients)));
+  const own = await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, message.mailbox.id), inArray(mailboxAddresses.address, recipients.map(address => address.toLowerCase()))));
   if (own.length) throw new ApiError(422, 'SELF_SEND', `A mailbox cannot send to its own address (${own[0]!.address}).`, 'to');
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_send:${message.mailbox.id}`}))`);
-  if (message.mailbox.expiresAt && Date.parse(message.mailbox.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
+  const [current] = await tx.select().from(mailboxes).where(eq(mailboxes.id, message.mailbox.id)).for('no key update');
+  if (!current) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
+  message = { ...message, mailbox: current };
+  if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   await enforceLimits(tx, message);
   const [domain] = await tx.select().from(mailboxDomains).where(eq(mailboxDomains.id, message.mailbox.domainId));
   const [region] = domain ? await tx.select().from(mailboxRegions).where(and(eq(mailboxRegions.workspaceId, message.scope.workspaceId), eq(mailboxRegions.region, domain.region))) : [];
@@ -149,7 +160,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
 export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest) {
   if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for mailbox sends.', 'replyMailboxId');
   const scope = { workspaceId: actor.workspaceId, environment: actor.environment };
-  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share');
+  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
   if (!target) throw new ApiError(404, 'NOT_FOUND', 'Mailbox was not found.');
   if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox receiving domain must be active before starting a tracked conversation.', 'replyMailboxId');
   const { mailbox } = target;
@@ -170,7 +181,7 @@ export function replyRecipients(original: MessageRow, ownAddresses: string[], re
   const list = (values: MailAddress[]) => values.map(value => value.address.toLowerCase()).filter(value => !mine.has(value));
   const to = original.direction === 'outbound' ? list(original.to) : list(original.replyTo.length ? original.replyTo : [{ name: original.fromName, address: original.fromAddress }]);
   const cc = replyAll ? [...new Set([...(original.direction === 'outbound' ? [] : list(original.to)), ...list(original.cc)])].filter(value => !to.includes(value)) : [];
-  return { to: [...new Set(to)], cc };
+  return { to: [...new Set(to)], cc: cc.filter(address => !to.includes(address)) };
 }
 export function assertReplyable(original: MessageRow, to: string[], allowAutomated: boolean) {
   if (allowAutomated) return;
@@ -182,7 +193,9 @@ export const replySubject = (subject: string, prefix: 'Re' | 'Fwd') => `${prefix
 
 /** Mailbox sync can lag provider acceptance. Never put an OpenSend ID on the wire or silently send an unthreaded follow-up. */
 export async function replyParentId(db: DbExecutor, original: MessageRow) {
-  if (original.messageId || original.direction !== 'outbound') return original.messageId;
+  if (original.messageId && wireId(original.messageId, 'In-Reply-To')) return original.messageId;
+  // Inbound mail is allowed to omit Message-ID; never invent one that the recipient cannot match.
+  if (original.direction !== 'outbound') return null;
   if (original.sendingEmailId) {
     const [sent] = await db.select({ providerId: emails.providerId, region: emails.region }).from(emails).where(and(eq(emails.id, original.sendingEmailId), eq(emails.workspaceId, original.workspaceId), eq(emails.environment, original.environment)));
     if (sent?.providerId) return sesMessageId(sent.providerId, sent.region);

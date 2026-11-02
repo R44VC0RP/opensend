@@ -10,10 +10,10 @@ import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxKe
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, latestCursor, mailboxEventTypes, readEvents, recordEvents, webhookSecretBinding } from './mailbox-events.js';
 import { mailboxS3, queueReconcile } from './mailbox-setup.js';
-import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
+import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
-import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
+import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 
 const BASE = '/mailbox/v1';
@@ -94,6 +94,7 @@ const SubdomainSchema = z.object({
 }).openapi('MailboxSubdomain');
 const MailboxSchema = z.object({
   id: z.string(), address: z.string(), displayName: z.string().nullable(), domain: z.string(), aliases: z.array(z.string()), rules: z.array(z.string()),
+  publicAddress: z.string().nullable().describe('Send-only address used as the default From. Null when the mailbox sends from its receiving address by default.'),
   metadata: z.record(z.string(), z.unknown()), origin: z.enum(['api', 'auto']), createdAt: z.string(), updatedAt: z.string(),
   expiresAt: z.string().datetime().nullable().describe('UTC lease expiry, or null for a permanent mailbox. After expiry, new delivery and sending stop. History stays readable and the address remains reserved until an admin deletes the mailbox.'),
   stats: z.object({ threads: z.number().int(), unreadThreads: z.number().int(), lastMessageAt: z.string().nullable() }),
@@ -178,6 +179,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
   return rows.map(row => {
     const stat = stats.find(item => item.mailboxId === row.id);
     return { id: row.id, address: row.address, displayName: row.displayName, domain: domainRows.find(item => item.id === row.domainId)?.name ?? row.address.split('@')[1]!,
+      publicAddress: addresses.find(item => item.mailboxId === row.id && item.kind === 'public')?.address ?? null,
       aliases: addresses.filter(item => item.mailboxId === row.id && item.kind === 'alias').map(item => item.address).sort(), rules: row.rules, metadata: row.metadata, origin: row.origin,
       createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)!, expiresAt: iso(row.expiresAt), stats: { threads: stat?.threads ?? 0, unreadThreads: stat?.unread ?? 0, lastMessageAt: iso(stat?.last) }, sendLimits: sendLimitsFor(row) };
   });
@@ -185,7 +187,12 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
 const threadView = (row: typeof mailboxThreads.$inferSelect) => ({ id: row.threadId, mailboxId: row.mailboxId, subject: row.subject, snippet: row.snippet, participants: row.participants, messageCount: row.messageCount, unreadCount: row.unreadCount,
   lastMessageAt: iso(row.lastMessageAt)!, lastInboundAt: iso(row.lastInboundAt), archived: row.archived, starred: row.starred, spam: row.spam, trashed: !!row.trashedAt, labels: row.labels });
 type MessageRow = typeof mailMessages.$inferSelect;
-const summaryView = (row: MessageRow, mailboxId: string, read: boolean, labels: string[] = []) => ({ id: row.id, threadId: row.threadId, mailboxId, direction: row.direction, status: row.status, errorCode: row.errorCode, read, labels,
+// A list page is metadata only. Fetch the potentially megabyte-sized HTML, text and headers on detail reads.
+const summaryColumns = { id: mailMessages.id, threadId: mailMessages.threadId, direction: mailMessages.direction, status: mailMessages.status, errorCode: mailMessages.errorCode,
+  fromName: mailMessages.fromName, fromAddress: mailMessages.fromAddress, to: mailMessages.to, cc: mailMessages.cc, subject: mailMessages.subject, snippet: mailMessages.snippet,
+  sentAt: mailMessages.sentAt, receivedAt: mailMessages.receivedAt, attachmentCount: mailMessages.attachmentCount, spam: mailMessages.spam, automated: mailMessages.automated };
+const storedSummaryColumns = { ...summaryColumns, region: mailMessages.region, envelopeTo: mailMessages.envelopeTo };
+const summaryView = (row: Pick<MessageRow, keyof typeof summaryColumns>, mailboxId: string, read: boolean, labels: string[] = []) => ({ id: row.id, threadId: row.threadId, mailboxId, direction: row.direction, status: row.status, errorCode: row.errorCode, read, labels,
   from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, subject: row.subject, snippet: row.snippet, sentAt: iso(row.sentAt), receivedAt: iso(row.receivedAt)!,
   attachmentCount: row.attachmentCount, spam: row.spam, automated: row.automated });
 async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolean; labels?: string[] }[], mailboxId: string, options: { html: boolean; headers: boolean }, db: Pick<Runtime['db'], 'select'> = runtime.db) {
@@ -263,11 +270,11 @@ async function patchMessages(c: Ctx, mailboxId: string, messageIds: string[], pa
 async function claimUnrouted(tx: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], scope: Scope, mailbox: typeof mailboxes.$inferSelect, addresses: string[], rules: string[]) {
   if (mailbox.expiresAt !== null) return 0; // A new lease starts with an empty mailbox, including on address reuse.
   const domain = mailbox.address.split('@')[1]!;
-  // A permanent wildcard cannot backfill mail for another identity's retained lease (including plus-tags).
-  const outsideLease = sql`NOT EXISTS (SELECT 1 FROM mailbox_addresses a JOIN mailboxes m ON m.id = a.mailbox_id
-    WHERE a.workspace_id = ${mailUnrouted.workspaceId} AND a.environment = ${mailUnrouted.environment} AND m.expires_at IS NOT NULL
+  // Neither a retained lease nor a send-only address (including plus-tags) grants historical delivery.
+  const outsideReservation = sql`NOT EXISTS (SELECT 1 FROM mailbox_addresses a JOIN mailboxes m ON m.id = a.mailbox_id
+    WHERE a.workspace_id = ${mailUnrouted.workspaceId} AND a.environment = ${mailUnrouted.environment} AND (m.expires_at IS NOT NULL OR a.kind = 'public')
     AND a.address IN (${mailUnrouted.address}, regexp_replace(${mailUnrouted.address}, '[+][^@]*@', '@')))`;
-  const rows = await tx.select().from(mailUnrouted).where(and(eq(mailUnrouted.workspaceId, scope.workspaceId), eq(mailUnrouted.environment, scope.environment), outsideLease, or(inArray(mailUnrouted.address, addresses), rules.length ? sql`${mailUnrouted.address} LIKE ${`%@${domain}`} OR ${mailUnrouted.address} LIKE ${`%.${domain}`}` : sql`false`))).limit(2000);
+  const rows = await tx.select().from(mailUnrouted).where(and(eq(mailUnrouted.workspaceId, scope.workspaceId), eq(mailUnrouted.environment, scope.environment), outsideReservation, or(inArray(mailUnrouted.address, addresses), rules.length ? sql`${mailUnrouted.address} LIKE ${`%@${domain}`} OR ${mailUnrouted.address} LIKE ${`%.${domain}`}` : sql`false`))).limit(2000);
   const claimed = rows.filter(row => addresses.includes(row.address) || rules.some(rule => ruleMatches(rule, row.address)) || addresses.some(address => { const [local, host] = row.address.split('@'); return local?.includes('+') && `${local.split('+')[0]}@${host}` === address; }));
   if (!claimed.length) return 0;
   const messageIds = [...new Set(claimed.map(row => row.messageId))];
@@ -359,8 +366,7 @@ export function registerMailbox(app: App) {
     const mx = await checkMx(name, parent.region);
     const row = await c.env.db.transaction(async tx => {
       // One lock per parent keeps accept_subdomains consistent with its active subdomains.
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_subdomains:${parent.id}`}))`);
-      const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, parent.id));
+      const [fresh] = await tx.select({ acceptSubdomains: mailboxDomains.acceptSubdomains }).from(mailboxDomains).where(eq(mailboxDomains.id, parent.id)).for('no key update');
       const [existing] = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.name, name)));
       if (existing && (existing.parentId !== parent.id || existing.status === 'active')) throw new ApiError(409, 'SUBDOMAIN_EXISTS', `${name} already receives mail.`, 'name');
       const now = new Date().toISOString();
@@ -396,8 +402,10 @@ export function registerMailbox(app: App) {
   });
 
   // ---------- mailboxes ----------
+  const Address = z.string().trim().toLowerCase().max(254).regex(ADDRESS, 'Use a valid email address.');
   const MailboxInput = z.object({
-    address: z.string().trim().toLowerCase().max(254).regex(ADDRESS, 'Use a valid email address.'), displayName: z.string().trim().max(200).nullable().optional(),
+    address: Address, displayName: z.string().trim().max(200).nullable().optional(),
+    publicAddress: Address.optional().describe('Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX.'),
     ttlSeconds: z.number().int().min(60).max(30 * 24 * 60 * 60).optional().describe('Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.'),
     aliases: z.array(z.string().trim().toLowerCase().max(254).regex(ADDRESS)).max(50).default([]), rules: z.array(z.string().max(254)).max(20).default([]).describe('Wildcard address patterns, e.g. support+*@acme.com or *@help.acme.com.'),
     metadata: z.record(z.string(), z.unknown()).default({}).refine(value => JSON.stringify(value).length <= 16384, 'Metadata must be at most 16 KB.'),
@@ -418,9 +426,25 @@ export function registerMailbox(app: App) {
     const host = input.address.split('@')[1]!;
     const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.name, host)));
     if (!domain || ['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${host} before creating mailboxes on it.`, 'address');
+    const publicAddress = input.publicAddress;
+    if (publicAddress) {
+      if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
+      const [local, publicHost] = publicAddress.split('@') as [string, string];
+      if (local !== input.address.split('@')[0] || !host.endsWith(`.${publicHost}`)) throw new ApiError(422, 'PUBLIC_ADDRESS_MISMATCH', 'Use the same local part on a parent domain of the receiving address.', 'publicAddress');
+      const identity = await getSes(c.env, domain.region).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
+        if (error instanceof Error && error.name === 'NotFoundException') throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `Verify the exact SES domain identity ${publicHost} in ${domain.region}.`, 'publicAddress');
+        throw new ApiError(503, 'SES_UNAVAILABLE', `Could not read the SES identity for ${publicHost} in ${domain.region}. Check GetEmailIdentity access.`, 'publicAddress', true);
+      });
+      if (identity.VerifiedForSendingStatus !== true) throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `${publicHost} is not verified for sending in ${domain.region}.`, 'publicAddress');
+      if (identity.DkimAttributes?.SigningEnabled !== true || identity.DkimAttributes.Status !== 'SUCCESS') throw new ApiError(409, 'PUBLIC_DOMAIN_DKIM_NOT_READY', `Enable and verify DKIM signing for ${publicHost} in ${domain.region}.`, 'publicAddress');
+    }
     const { row, runnable } = await c.env.db.transaction(async tx => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`mailbox_address:${value.workspaceId}:${input.address}`}))`);
+      await lockMailboxLane(tx, 'address');
       const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api', sendLimits: input.sendLimits, ttlSeconds: input.ttlSeconds });
+      if (publicAddress) {
+        const [claimed] = await tx.insert(mailboxAddresses).values({ ...scope, address: publicAddress, mailboxId: created.id, kind: 'public' }).onConflictDoNothing().returning({ address: mailboxAddresses.address });
+        if (!claimed) throw new ApiError(409, 'ADDRESS_TAKEN', `${publicAddress} already belongs to a mailbox.`, 'publicAddress');
+      }
       await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
       return { row: created, runnable: await recordEvents(tx, scope.workspaceId, scope.environment, [{ type: 'mailbox.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]) };
     });
@@ -432,7 +456,7 @@ export function registerMailbox(app: App) {
     return c.json((await mailboxViews(c.env, [mailbox]))[0]!, 200);
   });
   app.openapi(route({ method: 'patch', path: '/mailboxes/{mailboxId}', operationId: 'mailboxUpdate', tags: [TAG.mailboxes], description: 'Admin only. The address and lease expiry cannot change. On permanent mailboxes, aliases and rules replace the current lists; temporary mailboxes cannot add either.',
-    request: { params: MailboxParams, body: json(MailboxInput.omit({ address: true, ttlSeconds: true }).partial().strict().openapi('UpdateMailbox')) }, responses: { 200: response(MailboxSchema), ...errors } }), async c => {
+    request: { params: MailboxParams, body: json(MailboxInput.omit({ address: true, publicAddress: true, ttlSeconds: true }).partial().strict().openapi('UpdateMailbox')) }, responses: { 200: response(MailboxSchema), ...errors } }), async c => {
     admin(c); const { mailbox, scope } = await mailboxFor(c, c.req.valid('param').mailboxId); const input = c.req.valid('json');
     if (mailbox.expiresAt !== null) checkTemporaryMailboxRouting(input);
     const domain = mailbox.address.split('@')[1]!;
@@ -518,7 +542,7 @@ export function registerMailbox(app: App) {
     request: { params: MailboxParams, query: z.object({ direction: z.enum(['inbound', 'outbound']).optional(), unread: z.enum(['true', 'false']).optional(), label: labelName.optional(), threadId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), since: z.string().datetime({ offset: true }).optional(), until: z.string().datetime({ offset: true }).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
     responses: { 200: response(pageOf(MessageSummary, 'MailboxMessagePage')), ...errors } }), async c => {
     const { mailbox } = await mailboxFor(c, c.req.valid('param').mailboxId); const q = c.req.valid('query'); const mm = mailboxMessages, cursor = decodeCursor(q.cursor);
-    const rows = await c.env.db.select({ row: mailMessages, read: mm.read, labels: mm.labels, receivedAt: mm.receivedAt }).from(mm).innerJoin(mailMessages, eq(mailMessages.id, mm.messageId)).where(and(eq(mm.mailboxId, mailbox.id),
+    const rows = await c.env.db.select({ row: summaryColumns, read: mm.read, labels: mm.labels, receivedAt: mm.receivedAt }).from(mm).innerJoin(mailMessages, eq(mailMessages.id, mm.messageId)).where(and(eq(mm.mailboxId, mailbox.id),
       q.direction ? eq(mm.direction, q.direction) : undefined, q.unread === 'true' ? eq(mm.read, false) : q.unread === 'false' ? eq(mm.read, true) : undefined, q.threadId ? eq(mm.threadId, q.threadId) : undefined, q.label ? sql`${mm.labels} @> ARRAY[${q.label}]::text[]` : undefined,
       q.q ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.q})` : undefined, q.since ? sql`${mm.receivedAt} >= ${q.since}::timestamptz` : undefined, q.until ? sql`${mm.receivedAt} < ${q.until}::timestamptz` : undefined,
       cursor ? sql`(${mm.receivedAt}, ${mm.messageId}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(mm.receivedAt), desc(mm.messageId)).limit(q.limit + 1);
@@ -601,18 +625,17 @@ export function registerMailbox(app: App) {
   });
 
   // ---------- sending ----------
-  const Address = z.string().trim().toLowerCase().max(254).regex(ADDRESS, 'Use a valid email address.');
   const Recipients = z.array(Address).max(50);
   const AttachmentItem = z.union([
     z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), content: z.string().min(4).max(11_200_000).describe('Standard padded base64.'), contentType: z.string().max(100).optional(), disposition: z.enum(['attachment', 'inline']).optional(), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict(),
     z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).') }).strict(),
   ]).openapi('MailboxAttachmentInput');
   const Compose = {
-    from: Address.optional().describe('Send as the primary address (default) or one of the mailbox aliases.'),
+    from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.'),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
     attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.'),
     replyTo: Recipients.max(10).default([]),
-    headers: z.array(z.object({ name: z.string().regex(/^X-[A-Za-z0-9-]{1,120}$/, 'Custom headers must start with X-.'), value: z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be printable ASCII.') })).max(10).default([]),
+    headers: z.array(z.object({ name: z.string().regex(/^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$/, 'Use an X- extension header, not an X-SES- sending instruction.'), value: z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be printable ASCII.') })).max(10).refine(headers => new Set(headers.map(h => h.name.toLowerCase())).size === headers.length, 'Do not repeat a header name.').default([]),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),
   };
   const needsBody = (value: { text?: string; html?: string }) => !!value.text || !!value.html;
@@ -636,10 +659,10 @@ export function registerMailbox(app: App) {
     return { ...actor, environment: LIVE };
   }
   async function senderAddress(c: Ctx, mailbox: typeof mailboxes.$inferSelect, from?: string) {
-    if (!from || from === mailbox.address) return mailbox.address;
-    const [alias] = await c.env.db.select().from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), eq(mailboxAddresses.address, from)));
-    if (!alias) throw new ApiError(422, 'FROM_NOT_ALLOWED', 'Send from the mailbox address or one of its aliases.', 'from');
-    return from;
+    if (from === mailbox.address) return from;
+    const [owned] = await c.env.db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), from ? eq(mailboxAddresses.address, from) : eq(mailboxAddresses.kind, 'public')));
+    if (from && !owned) throw new ApiError(422, 'FROM_NOT_ALLOWED', 'Send from the mailbox address, its public address or one of its aliases.', 'from');
+    return owned?.address ?? mailbox.address;
   }
   async function dispatch(c: Ctx, mailbox: typeof mailboxes.$inferSelect, scope: Scope, access: MailboxAccess, body: unknown, build: () => Promise<Omit<OutgoingMessage, 'mailbox' | 'actor' | 'scope'>>) {
     const actor = sendActor(c, access);
@@ -675,7 +698,7 @@ export function registerMailbox(app: App) {
       from: await senderAddress(c, mailbox, body.from), to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments), threadId: original.threadId,
-      inReplyTo: parentId, references: [...original.references, ...(parentId ? [parentId] : [])], autoSubmitted: body.autoSubmitted, headers: body.headers,
+      inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
     }));
   }
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/attachments', operationId: 'mailboxUploadAttachment', tags: [TAG.messages], summary: 'Upload an attachment to send later', description: 'Stores a file (base64, 8 MiB) and returns an attachment_… ID for the attachments field of send, reply and forward. Unused uploads are deleted after 30 days.',
@@ -732,10 +755,11 @@ export function registerMailbox(app: App) {
     const value = access(c, 'read');
     const types = q.types?.split(',').map(type => type.trim()).filter(Boolean);
     if (types?.some(type => !(mailboxEventTypes as readonly string[]).includes(type))) throw new ApiError(422, 'INVALID_EVENT_TYPE', `Event types: ${mailboxEventTypes.join(', ')}.`, 'types');
-    let after = q.after !== undefined ? Number(q.after) : await latestCursor(c.env.db, value.workspaceId, LIVE);
+    const scope = { mailboxIds, includeStored: value.admin && types?.includes('message.stored') === true };
+    let after = q.after !== undefined ? Number(q.after) : await latestCursor(c.env.db, value.workspaceId, LIVE, scope);
     const deadline = Date.now() + q.wait * 1000;
     for (;;) {
-      const rows = await readEvents(c.env.db, value.workspaceId, LIVE, { after, mailboxIds, types, limit: q.limit });
+      const rows = await readEvents(c.env.db, value.workspaceId, LIVE, { ...scope, after, types, limit: q.limit });
       if (rows.length) return { data: rows.map(eventView), cursor: String(rows.at(-1)!.seq) };
       if (Date.now() >= deadline) return { data: [], cursor: String(after) };
       await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now()))));
@@ -782,7 +806,12 @@ export function registerMailbox(app: App) {
   });
 
   // ---------- webhooks ----------
-  const WebhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(mailboxEventTypes)).min(1).max(mailboxEventTypes.length).default(['message.received']), mailboxIds: z.array(z.string().min(1).max(120)).min(1).max(500).nullable().default(null).describe('Only events for these mailboxes; null for all.'), paused: z.boolean().default(false) }).strict();
+  const webhookFields = { url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(mailboxEventTypes)).min(1).max(mailboxEventTypes.length), mailboxIds: z.array(z.string().min(1).max(120)).min(1).max(500).nullable().describe('Only events for these mailboxes; null for all.'), paused: z.boolean() };
+  const WebhookInput = z.object({ ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), mailboxIds: webhookFields.mailboxIds.default(null), paused: webhookFields.paused.default(false) }).strict();
+  const WebhookPatch = z.object(webhookFields).partial().strict();
+  function checkWebhookScope(mailboxIds: string[] | null, eventTypes: string[]) {
+    if (mailboxIds !== null && eventTypes.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without a mailboxIds filter.', 'mailboxIds');
+  }
   const getWebhook = async (c: Ctx, webhookId: string) => {
     const value = admin(c);
     const [row] = await c.env.db.select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), eq(mailboxWebhooks.environment, LIVE), eq(mailboxWebhooks.id, webhookId)));
@@ -791,6 +820,7 @@ export function registerMailbox(app: App) {
   };
   app.openapi(route({ method: 'post', path: '/webhooks', operationId: 'mailboxCreateWebhook', tags: [TAG.webhooks], summary: 'Subscribe to mailbox events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.', request: { body: json(WebhookInput.openapi('CreateMailboxWebhook')) }, responses: { 201: response(WebhookSchema.extend({ secret: z.string() }).openapi('MailboxWebhookSecret')), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const webhookId = id('mwh'); const secret = webhookSecret();
+    checkWebhookScope(input.mailboxIds, input.eventTypes);
     const [row] = await c.env.db.insert(mailboxWebhooks).values({ id: webhookId, workspaceId: value.workspaceId, environment: LIVE, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds: input.mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, LIVE, webhookId)) }).returning();
     c.header('Cache-Control', 'no-store');
     return c.json({ ...webhookView(row!), secret }, 201);
@@ -801,8 +831,9 @@ export function registerMailbox(app: App) {
     return c.json({ data: rows.map(webhookView) }, 200);
   });
   app.openapi(route({ method: 'get', path: '/webhooks/{id}', operationId: 'mailboxGetWebhook', tags: [TAG.webhooks], request: { params: IdParam }, responses: { 200: response(WebhookSchema), ...errors } }), async c => c.json(webhookView((await getWebhook(c, c.req.valid('param').id)).row), 200));
-  app.openapi(route({ method: 'patch', path: '/webhooks/{id}', operationId: 'mailboxUpdateWebhook', tags: [TAG.webhooks], request: { params: IdParam, body: json(WebhookInput.partial().strict().openapi('UpdateMailboxWebhook')) }, responses: { 200: response(WebhookSchema), ...errors } }), async c => {
+  app.openapi(route({ method: 'patch', path: '/webhooks/{id}', operationId: 'mailboxUpdateWebhook', tags: [TAG.webhooks], request: { params: IdParam, body: json(WebhookPatch.openapi('UpdateMailboxWebhook')) }, responses: { 200: response(WebhookSchema), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id); const input = c.req.valid('json');
+    checkWebhookScope(input.mailboxIds === undefined ? row.mailboxIds : input.mailboxIds, input.eventTypes ?? row.eventTypes);
     const [updated] = await c.env.db.update(mailboxWebhooks).set({ ...input, ...(input.url ? { url: webhookUrl(c.env, input.url) } : {}), ...(input.eventTypes ? { eventTypes: [...new Set(input.eventTypes)] } : {}), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, row.id)).returning();
     return c.json(webhookView(updated!), 200);
   });
@@ -828,7 +859,7 @@ export function registerMailbox(app: App) {
     region: z.string().nullable(), envelopeTo: z.array(z.string()).describe('Recipients SES accepted this message for.'),
     mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()).describe('Recipients that matched no mailbox.'),
   }).openapi('StoredMessageSummary');
-  async function storedSummaries(runtime: Runtime, rows: MessageRow[]) {
+  async function storedSummaries(runtime: Runtime, rows: Pick<MessageRow, keyof typeof storedSummaryColumns>[]) {
     if (!rows.length) return [];
     const ids = rows.map(row => row.id);
     const [links, unrouted] = await Promise.all([
@@ -842,7 +873,7 @@ export function registerMailbox(app: App) {
     request: { query: z.object({ direction: z.enum(['inbound', 'outbound']).default('inbound'), region: z.string().max(40).optional(), mailboxId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
     responses: { 200: response(pageOf(StoredSummary, 'StoredMessagePage')), ...errors } }), async c => {
     const value = admin(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor); const m = mailMessages;
-    const rows = await c.env.db.select().from(m).where(and(eq(m.workspaceId, value.workspaceId), eq(m.environment, LIVE), eq(m.direction, q.direction), q.region ? eq(m.region, q.region) : undefined,
+    const rows = await c.env.db.select(storedSummaryColumns).from(m).where(and(eq(m.workspaceId, value.workspaceId), eq(m.environment, LIVE), eq(m.direction, q.direction), q.region ? eq(m.region, q.region) : undefined,
       q.mailboxId ? sql`EXISTS (SELECT 1 FROM mailbox_messages mm WHERE mm.message_id = ${m.id} AND mm.mailbox_id = ${q.mailboxId})` : undefined,
       q.q ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.q})` : undefined,
       cursor ? sql`(${m.receivedAt}, ${m.id}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(m.receivedAt), desc(m.id)).limit(q.limit + 1);

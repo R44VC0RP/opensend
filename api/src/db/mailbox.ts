@@ -21,6 +21,8 @@ export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: str
 const scope = () => ({ workspaceId: text('workspace_id').notNull(), environment: text('environment').$type<Mode>().notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
 
+export const mailboxWriteLanes = pgTable('mailbox_write_lanes', { lane: text('lane').$type<'address' | 'ingest' | 'events'>().primaryKey() });
+
 export const mailboxRegions = pgTable('mailbox_regions', {
   workspaceId: text('workspace_id').notNull(), region: text('region').notNull(),
   accountId: text('account_id'), bucket: text('bucket'), topicArn: text('topic_arn'), ruleSetName: text('rule_set_name'),
@@ -48,9 +50,9 @@ export const mailboxes = pgTable('mailboxes', {
 }, t => [index('mailboxes_page').on(t.workspaceId, t.environment, t.id), index('mailboxes_domain').on(t.workspaceId, t.environment, t.domainId)]);
 
 export const mailboxAddresses = pgTable('mailbox_addresses', {
-  ...scope(), address: text('address').notNull(), mailboxId: text('mailbox_id').notNull(), kind: text('kind').$type<'primary' | 'alias'>().notNull(),
+  ...scope(), address: text('address').notNull(), mailboxId: text('mailbox_id').notNull(), kind: text('kind').$type<'primary' | 'alias' | 'public'>().notNull(),
   createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.address] }), index('mailbox_addresses_mailbox').on(t.mailboxId)]);
+}, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.address] }), index('mailbox_addresses_mailbox').on(t.mailboxId), uniqueIndex('mailbox_addresses_one_public').on(t.mailboxId).where(sql`${t.kind} = 'public'`)]);
 
 export const mailThreads = pgTable('mail_threads', {
   id: text('id').primaryKey(), ...scope(), subject: text('subject').notNull().default(''), messageCount: integer('message_count').notNull().default(0),

@@ -1494,6 +1494,10 @@ export type Mailbox = {
     domain: string;
     aliases: Array<string>;
     rules: Array<string>;
+    /**
+     * Send-only address used as the default From. Null when the mailbox sends from its receiving address by default.
+     */
+    publicAddress: string | null;
     metadata: {
         [key: string]: unknown;
     };
@@ -1523,6 +1527,10 @@ export type Mailbox = {
 export type CreateMailbox = {
     address: string;
     displayName?: string | null;
+    /**
+     * Permanent mailboxes only: immutable default From with the same local part on a strict ancestor domain verified for sending with DKIM in this mailbox’s SES region. Does not receive mail or change MX.
+     */
+    publicAddress?: string;
     /**
      * Lease duration in whole seconds, 60–2592000 (30 days). Omit for a permanent mailbox. Temporary mailboxes accept their address and plus-tags, not aliases, wildcard rules or historical backfill. Expiry is fixed at creation.
      */
@@ -1787,7 +1795,7 @@ export type MailboxAttachmentUpload = {
 
 export type MailboxSendInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1829,7 +1837,7 @@ export type MailboxAttachmentInput = {
 
 export type MailboxReplyInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1873,7 +1881,7 @@ export type MailboxReplyInput = {
 
 export type MailboxForwardInput = {
     /**
-     * Send as the primary address (default) or one of the mailbox aliases.
+     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
      */
     from?: string;
     text?: string;
@@ -1915,7 +1923,7 @@ export type MailboxEventPage = {
 export type MailboxEvent = {
     id: string;
     cursor: string;
-    type: 'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
+    type: 'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted';
     createdAt: string;
     mailboxId: string | null;
     threadId: string | null;
@@ -1959,7 +1967,7 @@ export type MailboxWebhook = {
     id: string;
     url: string;
     description: string;
-    eventTypes: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     mailboxIds: Array<string> | null;
     paused: boolean;
     createdAt: string;
@@ -1969,7 +1977,7 @@ export type MailboxWebhook = {
 export type CreateMailboxWebhook = {
     url: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
@@ -1984,7 +1992,7 @@ export type MailboxWebhookList = {
 export type UpdateMailboxWebhook = {
     url?: string;
     description?: string;
-    eventTypes?: Array<'message.received' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
+    eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'message.updated' | 'thread.updated' | 'mailbox.created' | 'mailbox.deleted'>;
     /**
      * Only events for these mailboxes; null for all.
      */
