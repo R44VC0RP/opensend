@@ -381,7 +381,13 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('each request rechecks verified Google identity and exact allowlists, not cached session inspection', async t => {
     const fixture = await sessionFixture(t);
     const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': 'test' };
-    assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
+    const initial = await http('GET', '/v1/me', undefined, undefined, headers);
+    assert.equal(ok(initial).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
+    // Replay the same credentials as a browser, including its signed session-data cache.
+    const sessionData = initial.headers.getSetCookie().map(value => value.split(';')[0]!).filter(value => value.includes('session_data='));
+    assert.ok(sessionData.length);
+    for (const cookie of sessionData) secrets.add(cookie);
+    headers.cookie = [fixture.cookie, ...sessionData].join('; ');
     const cases = [
       { email: fixture.email, verified: false, hd: AUTH_DOMAIN, account: true, reason: 'Unverified email' },
       { email: fixture.email, verified: true, hd: AUTH_DOMAIN, account: false, reason: 'Missing Google account' },
@@ -394,6 +400,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       await authDb!.query('UPDATE auth_user SET email = $2, email_verified = $3, google_hosted_domain = $4 WHERE id = $1', [fixture.userId, state.email, state.verified, state.hd]);
       await authDb!.query('UPDATE auth_account SET provider_id = $2 WHERE user_id = $1', [fixture.userId, state.account ? 'google' : 'not-google']);
       error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
+      if (!state.account) error(await http('GET', '/v1/inbound/threads', undefined, undefined, { ...headers, 'x-opensend-environment': 'live' }), 401, 'AUTH_REQUIRED');
       assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null, state.reason);
       const email = address();
       error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
@@ -401,6 +408,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     }
     await authDb!.query('UPDATE auth_user SET email = $2, email_verified = true, google_hosted_domain = $3 WHERE id = $1', [fixture.userId, fixture.email, AUTH_DOMAIN]);
     assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, headers)).id, fixture.userId, 'Restoring this fixture’s current Google policy evidence must restore access without replacing its cookie.');
+    await authDb!.query('DELETE FROM auth_session WHERE id = $1', [fixture.sessionId]);
+    error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
+    assert.equal(ok(await http('GET', '/api/auth/get-session', undefined, undefined, headers)), null);
   });
 
   test('profile forgery, password login, non-Google providers and account linking are not public authentication paths', async t => {
