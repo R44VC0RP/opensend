@@ -1237,7 +1237,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(missing.resources.topic.exists, false);
         assert.equal(missing.resources.transactional.exists, false);
         assert.equal(writes().length, 0, 'Discovering missing resources must not create, update, or subscribe anything.');
-        await db.query(`UPDATE ses_regions SET report = report #- '{resources,transactional,autoValidation}' #- '{resources,marketing,autoValidation}' WHERE workspace_id = $1 AND region = $2`, [runtime.config.workspaceId, REGION]);
+        await db.query(`UPDATE ses_region_discovery SET report = report #- '{resources,transactional,autoValidation}' #- '{resources,marketing,autoValidation}' WHERE workspace_id = $1 AND region = $2`, [runtime.config.workspaceId, REGION]);
         const cachedCalls = observed.length;
         Object.assign(runtime.config.aws, { $source: { CREDENTIALS_CODE: 'e' } });
         assert.deepEqual(ok(await local('GET', discoveryPath, undefined, reader)), missing);
@@ -1278,7 +1278,8 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.ok(policy.Statement.every((statement: Json) => statement.Principal !== '*' && statement.Resource === expectedTopic));
         for (const set of sets.values()) {
           assert.ok(set.Tags.some((tag: Json) => tag.Key === 'opensend:installation-id' && tag.Value));
-          assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['SEND', 'DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
+          // Provider acceptance comes from SendEmail's response, not a duplicate SEND notification.
+          assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
         }
         const validationPath = `/v1/regions/${REGION}/auto-validation`;
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, testKey), 403);
