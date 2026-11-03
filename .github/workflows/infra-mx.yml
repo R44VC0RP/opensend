@@ -1,20 +1,20 @@
-name: Infra staging
+name: Infra MX
 
 on:
   push:
     branches: [opensend-mx]
-    paths: [infra/**, .github/workflows/infra-staging.yml]
+    paths: [infra/**, .github/workflows/infra-mx.yml]
   workflow_dispatch:
 
 concurrency:
-  group: infra-staging
+  group: infra-mx
   cancel-in-progress: false
 
 jobs:
   apply:
     if: github.ref == 'refs/heads/opensend-mx'
     runs-on: ubuntu-latest
-    environment: staging
+    environment: mx
     defaults:
       run:
         working-directory: infra
@@ -36,6 +36,6 @@ jobs:
           echo "::add-mask::$secret"
           echo "AWS_ACCESS_KEY_ID=$id" >> "$GITHUB_ENV"
           echo "AWS_SECRET_ACCESS_KEY=$secret" >> "$GITHUB_ENV"
-      - run: tofu init -input=false -backend-config="key=staging/terraform.tfstate"
-      - run: tofu apply -input=false -auto-approve -var-file=staging.tfvars
+      - run: tofu init -input=false -backend-config="key=production/terraform.tfstate"
+      - run: tofu apply -input=false -auto-approve -var-file=production.tfvars
       - run: tofu output

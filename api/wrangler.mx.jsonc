@@ -1,12 +1,12 @@
-// OpenSend MX staging: a separate installation that shares no data, queues, secrets or AWS
-// principal with production. Queues, the attachment bucket and Hyperdrive come from infra/
-// (tofu, staging.tfvars); deploy with `npx wrangler deploy --config wrangler.staging.jsonc`.
+// OpenSend MX (opensend.mx): the multi-tenant installation, separate from opensend.anoma.ly.
+// It shares no data, queues, secrets or AWS principal with it. Queues, the attachment bucket and
+// Hyperdrive come from infra/ (tofu, production.tfvars); deployed by .github/workflows/deploy-mx.yml.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "opensend-mx-staging",
+  "name": "opensend-mx",
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "workers_dev": false,
-  "routes": [{ "pattern": "staging.opensend.mx", "custom_domain": true }],
+  "routes": [{ "pattern": "opensend.mx", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
@@ -17,9 +17,9 @@
     "run_worker_first": ["/v1", "/v1/*", "/mailbox/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/health", "/openapi.json", "/docs.md", "/docs/operations/*", "/llms.txt"]
   },
   "vars": {
-    "PUBLIC_URL": "https://staging.opensend.mx",
+    "PUBLIC_URL": "https://opensend.mx",
     "DEFAULT_SES_REGION": "us-east-1",
-    // Simulated SES only until staging has its own AWS account.
+    // Simulated SES only until AWS connections exist.
     "ENABLE_LIVE_SES": "false",
     "JOB_CONCURRENCY": "6",
     "SIMULATED_SES_LATENCY_MS": "170",
@@ -29,23 +29,23 @@
     "WEBHOOK_ALLOWED_HOSTS": "",
     "AUTH_ALLOWED_DOMAINS": "anoma.ly",
     "API_RATE_LIMIT_PER_MINUTE": "10000",
-    "WORK_QUEUE_NAME": "opensend-mx-staging-work",
-    "FEEDBACK_QUEUE_NAME": "opensend-mx-staging-feedback"
+    "WORK_QUEUE_NAME": "opensend-mx-production-work",
+    "FEEDBACK_QUEUE_NAME": "opensend-mx-production-feedback"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
-  // From `tofu output hyperdrive_id` (infra/, staging state).
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8e22b69b74fb48518851d088445be127" }],
+  // From `tofu output hyperdrive_id` (infra/, production state).
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
   "browser": { "binding": "BROWSER" },
-  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-mx-staging-attachments" }],
+  "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-mx-production-attachments" }],
   "queues": {
     "producers": [
-      { "binding": "WAKE_QUEUE", "queue": "opensend-mx-staging-work" },
-      { "binding": "FEEDBACK_QUEUE", "queue": "opensend-mx-staging-feedback" }
+      { "binding": "WAKE_QUEUE", "queue": "opensend-mx-production-work" },
+      { "binding": "FEEDBACK_QUEUE", "queue": "opensend-mx-production-feedback" }
     ],
     "consumers": [
-      { "queue": "opensend-mx-staging-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
-      { "queue": "opensend-mx-staging-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 }
+      { "queue": "opensend-mx-production-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

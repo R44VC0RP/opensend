@@ -1,4 +1,4 @@
-name: Deploy staging
+name: Deploy MX
 
 on:
   push:
@@ -6,16 +6,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-staging
+  group: deploy-mx
   cancel-in-progress: false
 
 jobs:
   deploy:
-    # Only the opensend-mx branch deploys staging, and only once its resources exist
-    # (set the repository variable STAGING_DEPLOY_ENABLED=true after `tofu apply`).
-    if: github.ref == 'refs/heads/opensend-mx' && vars.STAGING_DEPLOY_ENABLED == 'true'
+    # Only the opensend-mx branch deploys OpenSend MX, and only once its resources exist
+    # (repository variable MX_DEPLOY_ENABLED=true after `tofu apply`).
+    if: github.ref == 'refs/heads/opensend-mx' && vars.MX_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
-    environment: staging
+    environment: mx
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,25 +38,25 @@ jobs:
         working-directory: api
       - run: npm run build
         working-directory: app
-      # Staging only: production migrations stay a manual, reviewed step.
+      # OpenSend MX holds only our own data until cutover; revisit automatic migrations before then.
       - run: npm run migrate
         working-directory: api
         env:
-          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
-          BETTER_AUTH_SECRET: ${{ secrets.STAGING_BETTER_AUTH_SECRET }}
-          PUBLIC_URL: https://staging.opensend.mx
-      - run: npx wrangler deploy --config wrangler.staging.jsonc
+          DATABASE_URL: ${{ secrets.MX_DATABASE_URL }}
+          BETTER_AUTH_SECRET: ${{ secrets.MX_BETTER_AUTH_SECRET }}
+          PUBLIC_URL: https://opensend.mx
+      - run: npx wrangler deploy --config wrangler.mx.jsonc
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_INFRA_API_TOKEN }}
-      # Worker secrets live in the GitHub staging environment and are re-applied on every deploy.
+      # Worker secrets live in the GitHub mx environment and are re-applied on every deploy.
       - name: Sync Worker secrets
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_INFRA_API_TOKEN }}
-          BETTER_AUTH_SECRET: ${{ secrets.STAGING_BETTER_AUTH_SECRET }}
-          GOOGLE_CLIENT_ID: ${{ secrets.STAGING_GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.STAGING_GOOGLE_CLIENT_SECRET }}
+          BETTER_AUTH_SECRET: ${{ secrets.MX_BETTER_AUTH_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.MX_GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.MX_GOOGLE_CLIENT_SECRET }}
         run: |
           jq -n '{BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET}' \
-            | npx wrangler secret bulk --config wrangler.staging.jsonc
+            | npx wrangler secret bulk --config wrangler.mx.jsonc

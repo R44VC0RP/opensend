@@ -37,7 +37,7 @@ variable "account_id" {
 
 variable "environment" {
   type        = string
-  description = "Resource name suffix, e.g. staging or production."
+  description = "Resource name suffix, e.g. production."
 }
 
 variable "bucket_location" {
