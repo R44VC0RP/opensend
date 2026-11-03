@@ -2770,6 +2770,11 @@ export type ProviderConnection = {
     quickCreateUrl: string | null;
 };
 
+export type ConnectionRegions = {
+    shared: Array<string>;
+    byo: Array<string>;
+};
+
 export type CreateConnection = {
     kind: 'shared' | 'byo';
     region: string;
@@ -16269,9 +16274,7 @@ export type ListConnectionRegionsResponses = {
     /**
      * Success
      */
-    200: {
-        shared: Array<string>;
-    };
+    200: ConnectionRegions;
 };
 
 export type ListConnectionRegionsResponse = ListConnectionRegionsResponses[keyof ListConnectionRegionsResponses];

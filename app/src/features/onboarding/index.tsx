@@ -79,11 +79,11 @@ function sharedError(error: unknown) {
   return message(error)
 }
 
-function ChooseSending({ unfinished, regions }: { unfinished: ProviderConnection | null; regions: string[] }) {
-  // BYO accepts any commercial region; offer the same regions as shared sending for now.
-  const regionOptions = [...new Set([...regions, ...unfinished ? [unfinished.region] : []])].map(region => ({ value: region, label: region }))
-  const [sharedRegion, setSharedRegion] = useState(unfinished?.kind === 'shared' ? unfinished.region : regions[0] ?? '')
-  const [byoRegion, setByoRegion] = useState(regions[0] ?? '')
+function ChooseSending({ unfinished, regions }: { unfinished: ProviderConnection | null; regions: { shared: string[]; byo: string[] } }) {
+  const sharedOptions = [...new Set([...regions.shared, ...unfinished ? [unfinished.region] : []])].map(region => ({ value: region, label: region }))
+  const byoOptions = regions.byo.map(region => ({ value: region, label: region }))
+  const [sharedRegion, setSharedRegion] = useState(unfinished?.kind === 'shared' ? unfinished.region : regions.shared[0] ?? '')
+  const [byoRegion, setByoRegion] = useState(regions.byo[0] ?? '')
   const shared = useConnectionMutation((region: string) => retrying(() => connectionApi.create({ kind: 'shared', region })), 'Shared sending is ready')
   const byo = useConnectionMutation((region: string) => connectionApi.create({ kind: 'byo', region }))
   const busy = shared.isPending || byo.isPending
@@ -96,7 +96,7 @@ function ChooseSending({ unfinished, regions }: { unfinished: ProviderConnection
         <h2 id="onboarding-shared">OpenSend shared sending</h2>
         <p className="muted">Send through OpenSend’s AWS account. Ready in about a minute.</p>
         <p className="onboarding-price">$0.11 per 1,000 emails</p>
-        <Field label="Region" htmlFor="onboarding-shared-region"><Select id="onboarding-shared-region" value={sharedRegion} onValueChange={setSharedRegion} options={regionOptions} disabled={busy || resuming} /></Field>
+        <Field label="Region" htmlFor="onboarding-shared-region"><Select id="onboarding-shared-region" value={sharedRegion} onValueChange={setSharedRegion} options={sharedOptions} disabled={busy || resuming} /></Field>
         {shared.error ? <Alert tone="danger">{sharedError(shared.error)}</Alert> : null}
         {shared.isPending && <p className="muted" role="status">Setting up shared sending in {sharedRegion}. This can take a minute.</p>}
         <Button variant="primary" loading={shared.isPending} disabled={busy} onClick={() => shared.mutate(sharedRegion)}>{resuming ? 'Finish setup' : 'Use shared sending'}</Button>
@@ -105,7 +105,7 @@ function ChooseSending({ unfinished, regions }: { unfinished: ProviderConnection
         <h2 id="onboarding-byo">Bring your own AWS</h2>
         <p className="muted">Send through your own AWS account. Takes a few minutes in the AWS console.</p>
         <p className="onboarding-price">You pay AWS directly</p>
-        <Field label="Region" htmlFor="onboarding-byo-region"><Select id="onboarding-byo-region" value={byoRegion} onValueChange={setByoRegion} options={regionOptions} disabled={busy || resuming} /></Field>
+        <Field label="Region" htmlFor="onboarding-byo-region"><Select id="onboarding-byo-region" value={byoRegion} onValueChange={setByoRegion} options={byoOptions} disabled={busy || resuming} /></Field>
         {byo.error ? <Alert tone="danger">{code(byo.error) === 'CONNECTION_EXISTS' ? 'Shared sending setup is already started. Start over to choose this instead.' : message(byo.error)}</Alert> : null}
         <Button loading={byo.isPending} disabled={busy || resuming} onClick={() => byo.mutate(byoRegion)}>Connect AWS</Button>
       </section>

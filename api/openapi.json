@@ -10991,6 +10991,27 @@
           "quickCreateUrl"
         ]
       },
+      "ConnectionRegions": {
+        "type": "object",
+        "properties": {
+          "shared": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "byo": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "shared",
+          "byo"
+        ]
+      },
       "CreateConnection": {
         "type": "object",
         "properties": {
@@ -46241,25 +46262,14 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Regions this installation offers for shared sending. Owner/admin dashboard only.",
+        "description": "Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.",
         "responses": {
           "200": {
             "description": "Success",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "shared": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  },
-                  "required": [
-                    "shared"
-                  ]
+                  "$ref": "#/components/schemas/ConnectionRegions"
                 }
               }
             }

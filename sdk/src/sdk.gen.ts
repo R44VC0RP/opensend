@@ -4346,7 +4346,7 @@ export const createConnection = <ThrowOnError extends boolean = false>(options: 
 });
 
 /**
- * Regions this installation offers for shared sending. Owner/admin dashboard only.
+ * Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.
  */
 export const listConnectionRegions = <ThrowOnError extends boolean = false>(options?: Options<ListConnectionRegionsData, ThrowOnError>): RequestResult<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError> => (options?.client ?? client).get<ListConnectionRegionsResponses, ListConnectionRegionsErrors, ThrowOnError>({
     security: [{

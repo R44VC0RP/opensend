@@ -26,6 +26,10 @@ function template(runtime: Runtime) {
 }
 const platformRegion = 'us-east-2';
 const sharedRegions = (runtime: Runtime) => runtime.config.sharedRegions ?? [platformRegion];
+// Commercial regions with an SES sending endpoint: https://docs.aws.amazon.com/general/latest/gr/ses.html
+const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-south-1', 'ap-south-2', 'ap-southeast-3', 'ap-southeast-5', 'ap-south-1', 'ap-northeast-3', 'ap-northeast-2',
+  'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ca-central-1', 'ca-west-1', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-north-1', 'eu-central-2',
+  'il-central-1', 'me-south-1', 'me-central-1', 'sa-east-1'];
 const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
@@ -119,6 +123,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   const offered = sharedRegions(runtime);
   if (kind === 'shared' && !offered.includes(region)) throw new ApiError(422, 'SHARED_REGION_UNAVAILABLE', `Shared sending is available in ${offered.join(', ')}.`, 'region');
   if (/^(cn-|us-gov-|us-iso|us-isob|eu-isoe|us-isof)/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region.', 'region');
+  if (kind === 'byo' && !byoRegions.includes(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region where Amazon SES supports sending.', 'region');
   const identity = await caller(platformRegion, platformCredentials(runtime));
   if (!identity.Account || !/^\d{12}$/.test(identity.Account) || !identity.Arn?.startsWith(`arn:aws:iam::${identity.Account}:user/`)) throw new ApiError(503, 'PLATFORM_PRINCIPAL_INVALID', 'Use an IAM user in the commercial AWS partition for the platform connection.');
   const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version)
@@ -133,8 +138,8 @@ export function registerProviderConnections(app: App) {
   app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {
     const row = await get(c.env, owner(c)); return c.json({ connection: row ? view(c.env, row) : null }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions this installation offers for shared sending. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()) })), ...errors } }), async c => {
-    owner(c); return c.json({ shared: sharedRegions(c.env) }, 200);
+  app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
+    owner(c); return c.json({ shared: sharedRegions(c.env), byo: byoRegions }, 200);
   });
   app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Shared setup is resumable by repeating this request. BYO returns a CloudFormation quick-create URL. Never sends mail.', request: { body: json(Create) }, responses: { 201: response(Connection), ...errors } }), async c => {
     const wid = owner(c);

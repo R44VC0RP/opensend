@@ -7,7 +7,7 @@ import type { ConnectionKind, Identity, ProviderConnection } from './types'
 const path = '/v1/connection'
 export const connectionApi = {
   get: async (signal?: AbortSignal) => (await request<{ connection: ProviderConnection | null }>(path, { signal })).connection,
-  regions: async (signal?: AbortSignal) => (await request<{ shared: string[] }>(`${path}/regions`, { signal })).shared,
+  regions: (signal?: AbortSignal) => request<{ shared: string[]; byo: string[] }>(`${path}/regions`, { signal }),
   create: (input: { kind: ConnectionKind; region: string }) => request<ProviderConnection>(path, { method: 'POST', body: input }),
   verify: (awsAccountId: string) => request<ProviderConnection>(`${path}/verify`, { method: 'POST', body: { awsAccountId } }),
   remove: () => request<{ deleted: true }>(path, { method: 'DELETE' }),
