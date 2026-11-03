@@ -49,9 +49,9 @@ The auth callback supplies the API key only to the bearer scheme; dashboard cook
 
 An **address** routes mail and authorizes a sender. A **message** is one email; a **thread** is the conversation you read and reply to. Unrelated emails to the same address start separate threads. Adding an address to a later message does not reveal earlier messages to its key.
 
-1. Enable receiving on a verified domain, then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. If another provider handles root-domain mail, keep its MX. Verify a dedicated receiving subdomain in SES, enable receiving there, publish only its SES MX, then create `{"address":"support@inbox.example.com","publicAddress":"support@example.com"}`. Verify the forwarding destination and forward the public address there without replacing the original MIME headers. Public senders require the same local part and a verified, DKIM-enabled parent domain.
+1. Enable receiving on a verified domain (`POST /v1/inbound/domains/{id}/enable`), publish the returned MX, then `POST /v1/inbound/addresses` with `{"address":"support@example.com"}`. Enable with `{"catchAll":"create_address"}` to create an address automatically when mail arrives for a new one; `store` keeps it as unrouted. If another provider already receives your root domain, see [Forward a public address](#forward-a-public-address-into-opensend).
 2. Subscribe with `POST /v1/inbound/webhooks`, for example `{"url":"https://example.com/support-hook","eventTypes":["message.received"],"addressIds":["mbx_…"]}`. Allowlist the exact HTTPS host, verify the raw-body signature and timestamp, and deduplicate the event `id`. Store `threadId` with the ticket; `messageId` identifies the individual message. Issue a scoped `read`/`send` key with `POST /v1/inbound/keys` and the relevant `addressIds`.
-3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message and `addressId` to disambiguate the sender. OpenSend sets the wire threading headers. `202` means queued, not delivered.
+3. Read `GET /v1/inbound/threads/{threadId}` and reply with `POST /v1/inbound/threads/{threadId}/reply`, `{"text":"Happy to help."}` and a stable `Idempotency-Key`. By default this answers the newest **visible** message; after your own send it follows up with the original recipients. Use `replyToMessageId` to answer an older message, `addressId` to disambiguate the sender, and `expectedRecipients` (`{to, cc, bcc}`) to reject the send if the computed recipients differ from what you reviewed. `from` defaults to the address's public sender, otherwise its receiving address; an administrator can set it to any address on a domain registered in OpenSend for the receiving region, while address keys may only use their own addresses. OpenSend sets `In-Reply-To` and `References`. `202` means queued, not delivered.
 
 ```ts
 import { getInboundThread, replyToInboundThread } from 'opensend-js';
@@ -64,6 +64,28 @@ await replyToInboundThread({
   throwOnError: true,
 });
 ```
+
+### Forward a public address into OpenSend
+
+Keep your existing mail provider for the root domain and let OpenSend receive one forwarded address. This is the flow used for `testing@opencode.ai`:
+
+1. Add and verify `inbox.example.com` in OpenSend, then enable receiving on it. Publish its SES MX record **only** on `inbox.example.com`; never add an SES MX to `example.com`, which would outrank your provider and take all its mail.
+2. In your provider (for example Cloudflare Email Routing), forward `support@example.com` to `support@inbox.example.com` and verify that destination. Automatic forwarding keeps `From`, `To`, `Subject`, `Message-ID`, `In-Reply-To` and `References`; it rewrites the envelope sender and adds authentication headers.
+3. Reply as the public address. Either create the address with `"publicAddress": "support@example.com"` (same local part, parent domain verified with DKIM), or pass `from` per reply when the address already exists, for example because the catch-all created it:
+
+```ts
+await replyToInboundThread({
+  client, path: { threadId }, headers: { 'Idempotency-Key': `reply-${messageId}` },
+  body: {
+    addressId, replyToMessageId: messageId, from: 'support@example.com',
+    text: 'Thanks, we are on it.',
+    expectedRecipients: { to: ['customer@example.net'], cc: [], bcc: [] },
+  },
+  throwOnError: true,
+});
+```
+
+The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and OpenSend files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
 
 **Browse or start conversations:** `GET /v1/inbound/threads?q=invoice` returns one row per visible conversation, newest activity first. Filter by `addressId` or page using `nextCursor`. Detail pages read oldest first within the most recent page; follow their cursor for earlier messages. `GET /v1/inbound/messages/{messageId}` returns the full stored body and attachment metadata. `POST /v1/inbound/threads` with `{addressId, to, subject, text}` starts a conversation. Alternatively, add `replyAddressId` to a single explicit-body transactional `/v1/emails/send` with live manage permission; the receipt includes `threadId` and `inboundMessageId`.
 
