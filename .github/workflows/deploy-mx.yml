@@ -48,6 +48,8 @@ jobs:
           DATABASE_URL: ${{ secrets.MX_DATABASE_URL }}
           BETTER_AUTH_SECRET: ${{ secrets.MX_BETTER_AUTH_SECRET }}
           PUBLIC_URL: https://opensend.mx
+          # Must match wrangler.mx.jsonc: migrations seed region settings from it.
+          DEFAULT_SES_REGION: us-east-2
       # Who may sign in and who owns the default workspace are deployment settings (GitHub mx
       # environment variables), not code. Unset means nobody: both fail closed.
       - run: >-
