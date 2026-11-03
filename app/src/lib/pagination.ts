@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useState } from 'react'
 
 export function useAdaptivePageSize(minimum = 5, maximum = 20) {
   const [pageSize, setPageSize] = useState(minimum)
+  const [measured, setMeasured] = useState(false)
   const [table, setTable] = useState<HTMLDivElement | null>(null)
   const tableRef = useCallback((node: HTMLDivElement | null) => setTable(node), [])
 
@@ -9,7 +10,7 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20) {
     if (!table) return
     const currentTable = table
     const surface = currentTable.closest<HTMLElement>('.page-surface')
-    if (!surface) return
+    if (!surface) { setMeasured(true); return }
     const currentSurface = surface
     function measure() {
       const style = getComputedStyle(currentSurface)
@@ -19,6 +20,7 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20) {
       const contentBottom = currentSurface.getBoundingClientRect().bottom - parseFloat(style.paddingBottom)
       const availableBody = contentBottom - currentTable.getBoundingClientRect().top - 36 - footerHeight
       setPageSize(Math.max(minimum, Math.min(maximum, Math.floor(availableBody / rowHeight))))
+      setMeasured(true)
     }
     measure()
     const observer = new ResizeObserver(measure)
@@ -27,7 +29,8 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20) {
     return () => { observer.disconnect(); window.removeEventListener('resize', measure) }
   }, [maximum, minimum, table])
 
-  return { pageSize, tableRef }
+  // Gate list queries on `measured` so mount requests the fitted page size once.
+  return { pageSize, tableRef, measured }
 }
 
 export function useCursorPagination() {

@@ -38,11 +38,11 @@ function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?:
   const [status, setStatus] = useState('all')
   const [stream, setStream] = useState('all')
   const [page, setPage] = useState(1)
-  const {pageSize, tableRef} = useAdaptivePageSize(5, 100)
+  const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100)
   useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
   const params = { ...(campaignId ? { campaignId } : { regionId }), search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
-  const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal), { interval: 30_000 })
+  const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal), { interval: 30_000, enabled: measured })
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} view="sent" />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
@@ -70,9 +70,9 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const pagination = useCursorPagination()
-  const { pageSize, tableRef } = useAdaptivePageSize(5, 100)
+  const { pageSize, tableRef, measured } = useAdaptivePageSize(5, 100)
   const cursor = pagination.cursor
-  const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000 })
+  const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000, enabled: measured })
   if (api.environment === 'test') return <div className="logs-page"><LogsHeader regionId={regionId} view="received" /><Alert tone="info">Received mail is live-only. Switch to live mode to see it.</Alert></div>
   return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>

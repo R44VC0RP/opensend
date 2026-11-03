@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
 import { createLiveApi, request } from './live'
+import { regionCatalogKey } from './regions'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 
 const ApiContext = createContext<OpenSendApi | null>(null)
@@ -27,6 +28,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
       return result
     },
   })
+  // Load the region catalog alongside /v1/me rather than after it; the shell reuses this cache entry.
+  useEffect(() => {
+    if (client.mode === 'demo' || publicRoute) return
+    void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
+  }, [cache, client, publicRoute])
   useEffect(() => {
     if (!identity.data || client.mode === 'demo') return
     const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
@@ -35,7 +41,8 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     try { id = decodeURIComponent(match[1]) } catch { return }
     void cache.prefetchQuery({ queryKey: ['opensend', client.mode, client.environment, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
-  useEffect(() => { const denied = () => { cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
+  // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
+  useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity', environment]) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
@@ -77,10 +84,10 @@ export function useApi() {
   return api
 }
 // Polling is opt-in and foreground-only; pass a function to poll only while the data is in progress.
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval: number | ((data: T | undefined) => number | false) }) {
+export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean }) {
   const api = useApi()
   const interval = poll?.interval
-  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
+  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
 }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()
