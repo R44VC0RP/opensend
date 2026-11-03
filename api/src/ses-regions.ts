@@ -25,6 +25,7 @@ function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   const value = actor(c, mutate ? 'manage' : 'read');
   if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Region configuration requires unrestricted workspace access.');
   if ((mutate || aws) && value.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Use live administrator context for AWS discovery and region configuration.');
+  if (c.env.config.multiTenant && (mutate || aws)) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use the workspace sending connection to manage its AWS region.');
   return value;
 }
 async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: string, workspaceId = runtime.config.workspaceId) {
@@ -111,6 +112,7 @@ async function approvedOrigin(runtime: Runtime, keyId: string) {
   return Boolean(key?.permissions.includes('manage') && !key.domains.length);
 }
 const provision: JobHandler = async (runtime, payload, job) => {
+  if (runtime.config.multiTenant) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use connection setup for hosted workspaces.');
   const parsed = Params.safeParse(payload);
   if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId || typeof payload.actorKeyId !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES provisioning job.');
   const { region } = parsed.data;
@@ -131,7 +133,7 @@ const provision: JobHandler = async (runtime, payload, job) => {
 };
 // Startup schedules only read-only discovery. Concurrent worker starts reuse active jobs.
 export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
-  if (!runtime.config.aws) return 0;
+  if (!runtime.config.aws || runtime.config.multiTenant) return 0;
   const fingerprint = await credentialFingerprint(runtime.config), target = discoveryTarget(runtime.config);
   return runtime.db.transaction(async tx => {
     const settings = await getRegionSettings(tx, runtime.config.workspaceId, 'update');
@@ -149,6 +151,7 @@ export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
   });
 }
 const discover: JobHandler = async (runtime, payload, job) => {
+  if (runtime.config.multiTenant) return;
   const parsed = Params.safeParse(payload);
   if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES discovery job.');
   if (payload.credentialsFingerprint !== await credentialFingerprint(runtime.config) || payload.publicUrl !== discoveryTarget(runtime.config)) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'Discovery connection settings changed.');

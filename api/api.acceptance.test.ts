@@ -492,7 +492,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('MOCK GOOGLE TRANSPORT: real OAuth state/callback lifecycle persists trusted claims, rejects denied profiles, and fails closed on configuration', async t => {
     const [{ createApp }, { drizzle }] = await Promise.all([import('./src/app.js'), import('drizzle-orm/node-postgres')]);
     const app = createApp();
-    const origin = 'https://mock-oauth.opensend.invalid';
+    const origin = 'https://mock-oauth.opensend.dev';
     const emailAllowed = `${unique('mock-email-approved')}@unapproved.invalid`;
     const runtime: import('./src/core.js').Runtime = {
       db: drizzle(authDb!),
@@ -640,7 +640,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
     error(await local('POST', '/api/auth/sign-in/social', { provider: 'google' }), 503, 'AUTH_NOT_CONFIGURED');
     assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [blockedEmail])).rowCount, 0);
-    await t.test('MX: atomic Google signup, invited roles, workspace selection and isolation', async () => {
+    await t.test('MX: atomic Google signup, invited roles, workspace selection and isolation', async mx => {
       const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
       cleanup(t, () => pool.end());
       runtime.db = drizzle(pool);
@@ -673,10 +673,96 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const guestSub = unique('guest-sub'), guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
+      await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
+        const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
+        const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
+        const platformKey = { accessKeyId: 'synthetic-platform', secretAccessKey: 'synthetic-platform-secret' };
+        const callerArn = `arn:aws:iam::${platform}:user/synthetic-platform`;
+        let externalIds: string[] = [], assumptions = 0;
+        providerTest.mock.method(STSClient.prototype, 'send', async function(this: InstanceType<typeof STSClient>, command: any) {
+          const key = (await this.config.credentials()).accessKeyId;
+          if (command.constructor.name === 'GetCallerIdentityCommand') return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/OpenSendMX/synthetic` };
+          assert.equal(command.constructor.name, 'AssumeRoleCommand'); assert.equal(key, platformKey.accessKeyId);
+          if (!command.input.ExternalId) throw Object.assign(new Error('Expected missing external ID denial'), { name: 'AccessDenied' });
+          assert.ok(externalIds.includes(command.input.ExternalId)); assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/OpenSendMX-[a-f0-9]{20}$/);
+          assumptions++; return { Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
+        });
+        const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
+        const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
+        async function aws(this: InstanceType<typeof SNSClient> | InstanceType<typeof SESv2Client>, command: any) {
+          const account = (await this.config.credentials()).accessKeyId === platformKey.accessKeyId ? platform : customer;
+          const name = command.constructor.name, i = command.input, set = sets.get(i.ConfigurationSetName), topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
+          calls.push(name);
+          switch (name) {
+            case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
+            case 'GetConfigurationSetCommand': return set ?? missing();
+            case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: set!.destinations };
+            case 'CreateConfigurationSetCommand': assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'), account === platform); sets.set(i.ConfigurationSetName, { ...i, destinations: [] }); return {};
+            case 'PutConfigurationSetSuppressionOptionsCommand': assert.equal(i.SuppressionScope, account === platform ? 'TENANT' : 'ACCOUNT'); set!.SuppressionOptions = i; return {};
+            case 'CreateConfigurationSetEventDestinationCommand': set!.destinations.push({ ...i.EventDestination, Name: i.EventDestinationName }); return {};
+            case 'CreateTopicCommand': { const arn = `arn:aws:sns:${region}:${account}:${i.Name}`; topics.set(arn, { Tags: i.Tags, Attributes: { TopicArn: arn, Owner: account }, subs: [] }); return { TopicArn: arn }; }
+            case 'GetTopicAttributesCommand': return topic ?? missing();
+            case 'ListTagsForResourceCommand': return topic;
+            case 'SetTopicAttributesCommand': topic!.Attributes.Policy = i.AttributeValue; return {};
+            case 'ListSubscriptionsByTopicCommand': return { Subscriptions: topic!.subs };
+            case 'SubscribeCommand': {
+              assert.equal(i.Endpoint, `${origin}/v1/events/ses`);
+              const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1', [i.TopicArn]);
+              assert.equal(allowed.rowCount, 1); topic!.subs.push({ ...i, SubscriptionArn: `${i.TopicArn}:fixture` }); return {};
+            }
+            case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: 'false', Owner: account, RawMessageDelivery: 'false' } };
+            case 'CreateTenantCommand': assert.deepEqual(i.SuppressionAttributes, { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE','COMPLAINT'] }); return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
+            case 'UpdateReputationEntityPolicyCommand': assert.equal(i.ReputationEntityPolicy, `arn:aws:ses:${region}:aws:reputation-policy/strict`); return {};
+            case 'CreateTenantResourceAssociationCommand': assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `opensend-${wid}`)); assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/); return {};
+            default: throw new Error(`Unexpected AWS command ${name}`);
+          }
+        }
+        providerTest.mock.method(SESv2Client.prototype, 'send', aws); providerTest.mock.method(SNSClient.prototype, 'send', aws);
+        runtime.config.aws = platformKey; runtime.config.liveEnabled = true;
+        providerTest.after(async () => { runtime.config.aws = undefined; runtime.config.liveEnabled = false; runtime.config.byoTemplateUrl = undefined; await pool.query('DELETE FROM provider_pool_regions WHERE region=$1 AND aws_account_id=$2', [region, platform]); });
+        const choose = (kind: string, cookie: string) => local('POST', path, { kind, region }, cookie);
+        const verify = (cookie: string) => local('POST', `${path}/verify`, { awsAccountId: customer }, cookie);
+        assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
+        error(await local('GET', path, undefined, guest), 403); error(await choose('byo', a.cookie), 503, 'BYO_NOT_CONFIGURED');
+        for (const user of [a,b]) {
+          const connected = ok(await choose('shared', user.cookie), 201);
+          assert.equal(connected.status, 'ready'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
+          assert.deepEqual(ok(await local('GET', path, undefined, user.cookie)).connection, connected);
+        }
+        assert.equal(sets.size, 2); assert.equal(topics.size, 1); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 1);
+        assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
+        const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
+        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
+        for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
+        runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v1.yaml';
+        const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
+        externalIds = [ac,bc].map(reply => {
+          const row = ok(reply, 201); assert.equal(row.status, 'pending'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
+          assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
+        });
+        assert.notEqual(externalIds[0], externalIds[1]);
+        await assert.rejects(pool.query('UPDATE provider_connections SET external_id=$1 WHERE workspace_id=$2', [externalIds[0], b.org.id]), { code: '23505' });
+        assert.equal(ok(await verify(a.cookie)).status, 'ready');
+        const before = calls.length;
+        error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
+        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);
+        await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
+        // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
+        const queued = unique('fixture-mail');
+        await pool.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
+          VALUES ($1,$2,'test',$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
+        try { error(await local('DELETE', path, undefined, a.cookie), 409, 'CONNECTION_IN_USE'); }
+        finally { await pool.query('DELETE FROM sending_emails WHERE id=$1 AND workspace_id=$2', [queued, a.org.id]); }
+        ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
+        assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
+      });
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       assert.equal(ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length, 0);
       await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
-      for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', '/v1/regions', `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
+      const memberRegions = ok(await local('GET', '/v1/regions', undefined, guest));
+      assert.ok(memberRegions.data.some((r: Json) => r.enabled && r.region === memberRegions.defaultRegion));
+      for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', `/v1/regions/${memberRegions.defaultRegion}/discovery`, `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
+      error(await local('PUT', `/v1/regions/${memberRegions.defaultRegion}`, { enabled: true }, guest), 403, 'PERMISSION_DENIED');
       error(await local('POST', '/v1/campaigns/nope/send', { revision: 1 }, guest), 403, 'PERMISSION_DENIED');
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
       error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
@@ -1344,6 +1430,8 @@ describe('DB region catalog and explicit SES setup', () => {
     } as any);
     t.mock.method(sns.SNSClient.prototype, 'send', provider as any);
     t.mock.method(sts.STSClient.prototype, 'send', provider as any);
+    const { CloudWatchClient } = await import('@aws-sdk/client-cloudwatch');
+    t.mock.method(CloudWatchClient.prototype, 'send', async () => ({ MetricDataResults: [] }));
     try {
       await drizzle(db).transaction(async tx => {
         runtime.db = tx;

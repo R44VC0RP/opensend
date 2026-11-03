@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
+import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand } from '@aws-sdk/client-sesv2';
 import { SESv2Client, GetAccountCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
@@ -34,7 +35,7 @@ export const SesDiscoverySchema = z.object({
   }).nullable().default(null).describe('Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness.'),
 }).openapi('SesDiscovery');
 export type SesDiscovery = z.infer<typeof SesDiscoverySchema>;
-export type SesSetupOptions = { region: string; installationId: string };
+export type SesSetupOptions = { region: string; installationId: string; connectionSetup?: boolean };
 export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId: string, topicArn: string) => Promise<void> };
 
 // OPEN/CLICK destinations support tracking-enabled sends; per-message tracking overrides
@@ -56,13 +57,14 @@ function autoValidationMode(options: { ValidationOptions?: { ConditionThreshold?
   return condition.ConditionThresholdEnabled === 'ENABLED' && ['managed', 'medium', 'high'].includes(threshold ?? '') ? threshold as AutoValidationMode : 'unknown';
 }
 
-function validationInput(name: string, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>) {
-  return new PutConfigurationSetSuppressionOptionsCommand({ ConfigurationSetName: name, SuppressionScope: 'ACCOUNT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'], ValidationOptions: { ConditionThreshold: mode === 'off' ? { ConditionThresholdEnabled: 'DISABLED' } : { ConditionThresholdEnabled: 'ENABLED', OverallConfidenceThreshold: { ConfidenceVerdictThreshold: mode.toUpperCase() as 'MANAGED' | 'MEDIUM' | 'HIGH' } } } });
+function validationInput(name: string, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, pooled = false) {
+  return new PutConfigurationSetSuppressionOptionsCommand({ ConfigurationSetName: name, SuppressionScope: pooled ? 'TENANT' : 'ACCOUNT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'], ValidationOptions: { ConditionThreshold: mode === 'off' ? { ConditionThresholdEnabled: 'DISABLED' } : { ConditionThresholdEnabled: 'ENABLED', OverallConfidenceThreshold: { ConfidenceVerdictThreshold: mode.toUpperCase() as 'MANAGED' | 'MEDIUM' | 'HIGH' } } } });
 }
 
+export const POOL_INSTALLATION = 'opensend-mx:pool';
 export function setupResources(installationId: string): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
-  const prefix = `opensend-${createHash('sha256').update(installationId).digest('hex').slice(0, 20)}`;
+  const prefix = installationId === POOL_INSTALLATION ? 'opensend-mx' : `opensend-${createHash('sha256').update(installationId).digest('hex').slice(0, 20)}`;
   return { transactional: `${prefix}-transactional`, marketing: `${prefix}-marketing`, topicName: `${prefix}-feedback`, eventDestinationName: `${prefix}-events` };
 }
 
@@ -238,6 +240,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         if (account.EnforcementStatus && account.EnforcementStatus !== 'HEALTHY') add(report, 'SES_ACCOUNT_ENFORCEMENT', 'SES account enforcement status is not healthy.');
       }),
       attempt(async () => {
+        if (options.connectionSetup) return; // Onboarding precedes domain setup; never enumerate pooled identities.
         let token: string | undefined; let count = 0; const seen = new Set<string>();
         do {
           const page = await c.ses.send(new ListEmailIdentitiesCommand({ PageSize: Math.min(100, LIMIT - count), NextToken: token }), { abortSignal: deadlineSignal });
@@ -305,7 +308,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         topic.rawMessageDelivery = rawStates.includes(true) ? true : rawStates.length && rawStates.every(v => v === false) ? false : null;
         if (topic.subscription === 'pending') add(report, 'SNS_CONFIRMATION_PENDING', 'SNS is awaiting the signed HTTPS subscription confirmation. Check that the public feedback endpoint is reachable, then select the pending subscription in the SNS console and choose Request confirmation to resend.');
       }),
-      readReputation(c.cw, deadlineSignal).then(value => { report.reputation = value; }),
+      options.connectionSetup ? undefined : readReputation(c.cw, deadlineSignal).then(value => { report.reputation = value; }),
     ]);
     report.provisioned = report.resources.transactional.owned === true && report.resources.transactional.eventWired === true && report.resources.marketing.owned === true && report.resources.marketing.eventWired === true && topic.owned === true && topic.policyReady === true && topic.subscription === 'confirmed' && topic.rawMessageDelivery === false && !topic.subscriptionsTruncated && !report.blockers.some(b => b.code === 'SNS_SUBSCRIPTION_FILTERED' || b.code.startsWith('AWS_') || b.code === 'SNS_SUBSCRIPTION_UNKNOWN' || b.code === 'SNS_SUBSCRIPTION_OWNERSHIP_CONFLICT');
     report.status = report.blockers.length ? 'blocked' : report.provisioned ? 'ready' : 'needs_provisioning';
@@ -380,11 +383,12 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   try {
     for (const kind of ['transactional', 'marketing'] as const) {
       if (report.resources[kind].exists === false) {
-        try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options.installationId), SendingOptions: { SendingEnabled: true } }), { abortSignal: deadlineSignal }); }
+        try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options.installationId), SendingOptions: { SendingEnabled: true }, ...(options.installationId === POOL_INSTALLATION ? { SuppressionOptions: { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'] } } : {}) }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!collision(error)) throw error; }
       }
       const set = await assertSetOwned(names[kind]); // Recheck after create/AlreadyExists races; never adopt by name.
-      if (!set.SuppressionOptions?.ValidationOptions) await c.ses.send(validationInput(names[kind], DEFAULT_AUTO_VALIDATION[kind]), { abortSignal: deadlineSignal });
+      const pooled = options.installationId === POOL_INSTALLATION;
+      if (!set.SuppressionOptions?.ValidationOptions || (pooled && set.SuppressionOptions.SuppressionScope !== 'TENANT')) await c.ses.send(validationInput(names[kind], DEFAULT_AUTO_VALIDATION[kind], pooled), { abortSignal: deadlineSignal });
     }
     if (report.resources.topic.exists === false) {
       // SNS CreateTopic is idempotent, so its success alone is not ownership evidence.
@@ -433,7 +437,30 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
   try {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: context.signal });
     if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
-    await c.ses.send(validationInput(name, mode), { abortSignal: context.signal });
+    await c.ses.send(validationInput(name, mode, options.installationId === POOL_INSTALLATION), { abortSignal: context.signal });
+  } catch (error) { throw awsError(error); }
+  finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
+}
+
+export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string) {
+  const context = setupContext(), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const TenantName = `opensend-${workspaceId}`;
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(TenantName)) throw new ApiError(409, 'INVALID_TENANT_NAME', 'This workspace ID is not a valid SES tenant name.');
+  const suppression = { SuppressionScope: 'TENANT' as const, SuppressedReasons: ['BOUNCE', 'COMPLAINT'] as ('BOUNCE' | 'COMPLAINT')[] };
+  try {
+    let tenant;
+    try { tenant = await c.ses.send(new CreateTenantCommand({ TenantName, SuppressionAttributes: suppression }), opts); }
+    catch (error) {
+      if (!collision(error)) throw error;
+      tenant = (await c.ses.send(new GetTenantCommand({ TenantName }), opts)).Tenant;
+      await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);
+    }
+    if (tenant?.TenantName !== TenantName || !tenant.TenantArn?.startsWith(`arn:aws:ses:${region}:${account}:tenant/${TenantName}/`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
+    await c.ses.send(new UpdateReputationEntityPolicyCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: tenant.TenantArn, ReputationEntityPolicy: `arn:aws:ses:${region}:aws:reputation-policy/strict` }), opts);
+    for (const ResourceArn of arns(account, region, setupResources(POOL_INSTALLATION)).sets) {
+      try { await c.ses.send(new CreateTenantResourceAssociationCommand({ TenantName, ResourceArn }), opts); }
+      catch (error) { if (!collision(error)) throw error; }
+    }
   } catch (error) { throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }

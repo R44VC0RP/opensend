@@ -43,7 +43,7 @@ const orderedRegions = (settings: typeof sesSettings.$inferSelect) => [settings.
 // API routes validating a region don't need either set of SNS topic bindings.
 export async function withRegionSettings(runtime: Runtime, workspaceId: string): Promise<Runtime> {
   const settings = await getRegionSettings(runtime.db, workspaceId);
-  return { ...runtime, config: { ...runtime.config, regions: orderedRegions(settings) } };
+  return { ...runtime, config: { ...runtime.config, workspaceId, regions: orderedRegions(settings) } };
 }
 export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false, workspaceId = runtime.config.workspaceId) {
   const [row] = await db.select().from(sesRegions).where(regionWhere(workspaceId, region)).limit(1);

@@ -203,6 +203,7 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
+    if (c.env.config.multiTenant) throw new ApiError(409, 'DOMAIN_CLAIM_REQUIRED', 'Hosted connections require an exclusive domain claim before creating an SES identity.');
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
     catch (error) {
@@ -216,6 +217,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row!, identity), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
+    if (c.env.config.multiTenant) throw new ApiError(409, 'DOMAIN_CLAIM_REQUIRED', 'Hosted connections require an exclusive domain claim before modifying an SES identity.');
     const a = actor(c, 'manage'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const { mailFromDomain } = c.req.valid('json');
@@ -353,6 +355,13 @@ function registerPublicEvents(app: App) {
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
+    if (c.env.config.multiTenant && envelope.Type === 'SubscriptionConfirmation') {
+      // Onboarding authorizes only confirmation of the exact topic registered before Subscribe.
+      // Do not grant a topic access to message ingestion before connection-aware routing exists.
+      const registered = await c.env.db.execute(sql`SELECT 1 FROM provider_connections WHERE feedback_topic_arn=${envelope.TopicArn}
+        UNION ALL SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=${envelope.TopicArn} LIMIT 1`);
+      if (registered.rowCount) c.env = { ...c.env, config: { ...c.env.config, snsTopicArns: [envelope.TopicArn] } };
+    }
     if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
     const trusted = await verifySns(c.env, envelope);
     if (envelope.Type !== 'Notification') {

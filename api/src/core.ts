@@ -5,6 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
+import { workspaceCredentials } from './provider-credentials.js';
 
 export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
@@ -37,6 +38,7 @@ export interface Config {
   allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
+  byoTemplateUrl?: string;
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];
@@ -115,7 +117,7 @@ export function getSes(runtime: Runtime, selectedRegion: string): SESv2Client {
   let clients = sesClients.get(runtime);
   if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
   let client = clients.get(selectedRegion);
-  if (!client) { client = new SESv2Client({ region: selectedRegion, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(selectedRegion, client); }
+  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(selectedRegion, client); }
   return client;
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {

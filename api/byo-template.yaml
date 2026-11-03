@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: OpenSend MX customer connection v1. Creates one revocable, regional SES role; receiving is optional.
+Parameters:
+  PlatformPrincipalArn:
+    Type: String
+    AllowedPattern: 'arn:aws:iam::[0-9]{12}:user/[A-Za-z0-9+=,.@_/-]+'
+  ExternalId:
+    Type: String
+    AllowedPattern: '[0-9a-f-]{36}'
+  ResourcePrefix:
+    Description: OpenSend resources dedicated to this connection.
+    Type: String
+    AllowedPattern: 'opensend-[0-9a-f]{20}'
+  FeedbackUrl:
+    Type: String
+    AllowedPattern: 'https://[^/?#]+/v1/events/ses'
+  ReceiveMail:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+Conditions:
+  Receiving: !Equals [!Ref ReceiveMail, 'true']
+Resources:
+  OpenSendRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AWS::StackName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref PlatformPrincipalArn }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'sts:ExternalId': !Ref ExternalId }
+      Policies:
+        - PolicyName: Sending
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['ses:GetAccount', 'ses:ListEmailIdentities', 'cloudwatch:GetMetricData', 'ses:ApplyTrackingConfigurationOverrides']
+                Resource: '*'
+                Condition: { StringEquals: { 'aws:RequestedRegion': !Ref 'AWS::Region' } }
+              - Effect: Allow
+                Action: ['ses:GetEmailIdentity', 'ses:CreateEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+              - Effect: Allow
+                Action: ['ses:GetConfigurationSet', 'ses:CreateConfigurationSet', 'ses:TagResource', 'ses:GetConfigurationSetEventDestinations', 'ses:CreateConfigurationSetEventDestination', 'ses:UpdateConfigurationSetEventDestination', 'ses:PutConfigurationSetSuppressionOptions']
+                Resource:
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
+              - Effect: Allow
+                Action: ['ses:SendEmail', 'ses:SendRawEmail']
+                Resource:
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
+              - Effect: Allow
+                Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:template/opensend-*'
+              - Effect: Allow
+                Action: ['sns:CreateTopic', 'sns:TagResource', 'sns:ListTagsForResource', 'sns:SetTopicAttributes', 'sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes', 'sns:GetSubscriptionAttributes', 'sns:SetSubscriptionAttributes']
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-feedback'
+              - Effect: Allow
+                Action: sns:Subscribe
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-feedback'
+                Condition: { StringEquals: { 'sns:Protocol': https, 'sns:Endpoint': !Ref FeedbackUrl } }
+        - !If
+          - Receiving
+          - PolicyName: Receiving
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ['ses:DescribeActiveReceiptRuleSet', 'ses:DescribeReceiptRuleSet', 'ses:CreateReceiptRuleSet', 'ses:SetActiveReceiptRuleSet', 'ses:CreateReceiptRule', 'ses:UpdateReceiptRule', 'ses:DeleteReceiptRule']
+                  Resource: '*'
+                  Condition: { StringEquals: { 'aws:RequestedRegion': !Ref 'AWS::Region' } }
+                - Effect: Allow
+                  Action: ['sns:CreateTopic', 'sns:TagResource', 'sns:ListTagsForResource', 'sns:SetTopicAttributes', 'sns:ListSubscriptionsByTopic']
+                  Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-inbound'
+                - Effect: Allow
+                  Action: sns:Subscribe
+                  Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-inbound'
+                  Condition: { StringEquals: { 'sns:Protocol': https, 'sns:Endpoint': !Ref FeedbackUrl } }
+                - Effect: Allow
+                  Action: ['s3:ListBucket', 's3:CreateBucket', 's3:PutBucketOwnershipControls', 's3:PutBucketTagging', 's3:PutBucketPublicAccessBlock', 's3:PutBucketPolicy', 's3:PutLifecycleConfiguration']
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}'
+                  Condition: { StringEqualsIfExists: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
+                - Effect: Allow
+                  Action: s3:GetObject
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/raw/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/att/*'
+                - Effect: Allow
+                  Action: s3:PutObject
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/att/*'
+          - !Ref AWS::NoValue
+Outputs:
+  AccountId:
+    Description: Enter this AWS account ID in OpenSend to verify the connection.
+    Value: !Ref AWS::AccountId
+  RoleArn:
+    Value: !GetAtt OpenSendRole.Arn

@@ -27,6 +27,7 @@ export function mailboxResources(installationId: string, region: string) {
 }
 
 function awsConfig(runtime: Runtime, region: string) {
+  if (runtime.config.multiTenant) throw new ApiError(409, 'INBOUND_CONNECTION_REQUIRED', 'Hosted receiving requires connection-aware inbound setup.');
   if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'Configure AWS access credentials to enable mailboxes.');
   return { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) };
 }
@@ -157,6 +158,7 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
  * a receipt rule with no recipients matches every address on every domain.
  */
 export async function reconcileRegion(runtime: Runtime, region: string): Promise<void> {
+  const config = awsConfig(runtime, region);
   const workspaceId = runtime.config.workspaceId;
   await runtime.db.insert(mailboxRegions).values({ workspaceId, region }).onConflictDoNothing();
   // The lease must expire before the job's own lease (3 minutes), so a retry of a run that died can take over
@@ -165,7 +167,6 @@ export async function reconcileRegion(runtime: Runtime, region: string): Promise
     .where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region), sql`(${mailboxRegions.reconcileLeaseUntil} IS NULL OR ${mailboxRegions.reconcileLeaseUntil} < now())`)).returning({ region: mailboxRegions.region });
   if (!lease) throw new ApiError(503, 'MAILBOX_RECONCILE_BUSY', 'Another mailbox setup run owns this region; retrying.', undefined, true);
   const signal = AbortSignal.timeout(100000);
-  const config = awsConfig(runtime, region);
   const sesClient = new SESClient(config);
   const clients = { sts: new STSClient(config), s3: new S3Client(config), sns: new SNSClient(config), ses: pacedSes(sesClient, signal) };
   try {

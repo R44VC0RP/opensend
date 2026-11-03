@@ -7,6 +7,7 @@ import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
 import { registerWorkspaces } from './workspaces.js';
+import { registerProviderConnections } from './provider-connections.js';
 import { registerAudience } from './audience.js';
 import { registerAudienceQuery } from './audience-query.js';
 import { registerTemplates } from './templates.js';
@@ -63,7 +64,7 @@ export function createApp() {
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') {
       // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
-      if (c.req.method === 'POST') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
+      if (c.req.method === 'POST' && !c.env.config.multiTenant) c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
       return next();
     }
     return authenticate(c, next);
@@ -74,7 +75,8 @@ export function createApp() {
     if (c.get('actor')?.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
     await next();
   };
-  for (const area of ['regions', 'domains', 'webhooks', 'agent-tokens']) app.use(`/v1/${area}/*`, notMember);
+  for (const area of ['domains', 'webhooks', 'agent-tokens']) app.use(`/v1/${area}/*`, notMember);
+  app.use('/v1/regions/*', (c, next) => c.req.method === 'GET' && c.req.path === '/v1/regions' ? next() : notMember(c, next));
   app.use('/v1/settings/ses', notMember);
   app.on('POST', ['send', 'schedule', 'pause', 'resume', 'pacing', 'cancel'].map(action => `/v1/campaigns/:id/${action}`), notMember);
   const regions = async (c: Ctx, next: () => Promise<void>) => {
@@ -99,7 +101,7 @@ export function createApp() {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app); registerMailbox(app);
-  registerWorkspaces(app); registerMcp(app);
+  registerWorkspaces(app); registerProviderConnections(app); registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;
   app.get('/openapi.json', c => { openApiDocument ??= createOpenApiDocument(app); c.header('cache-control', 'public, max-age=300'); return c.json(openApiDocument); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
