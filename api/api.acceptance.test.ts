@@ -896,6 +896,51 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
   });
 
+  test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
+    const db = await fixtureDatabase(t);
+    const manager = await oauthGrant(t, db, `${writableScope} opensend:live`);
+    const reader = await oauthGrant(t, db, 'opensend:read opensend:live offline_access');
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
+      const domain = unique('dom'), parent = unique('dom');
+      const name = 'inbox.example.com';
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES ($1,$2,'live',$3,$4), ($5,$2,'live','example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
+      runtime.config.liveEnabled = true; // SES transport is mocked below; the workspace transaction never commits.
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' };
+      const { SESv2Client, GetEmailIdentityCommand } = await import('@aws-sdk/client-sesv2');
+      let verified = false;
+      const ses = t.mock.method(SESv2Client.prototype, 'send', async (command: any) => {
+        assert.ok(command instanceof GetEmailIdentityCommand); assert.equal(command.input.EmailIdentity, name);
+        return { VerificationStatus: verified ? 'SUCCESS' : 'PENDING' };
+      });
+      const rpc = async (token: string, method: string, params: Json) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method, params },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
+      const call = async (name: string, args: Json) => (await rpc(manager.token,'tools/call',{ name, arguments:args })).structuredContent;
+      const enable = (extra: Json = {}) => call('enableInboundDomain',{ id:domain, confirm:true, ...extra });
+      const state = async (id: string) => (await call('getInboundDomain',{ id })).response.status;
+      assert.ok(!(await rpc(reader.token,'tools/list',{})).tools.some((tool: Json) => tool.name.endsWith('InboundDomain') || tool.name === 'listInboundDomains'));
+      assert.equal((await rpc(reader.token,'tools/call',{ name:'enableInboundDomain', arguments:{ id:domain,confirm:true } })).structuredContent.error.code,'TOOL_UNAVAILABLE');
+      assert.deepEqual((await call('listInboundDomains',{})).response.data.map((row: Json) => row.status),['off','off']);
+      assert.equal((await enable({ confirm:false })).error.code,'CONFIRMATION_REQUIRED');
+      assert.equal((await enable({ body:{ force:true } })).error.code,'INVALID_ARGUMENTS');
+      assert.equal(ses.mock.callCount(),0);
+      assert.equal((await enable()).error.code,'DOMAIN_NOT_VERIFIED');
+      verified = true;
+      let mx = '10 mx.other.example.';
+      const networkGuard = globalThis.fetch;
+      globalThis.fetch = async input => {
+        assert.equal(String(input), `https://cloudflare-dns.com/dns-query?name=${name}&type=MX`);
+        return Response.json({ Status: mx ? 0 : 2, Answer: mx ? [{ name, type: 15, data: mx }] : [] });
+      };
+      try {
+        assert.equal((await enable()).error.code,'MX_CONFLICT');
+        mx = ''; assert.equal((await enable()).error.code,'MX_LOOKUP_FAILED');
+        assert.equal(await state(domain),'off'); assert.equal((await jobs('mailbox.reconcile')).length,0);
+        mx = `10 inbound-smtp.${REGION}.amazonaws.com.`;
+        const result = await enable(); assert.equal(result.status,202); assert.equal(result.response.status,'provisioning');
+        assert.equal(await state(domain),'provisioning'); assert.equal(await state(parent),'off'); assert.equal((await jobs('mailbox.reconcile')).length,1);
+      } finally { globalThis.fetch = networkGuard; }
+    });
+  });
+
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
     const { token } = await oauthGrant(t, await fixtureDatabase(t), `${writableScope} opensend:live`);
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
@@ -922,7 +967,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent.response; };
       const tools = (await mcp('tools/list',{})).tools.map((x:Json)=>x.name);
       for (const name of ['saveInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','sendInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
-      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','enableInboundDomain']) assert.ok(!tools.includes(admin));
+      for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','provisionRegion']) assert.ok(!tools.includes(admin));
       const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
       const legacyHook = ok(await local('POST','/mailbox/v1/webhooks',{url:'https://example.com/mailboxes',eventTypes:['mailbox.created','mailbox.deleted']},'live'),201);
       const a=await success('saveInboundAddress',{action:'create',body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});

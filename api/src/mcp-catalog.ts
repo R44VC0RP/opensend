@@ -380,6 +380,13 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
 
   // Keep mailbox content off outbound-only grants, including all existing read grants.
   const inbound = (operation: McpOperation) => add(Object.freeze({ ...operation, inbound: true }));
+  inbound(alias(need('listInboundDomains'), 'listInboundDomains', 'List registered domains and their inbound receiving status. A verified sending identity alone does not mean receiving is active.'));
+  inbound(alias(need('getInboundDomain'), 'getInboundDomain', 'Read the receiving status, last MX check and setup errors for one registered domain ID. Only status=active means setup is complete.'));
+  const enable = need('enableInboundDomain');
+  const { id: domainId, confirm } = enable.tool.inputSchema.properties!;
+  inbound(custom('enableInboundDomain', 'Enable receiving for the confirmed domain ID. Checks SES verification and MX before queuing the receipt rule and related resources. Does not change DNS or override a conflicting mail provider. Read getInboundDomain after the 202 response to verify status=active.', {
+    type: 'object', properties: { id: domainId, confirm }, required: ['id', 'confirm'], additionalProperties: false,
+  }, true, args => ({ steps: [{ operation: enable, args: { id: args.id, confirm: args.confirm, body: { force: false } } }] }), enable.tool.outputSchema));
   for (const name of ['listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents']) inbound(need(name));
   inbound(actionTool('saveInboundAddress', 'Create or update a receiving address on a domain already enabled for inbound mail.', { create: need('createInboundAddress'), update: need('updateInboundAddress') }));
   const threadSends: Record<string, McpOperation> = { start: need('createInboundThread') };
@@ -403,7 +410,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
   direct('getCampaignStats', 'Read lifetime delivery, unique opens/clicks, bounce/complaint/failure counts and progress for one campaign. Rates include explicit numerators/denominators and are fractions, not percentages. Delivery is receiving-server acceptance, not inbox placement; engagement includes bots/privacy proxies. Test-mode rates are null.', 'getCampaignStats');
   direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read, send or manage delegation within the originating MCP approval and optional sender-domain restrictions. Cannot manage credentials.', 'createAgentToken');
-  direct('findDomains', 'List SES sending domains or supply id alone to retrieve one domain with current DKIM, custom MAIL FROM, MX and SPF records.', 'getDomains');
+  direct('findDomains', 'List SES sending identities or inspect DKIM and custom MAIL FROM. For inbound receiving status, use getInboundDomain with the same domain ID when available.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
 
   return result;

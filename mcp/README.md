@@ -58,6 +58,8 @@ Hosted inbound tools require an unrestricted **live manage** OAuth grant, even f
 
 | Task | Hosted tool |
 | --- | --- |
+| Check whether a domain receives mail | `listInboundDomains`, `getInboundDomain` (`id` from either the sending or receiving list) |
+| Enable receiving for a verified domain | `enableInboundDomain` (`id`, `confirm: true`); `202` means queued. Read `getInboundDomain` until `status` is `active`. This does not edit DNS or force a conflicting MX. |
 | Find or inspect a receiving address | `listInboundAddresses`, `getInboundAddress` (`addressId`) |
 | Create, update or remove an address | `saveInboundAddress` (`action: create` or `update`, `body`; `addressId` for updates), `deleteInboundAddress` (`addressId`) |
 | Find conversations or read a specific message | `listInboundThreads`, `getInboundThread` (`threadId`), `listInboundMessages`, `getInboundMessage` (`messageId`) |
@@ -98,4 +100,4 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
 
-The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `OPENSEND_API_URL` and `OPENSEND_API_KEY`; writes additionally require `OPENSEND_MCP_ALLOW_WRITES=true`. An address-scoped `os_mbx_…` key exposes inbound reads and, when writes are enabled, thread sends and state updates. The API enforces its address and permission restrictions on every call. Address administration requires unrestricted live manage access. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, provisioning, and other auxiliary routes are not exposed.
+The stdio launcher retains one tool per API operation, with nested `path`/`query` arguments. Set `OPENSEND_API_URL` and `OPENSEND_API_KEY`; writes additionally require `OPENSEND_MCP_ALLOW_WRITES=true`. An address-scoped `os_mbx_…` key exposes inbound mail reads and, when writes are enabled, thread sends and state updates, not receiving-domain setup. The API enforces its address and permission restrictions on every call. Receiving-domain and address administration require unrestricted live manage access. For `enableInboundDomain` use `{ "path": { "id": "dom_…" }, "confirm": true }`; no custom body or MX override is accepted. Stdio names its thread sends `createInboundThread` and `replyToInboundThread`; both require `confirm: true` and `idempotencyKey`. Inbound credential management, raw downloads, disabling receiving, and general SES provisioning are not exposed.
