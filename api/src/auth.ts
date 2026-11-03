@@ -44,8 +44,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     }
   } else {
     const dashboard = await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work), headers => {
-      const cookie = headers.get('set-cookie');
-      if (cookie) c.header('set-cookie', cookie, { append: true });
+      for (const cookie of headers.getSetCookie()) c.header('set-cookie', cookie, { append: true });
     });
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);

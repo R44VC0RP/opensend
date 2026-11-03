@@ -190,7 +190,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
     // before any validation branch can return and leave a rejected promise.
     await auth.$context;
     if (sessionWrites.has(path) || sessionReads.has(path)) {
-      const session = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true } });
+      const session = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true, disableRefresh: true } });
       if (!session || !await isApprovedUser(runtime, session.user.id)) return oauthError(401, 'access_denied', 'An approved Google session is required.');
     }
     const headers = new Headers(request.headers);
@@ -307,7 +307,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     if (!requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length || params.getAll('resource').length !== 1 || params.get('resource') !== resourceOf(runtime)) {
       return page('Invalid connection request', '<p>Restart the connection from your MCP client.</p>');
     }
-    const session = await auth.api.getSession({ headers: requestHeaders, query: { disableCookieCache: true } });
+    const session = await auth.api.getSession({ headers: requestHeaders, query: { disableCookieCache: true, disableRefresh: true } });
     const approvedSession = session && await isApprovedUser(runtime, session.user.id) ? session : null;
     const action = form?.get('action');
     if (action === 'signin') {

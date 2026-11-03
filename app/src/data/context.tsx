@@ -16,12 +16,17 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   const cache = useQueryClient()
   const [authError, setAuthError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const identity = useQuery({ queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute, retry: false, queryFn: async ({signal}) => {
-    const started = performance.now()
-    const result = await request<Identity>('/v1/me', {signal, environment})
-    console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
-    return result
-  } })
+  const identity = useQuery({
+    queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute,
+    networkMode: 'always', refetchOnReconnect: true,
+    retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
+    queryFn: async ({signal}) => {
+      const started = performance.now()
+      const result = await request<Identity>('/v1/me', {signal, environment})
+      console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
+      return result
+    },
+  })
   useEffect(() => {
     if (!identity.data || client.mode === 'demo') return
     const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
@@ -50,9 +55,21 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     }
     catch (error) { setAuthError(error); setBusy(false) }
   }
-  const error = authError ?? identity.error
-  const unconfigured = error instanceof ApiError && error.code === 'AUTH_NOT_CONFIGURED'
-  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>{publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}><h2>Sign in with Google</h2>{unconfigured ? <Alert tone="warning">Google sign-in is not configured. The deployment operator must configure the Google OAuth client, auth secret, public URL, and approved identities.</Alert> : error && !(error instanceof ApiError && error.status === 401) ? <Alert tone="danger">{error instanceof Error ? error.message : 'Sign-in is unavailable.'}</Alert> : null}{new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>}<Button variant="primary" disabled={unconfigured} loading={busy} onClick={login}>Continue with Google</Button><Button onClick={() => identity.refetch()}>Check session again</Button></div></main>}</SessionContext.Provider></ApiContext.Provider>
+  const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
+  const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
+  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>
+    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
+      {signedOut ? <>
+        <h2>Sign in with Google</h2>
+        {authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>}
+        <Button variant="primary" loading={busy} onClick={login}>Continue with Google</Button>
+      </> : <>
+        <h2>Couldn’t check your session</h2>
+        <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'OpenSend couldn’t verify your session. Try again without signing in.'}</Alert>
+      </>}
+      <Button loading={identity.isFetching} onClick={() => void identity.refetch()}>Check session again</Button>
+    </div></main>}
+  </SessionContext.Provider></ApiContext.Provider>
 }
 export function useApi() {
   const api = useContext(ApiContext)
