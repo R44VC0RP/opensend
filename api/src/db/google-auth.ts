@@ -5,6 +5,7 @@ export const authUser = pgTable('auth_user', {
   id: text('id').primaryKey(), name: text('name').notNull(), email: text('email').notNull().unique(),
   emailVerified: boolean('email_verified').notNull().default(false), image: text('image'),
   googleHostedDomain: text('google_hosted_domain'),
+  selectedWorkspaceId: text('selected_workspace_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

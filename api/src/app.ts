@@ -6,6 +6,7 @@ import type { Mode } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
+import { registerWorkspaces } from './workspaces.js';
 import { registerAudience } from './audience.js';
 import { registerAudienceQuery } from './audience-query.js';
 import { registerTemplates } from './templates.js';
@@ -57,6 +58,9 @@ export function createApp() {
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
+    // Joining requires a verified session, not an existing membership. This endpoint
+    // authenticates the invitation recipient directly and cannot authorize resource access.
+    if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') {
       // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
       if (c.req.method === 'POST') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
@@ -64,6 +68,15 @@ export function createApp() {
     }
     return authenticate(c, next);
   });
+  // These areas have read or send routes as well as manage routes. An MX member's
+  // read/send scopes do not confer access to infrastructure or campaign delivery controls.
+  const notMember = async (c: Ctx, next: () => Promise<void>) => {
+    if (c.get('actor')?.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'This operation requires a workspace owner or admin.');
+    await next();
+  };
+  for (const area of ['regions', 'domains', 'webhooks', 'agent-tokens']) app.use(`/v1/${area}/*`, notMember);
+  app.use('/v1/settings/ses', notMember);
+  app.on('POST', ['send', 'schedule', 'pause', 'resume', 'pacing', 'cancel'].map(action => `/v1/campaigns/:id/${action}`), notMember);
   const regions = async (c: Ctx, next: () => Promise<void>) => {
     c.env = await timed(c, 'region-db', () => withRegionSettings(c.env, c.get('actor').workspaceId));
     await next();
@@ -86,7 +99,7 @@ export function createApp() {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app); registerMailbox(app);
-  registerMcp(app);
+  registerWorkspaces(app); registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;
   app.get('/openapi.json', c => { openApiDocument ??= createOpenApiDocument(app); c.header('cache-control', 'public, max-age=300'); return c.json(openApiDocument); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };

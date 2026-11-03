@@ -2721,6 +2721,35 @@ export type MailboxUnroutedMessage = {
     address: string;
 };
 
+export type Workspace = {
+    id: string;
+    name: string;
+    slug: string;
+    role: 'owner' | 'admin' | 'member';
+};
+
+export type WorkspaceMember = {
+    id: string;
+    userId: string;
+    email: string;
+    name: string;
+    role: 'owner' | 'admin' | 'member';
+};
+
+export type WorkspaceInvitation = {
+    id: string;
+    workspaceId: string;
+    email: string;
+    role: 'owner' | 'admin' | 'member';
+    expiresAt: string;
+    acceptUrl: string;
+};
+
+export type InviteWorkspaceMember = {
+    email: string;
+    role: 'owner' | 'admin' | 'member';
+};
+
 export type ListMcpConnectionsData = {
     body?: never;
     path?: never;
@@ -2913,6 +2942,8 @@ export type GetCurrentIdentityResponses = {
     200: {
         id: string;
         workspaceId: string;
+        role: 'owner' | 'admin' | 'member' | null;
+        multiTenant: boolean;
         email: string | null;
         name: string | null;
         environment: 'live' | 'test';
@@ -15329,3 +15360,642 @@ export type MailboxListUnroutedResponses = {
 };
 
 export type MailboxListUnroutedResponse = MailboxListUnroutedResponses[keyof MailboxListUnroutedResponses];
+
+export type ListWorkspacesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces';
+};
+
+export type ListWorkspacesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListWorkspacesError = ListWorkspacesErrors[keyof ListWorkspacesErrors];
+
+export type ListWorkspacesResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<Workspace>;
+    };
+};
+
+export type ListWorkspacesResponse = ListWorkspacesResponses[keyof ListWorkspacesResponses];
+
+export type RenameCurrentWorkspaceData = {
+    body: {
+        name: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces/current';
+};
+
+export type RenameCurrentWorkspaceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RenameCurrentWorkspaceError = RenameCurrentWorkspaceErrors[keyof RenameCurrentWorkspaceErrors];
+
+export type RenameCurrentWorkspaceResponses = {
+    /**
+     * Success
+     */
+    200: Workspace;
+};
+
+export type RenameCurrentWorkspaceResponse = RenameCurrentWorkspaceResponses[keyof RenameCurrentWorkspaceResponses];
+
+export type ListWorkspaceMembersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces/current/members';
+};
+
+export type ListWorkspaceMembersErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListWorkspaceMembersError = ListWorkspaceMembersErrors[keyof ListWorkspaceMembersErrors];
+
+export type ListWorkspaceMembersResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<WorkspaceMember>;
+    };
+};
+
+export type ListWorkspaceMembersResponse = ListWorkspaceMembersResponses[keyof ListWorkspaceMembersResponses];
+
+export type InviteWorkspaceMemberData = {
+    body: InviteWorkspaceMember;
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces/current/members';
+};
+
+export type InviteWorkspaceMemberErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type InviteWorkspaceMemberError = InviteWorkspaceMemberErrors[keyof InviteWorkspaceMemberErrors];
+
+export type InviteWorkspaceMemberResponses = {
+    /**
+     * Success
+     */
+    201: WorkspaceInvitation;
+};
+
+export type InviteWorkspaceMemberResponse = InviteWorkspaceMemberResponses[keyof InviteWorkspaceMemberResponses];
+
+export type RevokeWorkspaceInvitationData = {
+    body?: never;
+    path?: never;
+    query: {
+        id: string;
+    };
+    url: '/v1/workspaces/current/invitations';
+};
+
+export type RevokeWorkspaceInvitationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RevokeWorkspaceInvitationError = RevokeWorkspaceInvitationErrors[keyof RevokeWorkspaceInvitationErrors];
+
+export type RevokeWorkspaceInvitationResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        deleted: true;
+    };
+};
+
+export type RevokeWorkspaceInvitationResponse = RevokeWorkspaceInvitationResponses[keyof RevokeWorkspaceInvitationResponses];
+
+export type ListWorkspaceInvitationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces/current/invitations';
+};
+
+export type ListWorkspaceInvitationsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListWorkspaceInvitationsError = ListWorkspaceInvitationsErrors[keyof ListWorkspaceInvitationsErrors];
+
+export type ListWorkspaceInvitationsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<WorkspaceInvitation>;
+    };
+};
+
+export type ListWorkspaceInvitationsResponse = ListWorkspaceInvitationsResponses[keyof ListWorkspaceInvitationsResponses];
+
+export type CreateWorkspaceInvitationData = {
+    body: InviteWorkspaceMember;
+    path?: never;
+    query?: never;
+    url: '/v1/workspaces/current/invitations';
+};
+
+export type CreateWorkspaceInvitationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateWorkspaceInvitationError = CreateWorkspaceInvitationErrors[keyof CreateWorkspaceInvitationErrors];
+
+export type CreateWorkspaceInvitationResponses = {
+    /**
+     * Success
+     */
+    201: WorkspaceInvitation;
+};
+
+export type CreateWorkspaceInvitationResponse = CreateWorkspaceInvitationResponses[keyof CreateWorkspaceInvitationResponses];
+
+export type RemoveWorkspaceMemberData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/workspaces/current/members/{id}';
+};
+
+export type RemoveWorkspaceMemberErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RemoveWorkspaceMemberError = RemoveWorkspaceMemberErrors[keyof RemoveWorkspaceMemberErrors];
+
+export type RemoveWorkspaceMemberResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        deleted: true;
+    };
+};
+
+export type RemoveWorkspaceMemberResponse = RemoveWorkspaceMemberResponses[keyof RemoveWorkspaceMemberResponses];
+
+export type UpdateWorkspaceMemberData = {
+    body: {
+        role: 'owner' | 'admin' | 'member';
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/workspaces/current/members/{id}';
+};
+
+export type UpdateWorkspaceMemberErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateWorkspaceMemberError = UpdateWorkspaceMemberErrors[keyof UpdateWorkspaceMemberErrors];
+
+export type UpdateWorkspaceMemberResponses = {
+    /**
+     * Success
+     */
+    200: {
+        id: string;
+        role: 'owner' | 'admin' | 'member';
+    };
+};
+
+export type UpdateWorkspaceMemberResponse = UpdateWorkspaceMemberResponses[keyof UpdateWorkspaceMemberResponses];
+
+export type AcceptWorkspaceInvitationData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/workspaces/invitations/{id}/accept';
+};
+
+export type AcceptWorkspaceInvitationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type AcceptWorkspaceInvitationError = AcceptWorkspaceInvitationErrors[keyof AcceptWorkspaceInvitationErrors];
+
+export type AcceptWorkspaceInvitationResponses = {
+    /**
+     * Success
+     */
+    200: {
+        workspaceId: string;
+    };
+};
+
+export type AcceptWorkspaceInvitationResponse = AcceptWorkspaceInvitationResponses[keyof AcceptWorkspaceInvitationResponses];

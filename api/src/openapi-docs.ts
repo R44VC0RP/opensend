@@ -78,6 +78,7 @@ function sdkSample(document: Json, path: string, method: string, pathItem: Json,
     if (operation.operationId === 'sendEmailBatch') options.body.emails = options.body.emails.map(completeEmail);
   }
   const renderedOptions = Object.entries(options).map(([key, value]) => `  ${key}: ${JSON.stringify(value, null, 2).replaceAll('\n', '\n  ')},`).join('\n');
+  if (operation.tags?.includes('Workspaces')) return `import { createClient } from 'opensend-js/client';\nimport { ${operation.operationId} } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\nconsole.log(result.data);`;
   return `import { createClient } from 'opensend-js/client';\nimport { ${operation.operationId} } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await ${operation.operationId}({\n  client,\n${renderedOptions ? `${renderedOptions}\n` : ''}  throwOnError: true,\n});\n\nconsole.log(result.data);`;
 }
 
@@ -93,6 +94,10 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
   if (operation.operationId === 'sendEmailBatch') body.emails = body.emails.map(completeEmail);
   const lines = [`curl --request ${method.toUpperCase()} \\`, `  --url 'https://opensend.anoma.ly${target}' \\`, `  --header 'Authorization: Bearer $OPENSEND_API_KEY'`];
   lines[2] = `  --header "Authorization: Bearer $OPENSEND_API_KEY"`;
+  if (operation.tags?.includes('Workspaces')) {
+    lines[1] = `  --url "\${OPENSEND_ORIGIN}${target}" \\`;
+    lines[2] = `  --header "Origin: $OPENSEND_ORIGIN" \\\n  --cookie "$OPENSEND_COOKIE_JAR"`;
+  }
   if (bodySchema) { lines[lines.length - 1] += ' \\'; lines.push(`  --header 'Content-Type: application/json' \\`, `  --data '${JSON.stringify(body, null, 2)}'`); }
   return lines.join('\n');
 }

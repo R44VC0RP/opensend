@@ -6,7 +6,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
 import { actor, ApiError, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
-import { approvedGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin } from './google-auth.js';
+import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin } from './google-auth.js';
+import { workspaces } from './db/workspaces.js';
 import { agentTokens } from './db/core.js';
 import { authAccount, authUser } from './db/google-auth.js';
 import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
@@ -22,10 +23,10 @@ const issuerOf = (runtime: Runtime) => `${originOf(runtime)}/api/auth`;
 const workspaceTag = (workspaceId: string) => workspaceId === 'default' ? '' : encodeURIComponent(workspaceId);
 const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(${oauthConsent.referenceId}, '|', 3)`, workspaceTag(workspaceId));
 function originalGrant(reference: string | null) {
-  const match = reference?.match(/^mcp_[0-9a-f-]{36}\|([^|]+)(?:\|([^|]+))?$/);
+  const match = reference?.match(/^mcp_[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
   const values = match?.[1]?.split(' ') ?? [];
   if (!values.length || !values.every(value => scopes.includes(value))) return null;
-  try { return { scopes: values, workspaceId: match?.[2] ? decodeURIComponent(match[2]) : 'default' }; }
+  try { return { scopes: values, workspaceId: match?.[2] ? decodeURIComponent(match[2]) : 'default', memberCeiling: !!match?.[3] }; }
   catch { return null; }
 }
 function grantPermissions(values: readonly string[]): Permission[] {
@@ -39,7 +40,7 @@ function invalidGrant(): never {
 // consent endpoint internally resumes authorize, then persists through refresh.
 // It also captures the original scope ceiling: later consent edits can only
 // reduce an existing identity, never elevate an already queued job.
-export function createMcpPlugin(runtime: Runtime) {
+export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
   const authorizationId = crypto.randomUUID();
   const resource = resourceOf(runtime);
   return mcp({
@@ -56,10 +57,10 @@ export function createMcpPlugin(runtime: Runtime) {
       page: '/mcp/consent', shouldRedirect: () => false,
       consentReferenceId: async ({ user, scopes: requested }) => {
         if (!user || !await isApprovedUser(runtime, user.id) || !requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length) invalidGrant();
-        const member = await membershipForApprovedUser(runtime.db, user.id, { bootstrapDefaultOwner: false });
-        if (!member) invalidGrant();
+        const member = await membershipForApprovedUser(runtime.db, user.id, { multiTenant: runtime.config.multiTenant, workspaceId: consentWorkspace, bootstrapDefaultOwner: false });
+        if (!member || (member.role === 'member' && requested.includes('opensend:manage'))) invalidGrant();
         const tag = workspaceTag(member.workspaceId);
-        return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${tag ? `|${tag}` : ''}`;
+        return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}`;
       },
     },
     extensions: [{ claims: { accessToken: async ({ user, client, referenceId, scopes: requested, resources }) => {
@@ -92,15 +93,16 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   // One joined SHARE lock retains consent, client/resource policy and Google
   // approval through the caller's dispatch transaction.
   if (!row?.userId || row.clientDisabled || row.resourceDisabled || row.resources?.length !== 1 || row.resources[0] !== resourceOf(runtime) ||
-    !approvedGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
+    !currentGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
   const original = originalGrant(row.referenceId);
   if (!original) return null;
-  const allowed = original.scopes.filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
+  const member = await membershipForApprovedUser(db, row.userId, { multiTenant: runtime.config.multiTenant, workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
+  if (!member) return null;
+  const role = original.memberCeiling ? 'member' : member.role;
+  const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'opensend:manage') && row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const member = await membershipForApprovedUser(db, row.userId, { workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
-  if (!member) return null;
-  const actor: Actor = { keyId, workspaceId: member.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
+  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
   return { actor, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 
@@ -312,7 +314,8 @@ async function consentPage(runtime: Runtime, request: Request) {
     if (query.length > 16 * 1024 || !query) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
     const params = new URLSearchParams(query); const clientId = params.get('client_id');
     if (!clientId) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
-    const auth = createAuth(runtime);
+    const consentWorkspace = runtime.config.multiTenant ? form?.get('workspace') ?? undefined : undefined;
+    const auth = createAuth(runtime, consentWorkspace);
     // This server-only call verifies Better Auth's signed/expiring OAuth query
     // before any client name, scope, redirect, or approval is displayed or used.
     await auth.api.getOAuthClientPublicPrelogin({ body: { client_id: clientId, oauth_query: query } });
@@ -321,7 +324,9 @@ async function consentPage(runtime: Runtime, request: Request) {
       return page('Invalid connection request', '<p>Restart the connection from your MCP client.</p>');
     }
     const session = await auth.api.getSession({ headers: requestHeaders, query: { disableCookieCache: true, disableRefresh: true } });
-    const approvedSession = session && await isApprovedUser(runtime, session.user.id) ? session : null;
+    const member = session && runtime.config.multiTenant ? await membershipForApprovedUser(runtime.db, session.user.id, { multiTenant: true, workspaceId: consentWorkspace, bootstrapDefaultOwner: false }) : null;
+    const approvedSession = session && (!runtime.config.multiTenant || member) && await isApprovedUser(runtime, session.user.id) ? session : null;
+    if (member?.role === 'member' && requested.includes('opensend:manage')) return page('Administrator approval required', '<p>Reconnect requesting read or send access instead of manage access.</p>');
     const action = form?.get('action');
     if (action === 'signin') {
       const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
@@ -335,12 +340,13 @@ async function consentPage(runtime: Runtime, request: Request) {
       const headers = new Headers(requestHeaders); headers.set('Content-Type', 'application/json');
       return redirectResult(await auth.handler(new Request(`${issuerOf(runtime)}/oauth2/consent`, { method: 'POST', headers, body: JSON.stringify({ accept: action === 'approve', oauth_query: query }) })));
     }
-    const hidden = `<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">`;
+    const hidden = `<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">` + (member ? `<input type="hidden" name="workspace" value="${escapeHtml(member.workspaceId)}">` : '');
     if (!approvedSession || (new URL(request.url).pathname === '/mcp/login' && (params.get('prompt') ?? '').split(' ').includes('login'))) {
       return page('Connect OpenSend', `<form method="post" action="/mcp/login">${hidden}<p>Use your approved Google account to connect this client.</p><div class="actions"><button name="action" value="signin">Continue with Google</button></div></form>`);
     }
     const [client] = await runtime.db.select({ name: oauthClient.name, disabled: oauthClient.disabled, redirectUris: oauthClient.redirectUris }).from(oauthClient).where(eq(oauthClient.clientId, clientId)).limit(1);
     if (!client || client.disabled) return page('Client unavailable', '<p>This client can no longer connect to OpenSend.</p>');
+    const [workspace] = member ? await runtime.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, member.workspaceId)) : [];
     const name = client.name?.slice(0, 160) || 'This MCP client';
     const redirectUri = params.get('redirect_uri') ?? client.redirectUris[0] ?? '';
     let host = redirectUri; try { host = new URL(redirectUri).host || redirectUri; } catch { /* Show the raw value when it is not a URL. */ }
@@ -349,7 +355,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const warning = `<p class="warn"><strong>Self-registered client.</strong> OpenSend has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
     const live = requested.includes('opensend:live');
     const labels = requested.filter(scope => scope !== 'opensend:live' && !(requested.includes('opensend:manage') && ['opensend:read', 'opensend:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
-    return page(`Allow ${name} to access OpenSend?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}</p><p><strong>${live ? 'Live environment — email can reach real recipients.' : 'Test environment — no real email is sent.'}</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
+    return page(`Allow ${name} to access OpenSend?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>${live ? 'Live environment — email can reach real recipients.' : 'Test environment — no real email is sent.'}</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
   } catch (error) {
     if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
     return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');

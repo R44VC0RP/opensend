@@ -72,7 +72,7 @@ export async function instantiateTemplate(runtime: Runtime, db: DbExecutor, iden
 }
 
 function manageTemplates(c: Parameters<typeof actor>[0]) {
-  const value = actor(c, 'manage');
+  const value = actor(c, 'editContent');
   if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Template administration requires unrestricted workspace access.');
   return value;
 }

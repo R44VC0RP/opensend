@@ -30,6 +30,7 @@ function access(c: Ctx, permission?: MailboxPermission): MailboxAccess {
   return value;
 }
 function admin(c: Ctx) { const value = access(c); if (!value.admin) throw new ApiError(403, 'ADMIN_REQUIRED', 'This operation requires an unrestricted live OpenSend key with manage permission.'); return value; }
+function readWorkspaceMail(c: Ctx) { return c.get('actor')?.credential === 'dashboard' ? access(c, 'read') : admin(c); }
 const scopeOf = (value: MailboxAccess): Scope => ({ workspaceId: value.workspaceId, environment: LIVE });
 async function mailboxFor(c: Ctx, mailboxId: string, permission: MailboxPermission = 'read', db: DbExecutor = c.env.db) {
   const value = access(c, permission);
@@ -54,6 +55,10 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     const actor = c.get('actor');
     if (actor.environment !== 'live' && (c.req.path.startsWith('/v1/inbound/') || actor.credential !== 'dashboard')) throw new ApiError(403, 'MAILBOX_LIVE_ONLY', 'Inbound receives real mail; use live access.');
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
+    if (actor.role === 'member' && actor.credential === 'dashboard' && actor.environment === 'live') {
+      c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: false, mailboxIds: null, permissions: ['read', 'send'] });
+      return next();
+    }
     if (!actor.permissions.includes('manage')) throw new ApiError(403, 'ADMIN_REQUIRED', 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
     c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] });
     await next();
@@ -1008,7 +1013,7 @@ export function registerMailbox(app: App) {
   app.openapi(route({ method: 'get', path: '/messages', operationId: 'mailboxListStoredMessages', tags: [TAG.messages], summary: 'List every stored message', description: 'All received (or sent) messages across every mailbox, including unrouted mail. Newest first, without bodies.',
     request: { query: z.object({ direction: z.enum(['inbound', 'outbound']).default('inbound'), region: z.string().max(40).optional(), mailboxId: z.string().max(120).optional(), q: z.string().trim().min(1).max(200).optional(), cursor: z.string().max(300).optional(), limit: Limit }) },
     responses: { 200: response(pageOf(StoredSummary, 'StoredMessagePage')), ...errors } }), async c => {
-    const value = admin(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor); const m = mailMessages;
+    const value = readWorkspaceMail(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor); const m = mailMessages;
     const rows = await c.env.db.select(storedSummaryColumns).from(m).where(and(eq(m.workspaceId, value.workspaceId), eq(m.environment, LIVE), eq(m.direction, q.direction), q.region ? eq(m.region, q.region) : undefined,
       q.mailboxId ? sql`EXISTS (SELECT 1 FROM mailbox_messages mm WHERE mm.message_id = ${m.id} AND mm.mailbox_id = ${q.mailboxId})` : undefined,
       q.q ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.q})` : undefined,
@@ -1022,7 +1027,7 @@ export function registerMailbox(app: App) {
       mailboxes: z.array(z.object({ id: z.string(), address: z.string() })), unrouted: z.array(z.string()),
       attachments: z.array(AttachmentSchema.extend({ url: z.string().nullable() })), rawUrl: z.string().nullable(), linksExpireAt: z.string(),
     }).openapi('StoredMessage')), ...errors } }), async c => {
-    const value = admin(c);
+    const value = readWorkspaceMail(c);
     const [row] = await c.env.db.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, value.workspaceId), eq(mailMessages.environment, LIVE), eq(mailMessages.id, c.req.valid('param').id)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const [[full], [summary], files] = await Promise.all([fullViews(c.env, [{ row, read: false }], '', { html: true, headers: true }), storedSummaries(c.env, [row]), c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId, row.id)).orderBy(asc(mailAttachments.id))]);
@@ -1036,7 +1041,7 @@ export function registerMailbox(app: App) {
   // ---------- unrouted ----------
   app.openapi(route({ method: 'get', path: '/unrouted', operationId: 'mailboxListUnrouted', tags: [TAG.messages], summary: 'Stored mail that matched no mailbox', description: 'Mail for addresses on a domain whose catch-all is set to store. Creating a mailbox for the address claims it.',
     request: { query: z.object({ address: z.string().trim().toLowerCase().max(254).optional(), cursor: z.string().max(300).optional(), limit: Limit }) }, responses: { 200: response(pageOf(MessageSummary.omit({ mailboxId: true, read: true, labels: true }).extend({ address: z.string() }).openapi('MailboxUnroutedMessage'), 'MailboxUnroutedPage')), ...errors } }), async c => {
-    const value = admin(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor);
+    const value = readWorkspaceMail(c); const q = c.req.valid('query'); const cursor = decodeCursor(q.cursor);
     const rows = await c.env.db.select({ row: mailMessages, address: mailUnrouted.address }).from(mailUnrouted).innerJoin(mailMessages, eq(mailMessages.id, mailUnrouted.messageId)).where(and(eq(mailUnrouted.workspaceId, value.workspaceId), eq(mailUnrouted.environment, LIVE),
       q.address ? eq(mailUnrouted.address, q.address) : undefined, cursor ? sql`(${mailMessages.receivedAt}, ${mailMessages.id}) < (${cursor[0]}::timestamptz, ${cursor[1]})` : undefined)).orderBy(desc(mailMessages.receivedAt), desc(mailMessages.id)).limit(q.limit + 1);
     const last = rows[q.limit - 1];

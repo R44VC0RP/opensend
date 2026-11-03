@@ -36,6 +36,7 @@ export interface Config {
   allowedEmails: string[];
   allowedDomains: string[];
   defaultWorkspaceOwners: '*' | string[];
+  multiTenant: boolean;
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];
@@ -89,8 +90,11 @@ export const json = <T extends z.ZodType>(schema: T) => ({ content: { 'applicati
 export const response = <T extends z.ZodType>(schema: T, description = 'Success') => ({ description, content: { 'application/json': { schema } } });
 export const page = <T extends z.ZodType>(schema: T) => z.object({ data: z.array(schema), nextCursor: z.string().nullable() });
 export function id(prefix: string) { return `${prefix}_${crypto.randomUUID().replaceAll('-', '')}`; }
-export function actor(c: Ctx, permission: Permission = 'read'): Actor {
+export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Actor {
   const value = c.get('actor');
+  // Dashboard roles include content editing. A scoped machine grant is still bounded by its
+  // original permission contract: send alone does not delegate contact or template management.
+  const permission = action === 'editContent' ? (c.env.config.multiTenant && value?.credential === 'dashboard' ? 'send' : 'manage') : action;
   if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw new ApiError(403, 'PERMISSION_DENIED', `This operation requires ${permission} permission.`);
   return value;
 }

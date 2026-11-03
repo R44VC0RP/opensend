@@ -11,6 +11,7 @@ const values = z.object({
   GOOGLE_CLIENT_SECRET: optional(z.string().min(1)),
   AUTH_ALLOWED_EMAILS: z.string().default(''),
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
+  MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
   // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
@@ -50,7 +51,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (Boolean(v.GOOGLE_CLIENT_ID) !== Boolean(v.GOOGLE_CLIENT_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither.');
   if (v.PREVIOUS_BETTER_AUTH_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BETTER_AUTH_SECRET.');
   const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
-  const defaultWorkspaceOwners = v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
+  const defaultWorkspaceOwners = v.MULTI_TENANT === 'true' ? [] : v.DEFAULT_WORKSPACE_OWNERS === '*' ? '*' : list(v.DEFAULT_WORKSPACE_OWNERS.toLowerCase());
   if (defaultWorkspaceOwners !== '*' && defaultWorkspaceOwners.some(e => !z.email().safeParse(e).success)) throw new ApiError(503, 'CONFIG_INVALID', 'Set DEFAULT_WORKSPACE_OWNERS to exact email addresses or a single *.');
   const allowedDomains = list(v.AUTH_ALLOWED_DOMAINS).map(d => d.toLowerCase());
   if (allowedEmails.some(e => !z.email().safeParse(e).success) || allowedDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact email addresses and domain names in the authentication allowlists, without wildcards or URLs.');
@@ -60,7 +61,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
-    workspaceId: 'default', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
+    workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,

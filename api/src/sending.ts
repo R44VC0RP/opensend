@@ -915,6 +915,7 @@ export function registerSending(app: App) {
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
       draftSender(c.env, a, current.draft);
+      if (a.role === 'member' && !['draft', 'reviewed'].includes(current.status)) throw new ApiError(403, 'PERMISSION_DENIED', 'Members can archive only campaign drafts.');
       if (input.archived && ['scheduled', 'sending'].includes(current.status)) throw new ApiError(409, 'CAMPAIGN_ACTIVE', 'Cancel or finish sending this campaign before archiving it.');
       if (Boolean(current.archivedAt) === input.archived) return current;
       const [updated] = await db.update(campaigns).set({ archivedAt: input.archived ? now() : null, updatedAt: now() }).where(campaignWhere(a, campaignId)).returning();
@@ -1349,20 +1350,20 @@ export async function finishEmailCampaign(runtime: Runtime, a: Actor, mail: type
   if (!mail.reviewId) await finishCampaign(runtime, a, mail.campaignId);
 }
 // Shared by campaign workers and the dispatch claim. A queued origin cannot bootstrap membership.
-export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: SQL) {
+export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: SQL, direct = sql`false`) {
   const c = runtime.config;
   return sql`SELECT 1 FROM workspace_members m JOIN auth_user u ON u.id = m.user_id
     JOIN auth_account g ON g.user_id = u.id AND g.provider_id = 'google' AND g.account_id <> ''
     WHERE ${Boolean(c.googleClientId && c.googleClientSecret && c.authSecret)}::boolean AND m.workspace_id = ${workspaceId} AND m.user_id = ${userId}
-      AND m.role IN ('owner', 'admin') AND u.email_verified AND u.email <> ''
-      AND (${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email) OR (u.google_hosted_domain <> '' AND ${JSON.stringify(c.allowedDomains)}::jsonb ? lower(u.google_hosted_domain)))
+      AND (m.role IN ('owner', 'admin') ${c.multiTenant ? sql`OR (m.role = 'member' AND ${direct})` : sql``}) AND u.email_verified AND u.email <> ''
+      ${c.multiTenant ? sql`` : sql`AND (${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email) OR (u.google_hosted_domain <> '' AND ${JSON.stringify(c.allowedDomains)}::jsonb ? lower(u.google_hosted_domain)))`}
     LIMIT 1 FOR SHARE OF m, u, g`;
 }
-export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; environment: Mode; actorKeyId: string; snapshot: Pick<EmailSnapshot, 'from'> }) {
+export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; environment: Mode; actorKeyId: string; campaignId?: string | null; snapshot: Pick<EmailSnapshot, 'from'> }) {
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
   // Queued work may re-check membership but must never create or restore it.
   if (mail.actorKeyId.startsWith('user_')) {
-    return (await db.execute(approvedOriginUser(runtime, sql`${mail.workspaceId}`, sql`${mail.actorKeyId.slice(5)}`))).rows.length > 0;
+    return (await db.execute(approvedOriginUser(runtime, sql`${mail.workspaceId}`, sql`${mail.actorKeyId.slice(5)}`, sql`${!mail.campaignId}::boolean`))).rows.length > 0;
   }
   if (mail.actorKeyId.startsWith('mbk_')) {
     // Mailbox keys may send only as an address of a mailbox they are scoped to.
@@ -1373,7 +1374,7 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
   }
   if (mail.actorKeyId.startsWith('mcp_')) {
     const grant = await getMcpGrantActor(runtime, mail.actorKeyId, db);
-    return !!grant && grant.workspaceId === mail.workspaceId && (mail.environment === 'test' || grant.environment === mail.environment) &&
+    return !!grant && (!mail.campaignId || grant.role !== 'member') && grant.workspaceId === mail.workspaceId && (mail.environment === 'test' || grant.environment === mail.environment) &&
       (grant.permissions.includes('manage') || grant.permissions.includes('send')) &&
       senderDomainAllowed(grant.domains, mail.snapshot.from.split('@')[1]!);
   }
@@ -1592,7 +1593,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
     const readyJobs = await runtime.db.transaction(async db => {
       const campaign = await findCampaign(db, a, initial.campaignId, true);
       await lockAdmission(db, a);
-      const authorized = !!review && await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, snapshot: { from: review.draft.from } });
+      const authorized = !!review && await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: review.draft.from } });
       const [expansion] = await db.select().from(campaignExpansions).where(eq(campaignExpansions.campaignId, campaign.id)).for('update');
       if (!expansion || expansion.jobId !== job.id || !['pending', 'expanding'].includes(expansion.status)) return;
       if (campaign.status === 'canceled' || !authorized) { await cancelCampaignWork(db, a, campaign, authorized ? undefined : 'ORIGIN_KEY_REVOKED'); return; }

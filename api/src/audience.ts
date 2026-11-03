@@ -227,7 +227,7 @@ export function registerAudience(app: App) {
     return c.json({ ...result, data: await readContacts(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contacts', operationId: 'createContact', tags: ['Audience'], security, request: { body: json(ContactInput) }, responses: { 201: response(Contact), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), input = c.req.valid('json');
+    const identity = actor(c, 'editContent'), input = c.req.valid('json');
     const [contact] = await c.env.db.insert(contacts).values({ id: id('con'), ...scopeValues(identity), ...input }).onConflictDoNothing({ target: [contacts.workspaceId, contacts.environment, contacts.email] }).returning();
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
     return c.json(contact, 201);
@@ -237,12 +237,12 @@ export function registerAudience(app: App) {
     return c.json((await readContacts(c.env.db, identity, [row]))[0]!, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
+    const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
     const [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
     return c.json(contact ?? notFound('Contact'), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/contacts/{id}', operationId: 'deleteContact', tags: ['Audience'], security, description: 'Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.', request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), contactId = c.req.valid('param').id;
+    const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id;
     await c.env.db.transaction(async tx => {
       await findContact(tx, identity, contactId);
       await tx.update(contacts).set({ deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), name: null, properties: {} }).where(and(scope(contacts, identity), eq(contacts.id, contactId)));
@@ -251,7 +251,7 @@ export function registerAudience(app: App) {
     return c.json({ id: contactId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: 'Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; OpenSend records the actor and current time when omitted. Does not lift delivery suppression. Imports/profile edits cannot establish consent.', request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), contactId = c.req.valid('param').id, input = c.req.valid('json');
+    const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json');
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const source = input.source ?? (identity.credential === 'dashboard' ? 'dashboard' : identity.credential === 'mcp' ? 'mcp' : identity.credential === 'agentToken' ? 'agent-token' : 'api');
     const contact = await c.env.db.transaction(async tx => {
@@ -322,7 +322,7 @@ export function registerAudience(app: App) {
     const conditions = [compileRule(segment.rule)]; if (listId) { await findList(c.env.db, identity, listId); conditions.push(inList(identity, listId)); } return c.json(counts(await boundedContacts(c.env.db, identity, conditions, 1000)), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), input = c.req.valid('json'); if (input.listId) await findList(c.env.db, identity, input.listId);
+    const identity = actor(c, 'editContent'), input = c.req.valid('json'); if (input.listId) await findList(c.env.db, identity, input.listId);
     const preview = previewImport(input); const [row] = await c.env.db.insert(imports).values({ id: id('imp'), ...scopeValues(identity), listId: input.listId, ...preview }).returning(); return c.json(row!, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
@@ -332,7 +332,7 @@ export function registerAudience(app: App) {
     const identity = actor(c); const [row] = await c.env.db.select().from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1); return c.json(row ?? notFound('Import'), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
-    const identity = actor(c, 'manage'), importId = c.req.valid('param').id;
+    const identity = actor(c, 'editContent'), importId = c.req.valid('param').id;
     const result = await c.env.db.transaction(async tx => {
       const [job] = await tx.select().from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update'); if (!job) return notFound('Import'); if (job.status === 'committed') return job;
       // A share lock keeps the list from being changed or deleted mid-commit without serializing concurrent imports into it.

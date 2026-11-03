@@ -1,6 +1,6 @@
 import { and, eq, getTableColumns, sql } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { ApiError, getSes, id, log, type Actor, type Mode, type Runtime } from './core.js';
+import { ApiError, getSes, id, log, type Actor, type DbExecutor, type Mode, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
@@ -294,12 +294,12 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
 
 // OAuth grant decoding, original scopes and client/resource policy stay in the MCP verifier.
 // All other origins are checked under the claim's locks, including permission/domain changes.
-const mcpOrigin = (item: Prepared) => `${item.mail.workspaceId}\u0000${item.mail.actorKeyId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
-async function originDecisions(prepared: Prepared[]) {
+const mcpOrigin = (item: Prepared) => `${item.mail.workspaceId}\u0000${item.mail.actorKeyId}\u0000${!!item.mail.campaignId}\u0000${item.snapshot.from.split('@')[1]!.toLowerCase()}`;
+async function originDecisions(prepared: Prepared[], db: DbExecutor) {
   const grants = new Map<string, boolean>();
   for (const item of prepared) if (item.mail.actorKeyId.startsWith('mcp_') && !grants.has(mcpOrigin(item))) {
     const runtime = item.owner.runtime;
-    grants.set(mcpOrigin(item), await originAllowed(runtime, runtime.db, { ...item.mail, snapshot: item.snapshot }));
+    grants.set(mcpOrigin(item), await originAllowed(runtime, db, { ...item.mail, snapshot: item.snapshot }));
   }
   return grants;
 }
@@ -307,7 +307,7 @@ async function originDecisions(prepared: Prepared[]) {
 // One statement elects every row in the group: key revocation under FOR SHARE, consent locks, campaign
 // cancellation, unsubscribe tokens and attempt events. Rows flip queued → attempting here, so the group
 // is kept to the provider in-flight width: a platform reset can only strand what was actually mid-call.
-async function claimGroup(runtime: Runtime, environment: Mode, prepared: Prepared[], origins: Map<string, boolean>): Promise<Map<string, EmailStatus>> {
+async function claimGroup(runtime: Runtime, environment: Mode, prepared: Prepared[], origins: Map<string, boolean>, db: DbExecutor = runtime.db): Promise<Map<string, EmailStatus>> {
   const input = prepared.map(item => ({
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
@@ -316,7 +316,7 @@ async function claimGroup(runtime: Runtime, environment: Mode, prepared: Prepare
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
-  const claimed = await runtime.db.execute<{ id: string; status: EmailStatus }>(sql`WITH input AS (
+  const claimed = await db.execute<{ id: string; status: EmailStatus }>(sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)
     ), key_state AS MATERIALIZED (
@@ -334,7 +334,7 @@ async function claimGroup(runtime: Runtime, environment: Mode, prepared: Prepare
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed
-          WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`)})
+          WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`, sql`x.campaign_id IS NULL`)})
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN ${environment === 'live'}::boolean AND EXISTS (
             SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.environment = 'live' AND b.address = x.sender
             WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND k.permissions ? 'send'
@@ -534,10 +534,14 @@ async function dispatchBatch(base: Runtime, lane: Lane): Promise<{ processed: nu
     await phase('activate', () => activateCampaigns(base, environment, [...campaigns].map(([id, workspace_id]) => ({ id, workspace_id }))));
     for (const id of campaigns.keys()) lane.activated.add(id);
   }
-  const origins = await originDecisions(prepared);
+  const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
   for (const group of chunk(prepared, options.sendConcurrency)) {
-    const statuses = await phase('claim', () => claimGroup(base, environment, group, origins));
+    // Hold MX grant/membership SHARE locks through the durable attempt, never during SES I/O.
+    // Direct dashboard/API-key batches still need just the single claim statement.
+    const statuses = await phase('claim', () => base.config.multiTenant && group.some(item => item.mail.actorKeyId.startsWith('mcp_'))
+      ? base.db.transaction(async tx => claimGroup(base, environment, group, await originDecisions(group, tx), tx))
+      : claimGroup(base, environment, group, origins));
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     const lost = group.filter(item => !statuses.has(item.mail.id));
     counters.skipped += group.length - attempting.length;

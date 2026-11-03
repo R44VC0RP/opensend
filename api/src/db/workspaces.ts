@@ -1,5 +1,6 @@
 import { index, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { authUser } from './google-auth.js';
+import { sql } from 'drizzle-orm';
 
 // Better Auth 1.7.3 modelName mappings: organization → workspaces, member → workspaceMembers,
 // invitation → workspaceInvitations. Map organizationId → workspaceId on both child models;
@@ -25,4 +26,5 @@ export const workspaceInvitations = pgTable('workspace_invitations', {
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   inviterId: text('inviter_id').notNull().references(() => authUser.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-}, t => [index('workspace_invitations_workspace_idx').on(t.workspaceId), index('workspace_invitations_email_idx').on(t.email)]);
+}, t => [index('workspace_invitations_workspace_idx').on(t.workspaceId), index('workspace_invitations_email_idx').on(t.email),
+  uniqueIndex('workspace_invitations_pending_idx').on(t.workspaceId, t.email).where(sql`status = 'pending'`)]);

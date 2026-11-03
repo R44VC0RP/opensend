@@ -9,6 +9,7 @@ import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
+import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
@@ -171,12 +172,15 @@ async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const
 
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
-    const a = workspaceActor(c); const [row] = await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
+    const a = workspaceActor(c); const [row] = c.env.config.multiTenant
+      ? await c.env.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, a.workspaceId))
+      : await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
     return c.json({ name: row?.name ?? 'OpenSend', environment: a.environment }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
-    await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
+    if (c.env.config.multiTenant) await c.env.db.update(workspaces).set({ name }).where(eq(workspaces.id, a.workspaceId));
+    else await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
     return c.json({ name, environment: a.environment }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });

@@ -497,7 +497,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     const runtime: import('./src/core.js').Runtime = {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
-      config: { workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
+      config: { multiTenant: false, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
         allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -537,8 +537,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       }
       throw new Error(`Unexpected network request in mocked Google transport: ${new URL(request.url).origin}`);
     });
-    async function local(method: string, path: string, body?: Json, cookie?: string): Promise<Reply> {
-      const response = await app.fetch(new Request(`${origin}${path}`, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime);
+    async function local(method: string, path: string, body?: Json, cookie?: string, headers: Record<string, string> = {}): Promise<Reply> {
+      const response = await app.fetch(new Request(`${origin}${path}`, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) }), runtime);
       const text = await response.text();
       let parsed: unknown = text;
       try { parsed = JSON.parse(text); } catch { /* Redirects intentionally have no JSON body. */ }
@@ -567,7 +567,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
       { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
     ];
-    for (const scenario of scenarios) {
+    async function login(scenario: typeof scenarios[number]) {
       fixtureEmails.push(scenario.email);
       jwtFault = scenario.jwtFault ?? '';
       profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: 'Mock provider identity', email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
@@ -625,7 +625,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const replay = await local('GET', `/api/auth/callback/google?state=${encodeURIComponent(state)}&code=${expectedCode}`, undefined, stateCookie);
       assert.equal(replay.headers.get('location'), `${origin}/?auth=error`);
       assert.equal(tokenCalls, previousCalls + 1, 'Consumed OAuth state cannot exchange a code twice.');
+      return approvedCookie;
     }
+    for (const scenario of scenarios) await login(scenario);
     assert.ok(certCalls > 0, 'The normal provider path must verify the mocked JWT against mocked Google JWKS, not merely decode claims.');
     assert.ok(approvedCookie);
     runtime.config.allowedEmails = [];
@@ -638,6 +640,84 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     error(await local('POST', '/v1/contacts', { email: blockedEmail }, approvedCookie), 503, 'AUTH_NOT_CONFIGURED');
     error(await local('POST', '/api/auth/sign-in/social', { provider: 'google' }), 503, 'AUTH_NOT_CONFIGURED');
     assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [blockedEmail])).rowCount, 0);
+    await t.test('MX: atomic Google signup, invited roles, workspace selection and isolation', async () => {
+      const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
+      cleanup(t, () => pool.end());
+      runtime.db = drizzle(pool);
+      Object.assign(runtime.config, { multiTenant: true, googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
+      const base = '/v1/workspaces/current', workspaces: string[] = [];
+      cleanup(t, async () => {
+        for (const wid of workspaces) {
+          await pool.query('DELETE FROM audience_contacts WHERE workspace_id = $1', [wid]);
+          await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
+          await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
+        }
+      });
+      const ownerEmail = `${unique('mx-owner')}@example.com`, otherEmail = `${unique('mx-owner')}@example.com`, guestEmail = `${unique('mx-guest')}@outside.invalid`;
+      const newOwner = async (email: string) => {
+        const cookie = await login({ allowed: true, email, verified: true, hd: 'example.com' });
+        const [first, simultaneous] = await Promise.all([local('GET', '/v1/workspaces', undefined, cookie), local('GET', '/v1/workspaces', undefined, cookie)]);
+        const memberships = ok(first).data; assert.deepEqual(ok(simultaneous).data, memberships);
+        assert.equal(memberships.length, 1); const [org] = memberships; workspaces.push(org.id);
+        assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's Organization"); assert.notEqual(org.id, 'default');
+        return { cookie, org };
+      };
+      const a = await newOwner(ownerEmail), b = await newOwner(otherEmail);
+      assert.notEqual(a.org.id, b.org.id); assert.notEqual(a.org.slug, b.org.slug);
+      const select = (id: string) => ({ 'x-opensend-workspace': id });
+      error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
+      runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
+      await login({ allowed: false, email: `${unique('mx-denied')}@outside.invalid`, verified: true });
+      const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
+      assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
+      const guestSub = unique('guest-sub'), guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      const me = ok(await local('GET', '/v1/me', undefined, guest));
+      assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
+      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
+      assert.equal(ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length, 0);
+      await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      for (const path of ['/v1/api-keys', '/v1/domains', '/v1/webhooks', '/v1/regions', `${base}/members`]) error(await local('GET', path, undefined, guest), 403, 'PERMISSION_DENIED');
+      error(await local('POST', '/v1/campaigns/nope/send', { revision: 1 }, guest), 403, 'PERMISSION_DENIED');
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
+      error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
+      const { originAllowed } = await import('./src/sending.js');
+      const queued = { workspaceId: a.org.id, environment: 'test' as const, actorKeyId: `user_${me.id}`, snapshot: { from: 'sender@example.com' } };
+      assert.equal(await originAllowed(runtime, runtime.db, queued), true);
+      assert.equal(await originAllowed(runtime, runtime.db, { ...queued, campaignId: 'campaign' }), false);
+      const owner = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.role === 'owner');
+      error(await local('DELETE', `${base}/members/${owner.id}`, undefined, a.cookie), 409, 'LAST_OWNER');
+      error(await local('PATCH', `${base}/members/${owner.id}`, { role:'admin' }, a.cookie), 409, 'LAST_OWNER');
+      const firstMembership = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.userId === me.id);
+      ok(await local('DELETE', `${base}/members/${firstMembership.id}`, undefined, a.cookie));
+      error(await local('GET', '/v1/me', undefined, guest), 401);
+      const revoked = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'admin' }, a.cookie), 201);
+      ok(await local('DELETE', `${base}/invitations?id=${revoked.id}`, undefined, a.cookie));
+      error(await local('POST', `/v1/workspaces/invitations/${revoked.id}/accept`, undefined, guest), 404);
+      const rejoin = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'member' }, a.cookie), 201);
+      assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${rejoin.id}/accept`, undefined, guest)).workspaceId, a.org.id);
+      const invited = ok(await local('POST', `${base}/members`, { email: guestEmail, role:'admin' }, b.cookie), 201);
+      const returning = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      assert.equal(ok(await local('GET', '/v1/me', undefined, returning)).workspaceId, a.org.id, 'An unsolicited invitation must not switch an existing member into another workspace.');
+      const accept = `/v1/workspaces/invitations/${invited.id}/accept`;
+      error(await local('POST', accept, undefined, a.cookie), 404);
+      assert.equal(ok(await local('POST', accept, undefined, guest)).workspaceId, b.org.id);
+      assert.equal(ok(await local('GET', '/v1/me', undefined, guest)).role, 'admin');
+      error(await local('POST', `${base}/members`, { email: address(), role:'owner' }, guest), 403, 'OWNER_REQUIRED');
+      ok(await local('PATCH', base, { name: 'New name' }, guest));
+      assert.equal(ok(await local('GET', '/v1/settings/workspace', undefined, b.cookie)).name, 'New name');
+      assert.equal(ok(await local('GET', '/v1/me', undefined, guest, select(a.org.id))).role, 'member');
+      assert.equal(ok(await local('GET', '/v1/me', undefined, guest)).workspaceId, a.org.id);
+      const member = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.userId === me.id);
+      ok(await local('PATCH', `${base}/members/${member.id}`, { role:'owner' }, a.cookie));
+      // Two owners cannot concurrently demote each other and leave a workspace without an owner.
+      const race = await Promise.all([local('DELETE', `${base}/members/${owner.id}`, undefined, a.cookie), local('DELETE', `${base}/members/${member.id}`, undefined, guest)]);
+      assert.deepEqual(race.map(reply => reply.status).sort(), [200,409]);
+      const remaining = await pool.query('SELECT user_id FROM workspace_members WHERE workspace_id = $1', [a.org.id]);
+      assert.equal(remaining.rowCount, 1);
+      const removed = remaining.rows[0].user_id === me.id ? a.cookie : guest;
+      error(await local('GET', '/v1/me', undefined, removed, select(a.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
+      assert.equal(await originAllowed(runtime, runtime.db, { ...queued, actorKeyId: `user_${removed === guest ? me.id : owner.userId}` }), false);
+    });
     transport.mock.restore();
   });
 
@@ -920,6 +1000,35 @@ describe('Hosted MCP OAuth and tools', () => {
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
+  });
+
+  test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
+      const wid = runtime.config.workspaceId, uid = manager!.userId;
+      await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
+      const deniedClient = ok(await registerClient(t, db, {}, request), 201);
+      const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
+        scope: writableScope, resource: resourceUrl, state: unique('state'), code_challenge: createHash('sha256').update(randomUUID()).digest('base64url'), code_challenge_method: 'S256' });
+      const denied = await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' });
+      assert.equal(denied.status, 400, 'A member must not authorize manage scope.');
+      assert.equal((await db.query('SELECT id FROM oauth_consent WHERE client_id=$1', [deniedClient.client_id])).rowCount, 0);
+      const { token } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
+      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'test',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result.structuredContent;
+      assert.equal((await call('getContext')).response.workspaceId, wid);
+      const send = async () => {
+        const reply = await call('sendEmail', { mode: 'single', body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
+        assert.equal(reply.status, 202, redact(reply)); return reply.response.id;
+      };
+      const first = await send(); await run('email.dispatch');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
+      const second = await send();
+      await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
+      assert.equal((await call('getContext')).response.role, 'member', 'An existing member grant must not grow on promotion.');
+      await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, uid]);
+      await run('email.dispatch');
+      assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1', [second])).rows[0].error_code, 'ORIGIN_KEY_REVOKED');
+    });
   });
 
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
