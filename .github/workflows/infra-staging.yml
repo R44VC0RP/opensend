@@ -26,12 +26,12 @@ jobs:
       - uses: opentofu/setup-opentofu@v1
         with:
           tofu_version: 1.13.1
-      # R2's S3 API accepts an account API token as credentials: the token ID is the access
-      # key and the SHA-256 of the token value is the secret.
+      # R2's S3 API accepts a Cloudflare API token as credentials: the token ID is the access
+      # key and the SHA-256 of the token value is the secret. opensend-mx-infra is a user token.
       - name: Derive R2 state credentials
         run: |
           id=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            https://api.cloudflare.com/client/v4/accounts/15d29c8639fd3733b1b5486a2acfd968/tokens/verify | jq -r .result.id)
+            https://api.cloudflare.com/client/v4/user/tokens/verify | jq -r .result.id)
           secret=$(printf %s "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)
           echo "::add-mask::$secret"
           echo "AWS_ACCESS_KEY_ID=$id" >> "$GITHUB_ENV"
