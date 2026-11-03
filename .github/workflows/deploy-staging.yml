@@ -38,7 +38,25 @@ jobs:
         working-directory: api
       - run: npm run build
         working-directory: app
+      # Staging only: production migrations stay a manual, reviewed step.
+      - run: npm run migrate
+        working-directory: api
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          BETTER_AUTH_SECRET: ${{ secrets.STAGING_BETTER_AUTH_SECRET }}
+          PUBLIC_URL: https://staging.opensend.mx
       - run: npx wrangler deploy --config wrangler.staging.jsonc
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Worker secrets live in the GitHub staging environment and are re-applied on every deploy.
+      - name: Sync Worker secrets
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          BETTER_AUTH_SECRET: ${{ secrets.STAGING_BETTER_AUTH_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.STAGING_GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.STAGING_GOOGLE_CLIENT_SECRET }}
+        run: |
+          jq -n '{BETTER_AUTH_SECRET: env.BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID: env.GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET: env.GOOGLE_CLIENT_SECRET}' \
+            | npx wrangler secret bulk --config wrangler.staging.jsonc

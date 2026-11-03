@@ -1,0 +1,41 @@
+name: Infra staging
+
+on:
+  push:
+    branches: [opensend-mx]
+    paths: [infra/**, .github/workflows/infra-staging.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: infra-staging
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/opensend-mx'
+    runs-on: ubuntu-latest
+    environment: staging
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_INFRA_API_TOKEN }}
+      TF_VAR_database: ${{ secrets.TF_VAR_DATABASE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.13.1
+      # R2's S3 API accepts an account API token as credentials: the token ID is the access
+      # key and the SHA-256 of the token value is the secret.
+      - name: Derive R2 state credentials
+        run: |
+          id=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            https://api.cloudflare.com/client/v4/accounts/15d29c8639fd3733b1b5486a2acfd968/tokens/verify | jq -r .result.id)
+          secret=$(printf %s "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::$secret"
+          echo "AWS_ACCESS_KEY_ID=$id" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=$secret" >> "$GITHUB_ENV"
+      - run: tofu init -input=false -backend-config="key=staging/terraform.tfstate"
+      - run: tofu apply -input=false -auto-approve -var-file=staging.tfvars
+      - run: tofu output
