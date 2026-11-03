@@ -34,8 +34,8 @@
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
-  // `tofu output hyperdrive_id` once the staging database exists.
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
+  // From `tofu output hyperdrive_id` (infra/, staging state).
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "8e22b69b74fb48518851d088445be127" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-mx-staging-attachments" }],
   "queues": {
