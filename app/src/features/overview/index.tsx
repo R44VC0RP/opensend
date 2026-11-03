@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiQuery, useRegion, useApi } from '../../data/context'
+import { useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import type { ChartPoint, SesDiscovery, Stream, TimeRange } from '../../data/types'
@@ -31,7 +31,9 @@ export function OverviewPage() {
   const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal), { interval: 60_000 })
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
-  const discovery = useRegionDiscovery(api.environment === 'test' ? undefined : current)
+  // Hosted workspaces have no SES discovery; their connection manages the region.
+  const multiTenant = useWorkspaceAccess().multiTenant
+  const discovery = useRegionDiscovery(api.environment === 'test' || multiTenant ? undefined : current)
   const data = query.data
   const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
   return <><PageHeader title="Overview" actions={<div className="cluster">{api.environment !== 'test' && <ReputationSummary report={discovery.data} regionId={regionId} />}<span className="muted">{regionId}</span>{api.environment === 'test' ? <StatusBadge status="Test simulation" /> : current ? <StatusBadge status={label(current.discoveryStatus)} tone={current.discoveryStatus === 'ready' ? 'success' : current.discoveryStatus === 'blocked' ? 'danger' : 'warning'} /> : <Skeleton width={84} height={20} />}</div>} />{filterBar}

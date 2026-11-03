@@ -39,6 +39,8 @@ export interface Config {
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   byoTemplateUrl?: string;
+  /** Regions offered for MX shared sending; defaults to us-east-2. */
+  sharedRegions?: string[];
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];

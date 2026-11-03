@@ -2,7 +2,6 @@ import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { workspaceApi } from '../data/workspaces'
-import { connectionApi } from '../data/connections'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText, useToast } from './ui'
@@ -10,6 +9,7 @@ import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 
 const SendingOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.SendingOnboarding })))
+const AdminSetupRequired = lazy(() => import('../features/onboarding').then(m => ({ default: m.AdminSetupRequired })))
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -27,11 +27,10 @@ export function AppShell() {
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
-  // Hosted workspaces choose a sending connection before using the app.
-  const needsConnection = access.multiTenant && access.canAdminister && api.mode !== 'demo'
-  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal), { enabled: needsConnection, interval: data => data?.kind === 'shared' && data.status === 'pending' ? 5000 : false })
-  const onboarding = needsConnection && connection.data?.status !== 'ready'
-  const discovery = useRegionDiscovery(onboarding ? undefined : current)
+  // Hosted workspaces need a ready sending connection; /v1/me carries its summary. Their regions are
+  // managed by that connection, so SES discovery and its sidebar status don't apply.
+  const onboarding = access.multiTenant && api.mode !== 'demo' && session?.identity?.connection?.status !== 'ready'
+  const discovery = useRegionDiscovery(access.multiTenant ? undefined : current)
   const quota = discovery.data?.account?.quota
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
@@ -82,7 +81,7 @@ export function AppShell() {
       <div className="sidebar-context">{workspaceSelect}</div>
       <div className="sidebar-footer"><Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button></div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{connection.isPending ? <RouteSkeleton /> : connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> : <SendingOnboarding connection={connection.data} />}</Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{access.canAdminister ? <SendingOnboarding /> : <AdminSetupRequired />}</Suspense></main>
   </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
@@ -97,8 +96,8 @@ export function AppShell() {
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={`${path}${environmentSearch}`} end={path === '/'}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
-        {access.canAdminister && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
-      <div className="sidebar-quota">{api.environment === 'test' || !access.canAdminister ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
+        {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
+      <div className="sidebar-quota">{api.environment === 'test' || !access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
         {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
         <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>

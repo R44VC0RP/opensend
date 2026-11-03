@@ -15,7 +15,7 @@ export function MutationError({ error }: { error: unknown }) {
 export function SettingsTabs({ value }: { value: 'ses' | 'webhooks' | 'workspace' }) {
   const navigate = useNavigate()
   const access = useWorkspaceAccess()
-  const items = [...access.canAdminister ? [{ value: 'ses', label: 'Amazon SES' }, { value: 'webhooks', label: 'Webhooks' }] : [], ...access.multiTenant ? [{ value: 'workspace', label: 'Workspace' }] : []]
+  const items = [...access.canAdminister ? [{ value: 'ses', label: access.multiTenant ? 'Sending' : 'Amazon SES' }, { value: 'webhooks', label: 'Webhooks' }] : [], ...access.multiTenant ? [{ value: 'workspace', label: 'Workspace' }] : []]
   return <Tabs value={value} onValueChange={next => navigate(next === 'ses' ? '/settings' : `/settings/${next}`)} items={items} />
 }
 export function SecretDialog({ secret, title, onClose }: { secret: string | null; title: string; onClose: () => void }) {

@@ -24,6 +24,15 @@ export type ApiError = {
     };
 };
 
+/**
+ * Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).
+ */
+export type ConnectionSummary = {
+    kind: 'shared' | 'byo';
+    region: string;
+    status: 'pending' | 'ready';
+} | null;
+
 export type AgentToken = {
     id: string;
     token: string;
@@ -2967,6 +2976,7 @@ export type GetCurrentIdentityResponses = {
         domains: Array<string>;
         origin: string;
         host: string;
+        connection: ConnectionSummary;
     };
 };
 
@@ -16202,6 +16212,69 @@ export type CreateConnectionResponses = {
 };
 
 export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
+
+export type ListConnectionRegionsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/connection/regions';
+};
+
+export type ListConnectionRegionsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListConnectionRegionsError = ListConnectionRegionsErrors[keyof ListConnectionRegionsErrors];
+
+export type ListConnectionRegionsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        shared: Array<string>;
+    };
+};
+
+export type ListConnectionRegionsResponse = ListConnectionRegionsResponses[keyof ListConnectionRegionsResponses];
 
 export type VerifyConnectionData = {
     body: {

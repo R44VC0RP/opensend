@@ -1,9 +1,10 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, Field, Input, PageHeader, Select, useToast } from '../../components/ui'
-import { useApi } from '../../data/context'
-import { connectionApi, retryableConnectionErrors, sendingRegions } from '../../data/connections'
+import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, PageHeader, Select, useToast } from '../../components/ui'
+import { RouteSkeleton } from '../../components/RouteSkeleton'
+import { useApiQuery, useSession } from '../../data/context'
+import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { ApiError, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
@@ -18,19 +19,18 @@ async function retrying<T>(run: () => Promise<T>) {
     }
   }
 }
-const regionOptions = sendingRegions.map(region => ({ value: region, label: region }))
 const code = (error: unknown) => error instanceof ApiError ? error.code : undefined
 const message = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Try again.'
 
 function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnection | null>, readyMessage?: string) {
-  const api = useApi()
   const client = useQueryClient()
   const toast = useToast()
+  const sync = useConnectionCache()
   return useMutation({
     gcTime: 0,
     mutationFn: write,
     onSuccess: connection => {
-      client.setQueryData(['opensend', api.mode, api.environment, 'connection'], connection)
+      sync(connection)
       if (connection?.status !== 'ready') return
       if (readyMessage) toast(readyMessage, 'success')
       // Regions, discovery and limits now come from the new connection.
@@ -48,9 +48,29 @@ function StartOver({ connection }: { connection: ProviderConnection }) {
   </>
 }
 
-export function SendingOnboarding({ connection }: { connection: ProviderConnection | null }) {
-  if (connection?.kind === 'byo' && connection.status === 'pending' && connection.quickCreateUrl) return <ConnectAws connection={connection} />
-  return <ChooseSending unfinished={connection?.status === 'pending' ? connection : null} />
+export function SendingOnboarding() {
+  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal), { interval: data => data?.kind === 'shared' && data.status === 'pending' ? 5000 : false })
+  const regions = useApiQuery(['connection-regions'], (_api, signal) => connectionApi.regions(signal))
+  const sync = useConnectionCache()
+  // Setup finished elsewhere (another tab or admin): lift the gate.
+  useEffect(() => { if (connection.data?.status === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (connection.error || regions.error) return <ErrorState error={connection.error ?? regions.error} onRetry={() => { void connection.refetch(); void regions.refetch() }} />
+  if (connection.isPending || regions.isPending) return <RouteSkeleton />
+  const current = connection.data
+  if (current?.kind === 'byo' && current.status === 'pending' && current.quickCreateUrl) return <ConnectAws connection={current} />
+  return <ChooseSending unfinished={current?.status === 'pending' ? current : null} regions={regions.data} />
+}
+
+export function AdminSetupRequired() {
+  const client = useQueryClient()
+  const environment = useSession()?.environment ?? 'live'
+  const [checking, setChecking] = useState(false)
+  async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity', environment], exact: true }) } finally { setChecking(false) } }
+  return <div className="stack onboarding onboarding--narrow">
+    <PageHeader title="Sending isn’t set up yet" />
+    <p className="muted onboarding-lead">An admin needs to finish setup for this workspace before you can use it.</p>
+    <div><Button loading={checking} onClick={() => void check()}>Check again</Button></div>
+  </div>
 }
 
 function sharedError(error: unknown) {
@@ -59,9 +79,11 @@ function sharedError(error: unknown) {
   return message(error)
 }
 
-function ChooseSending({ unfinished }: { unfinished: ProviderConnection | null }) {
-  const [sharedRegion, setSharedRegion] = useState(unfinished?.kind === 'shared' ? unfinished.region : sendingRegions[0])
-  const [byoRegion, setByoRegion] = useState(sendingRegions[0])
+function ChooseSending({ unfinished, regions }: { unfinished: ProviderConnection | null; regions: string[] }) {
+  // BYO accepts any commercial region; offer the same regions as shared sending for now.
+  const regionOptions = [...new Set([...regions, ...unfinished ? [unfinished.region] : []])].map(region => ({ value: region, label: region }))
+  const [sharedRegion, setSharedRegion] = useState(unfinished?.kind === 'shared' ? unfinished.region : regions[0] ?? '')
+  const [byoRegion, setByoRegion] = useState(regions[0] ?? '')
   const shared = useConnectionMutation((region: string) => retrying(() => connectionApi.create({ kind: 'shared', region })), 'Shared sending is ready')
   const byo = useConnectionMutation((region: string) => connectionApi.create({ kind: 'byo', region }))
   const busy = shared.isPending || byo.isPending

@@ -12,6 +12,7 @@ import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
 import { claimInvitation, onboardNewUser, WorkspaceRole } from './workspaces.js';
+import { ConnectionSummary, connectionSummary } from './provider-connections.js';
 
 const day = 24 * 60 * 60;
 
@@ -300,11 +301,11 @@ export function registerGoogleAuth(app: App) {
     }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/me', operationId: 'getCurrentIdentity', tags: ['Auth'], security,
-    responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), role: WorkspaceRole.nullable(), multiTenant: z.boolean(), email: z.string().nullable(), name: z.string().nullable(), environment: z.enum(['live', 'test']), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string() })), ...errors },
+    responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), role: WorkspaceRole.nullable(), multiTenant: z.boolean(), email: z.string().nullable(), name: z.string().nullable(), environment: z.enum(['live', 'test']), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string(), connection: ConnectionSummary.nullable().openapi({ description: 'Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).' }) })), ...errors },
   }), async c => {
     const identity = c.get('actor');
     const userId = identity.keyId.startsWith('user_') ? identity.keyId.slice(5) : null;
     const origin = new URL(c.env.config.publicUrl).origin;
-    return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, role: WorkspaceRole.nullable().parse(identity.role ?? null), multiTenant: c.env.config.multiTenant, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host }, 200);
+    return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, role: WorkspaceRole.nullable().parse(identity.role ?? null), multiTenant: c.env.config.multiTenant, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host, connection: c.env.config.multiTenant ? await connectionSummary(c.env, identity.workspaceId) : null }, 200);
   });
 }

@@ -10,6 +10,8 @@ const Kind = z.enum(['shared', 'byo']);
 const Create = z.object({ kind: Kind, region: z.string().max(32).regex(regionPattern) }).strict().openapi('CreateConnection');
 const AccountId = z.string().regex(/^\d{12}$/).openapi({ example: '123456789012' });
 const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), status: z.enum(['pending', 'ready']), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
+// Safe for every workspace member: no account IDs, role ARNs or external IDs.
+export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), status: z.enum(['pending', 'ready']) }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; status: 'pending' | 'ready'; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null };
 
 function owner(c: Ctx) {
@@ -23,6 +25,7 @@ function template(runtime: Runtime) {
   return runtime.config.byoTemplateUrl;
 }
 const platformRegion = 'us-east-2';
+const sharedRegions = (runtime: Runtime) => runtime.config.sharedRegions ?? [platformRegion];
 const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
@@ -35,6 +38,10 @@ function view(runtime: Runtime, row: Row) {
 }
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
+}
+export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'status'>>(sql`SELECT kind, region, status FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
+  return row ? { kind: row.kind, region: row.region, status: row.status } : null;
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -108,8 +115,9 @@ async function provision(runtime: Runtime, row: Row, account: string, roleArn?: 
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {
   const { region, kind } = input;
   if (kind === 'byo') template(runtime);
-  // Ohio at launch. Ireland is inside the IAM boundary but not yet offered to customers.
-  if (kind === 'shared' && region !== platformRegion) throw new ApiError(422, 'SHARED_REGION_UNAVAILABLE', 'Shared sending is available in us-east-2.', 'region');
+  // Offered regions come from SHARED_SENDING_REGIONS (Ohio at launch; Ireland is inside the IAM boundary).
+  const offered = sharedRegions(runtime);
+  if (kind === 'shared' && !offered.includes(region)) throw new ApiError(422, 'SHARED_REGION_UNAVAILABLE', `Shared sending is available in ${offered.join(', ')}.`, 'region');
   if (/^(cn-|us-gov-|us-iso|us-isob|eu-isoe|us-isof)/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region.', 'region');
   const identity = await caller(platformRegion, platformCredentials(runtime));
   if (!identity.Account || !/^\d{12}$/.test(identity.Account) || !identity.Arn?.startsWith(`arn:aws:iam::${identity.Account}:user/`)) throw new ApiError(503, 'PLATFORM_PRINCIPAL_INVALID', 'Use an IAM user in the commercial AWS partition for the platform connection.');
@@ -124,6 +132,9 @@ export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
   app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {
     const row = await get(c.env, owner(c)); return c.json({ connection: row ? view(c.env, row) : null }, 200);
+  });
+  app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions this installation offers for shared sending. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()) })), ...errors } }), async c => {
+    owner(c); return c.json({ shared: sharedRegions(c.env) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Shared setup is resumable by repeating this request. BYO returns a CloudFormation quick-create URL. Never sends mail.', request: { body: json(Create) }, responses: { 201: response(Connection), ...errors } }), async c => {
     const wid = owner(c);

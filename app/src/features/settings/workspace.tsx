@@ -33,7 +33,7 @@ function SesSettings({multiTenant}: {multiTenant: boolean}) {
   return <div className="stack settings-ses">
     <PageHeader title="Settings" />
     <SettingsTabs value="ses" />
-    {multiTenant ? <><SendingConnection /><RegionSetup /></> : workspace.isPending ? <SettingsBodySkeleton regionId={regionId} /> : <>
+    {multiTenant ? <SendingConnection /> : workspace.isPending ? <SettingsBodySkeleton regionId={regionId} /> : <>
       <RegionSetup />
       {workspace.error ? <ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /> : <WorkspaceForm key={workspace.data.id} workspace={workspace.data} />}
       <SignedInSection />
