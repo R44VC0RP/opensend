@@ -57,7 +57,7 @@ export function createApp() {
     const configured = async () => {
       const globalCampaignRead = c.req.method === 'GET' && /^\/v1\/campaigns(?:\/[^/]+(?:\/(?:state|preview))?)?$/.test(c.req.path) && !new URL(c.req.url).searchParams.has('region');
       // SES callbacks use a 30 s per-isolate cache; the SNS route re-resolves fresh before rejecting an unknown topic.
-      if ((!globalCampaignRead && /^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path)) || c.req.path === '/v1/settings/ses') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, c.req.path === '/v1/events/ses' ? { cacheMs: 30_000 } : {}));
+      if ((!globalCampaignRead && /^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path)) || c.req.path === '/v1/settings/ses') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, c.req.path === '/v1/events/ses' ? { cacheMs: 30_000 } : { workspaceId: c.get('actor').workspaceId }));
       await next();
     };
     if (c.req.path === '/v1/events/ses') return configured();

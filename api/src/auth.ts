@@ -13,7 +13,7 @@ import { getMcpGrantActor } from './mcp-auth.js';
 const delegatedActor = Symbol('mcpActor');
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
 export async function dispatchAsActor(app: App, request: Request, runtime: Runtime, identity: Actor): Promise<Response> {
-  if (!identity.keyId.startsWith('mcp_') || identity.workspaceId !== runtime.config.workspaceId) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
+  if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw new ApiError(403, 'PERMISSION_DENIED', 'Invalid delegated API principal.');
   const delegatedRuntime: DelegatedRuntime = { ...runtime, [delegatedActor]: identity };
   return await app.fetch(request, delegatedRuntime);
 }
@@ -28,15 +28,15 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
     if (token.startsWith('os_agent_')) {
       const temporary = await verifyAgentToken(c.env.config, token);
-      const [tracked] = temporary ? await c.env.db.select().from(agentTokens).where(and(eq(agentTokens.id, temporary.id), eq(agentTokens.workspaceId, c.env.config.workspaceId))).limit(1) : [];
-      const grant = temporary ? await getMcpGrantActor(c.env, temporary.grant) : null;
-      if (!temporary || !tracked || tracked.revokedAt || Date.parse(tracked.expiresAt) !== temporary.exp || tracked.grantId !== temporary.grant || tracked.environment !== temporary.environment || JSON.stringify(tracked.permissions) !== JSON.stringify(temporary.permissions) || JSON.stringify(tracked.domains) !== JSON.stringify(temporary.domains) || !grant || (temporary.environment === 'live' && grant.environment !== 'live') || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
-      c.set('actor', { ...grant, environment: temporary.environment, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
+      const [tracked] = temporary ? await c.env.db.select().from(agentTokens).where(eq(agentTokens.id, temporary.id)).limit(1) : [];
+      const grant = tracked && !tracked.revokedAt ? await getMcpGrantActor(c.env, tracked.grantId) : null;
+      if (!temporary || !tracked || tracked.revokedAt || Date.parse(tracked.expiresAt) !== temporary.exp || tracked.grantId !== temporary.grant || tracked.environment !== temporary.environment || JSON.stringify(tracked.permissions) !== JSON.stringify(temporary.permissions) || JSON.stringify(tracked.domains) !== JSON.stringify(temporary.domains) || !grant || grant.workspaceId !== tracked.workspaceId || (temporary.environment === 'live' && grant.environment !== 'live') || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
+      c.set('actor', { ...grant, workspaceId: tracked.workspaceId, environment: temporary.environment, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
       await c.env.db.update(agentTokens).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(agentTokens.id, tracked.id), or(isNull(agentTokens.lastUsedAt), sql`${agentTokens.lastUsedAt} < now() - interval '1 minute'`)));
     } else {
       if (!/^os_(?:test|live)_[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
-      const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), eq(apiKeys.workspaceId, c.env.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);
+      const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), isNull(apiKeys.revokedAt))).limit(1);
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       // API-key credentials always define the environment, regardless of cookies or headers.
       c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });

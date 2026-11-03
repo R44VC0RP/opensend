@@ -510,7 +510,7 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false, htmlValidated = false): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (!sharedValidated) {
-    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
+    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
     sender(runtime, a, input.from, input.region);
   }
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
@@ -879,7 +879,7 @@ export function registerSending(app: App) {
         if (active && active.revision === row.revision && ['pending', 'processing'].includes(active.status)) return asyncReviewView(active);
       }
       await assertRegionEnabled(db, a.workspaceId, draft.region);
-      if (a.environment === 'live') await assertLiveRegionReady(c.env, db, draft.region, 'marketing');
+      if (a.environment === 'live') await assertLiveRegionReady(c.env, db, draft.region, 'marketing', false, a.workspaceId);
       const lockedAttachments = await attachmentRows(db, a, draft.attachments, true);
       const rendered = renderCampaignContent(c.env, draft);
       const reviewId = id('review');
@@ -1008,7 +1008,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (!reviewId) {
     const draft = readyCampaign(row.draft); sender(runtime, a, draft.from, draft.region);
     await assertRegionEnabled(db, a.workspaceId, draft.region);
-    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, draft.region, 'marketing');
+    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
     let active = row.preparingReviewId ? (await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId), eq(campaignReviews.campaignId, campaignId), eq(campaignReviews.revision, row.revision))))[0] : undefined;
     let captured = false;
     if (!active || !['pending', 'processing'].includes(active.status)) {
@@ -1043,7 +1043,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (review.status !== 'ready' || review.processed !== review.eligible) throw new ApiError(409, 'CAMPAIGN_REVIEW_NOT_READY', 'Wait for every reviewed recipient to finish preparation.');
   sender(runtime, a, review.draft.from, review.draft.region);
   await assertRegionEnabled(db, a.workspaceId, review.draft.region);
-  if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing');
+  if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', false, a.workspaceId);
   await checkCampaignCapacity(db, a, review.eligible);
   await attachmentRows(db, a, review.draft.attachments, true);
   await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId, ...pacing });

@@ -39,30 +39,31 @@ export async function assertRegionEnabled(db: DbExecutor, workspaceId: string, r
   if (!settings.enabledRegions.includes(selected)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
   return selected;
 }
-export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false) {
-  const [row] = await db.select().from(sesRegions).where(regionWhere(runtime.config.workspaceId, region)).limit(1);
+export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false, workspaceId = runtime.config.workspaceId) {
+  const [row] = await db.select().from(sesRegions).where(regionWhere(workspaceId, region)).limit(1);
   if (!row?.report?.provisioned || row.report.account?.sendingEnabled !== true || row.credentialsFingerprint !== await credentialFingerprint(runtime.config) || row.publicUrl !== discoveryTarget(runtime.config) || row.trustedAccountId !== row.report.account?.id || row.trustedTopicArn !== row.report.resources.topic.arn || row.report.resources[stream].sendingEnabled !== true) {
     throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region', retryable);
   }
 }
-const regionRows = (runtime: Runtime) => Promise.all([
-  getRegionSettings(runtime.db, runtime.config.workspaceId),
-  runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
-  runtime.db.select({ region: mailboxRegions.region, account: mailboxRegions.accountId, arn: mailboxRegions.topicArn }).from(mailboxRegions).where(eq(mailboxRegions.workspaceId, runtime.config.workspaceId)),
+const regionRows = (runtime: Runtime, workspaceId: string) => Promise.all([
+  getRegionSettings(runtime.db, workspaceId),
+  runtime.db.select({ region: sesRegions.region, account: sesRegions.trustedAccountId, arn: sesRegions.trustedTopicArn }).from(sesRegions).where(eq(sesRegions.workspaceId, workspaceId)),
+  runtime.db.select({ region: mailboxRegions.region, account: mailboxRegions.accountId, arn: mailboxRegions.topicArn }).from(mailboxRegions).where(eq(mailboxRegions.workspaceId, workspaceId)),
 ]);
 // Per-isolate cache for the SES callback route only (one POST per SES event, ~23/s mid-send, 3 queries each).
 // Callers must treat a cached miss as unknown and re-resolve fresh before rejecting (see the SNS route).
 const regionCache = new Map<string, { expires: number; rows: ReturnType<typeof regionRows> }>();
-export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?: number } = {}): Promise<Runtime> {
+export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?: number; workspaceId?: string } = {}): Promise<Runtime> {
+  const workspaceId = options.workspaceId ?? runtime.config.workspaceId;
   let rows: ReturnType<typeof regionRows>;
-  const cached = options.cacheMs ? regionCache.get(runtime.config.workspaceId) : undefined;
+  const cached = options.cacheMs ? regionCache.get(workspaceId) : undefined;
   if (cached && cached.expires > Date.now()) rows = cached.rows;
   else {
-    rows = regionRows(runtime);
+    rows = regionRows(runtime, workspaceId);
     if (options.cacheMs) {
       const entry = { expires: Date.now() + options.cacheMs, rows };
-      regionCache.set(runtime.config.workspaceId, entry);
-      rows.catch(() => { if (regionCache.get(runtime.config.workspaceId) === entry) regionCache.delete(runtime.config.workspaceId); });
+      regionCache.set(workspaceId, entry);
+      rows.catch(() => { if (regionCache.get(workspaceId) === entry) regionCache.delete(workspaceId); });
     }
   }
   const [settings, trusted, inbound] = await rows;
@@ -81,16 +82,16 @@ export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?
     awsAccountId: accounts.size === 1 ? valid[0]!.account! : undefined,
   } };
 }
-export async function regionCatalog(runtime: Runtime) {
+export async function regionCatalog(runtime: Runtime, workspaceId: string) {
   const fingerprint = await credentialFingerprint(runtime.config);
   const [settings, rows, active] = await Promise.all([
-    getRegionSettings(runtime.db, runtime.config.workspaceId),
+    getRegionSettings(runtime.db, workspaceId),
     runtime.db.select({ region: sesRegions.region, status: sql<string | null>`${sesRegions.report}->>'status'`,
       lastDiscoveredAt: sesRegions.lastDiscoveredAt, fingerprint: sesRegions.credentialsFingerprint, publicUrl: sesRegions.publicUrl,
       provisionJobId: sesRegions.provisionJobId, provisionStatus: jobs.status, provisionError: jobs.lastError,
     }).from(sesRegions).leftJoin(jobs, and(eq(jobs.id, sesRegions.provisionJobId), eq(jobs.workspaceId, sesRegions.workspaceId)))
-      .where(eq(sesRegions.workspaceId, runtime.config.workspaceId)),
-    runtime.db.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running']))),
+      .where(eq(sesRegions.workspaceId, workspaceId)),
+    runtime.db.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running']))),
   ]);
   const regions = [...new Set([...settings.enabledRegions, ...rows.map(row => row.region)])].sort();
   return { defaultRegion: settings.defaultRegion, data: regions.map(region => {
@@ -103,22 +104,22 @@ export async function regionCatalog(runtime: Runtime) {
       provisionStatus: row?.provisionStatus ?? null, provisionError: row?.provisionError ?? null };
   }) };
 }
-export async function configureRegion(runtime: Runtime, region: string, input: { enabled?: boolean; makeDefault?: boolean }) {
+export async function configureRegion(runtime: Runtime, workspaceId: string, region: string, input: { enabled?: boolean; makeDefault?: boolean }) {
   await runtime.db.transaction(async tx => {
-    const settings = await getRegionSettings(tx, runtime.config.workspaceId, 'update');
+    const settings = await getRegionSettings(tx, workspaceId, 'update');
     let enabled = settings.enabledRegions;
     if (input.enabled === false) {
       if (settings.defaultRegion === region || input.makeDefault) throw new ApiError(409, 'REGION_DEFAULT_REQUIRED', 'Choose another default region before disabling this one.');
-      const pending = await tx.select({ id: emails.id }).from(emails).where(and(eq(emails.workspaceId, runtime.config.workspaceId), eq(emails.region, region), inArray(emails.status, ['queued', 'attempting', 'acceptance_unknown']))).limit(1);
-      const scheduled = await tx.select({ id: campaigns.id }).from(campaigns).where(and(eq(campaigns.workspaceId, runtime.config.workspaceId), sql`${campaigns.draft}->>'region'=${region}`, inArray(campaigns.status, ['scheduled', 'sending']))).limit(1);
-      const provisioning = await tx.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.workspaceId, runtime.config.workspaceId), eq(jobs.type, 'ses.provision'), sql`${jobs.payload}->>'region'=${region}`, inArray(jobs.status, ['pending', 'running']))).limit(1);
+      const pending = await tx.select({ id: emails.id }).from(emails).where(and(eq(emails.workspaceId, workspaceId), eq(emails.region, region), inArray(emails.status, ['queued', 'attempting', 'acceptance_unknown']))).limit(1);
+      const scheduled = await tx.select({ id: campaigns.id }).from(campaigns).where(and(eq(campaigns.workspaceId, workspaceId), sql`${campaigns.draft}->>'region'=${region}`, inArray(campaigns.status, ['scheduled', 'sending']))).limit(1);
+      const provisioning = await tx.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, 'ses.provision'), sql`${jobs.payload}->>'region'=${region}`, inArray(jobs.status, ['pending', 'running']))).limit(1);
       if (pending.length || scheduled.length || provisioning.length) throw new ApiError(409, 'REGION_IN_USE', 'This region has queued, in-flight, or uncertain work. Resolve it before disabling the region.');
       enabled = enabled.filter(value => value !== region);
     } else if (input.enabled === true || input.makeDefault) enabled = [...new Set([...enabled, region])];
-    const existing = await tx.select({ region: sesRegions.region }).from(sesRegions).where(eq(sesRegions.workspaceId, runtime.config.workspaceId));
+    const existing = await tx.select({ region: sesRegions.region }).from(sesRegions).where(eq(sesRegions.workspaceId, workspaceId));
     if (new Set([...enabled, ...existing.map(row => row.region), region]).size > 40) throw new ApiError(422, 'REGION_LIMIT_EXCEEDED', 'At most 40 SES regions may be configured.');
-    await tx.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region }).onConflictDoNothing();
-    await tx.update(sesSettings).set({ enabledRegions: enabled, defaultRegion: input.makeDefault ? region : settings.defaultRegion }).where(settingWhere(runtime.config.workspaceId));
+    await tx.insert(sesRegions).values({ workspaceId, region }).onConflictDoNothing();
+    await tx.update(sesSettings).set({ enabledRegions: enabled, defaultRegion: input.makeDefault ? region : settings.defaultRegion }).where(settingWhere(workspaceId));
   });
-  return regionCatalog(runtime);
+  return regionCatalog(runtime, workspaceId);
 }

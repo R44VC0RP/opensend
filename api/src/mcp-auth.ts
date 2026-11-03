@@ -3,10 +3,10 @@ import { createResourceServerChallenge } from '@better-auth/oauth-provider';
 import { APIError } from 'better-auth/api';
 import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, eq, gt, like, ne } from 'drizzle-orm';
+import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
 import { actor, ApiError, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
-import { approvedGoogleIdentity, createAuth, isApprovedUser, requireDashboardOrigin } from './google-auth.js';
+import { approvedGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin } from './google-auth.js';
 import { agentTokens } from './db/core.js';
 import { authAccount, authUser } from './db/google-auth.js';
 import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
@@ -17,10 +17,16 @@ const originOf = (runtime: Runtime) => new URL(runtime.config.publicUrl).origin;
 const resourceOf = (runtime: Runtime) => `${originOf(runtime)}/mcp`;
 const issuerOf = (runtime: Runtime) => `${originOf(runtime)}/api/auth`;
 
-function originalScopes(reference: string | null) {
-  const match = reference?.match(/^mcp_[0-9a-f-]{36}\|(.+)$/);
+// Consent references persist unchanged through code exchange and refresh. A
+// two-field reference was issued in default; it must never follow a user elsewhere.
+const workspaceTag = (workspaceId: string) => workspaceId === 'default' ? '' : encodeURIComponent(workspaceId);
+const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(${oauthConsent.referenceId}, '|', 3)`, workspaceTag(workspaceId));
+function originalGrant(reference: string | null) {
+  const match = reference?.match(/^mcp_[0-9a-f-]{36}\|([^|]+)(?:\|([^|]+))?$/);
   const values = match?.[1]?.split(' ') ?? [];
-  return values.length && values.every(value => scopes.includes(value)) ? values : [];
+  if (!values.length || !values.every(value => scopes.includes(value))) return null;
+  try { return { scopes: values, workspaceId: match?.[2] ? decodeURIComponent(match[2]) : 'default' }; }
+  catch { return null; }
 }
 function grantPermissions(values: readonly string[]): Permission[] {
   return permissions.filter(permission => values.includes(`opensend:${permission}`));
@@ -50,7 +56,10 @@ export function createMcpPlugin(runtime: Runtime) {
       page: '/mcp/consent', shouldRedirect: () => false,
       consentReferenceId: async ({ user, scopes: requested }) => {
         if (!user || !await isApprovedUser(runtime, user.id) || !requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length) invalidGrant();
-        return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}`;
+        const member = await membershipForApprovedUser(runtime.db, user.id);
+        if (!member) invalidGrant();
+        const tag = workspaceTag(member.workspaceId);
+        return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${tag ? `|${tag}` : ''}`;
       },
     },
     extensions: [{ claims: { accessToken: async ({ user, client, referenceId, scopes: requested, resources }) => {
@@ -84,10 +93,14 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   // approval through the caller's dispatch transaction.
   if (!row?.userId || row.clientDisabled || row.resourceDisabled || row.resources?.length !== 1 || row.resources[0] !== resourceOf(runtime) ||
     !approvedGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
-  const allowed = originalScopes(row.referenceId).filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
+  const original = originalGrant(row.referenceId);
+  if (!original) return null;
+  const allowed = original.scopes.filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { keyId, workspaceId: runtime.config.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
+  const member = await membershipForApprovedUser(db, row.userId, original.workspaceId);
+  if (!member) return null;
+  const actor: Actor = { keyId, workspaceId: member.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
   return { actor, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 
@@ -352,16 +365,16 @@ async function redirectResult(result: Response) {
 }
 export function registerMcpAuth(app: App): void {
   app.openapi(createRoute({ method: 'get', path: '/v1/mcp-connections', operationId: 'listMcpConnections', tags: ['Auth'], security, request: { query: PageQuery }, responses: { 200: response(pageSchema(McpConnection)), ...errors } }), async c => {
-    dashboardOwner(c); const query = c.req.valid('query');
+    const identity = dashboardOwner(c); const query = c.req.valid('query');
     const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
       .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
-      .where(and(like(oauthConsent.referenceId, 'mcp\_%'), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
+      .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
     return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
     const revoked = await c.env.db.transaction(async tx => {
-      const [connection] = await tx.select().from(oauthConsent).where(and(eq(oauthConsent.id, consentId), like(oauthConsent.referenceId, 'mcp\_%'))).limit(1).for('update');
+      const [connection] = await tx.select().from(oauthConsent).where(and(eq(oauthConsent.id, consentId), like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId))).limit(1).for('update');
       if (!connection?.userId) return false;
       const revokedAt = new Date().toISOString();
       if (connection.referenceId) {

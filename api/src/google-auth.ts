@@ -10,6 +10,7 @@ import { and, eq, exists, gt, ne, sql } from 'drizzle-orm';
 import { ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
+import { workspaceMembers } from './db/workspaces.js';
 
 const day = 24 * 60 * 60;
 
@@ -42,6 +43,21 @@ async function approvedUser(runtime: Runtime, userId: string, db: DbExecutor, se
 
 export async function isApprovedUser(runtime: Runtime, userId: string, db: DbExecutor = runtime.db): Promise<boolean> {
   return Boolean(await approvedUser(runtime, userId, db));
+}
+
+// Only call after Google approval. Until workspace selection exists, an ambiguous
+// login fails closed; an existing consent may select only its bound workspace.
+export async function membershipForApprovedUser(db: DbExecutor, userId: string, workspaceId?: string) {
+  const fields = { workspaceId: workspaceMembers.workspaceId, role: workspaceMembers.role };
+  const memberships = () => db.select(fields).from(workspaceMembers).where(eq(workspaceMembers.userId, userId)).for('share');
+  let rows = await memberships();
+  if (!rows.length && (workspaceId === undefined || workspaceId === 'default')) {
+    rows = await db.insert(workspaceMembers).values({ id: crypto.randomUUID(), userId, workspaceId: 'default', role: 'owner' })
+      .onConflictDoNothing({ target: [workspaceMembers.workspaceId, workspaceMembers.userId] }).returning(fields);
+    if (!rows.length) rows = await memberships(); // Concurrent first use; read the winner's role.
+  }
+  const member = workspaceId !== undefined ? rows.find(row => row.workspaceId === workspaceId) : rows.length === 1 ? rows[0] : null;
+  return member && (member.role === 'owner' || member.role === 'admin') ? member : null;
 }
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
@@ -168,9 +184,11 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     if (!session) return null;
     const user = await measure('approval-db', () => approvedUser(runtime, session.user.id, runtime.db, session.session));
     if (!user) return null;
+    const member = await membershipForApprovedUser(runtime.db, session.user.id);
+    if (!member) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
-    return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: user.email, name: user.name };
+    return { keyId: `user_${session.user.id}`, ...member, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: user.email, name: user.name };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof APIError && error.statusCode === 401) return null;

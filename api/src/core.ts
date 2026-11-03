@@ -12,6 +12,7 @@ export type Mode = 'live' | 'test';
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
+  role?: string;
   // "environment:region" pairs whose queued mail this request committed; the response path nudges their dispatcher.
   dispatchTargets?: Set<string>;
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).

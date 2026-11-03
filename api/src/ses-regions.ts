@@ -26,39 +26,39 @@ function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   if ((mutate || aws) && value.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Use live administrator context for AWS discovery and region configuration.');
   return value;
 }
-async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: string) {
+async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: string, workspaceId = runtime.config.workspaceId) {
   const fingerprint = await credentialFingerprint(runtime.config);
   await runtime.db.transaction(async tx => {
-    await tx.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region: report.region }).onConflictDoNothing();
+    await tx.insert(sesRegions).values({ workspaceId, region: report.region }).onConflictDoNothing();
     const updated = await tx.update(sesRegions).set({ report, credentialsFingerprint: fingerprint, publicUrl: discoveryTarget(runtime.config), lastDiscoveredAt: report.checkedAt })
-      .where(and(regionWhere(runtime.config.workspaceId, report.region), jobId ? eq(sesRegions.provisionJobId, jobId) : undefined,
+      .where(and(regionWhere(workspaceId, report.region), jobId ? eq(sesRegions.provisionJobId, jobId) : undefined,
         sql`(${sesRegions.lastDiscoveredAt} IS NULL OR ${sesRegions.lastDiscoveredAt} <= ${report.checkedAt}::timestamptz)`)).returning({ region: sesRegions.region });
     if (!updated.length) return;
-    for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId: runtime.config.workspaceId, environment: 'live', region: report.region, name: domain.name }).onConflictDoNothing();
+    for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, environment: 'live', region: report.region, name: domain.name }).onConflictDoNothing();
   });
 }
 export function registerSesRegions(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/regions', operationId: 'listRegions', tags: ['Regions'], security,
     description: 'Lists persisted region settings and cached discovery/job status without AWS calls. The environment default only seeds installation settings during migration.',
     responses: { 200: response(Catalog), ...errors },
-  }), async c => { access(c); return c.json(Catalog.parse(await regionCatalog(c.env)), 200); });
+  }), async c => { const value = access(c); return c.json(Catalog.parse(await regionCatalog(c.env, value.workspaceId)), 200); });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}', operationId: 'configureRegion', tags: ['Regions'], security,
     description: 'Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.',
     request: { params: Params, body: json(z.object({ enabled: z.boolean().optional(), makeDefault: z.boolean().optional() }).strict().refine(value => value.enabled !== undefined || value.makeDefault === true, 'Choose enabled or makeDefault.').openapi('ConfigureRegion')) },
     responses: { 200: response(Catalog), ...errors },
-  }), async c => { access(c, true); return c.json(Catalog.parse(await configureRegion(c.env, c.req.valid('param').region, c.req.valid('json'))), 200); });
+  }), async c => { const value = access(c, true); return c.json(Catalog.parse(await configureRegion(c.env, value.workspaceId, c.req.valid('param').region, c.req.valid('json'))), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/regions/{region}/discovery', operationId: 'discoverRegion', tags: ['Regions'], security,
     description: 'Read-only AWS discovery. Caches observations in PostgreSQL for 15 minutes; refresh=true forces AWS reads. Never creates resources or subscribes endpoints. Credential or public-origin changes invalidate the cache.',
     request: { params: Params, query: z.object({ refresh: z.enum(['true', 'false']).optional() }) }, responses: { 200: response(SesDiscoverySchema), ...errors },
   }), async c => {
-    access(c, false, true); const { region } = c.req.valid('param');
-    const settings = await getRegionSettings(c.env.db, c.env.config.workspaceId);
+    const value = access(c, false, true); const { region } = c.req.valid('param');
+    const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before discovery.', 'region');
-    const [cached] = await c.env.db.select().from(sesRegions).where(regionWhere(c.env.config.workspaceId, region)).limit(1);
+    const [cached] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
     const fingerprint = await credentialFingerprint(c.env.config);
     if (c.req.valid('query').refresh !== 'true' && cached?.report && cached.credentialsFingerprint === fingerprint && cached.publicUrl === discoveryTarget(c.env.config) && cached.lastDiscoveredAt && Date.now() - Date.parse(cached.lastDiscoveredAt) < DISCOVERY_TTL) return c.json(SesDiscoverySchema.parse(cached.report), 200);
     const report = await discoverSes(c.env, { region, installationId: settings.installationId });
-    await saveDiscovery(c.env, report); return c.json(report, 200);
+    await saveDiscovery(c.env, report, undefined, value.workspaceId); return c.json(report, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/regions/{region}/provision', operationId: 'provisionRegion', tags: ['Regions'], security,
     description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
@@ -93,7 +93,7 @@ export function registerSesRegions(app: App) {
     if (row?.report) {
       const report = SesDiscoverySchema.parse(row.report);
       report.resources[input.stream].autoValidation = input.mode;
-      await saveDiscovery(c.env, { ...report, checkedAt: new Date().toISOString() });
+      await saveDiscovery(c.env, { ...report, checkedAt: new Date().toISOString() }, undefined, value.workspaceId);
     }
     return c.json(ValidationSettings.parse(input), 200);
   });

@@ -162,18 +162,18 @@ function redact(value: unknown): string {
 function diagnostic(reply: Reply): string {
   return `HTTP ${reply.status}; x-request-id=${reply.headers.get('x-request-id') ?? '(missing)'}; body=${redact(reply.body)}`;
 }
-async function http(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}, timeout = 5_000, base = BASE): Promise<Reply> {
+async function http(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}, timeout = 5_000, base = BASE, transport: (request: Request) => Response | Promise<Response> = fetch): Promise<Reply> {
   if (key === MANAGER) assert.ok(manager, 'Synthetic dashboard session has not been bootstrapped.');
   const credentials: Record<string, string> = key === MANAGER
     ? { cookie: manager!.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': path.startsWith('/v1/api-keys') ? 'live' : 'test' }
     : key ? { authorization: `Bearer ${key}` } : {};
-  const response = await fetch(`${base}${path}`, {
+  const response = await transport(new Request(`${base}${path}`, {
     method,
     redirect: 'manual',
     headers: { ...credentials, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     body: body === undefined ? undefined : headers['content-type'] === 'application/x-www-form-urlencoded' ? String(body) : JSON.stringify(body),
     signal: AbortSignal.timeout(timeout),
-  });
+  }));
   const text = await response.text();
   let parsed: unknown = text;
   try { parsed = JSON.parse(text); } catch { /* Hosted pages intentionally return HTML. */ }
@@ -656,9 +656,9 @@ describe('Hosted MCP OAuth and tools', () => {
     }
     return reply;
   }
-  async function registerClient(t: TestContext, db: pg.Client, metadata: Json = {}): Promise<Reply> {
+  async function registerClient(t: TestContext, db: pg.Client, metadata: Json = {}, request = http): Promise<Reply> {
     const name = unique('acceptance-mcp-client');
-    const reply = protectOAuth(await http('POST', '/api/auth/oauth2/register', undefined, {
+    const reply = protectOAuth(await request('POST', '/api/auth/oauth2/register', undefined, {
       client_name: name, redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: writableScope, ...metadata,
     }));
@@ -668,15 +668,15 @@ describe('Hosted MCP OAuth and tools', () => {
     });
     return reply;
   }
-  async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope) {
-    const client = ok(await registerClient(t, db, { scope }), 201);
+  async function oauthGrant(t: TestContext, db: pg.Client, scope = writableScope, request = http) {
+    const client = ok(await registerClient(t, db, { scope }, request), 201);
     const redirectUri = 'http://127.0.0.1/callback';
     const verifier = `${randomUUID()}${randomUUID()}`.replaceAll('-', '');
     secrets.add(verifier);
     const state = unique('acceptance-mcp-state');
     const query = new URLSearchParams({ response_type: 'code', client_id: client.client_id, redirect_uri: redirectUri,
       scope, state, resource: resourceUrl, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' });
-    const authorization = ok(protectOAuth(await http('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER)));
+    const authorization = ok(protectOAuth(await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' })));
     assert.equal(authorization.redirect, true);
     assert.equal(typeof authorization.url, 'string');
     const consentUrl = new URL(authorization.url, PUBLIC_ORIGIN);
@@ -684,7 +684,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(consentUrl.pathname, '/mcp/consent');
     const oauthQuery = consentUrl.search.slice(1);
     secrets.add(oauthQuery);
-    const approval = ok(protectOAuth(await http('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
+    const approval = ok(protectOAuth(await request('POST', '/api/auth/oauth2/consent', MANAGER, { accept: true, oauth_query: oauthQuery })));
     assert.equal(typeof approval.url, 'string');
     const callback = new URL(approval.url);
     assert.equal(`${callback.origin}${callback.pathname}`, redirectUri);
@@ -692,7 +692,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const code = callback.searchParams.get('code');
     assert.ok(code, 'Approved OAuth consent must issue an authorization code.');
     secrets.add(code);
-    const tokenReply = protectOAuth(await http('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({
+    const tokenReply = protectOAuth(await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({
       grant_type: 'authorization_code', client_id: client.client_id, redirect_uri: redirectUri, code, code_verifier: verifier, resource: resourceUrl,
     }).toString(), { 'content-type': 'application/x-www-form-urlencoded' }));
     const tokens = ok(tokenReply);
@@ -923,10 +923,9 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   test('live MCP can inspect and enable receiving without forcing MX or changing other domains', async t => {
-    const db = await fixtureDatabase(t);
-    const manager = await oauthGrant(t, db, `${writableScope} opensend:live`);
-    const reader = await oauthGrant(t, db, 'opensend:read opensend:live offline_access');
-    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs, request }) => {
+      const manager = await oauthGrant(t, db, `${writableScope} opensend:live`, request);
+      const reader = await oauthGrant(t, db, 'opensend:read opensend:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
       await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES ($1,$2,'live',$3,$4), ($5,$2,'live','example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
@@ -968,8 +967,8 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   test('thread-first Inbound: live MCP starts and replies; address keys see only delivered messages and safe replays', async t => {
-    const { token } = await oauthGrant(t, await fixtureDatabase(t), `${writableScope} opensend:live`);
-    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { token } = await oauthGrant(t, db, `${writableScope} opensend:live`, request);
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const { dispatchDue } = await import('./src/dispatcher.js');
@@ -1239,6 +1238,8 @@ describe('DB region catalog and explicit SES setup', () => {
     try {
       await drizzle(db).transaction(async tx => {
         runtime.db = tx;
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [runtime.config.workspaceId]);
+        await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
         await (await import('./src/ses-region-state.js')).ensureRegionSettings(runtime.db, runtime.config);
         async function local(method: string, path: string, body?: Json, key?: string, environment: 'test' | 'live' = 'live'): Promise<Reply> {
           const response = await app.fetch(new Request(`${runtime.config.publicUrl}${path}`, {
@@ -2911,6 +2912,8 @@ describe('Operational configuration and public event boundaries', () => {
     try {
       await drizzle(db).transaction(async tx => {
         runtime.db = tx;
+        await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [runtime.config.workspaceId]);
+        await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
         await regional.ensureRegionSettings(runtime.db, runtime.config);
         const settings = await regional.getRegionSettings(runtime.db, runtime.config.workspaceId);
         const topicArn = `arn:aws:sns:${REGION}:111122223333:${setupResources(settings.installationId).topicName}`;
@@ -2978,6 +2981,7 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
 async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   runtime: import('./src/core.js').Runtime;
   db: pg.Client;
+  request: typeof http;
   local: (method: string, path: string, body?: Json, environment?: 'test' | 'live', headers?: Record<string, string>) => Promise<Reply>;
   run: (type: string) => Promise<void>;
   jobs: (type: string) => Promise<Json[]>;
@@ -3003,6 +3007,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   try {
     await drizzle(db).transaction(async tx => {
       runtime.db = tx;
+      await db.query('INSERT INTO workspaces (id, name, slug) VALUES ($1, $1, $1)', [runtime.config.workspaceId]);
+      await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
+      const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
       await ensureRegionSettings(runtime.db, runtime.config);
       async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'test', headers: Record<string, string> = {}): Promise<Reply> {
         const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
@@ -3031,7 +3038,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
           await db.query("UPDATE jobs SET status = 'completed' WHERE id = $1", [job.id]);
         }
       }
-      await scenario({ runtime, db, local, run, jobs });
+      await scenario({ runtime, db, local, run, jobs, request });
       assert.equal(network.mock.callCount(), 0, 'No provider, webhook, certificate or credential network request is allowed.');
       throw rollback;
     });

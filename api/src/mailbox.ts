@@ -43,7 +43,7 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const token = c.req.header('authorization')?.match(/^Bearer (.+)$/i)?.[1];
   if (token?.startsWith('os_mbx_')) {
     if (!/^os_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
-    const [key] = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.hash, await digest(token)), eq(mailboxKeys.workspaceId, c.env.config.workspaceId), isNull(mailboxKeys.revokedAt))).limit(1);
+    const [key] = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.hash, await digest(token)), isNull(mailboxKeys.revokedAt))).limit(1);
     if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
     const limit = c.env.config.apiRateLimitPerMinute;
     const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES (${key.workspaceId}, ${key.id}, date_trunc('minute', now()), 1)
@@ -51,7 +51,7 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     if (budget.rows[0]!.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${limit}-request minute budget. Retry after the window resets.`, undefined, true); }
     await c.env.db.update(mailboxKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.id, key.id), or(isNull(mailboxKeys.lastUsedAt), sql`${mailboxKeys.lastUsedAt} < now() - interval '1 minute'`)));
     c.set('mailboxAccess', { keyId: key.id, workspaceId: key.workspaceId, environment: LIVE, admin: false, mailboxIds: key.mailboxIds, permissions: key.permissions });
-    c.env = await resolveRegionRuntime(c.env);
+    c.env = await resolveRegionRuntime(c.env, { workspaceId: key.workspaceId });
     return next();
   }
   return authenticate(c, async () => {
@@ -60,7 +60,7 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
     if (!actor.permissions.includes('manage')) throw new ApiError(403, 'ADMIN_REQUIRED', 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
     c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] });
-    c.env = await resolveRegionRuntime(c.env);
+    c.env = await resolveRegionRuntime(c.env, { workspaceId: actor.workspaceId });
     await next();
   });
 }
@@ -148,11 +148,11 @@ function storedCatchAll(value: 'create_address' | 'create_mailbox' | 'store') { 
 function receivingRouting(inbound: boolean, catchAll: 'create_mailbox' | 'store', count: number) {
   return inbound ? { catchAll: catchAll === 'create_mailbox' ? 'create_address' as const : catchAll, addressCount: count } : { catchAll, mailboxCount: count };
 }
-async function domainViews(runtime: Runtime, rows: (typeof domains.$inferSelect)[], inboundApi: boolean) {
+async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[], inboundApi: boolean) {
   if (!rows.length) return [];
-  const inbound = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), eq(mailboxDomains.environment, LIVE), isNull(mailboxDomains.parentId), inArray(mailboxDomains.domainId, rows.map(row => row.id))));
-  const counts = inbound.length ? await runtime.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, inbound.map(row => row.id))).groupBy(mailboxes.domainId) : [];
-  const children = inbound.length ? await runtime.db.select({ parentId: mailboxDomains.parentId, count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(inArray(mailboxDomains.parentId, inbound.map(row => row.id)), eq(mailboxDomains.status, 'active'))).groupBy(mailboxDomains.parentId) : [];
+  const inbound = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, access(c).workspaceId), eq(mailboxDomains.environment, LIVE), isNull(mailboxDomains.parentId), inArray(mailboxDomains.domainId, rows.map(row => row.id))));
+  const counts = inbound.length ? await c.env.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, inbound.map(row => row.id))).groupBy(mailboxes.domainId) : [];
+  const children = inbound.length ? await c.env.db.select({ parentId: mailboxDomains.parentId, count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(inArray(mailboxDomains.parentId, inbound.map(row => row.id)), eq(mailboxDomains.status, 'active'))).groupBy(mailboxDomains.parentId) : [];
   return rows.map(row => {
     const state = inbound.find(item => item.domainId === row.id);
     return { id: row.id, name: row.name, region: row.region, status: state?.status ?? 'off' as const, dns: [expectedMx(row.name, row.region)], mx: state?.mx ?? null, lastError: state?.lastError ?? null,
@@ -161,7 +161,7 @@ async function domainViews(runtime: Runtime, rows: (typeof domains.$inferSelect)
   });
 }
 async function operationDomain(c: Ctx, domainId: string) {
-  const [row] = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, c.env.config.workspaceId), eq(domains.environment, LIVE), eq(domains.id, domainId)));
+  const [row] = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, access(c).workspaceId), eq(domains.environment, LIVE), eq(domains.id, domainId)));
   if (!row) throw new ApiError(404, 'NOT_FOUND', 'Domain was not found.');
   return row;
 }
@@ -173,7 +173,7 @@ async function subdomainViews(runtime: Runtime, parent: typeof mailboxDomains.$i
 /** The receiving top-level row for an OpenSend domain, which subdomains hang off. */
 async function receivingParent(c: Ctx, domainId: string) {
   const row = await operationDomain(c, domainId);
-  const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
+  const [parent] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, row.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
   if (!parent || !['provisioning', 'waiting_for_mx', 'active'].includes(parent.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${row.name} before adding subdomains.`);
   return parent;
 }
@@ -315,20 +315,20 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
   const catchAll = z.enum(inbound ? InboundCatchAll.options : SubdomainSchema.shape.catchAll.options);
   // ---------- domains ----------
   app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: inbound ? 'listInboundDomains' : 'mailboxListDomains', summary: 'List domains and their receiving status', responses: { 200: response(z.object({ data: z.array(domain) }).openapi(`${prefix}DomainList`)), ...errors } }), async c => {
-    admin(c);
-    const rows = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, c.env.config.workspaceId), eq(domains.environment, LIVE), inArray(domains.region, c.env.config.regions))).orderBy(asc(domains.name));
-    return c.json({ data: await domainViews(c.env, rows, inbound) }, 200);
+    const value = admin(c);
+    const rows = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, value.workspaceId), eq(domains.environment, LIVE), inArray(domains.region, c.env.config.regions))).orderBy(asc(domains.name));
+    return c.json({ data: await domainViews(c, rows, inbound) }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'get', path: `${base}/{id}`, operationId: inbound ? 'getInboundDomain' : 'mailboxGetDomain', request: { params: IdParam }, responses: { 200: response(domain), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    return c.json((await domainViews(c.env, [row], inbound))[0]!, 200);
+    return c.json((await domainViews(c, [row], inbound))[0]!, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: inbound ? 'checkInboundDomain' : 'mailboxCheckDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(domain), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     const mx = await checkMx(row.name, row.region);
-    await c.env.db.update(mailboxDomains).set({ mx, checkedAt: mx.checkedAt, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
-    if (mx.state !== 'error') await c.env.db.update(mailboxDomains).set({ status: mx.state === 'active' ? 'active' : 'waiting_for_mx' }).where(and(eq(mailboxDomains.workspaceId, c.env.config.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active'])));
-    const [view] = await domainViews(c.env, [row], inbound);
+    await c.env.db.update(mailboxDomains).set({ mx, checkedAt: mx.checkedAt, updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, row.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId)));
+    if (mx.state !== 'error') await c.env.db.update(mailboxDomains).set({ status: mx.state === 'active' ? 'active' : 'waiting_for_mx' }).where(and(eq(mailboxDomains.workspaceId, row.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active'])));
+    const [view] = await domainViews(c, [row], inbound);
     return c.json({ ...view!, mx }, 200);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/enable`, operationId: inbound ? 'enableInboundDomain' : 'mailboxEnableDomain', summary: 'Enable receiving for a verified domain',
@@ -349,7 +349,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
       await queueReconcile(tx, value.workspaceId, row.region);
     });
     log('info', { code: 'MAILBOX_DOMAIN_ENABLE_QUEUED', region: row.region, mx: mx.state });
-    return c.json((await domainViews(c.env, [row], inbound))[0]!, 202);
+    return c.json((await domainViews(c, [row], inbound))[0]!, 202);
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/disable`, operationId: inbound ? 'disableInboundDomain' : 'mailboxDisableDomain', summary: 'Stop receiving for a domain', description: `Removes the domain from the OpenSend receipt rule. ${inbound ? 'Receiving addresses' : 'Mailboxes'} and stored messages are kept.`, request: { params: IdParam }, responses: { 202: response(domain), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
@@ -357,7 +357,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
       const updated = await tx.update(mailboxDomains).set({ status: 'disabling', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active', 'failed']))).returning({ id: mailboxDomains.id });
       if (updated.length) await queueReconcile(tx, value.workspaceId, row.region);
     });
-    return c.json((await domainViews(c.env, [row], inbound))[0]!, 202);
+    return c.json((await domainViews(c, [row], inbound))[0]!, 202);
   });
   app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{id}`, operationId: inbound ? 'updateInboundDomain' : 'mailboxUpdateDomain',
     request: { params: IdParam, body: json(z.object({ catchAll: catchAll.optional(), acceptSubdomains: z.boolean().optional().describe('Whether the receipt rule also matches every subdomain (.example.com). Turned on by the first subdomain and kept on after that.') }).strict().refine(value => value.catchAll !== undefined || value.acceptSubdomains !== undefined, 'Set catchAll or acceptSubdomains.').openapi(`Update${prefix}Domain`)) }, responses: { 200: response(domain), ...errors } }), async c => {
@@ -370,7 +370,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
       return saved;
     });
     if (!updated.length) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', 'Enable receiving for this domain first.');
-    return c.json((await domainViews(c.env, [row], inbound))[0]!, 200);
+    return c.json((await domainViews(c, [row], inbound))[0]!, 200);
   });
 
   // ---------- subdomains ----------
