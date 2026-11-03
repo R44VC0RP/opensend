@@ -35,7 +35,7 @@
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
   // From `tofu output hyperdrive_id` (infra/, production state).
-  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "00000000000000000000000000000000" }],
+  "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "3742f44f5c9344fd8e7c99b7b08b84cf" }],
   "browser": { "binding": "BROWSER" },
   "r2_buckets": [{ "binding": "ATTACHMENTS", "bucket_name": "opensend-mx-production-attachments" }],
   "queues": {
