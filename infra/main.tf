@@ -40,13 +40,8 @@ terraform {
     method "aes_gcm" "state" {
       keys = key_provider.pbkdf2.state
     }
-    # One-time: read the existing unencrypted state, then remove this fallback.
-    method "unencrypted" "migrate" {}
     state {
       method = method.aes_gcm.state
-      fallback {
-        method = method.unencrypted.migrate
-      }
     }
     plan {
       method = method.aes_gcm.state
