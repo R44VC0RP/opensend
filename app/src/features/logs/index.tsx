@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { ArrowUpRight, ChevronRight, Download, Paperclip, Search } from 'lucide-react'
+import { ArrowUpRight, ChevronRight, Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiQuery, useRegion, useApi } from '../../data/context'
 import type { Email, ReceivedEmail, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
@@ -21,14 +21,19 @@ function logTimestamp(value: string) {
 export function LogsPage() {
   const { regionId } = useRegion()
   const [params] = useSearchParams()
-  return params.get('view') === 'received' ? <ReceivedLogs key={regionId} regionId={regionId} /> : <RegionalLogs key={regionId} regionId={regionId} />
+  const campaignId = params.get('campaign') || undefined
+  return params.get('view') === 'received' ? <ReceivedLogs key={regionId} regionId={regionId} /> : <RegionalLogs key={`${regionId}:${campaignId ?? ''}`} regionId={regionId} campaignId={campaignId} />
 }
 function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'received' }) {
   const [params, setParams] = useSearchParams()
   return <><PageHeader title="Logs" actions={<span className="muted">{regionId}</span>} />
     <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></>
 }
-function RegionalLogs({ regionId }: { regionId: string }) {
+function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  // A campaign sends from one region, so its filter replaces the region selector.
+  const campaign = useApiQuery(['campaign', campaignId ?? null], (api, signal) => campaignId ? api.campaigns.get(campaignId, signal) : Promise.resolve(null))
+  const clearCampaign = () => { const next = new URLSearchParams(searchParams); next.delete('campaign'); setSearchParams(next) }
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('all')
   const [stream, setStream] = useState('all')
@@ -36,13 +41,13 @@ function RegionalLogs({ regionId }: { regionId: string }) {
   const {pageSize, tableRef} = useAdaptivePageSize(5, 100)
   useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
-  const params = { regionId, search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
+  const params = { ...(campaignId ? { campaignId } : { regionId }), search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiQuery(['emails', params], (api, signal) => api.emails.list(params, signal), { interval: 30_000 })
-  return <div className="logs-page"><LogsHeader regionId={regionId} view="sent" />
-    <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
+  return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} view="sent" />
+    <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
       <Select aria-label="Email stream filter" value={stream} onValueChange={value => { setStream(value); setPage(1) }} options={[{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div>
-      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv('opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', 'Region'], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, email.regionId])])}><Download size={16} />Export page</Button>
+      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `opensend-${campaignId}-logs-page.csv` : 'opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', 'Region'], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, email.regionId])])}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<Email> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
@@ -53,7 +58,7 @@ function RegionalLogs({ regionId }: { regionId: string }) {
         { ...logColumns[4], render: row => <span title={row.subject}>{row.subject}</span> },
         { ...logColumns[5], render: row => <span className="muted">{label(row.stream)}</span> },
         { ...logColumns[6], render: () => <ChevronRight size={14} aria-hidden /> },
-      ]} empty={<EmptyState title="No emails found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1) }}>Clear filters</Button>} />} />
+      ]} empty={<EmptyState title="No emails found" action={<Button onClick={() => { setSearch(''); setStatus('all'); setStream('all'); setPage(1); if (campaignId) clearCampaign() }}>Clear filters</Button>} />} />
       {query.data ? <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} /> : <PaginationSkeleton />}
     </>}
   </div>
