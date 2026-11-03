@@ -9,8 +9,6 @@ import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachmen
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Mode, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
-import { isApprovedUser } from './google-auth.js';
-import { workspaceMembers } from './db/workspaces.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
@@ -1350,14 +1348,21 @@ async function finishCampaign(runtime: Runtime, a: Actor, campaignId: string | n
 export async function finishEmailCampaign(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect) {
   if (!mail.reviewId) await finishCampaign(runtime, a, mail.campaignId);
 }
+// Shared by campaign workers and the dispatch claim. A queued origin cannot bootstrap membership.
+export function approvedOriginUser(runtime: Runtime, workspaceId: SQL, userId: SQL) {
+  const c = runtime.config;
+  return sql`SELECT 1 FROM workspace_members m JOIN auth_user u ON u.id = m.user_id
+    JOIN auth_account g ON g.user_id = u.id AND g.provider_id = 'google' AND g.account_id <> ''
+    WHERE ${Boolean(c.googleClientId && c.googleClientSecret && c.authSecret)}::boolean AND m.workspace_id = ${workspaceId} AND m.user_id = ${userId}
+      AND m.role IN ('owner', 'admin') AND u.email_verified AND u.email <> ''
+      AND (${JSON.stringify(c.allowedEmails)}::jsonb ? lower(u.email) OR (u.google_hosted_domain <> '' AND ${JSON.stringify(c.allowedDomains)}::jsonb ? lower(u.google_hosted_domain)))
+    LIMIT 1 FOR SHARE OF m, u, g`;
+}
 export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { workspaceId: string; environment: Mode; actorKeyId: string; snapshot: Pick<EmailSnapshot, 'from'> }) {
   // Session-origin jobs retain the Google principal, not a browser session or bootstrap credential.
   // Queued work may re-check membership but must never create or restore it.
   if (mail.actorKeyId.startsWith('user_')) {
-    const userId = mail.actorKeyId.slice(5);
-    if (!await isApprovedUser(runtime, userId, db)) return false;
-    const [member] = await db.select({ role: workspaceMembers.role }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, userId), eq(workspaceMembers.workspaceId, mail.workspaceId))).for('share');
-    return member?.role === 'owner' || member?.role === 'admin';
+    return (await db.execute(approvedOriginUser(runtime, sql`${mail.workspaceId}`, sql`${mail.actorKeyId.slice(5)}`))).rows.length > 0;
   }
   if (mail.actorKeyId.startsWith('mbk_')) {
     // Mailbox keys may send only as an address of a mailbox they are scoped to.
@@ -1378,12 +1383,16 @@ export async function originAllowed(runtime: Runtime, db: DbExecutor, mail: { wo
   // never through SES I/O. Once attempting, revocation cannot recall an in-flight provider call.
   return !!key && !key.revokedAt && (key.permissions.includes('manage') || key.permissions.includes('send')) && senderDomainAllowed(key.domains, mail.snapshot.from.split('@')[1]!);
 }
-export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient } | null) {
+export function checkedDispatchAttachments(ids: string[], rows: (typeof attachments.$inferSelect)[]) {
+  validateAttachmentRows(distinctAttachmentIds(ids), rows);
+  return rows;
+}
+export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
   // The winning claim persists its snapshot and token atomically; losing workers
   // discard their render without writing a different snapshot over the winner.
-  const rows = await attachmentRows(runtime.db, a, mail.snapshot.attachments);
+  const rows = prefetched ? checkedDispatchAttachments(mail.snapshot.attachments, prefetched) : await attachmentRows(runtime.db, a, mail.snapshot.attachments);
   if (!review?.rendered || review.status !== 'ready' || !review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The reviewed recipient is unavailable.');
   const snapshot = await campaignMessage(runtime, runtime.db, a, review.draft, review.recipient, false, true, rows, review.rendered, true, !review.rendered.html?.includes('{{'));
   if (await digest(canonical(snapshot)) !== review.contentHash) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_CHANGED', 'The renderer no longer reproduces the reviewed message. No provider attempt was made.');
