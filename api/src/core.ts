@@ -62,6 +62,7 @@ export type FeedbackItem = { environment: Mode; region: string; topicArn: string
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   wake?: (readyJobs?: number) => Promise<void>;
+  deferNudge?: (pending: Promise<void>) => void;
   // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (environment: Mode, region: string) => Promise<void>;

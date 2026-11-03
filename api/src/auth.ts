@@ -1,9 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, eq, gt, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { ApiError, actor, digest, errors, id, IdParams, json, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed } from './core.js';
-import type { Actor, App, AppEnv, Runtime } from './core.js';
+import type { Actor, App, AppEnv, Ctx, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
+import { mailboxKeys } from './db/mailbox.js';
 import { getDashboardActor, requireDashboardOrigin } from './google-auth.js';
 import { createAgentToken, verifyAgentToken } from './agent-token.js';
 import { getMcpGrantActor } from './mcp-auth.js';
@@ -18,29 +19,70 @@ export async function dispatchAsActor(app: App, request: Request, runtime: Runti
   return await app.fetch(request, delegatedRuntime);
 }
 
+// `credential` returns at most one authorized row. Charge the originating principal
+// (the grant for agent tokens), but touch only the credential actually presented.
+export async function chargeCredential<T extends Record<string, unknown>>(c: Ctx, table: typeof agentTokens | typeof apiKeys | typeof mailboxKeys, credential: SQL) {
+  const result = await c.env.db.execute<T & { used: number; max_requests: number }>(sql`
+    WITH credential AS (${credential}), budget AS (
+      INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+      SELECT workspace_id, key_id, date_trunc('minute', now()), 1 FROM credential
+      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
+        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, (SELECT max_requests + 1 FROM credential)) ELSE 1 END,
+        window_start = excluded.window_start RETURNING used
+    ), touched AS (
+      UPDATE ${table} k SET last_used_at = ${new Date().toISOString()}::timestamptz FROM credential, budget WHERE k.id = credential.id
+        AND (k.last_used_at IS NULL OR k.last_used_at < now() - interval '1 minute')
+        ${table === mailboxKeys ? sql`AND budget.used <= credential.max_requests` : sql``}
+    ) SELECT credential.*, budget.used FROM credential, budget`);
+  const row = result.rows[0];
+  if (row) checkBudget(c, row.used, row.max_requests);
+  return row;
+}
+function checkBudget(c: Ctx, used: number, maxRequests: number) {
+  if (used <= maxRequests) return;
+  c.header('Retry-After', '60');
+  throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
+}
+
 export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
   const delegated = (c.env as DelegatedRuntime)[delegatedActor];
   const authorization = c.req.header('authorization');
   if (delegated) {
     c.set('actor', delegated);
+    const maxRequests = delegated.environment === 'test' ? Math.floor(c.env.config.apiRateLimitPerMinute / 2) : c.env.config.apiRateLimitPerMinute;
+    const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
+      VALUES (${delegated.workspaceId}, ${delegated.keyId}, date_trunc('minute', now()), 1)
+      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
+        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
+        window_start = excluded.window_start RETURNING used`));
+    checkBudget(c, budget.rows[0]!.used, maxRequests);
   } else if (authorization !== undefined) {
     const token = authorization.match(/^Bearer (.+)$/i)?.[1];
     if (!token || token.length > 16 * 1024) throw new ApiError(401, 'AUTH_INVALID', 'The API token is invalid or has been revoked.');
     if (token.startsWith('os_agent_')) {
       const temporary = await verifyAgentToken(c.env.config, token);
-      const [tracked] = temporary ? await c.env.db.select().from(agentTokens).where(eq(agentTokens.id, temporary.id)).limit(1) : [];
-      const grant = tracked && !tracked.revokedAt ? await getMcpGrantActor(c.env, tracked.grantId) : null;
-      if (!temporary || !tracked || tracked.revokedAt || Date.parse(tracked.expiresAt) !== temporary.exp || tracked.grantId !== temporary.grant || tracked.environment !== temporary.environment || JSON.stringify(tracked.permissions) !== JSON.stringify(temporary.permissions) || JSON.stringify(tracked.domains) !== JSON.stringify(temporary.domains) || !grant || grant.workspaceId !== tracked.workspaceId || (temporary.environment === 'live' && grant.environment !== 'live') || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
-      c.set('actor', { ...grant, workspaceId: tracked.workspaceId, environment: temporary.environment, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
-      await c.env.db.update(agentTokens).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(agentTokens.id, tracked.id), or(isNull(agentTokens.lastUsedAt), sql`${agentTokens.lastUsedAt} < now() - interval '1 minute'`)));
+      const grant = temporary && await getMcpGrantActor(c.env, temporary.grant);
+      const invalid = () => new ApiError(401, 'AUTH_INVALID', 'The temporary API token is invalid, expired, or its originating approval was revoked.');
+      if (!temporary || !grant || (temporary.environment === 'live' && grant.environment !== 'live') || temporary.permissions.some(permission => !grant.permissions.includes('manage') && !grant.permissions.includes(permission))) throw invalid();
+      const limit = temporary.environment === 'test' ? Math.floor(c.env.config.apiRateLimitPerMinute / 2) : c.env.config.apiRateLimitPerMinute;
+      const tracked = await timed(c, 'budget-db', () => chargeCredential(c, agentTokens, sql`
+        SELECT id, workspace_id, grant_id AS key_id, ${limit}::int AS max_requests FROM agent_tokens
+        WHERE id = ${temporary.id} AND revoked_at IS NULL AND workspace_id = ${grant.workspaceId} AND grant_id = ${temporary.grant}
+          AND environment = ${temporary.environment} AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
+          AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
+      if (!tracked) throw invalid();
+      c.set('actor', { ...grant, environment: temporary.environment, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
     } else {
       if (!/^os_(?:test|live)_[0-9a-f]{64}$/i.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       const hash = await digest(token);
-      const [key] = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.hash, hash), isNull(apiKeys.revokedAt))).limit(1);
+      const limit = c.env.config.apiRateLimitPerMinute;
+      const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'environment' | 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys, sql`
+        SELECT id, workspace_id, id AS key_id, environment, permissions, domains,
+          CASE WHEN environment = 'test' THEN ${Math.floor(limit / 2)}::int ELSE ${limit}::int END AS max_requests
+        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
       // API-key credentials always define the environment, regardless of cookies or headers.
-      c.set('actor', { keyId: key.id, workspaceId: key.workspaceId, environment: key.environment, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
-      await c.env.db.update(apiKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, key.id), or(isNull(apiKeys.lastUsedAt), sql`${apiKeys.lastUsedAt} < now() - interval '1 minute'`)));
+      c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, environment: key.environment, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
     const dashboard = await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work), headers => {
@@ -49,19 +91,6 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
     if (!dashboard) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with an approved Google account or supply a bearer API key.');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) requireDashboardOrigin(c.env, c.req.raw.headers);
     c.set('actor', dashboard);
-  }
-  const identity = c.get('actor');
-  if (!identity.keyId.startsWith('user_')) {
-    const maxRequests = identity.environment === 'test' ? Math.floor(c.env.config.apiRateLimitPerMinute / 2) : c.env.config.apiRateLimitPerMinute;
-    const budget = await timed(c, 'budget-db', () => c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
-      VALUES (${identity.workspaceId}, ${identity.keyId}, date_trunc('minute', now()), 1)
-      ON CONFLICT (workspace_id, key_id) DO UPDATE SET
-        used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${maxRequests + 1}) ELSE 1 END,
-        window_start = excluded.window_start RETURNING used`));
-    if (budget.rows[0]!.used > maxRequests) {
-      c.header('Retry-After', '60');
-      throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${maxRequests}-request minute budget. Retry after the window resets.`, undefined, true);
-    }
   }
   await next();
 };

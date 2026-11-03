@@ -24,6 +24,7 @@ export class DispatcherShard extends DurableObject<Env> {
   private pool?: Pool;
   private running = false;
   private gate?: GateState;
+  private identity?: Identity;
   private placementLogged = false;
 
   // Once per object lifetime: where this shard runs and what one database round trip costs from there.
@@ -52,14 +53,17 @@ export class DispatcherShard extends DurableObject<Env> {
       shard: { index: Number(url.searchParams.get('shard') ?? 0), count: Math.max(1, Number(url.searchParams.get('count') ?? 1)) },
     };
     if (!identity.region) return new Response('region required', { status: 400 });
-    await this.ctx.storage.put('identity', identity);
+    if (!this.identity || dispatcherName(this.identity) !== dispatcherName(identity)) {
+      await this.ctx.storage.put('identity', identity);
+      this.identity = identity;
+    }
     // An alarm during a run is harmless: it re-checks for work after the current run returns.
     if (!this.running && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now());
     return Response.json({ ok: true, running: this.running });
   }
 
   async alarm(): Promise<void> {
-    const identity = await this.ctx.storage.get<Identity>('identity');
+    const identity = this.identity ??= await this.ctx.storage.get<Identity>('identity');
     if (!identity) return;
     if (this.running) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
     this.running = true;

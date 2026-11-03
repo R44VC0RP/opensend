@@ -12,6 +12,7 @@ import { registerTemplates } from './templates.js';
 import { registerSending } from './sending.js';
 import { registerOperations } from './operations.js';
 import { registerSesRegions, resolveRegionRuntime } from './ses-regions.js';
+import { withRegionSettings } from './ses-region-state.js';
 import { registerMcp } from './mcp.js';
 import { registerMailbox } from './mailbox.js';
 import { registerMcpAuth } from './mcp-auth.js';
@@ -39,31 +40,41 @@ export function createApp() {
     log(c.res.status >= 500 ? 'error' : 'info', { requestId, operation: c.req.routePath ?? 'unmatched', method: c.req.method, status: c.res.status, durationMs: Date.now() - start, timings: Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) });
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
-    if ((enqueued > 0 || wakeJobs) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.env.wake) {
-      try { await c.env.wake(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
-    }
+    const wake = (enqueued > 0 || wakeJobs) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) ? c.env.wake : undefined;
     const targets = c.get('actor')?.dispatchTargets;
-    if (targets?.size && c.res.status < 300 && c.env.dispatch) {
-      for (const target of targets) {
+    const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
+    if (!wake && !dispatch) return;
+    const nudge = async () => {
+      if (wake) try { await wake(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+      if (dispatch && targets) for (const target of targets) {
         const [environment, region] = target.split(':') as [Mode, string];
-        try { await c.env.dispatch(environment, region); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+        try { await dispatch(environment, region); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
-    }
+    };
+    if (c.env.deferNudge) c.env.deferNudge(nudge()); else await nudge();
   });
   app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
-    const configured = async () => {
-      const globalCampaignRead = c.req.method === 'GET' && /^\/v1\/campaigns(?:\/[^/]+(?:\/(?:state|preview))?)?$/.test(c.req.path) && !new URL(c.req.url).searchParams.has('region');
-      // SES callbacks use a 30 s per-isolate cache; the SNS route re-resolves fresh before rejecting an unknown topic.
-      if ((!globalCampaignRead && /^\/v1\/(?:emails|campaigns|domains|templates|metrics|regions|webhooks|events\/ses)(?:\/|$)/.test(c.req.path)) || c.req.path === '/v1/settings/ses') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, c.req.path === '/v1/events/ses' ? { cacheMs: 30_000 } : { workspaceId: c.get('actor').workspaceId }));
-      await next();
-    };
-    if (c.req.path === '/v1/events/ses') return configured();
-    // Reject invalid credentials before accessing regional settings. Never mutate a shared Node runtime.
-    return authenticate(c, configured);
+    if (c.req.path === '/v1/events/ses') {
+      // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
+      if (c.req.method === 'POST') c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));
+      return next();
+    }
+    return authenticate(c, next);
   });
+  const regions = async (c: Ctx, next: () => Promise<void>) => {
+    c.env = await timed(c, 'region-db', () => withRegionSettings(c.env, c.get('actor').workspaceId));
+    await next();
+  };
+  // Discovery, provisioning and the catalog load persisted settings themselves.
+  app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/metrics'], (c, next) => c.req.query('region') ? regions(c, next) : next());
+  app.on('GET', ['/v1/settings/ses', '/v1/domains', '/v1/domains/:id'], regions);
+  app.on('POST', ['/v1/domains', '/v1/domains/:id/mail-from', '/v1/domains/:id/verify', '/v1/emails/send', '/v1/emails/batch',
+    '/v1/campaigns', ...['test', 'reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
+  app.on('PATCH', ['/v1/campaigns/:id', '/v1/campaigns/:id/archive'], regions);
+  app.on('DELETE', '/v1/campaigns/:id', regions);
   app.onError((error, c) => {
     const requestId = c.get('requestId');
     const known = error instanceof ApiError;

@@ -39,6 +39,12 @@ export async function assertRegionEnabled(db: DbExecutor, workspaceId: string, r
   if (!settings.enabledRegions.includes(selected)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
   return selected;
 }
+const orderedRegions = (settings: typeof sesSettings.$inferSelect) => [settings.defaultRegion, ...settings.enabledRegions.filter(region => region !== settings.defaultRegion)];
+// API routes validating a region don't need either set of SNS topic bindings.
+export async function withRegionSettings(runtime: Runtime, workspaceId: string): Promise<Runtime> {
+  const settings = await getRegionSettings(runtime.db, workspaceId);
+  return { ...runtime, config: { ...runtime.config, regions: orderedRegions(settings) } };
+}
 export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false, workspaceId = runtime.config.workspaceId) {
   const [row] = await db.select().from(sesRegions).where(regionWhere(workspaceId, region)).limit(1);
   if (!row?.report?.provisioned || row.report.account?.sendingEnabled !== true || row.credentialsFingerprint !== await credentialFingerprint(runtime.config) || row.publicUrl !== discoveryTarget(runtime.config) || row.trustedAccountId !== row.report.account?.id || row.trustedTopicArn !== row.report.resources.topic.arn || row.report.resources[stream].sendingEnabled !== true) {
@@ -74,7 +80,7 @@ export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?
   const inboundName = resources.topicName.replace(/-feedback$/, '-inbound');
   const inboundTopics = accounts.size === 1 ? inbound.filter(row => row.account === valid[0]!.account && row.arn === `arn:aws:sns:${row.region}:${row.account}:${inboundName}`).map(row => row.arn!) : [];
   return { ...runtime, config: { ...runtime.config,
-    regions: [settings.defaultRegion, ...settings.enabledRegions.filter(region => region !== settings.defaultRegion)],
+    regions: orderedRegions(settings),
     configurationSets: { transactional: resources.transactional, marketing: resources.marketing },
     // A disabled sending region retains its authenticated feedback channel for historical mail.
     snsTopicArns: accounts.size === 1 ? [...valid.map(row => row.arn!), ...inboundTopics] : [],
@@ -84,20 +90,22 @@ export async function resolveRegionRuntime(runtime: Runtime, options: { cacheMs?
 }
 export async function regionCatalog(runtime: Runtime, workspaceId: string) {
   const fingerprint = await credentialFingerprint(runtime.config);
-  const [settings, rows, active] = await Promise.all([
-    getRegionSettings(runtime.db, workspaceId),
-    runtime.db.select({ region: sesRegions.region, status: sql<string | null>`${sesRegions.report}->>'status'`,
-      lastDiscoveredAt: sesRegions.lastDiscoveredAt, fingerprint: sesRegions.credentialsFingerprint, publicUrl: sesRegions.publicUrl,
-      provisionJobId: sesRegions.provisionJobId, provisionStatus: jobs.status, provisionError: jobs.lastError,
-    }).from(sesRegions).leftJoin(jobs, and(eq(jobs.id, sesRegions.provisionJobId), eq(jobs.workspaceId, sesRegions.workspaceId)))
-      .where(eq(sesRegions.workspaceId, workspaceId)),
-    runtime.db.select({ payload: jobs.payload }).from(jobs).where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, 'ses.discover'), inArray(jobs.status, ['pending', 'running']))),
-  ]);
-  const regions = [...new Set([...settings.enabledRegions, ...rows.map(row => row.region)])].sort();
+  const target = discoveryTarget(runtime.config);
+  const rows = await runtime.db.select({ defaultRegion: sesSettings.defaultRegion, enabledRegions: sesSettings.enabledRegions,
+    region: sesRegions.region, status: sql<string | null>`${sesRegions.report}->>'status'`,
+    lastDiscoveredAt: sesRegions.lastDiscoveredAt, fingerprint: sesRegions.credentialsFingerprint, publicUrl: sesRegions.publicUrl,
+    provisionJobId: sesRegions.provisionJobId, provisionStatus: jobs.status, provisionError: jobs.lastError,
+    active: sql<string[]>`ARRAY(SELECT payload->>'region' FROM jobs WHERE workspace_id = ${workspaceId} AND type = 'ses.discover'
+      AND status IN ('pending', 'running') AND payload->>'credentialsFingerprint' = ${fingerprint} AND payload->>'publicUrl' = ${target})`,
+  }).from(sesSettings).leftJoin(sesRegions, eq(sesRegions.workspaceId, sesSettings.workspaceId))
+    .leftJoin(jobs, and(eq(jobs.id, sesRegions.provisionJobId), eq(jobs.workspaceId, sesRegions.workspaceId))).where(settingWhere(workspaceId));
+  const settings = rows[0];
+  if (!settings) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
+  const regions = [...new Set([...settings.enabledRegions, ...rows.flatMap(row => row.region ? [row.region] : [])])].sort();
   return { defaultRegion: settings.defaultRegion, data: regions.map(region => {
     const row = rows.find(value => value.region === region);
-    const stale = row?.lastDiscoveredAt && (row.fingerprint !== fingerprint || row.publicUrl !== discoveryTarget(runtime.config) || Date.now() - Date.parse(row.lastDiscoveredAt) >= DISCOVERY_TTL);
-    const discovering = active.some(job => job.payload.region === region && job.payload.credentialsFingerprint === fingerprint && job.payload.publicUrl === discoveryTarget(runtime.config));
+    const stale = row?.lastDiscoveredAt && (row.fingerprint !== fingerprint || row.publicUrl !== target || Date.now() - Date.parse(row.lastDiscoveredAt) >= DISCOVERY_TTL);
+    const discovering = settings.active.includes(region);
     const discoveryStatus = discovering ? 'discovering' : !row?.lastDiscoveredAt ? 'not_discovered' : stale ? 'stale' : row.status ?? 'not_discovered';
     return { region, enabled: settings.enabledRegions.includes(region), isDefault: region === settings.defaultRegion,
       discoveryStatus, lastDiscoveredAt: row?.lastDiscoveredAt ?? null, provisionJobId: row?.provisionJobId ?? null,

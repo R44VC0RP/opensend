@@ -38,13 +38,14 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fal
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, ctx?: ExecutionContext): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
   const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: workerConcurrency(env) });
+  const nudges: Promise<void>[] = [];
   try {
     const db = drizzle(client);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, wake: async (readyJobs = 1) => {
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1) => {
       // A bounded burst advertises newly committed work to Queues autoscaling.
       // These are hints, not email jobs; Postgres still owns every claim.
       const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / workerConcurrency(env))));
@@ -76,10 +77,14 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
     }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
-  } finally { await client.end(); }
+  } finally {
+    // A post-commit queue reservation still needs this request's Hyperdrive pool.
+    if (ctx && nudges.length) ctx.waitUntil(Promise.allSettled(nudges).then(() => client.end()));
+    else await client.end();
+  }
 }
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
       if (request.method === 'GET' || request.method === 'HEAD') { url.protocol = 'https:'; return secureResponse(Response.redirect(url.toString(), 301)); }
@@ -102,7 +107,7 @@ export default {
         const result = await app.fetch(new Request(request, { headers }), runtime);
         const failureBucket = publicFailureBucket(new URL(request.url).pathname, result.status);
         return failureBucket && !await publicFailureAllowed(runtime, failureBucket, peer) ? publicFailureDenied() : result;
-      });
+      }, ctx);
       const runtimeMs = performance.now() - runtimeStarted;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');

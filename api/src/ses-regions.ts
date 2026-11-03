@@ -8,7 +8,7 @@ import { isApprovedUser } from './google-auth.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
 import { assertProvisionable, AutoValidationModeSchema, discoverSes, provisionSes, SesDiscoverySchema, setAutoValidation, type SesDiscovery } from './ses-setup.js';
-import { assertRegionEnabled, configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
+import { configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
 export { ensureRegionSettings, resolveRegionRuntime } from './ses-region-state.js';
 
 const Params = z.object({ region: z.string().max(32).regex(regionPattern) }).openapi('SesRegionParams');
@@ -64,9 +64,11 @@ export function registerSesRegions(app: App) {
     description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
     request: { params: Params, body: json(z.object({ confirm: z.literal(true) }).strict().openapi('ProvisionRegion')) }, responses: { 202: response(Receipt), ...errors },
   }), async c => {
-    const value = access(c, true); assertProvisionable(c.env); const { region } = c.req.valid('param');
+    const value = access(c, true); const { region } = c.req.valid('param');
     const receipt = await c.env.db.transaction(async tx => {
-      await assertRegionEnabled(tx, value.workspaceId, region);
+      const settings = await getRegionSettings(tx, value.workspaceId, 'share');
+      assertProvisionable(c.env);
+      if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
       await tx.insert(sesRegions).values({ workspaceId: value.workspaceId, region }).onConflictDoNothing();
       const [row] = await tx.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).for('update');
       if (row!.provisionJobId) {

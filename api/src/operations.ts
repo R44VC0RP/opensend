@@ -5,13 +5,13 @@ import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand,
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
-import { enqueue, MAX_ATTEMPTS, workspaceRuntimes } from './jobs.js';
+import { enqueue, MAX_ATTEMPTS } from './jobs.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { resolveRegionRuntime } from './ses-region-state.js';
+import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
@@ -227,13 +227,15 @@ export function registerOperations(app: App) {
     return c.json({ data: rows.slice(0, q.limit).map(metadata), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), body = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url); body.regions?.forEach(r => region(c.env, r));
+    const a = workspaceActor(c, 'manage'), body = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url);
+    if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, environment: a.environment, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, webhookId)) }).returning();
     return c.json(metadata(row!), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => c.json(metadata(await getWebhook(c.env, workspaceActor(c), c.req.valid('param').id)), 200));
   app.openapi(createRoute({ method: 'patch', path: '/v1/webhooks/{id}', operationId: 'updateWebhook', tags: ['Webhooks'], security, request: { params: IdParams, body: json(webhookPatch) }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), body = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url); body.regions?.forEach(r => region(c.env, r));
+    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), body = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url);
+    if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const row = await c.env.db.transaction(async tx => {
       const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
       const [updated] = await tx.update(webhooks).set({ ...body, updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
@@ -331,23 +333,6 @@ function verifySesAccount(runtime: Runtime, message: unknown) {
   // SNS topics can receive cross-account SES events; only an explicit SES account binding is authoritative.
   if (runtime.config.awsAccountId && accountId !== runtime.config.awsAccountId) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this deployment.');
 }
-// Topic verification identifies the provider, not the tenant. Resolve all owners in one lookup. A tag can
-// identify an in-flight attempt before its provider response commits, but must not contradict a stored ID.
-async function feedbackOwners(runtime: Runtime, items: FeedbackItem[]) {
-  const keys = items.map((item, index) => ({ index, environment: item?.environment, region: item?.region,
-    provider_id: (item?.message?.mail as { messageId?: string } | undefined)?.messageId, tagged_id: taggedEmailId(item?.message) }));
-  const result = await runtime.db.execute<{ index: number; workspace_id: string }>(sql`
-    SELECT x.index, min(e.workspace_id) AS workspace_id FROM jsonb_to_recordset(${JSON.stringify(keys)}::jsonb)
-      AS x(index int, environment text, region text, provider_id text, tagged_id text)
-    JOIN sending_emails e ON e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
-      AND (x.tagged_id IS NULL OR e.id = x.tagged_id)
-      AND (e.provider_id = x.provider_id OR (e.id = x.tagged_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown')))
-    GROUP BY x.index HAVING count(*) = 1`);
-  return new Map(result.rows.map(row => [row.index, row.workspace_id]));
-}
-function unmatchedFeedback(item: FeedbackItem) {
-  log('warn', { code: 'SES_FEEDBACK_UNMATCHED', environment: item.environment, region: item.region, messageId: item.messageId });
-}
 function registerPublicEvents(app: App) {
   app.use('/v1/events/ses', async (c, next) => {
     // SNS sends JSON envelopes as text/plain. Normalize only the media type before
@@ -391,15 +376,10 @@ function registerPublicEvents(app: App) {
       await c.env.feedback.enqueue([item]);
       return c.json({ accepted: true }, 202);
     }
-    const workspaceId = (await feedbackOwners(c.env, [item])).get(0);
-    if (!workspaceId) { unmatchedFeedback(item); return c.json({ accepted: true }, 202); }
-    const identity = { workspaceId, environment: item.environment };
-    const routine = await ingestRoutineFeedback(c.env, payload, identity);
-    const runnable = routine ?? await c.env.db.transaction(async tx => {
-      const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, ...identity }).onConflictDoNothing().returning(); if (!inserted.length) return 0;
-      await enqueue(tx, { type: 'operation.ses', ...identity, payload });
-      return 1;
-    });
+    const { error, runnable } = await ingestRoutineSesEvent(c.env, routineInput(item, true));
+    if (error === 'SES_ACCOUNT_MISMATCH') throw new ApiError(403, error, 'The SES sending account is missing or does not match this deployment.');
+    // SNS retries 5xx, not 4xx. Without a verified owner we cannot store a tenant-scoped recovery job yet.
+    if (error) throw new ApiError(503, error, 'The feedback owner is not yet available; retry this notification.', undefined, true);
     if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
     return c.json({ accepted: true }, 202);
   });
@@ -545,33 +525,18 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
-async function ingestRoutineFeedback(runtime: Runtime, payload: Record<string, unknown>, identity: { workspaceId: string; environment: Mode }): Promise<number | null> {
-  const data = payload.message as Record<string, any> | undefined;
-  const kind = data?.eventType ?? data?.notificationType;
-  const providerId = data?.mail?.messageId;
-  if ((kind !== 'Send' && kind !== 'Delivery') || typeof providerId !== 'string') return null;
-  const timestamp = data?.[kind.toLowerCase()]?.timestamp;
-  const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
-  const result = await ingestRoutineSesEvent(runtime, {
-    ...identity, type: kind === 'Send' ? 'send' : 'delivery', providerId, taggedEmailId: taggedEmailId(data), createdAt,
-    externalId: `${payload.topicArn}:${payload.messageId}`, data: { providerId },
-    ingress: { topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), payload,
-      recoveryType: identity.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' },
-  });
-  log('info', { code: 'SES_FEEDBACK_INGESTED', ...identity, kind, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
-  return result.runnable;
-}
-
-function routineInput(item: FeedbackItem, workspaceId: string): RoutineIngress | null {
+function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress {
   const data = item.message as Record<string, any>;
   const kind = data?.eventType ?? data?.notificationType;
   const providerId = data?.mail?.messageId;
-  if ((kind !== 'Send' && kind !== 'Delivery') || typeof providerId !== 'string') return null;
-  const timestamp = data?.[kind.toLowerCase()]?.timestamp;
+  const type = kind === 'Send' ? 'send' : kind === 'Delivery' ? 'delivery' : 'receipt';
+  if (type === 'receipt' && item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
+  if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
+  const timestamp = type !== 'receipt' ? data[type]?.timestamp : undefined;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  return { workspaceId, environment: item.environment, type: kind === 'Send' ? 'send' : 'delivery', providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
-    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: item.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' } };
+  return { environment: item.environment, type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
+    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther ? undefined : item.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' } };
 }
 /**
  * Batch feedback ingestion for the feedback queue consumer. Routine Send/Delivery callbacks are
@@ -581,31 +546,26 @@ function routineInput(item: FeedbackItem, workspaceId: string): RoutineIngress |
  * signature check at ingress; test items must carry the simulator's synthetic identity.
  */
 export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[]): Promise<{ ok: boolean; error?: string }[]> {
-  const owners = await feedbackOwners(runtime, items);
-  const regionalRuntime = workspaceRuntimes(runtime);
   const outcomes: { ok: boolean; error?: string }[] = items.map(() => ({ ok: false }));
-  const routine = new Map<Mode, { index: number; input: RoutineIngress }[]>();
+  const groups = new Map<Mode | 'receipt', { index: number; input: RoutineIngress }[]>();
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
     try {
       if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
       else verifySesAccount(runtime, item.message);
-      const workspaceId = owners.get(index);
-      if (!workspaceId) { unmatchedFeedback(item); outcomes[index] = { ok: true }; continue; }
-      if (item.environment === 'live') verifySesAccount(await regionalRuntime(workspaceId), item.message);
-      const input = routineInput(item, workspaceId);
-      if (input) { const group = routine.get(item.environment) ?? []; group.push({ index, input }); routine.set(item.environment, group); }
-      else if (item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
-      else other.push({ index, item, workspaceId });
+      const input = routineInput(item), key = input.type === 'receipt' ? 'receipt' : item.environment;
+      const group = groups.get(key) ?? []; group.push({ index, input }); groups.set(key, group);
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
   }
-  for (const [environment, group] of routine) {
+  for (const group of groups.values()) {
     try {
       const results = await ingestRoutineSesEvents(runtime, group.map(entry => entry.input));
       for (const [position, entry] of group.entries()) {
         const result = results[position]!;
+        if (result.error || !result.workspaceId) { outcomes[entry.index] = { ok: false, error: result.error ?? 'SES_EMAIL_NOT_FOUND' }; continue; }
+        if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
         outcomes[entry.index] = { ok: true };
-        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: entry.input.workspaceId, environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, environment: entry.input.environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
       }
       // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
       if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
@@ -614,8 +574,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
     }
   }
   if (other.length) {
-    // Non-routine callbacks need a receipt row first; processing is idempotent per receipt.
-    await runtime.db.insert(snsReceipts).values(other.map(({ item, workspaceId }) => ({ topicArn: item.topicArn, messageId: item.messageId, workspaceId, environment: item.environment }))).onConflictDoNothing();
+    // Non-routine receipts were persisted with their verified owner in the batch statement.
     await Promise.all(other.map(async ({ index, item, workspaceId }) => {
       try {
         await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
@@ -706,8 +665,8 @@ function assertSimulatedFeedback(payload: Record<string, unknown>, job: { enviro
 }
 const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
   assertSimulatedFeedback(payload, job);
-  const routine = await ingestRoutineFeedback(runtime, payload, job);
-  if (routine === null) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
+  const input = routineInput({ environment: job.environment, topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), message: payload.message as Record<string, unknown> });
+  await ingestRoutineSesEvent(runtime, { ...input, workspaceId: job.workspaceId });
 };
 const simulatedFeedbackRecovery: JobHandler = async (runtime, payload, job) => {
   assertSimulatedFeedback(payload, job);

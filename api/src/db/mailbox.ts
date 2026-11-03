@@ -74,7 +74,7 @@ export const mailMessages = pgTable('mail_messages', {
   spam: boolean('spam').notNull().default(false), automated: boolean('automated').notNull().default(false), status: text('status').notNull().default('received'),
   senderMailboxId: text('sender_mailbox_id'), errorCode: text('error_code'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
-});
+}, t => [index('mail_messages_tenant_page').on(t.workspaceId, t.environment, t.direction, t.receivedAt.desc(), t.id.desc())]);
 
 export const mailMessageIds = pgTable('mail_message_ids', {
   ...scope(), messageId: text('message_id').notNull(), mailMessageId: text('mail_message_id').notNull(), threadId: text('thread_id').notNull(),
@@ -82,13 +82,14 @@ export const mailMessageIds = pgTable('mail_message_ids', {
 
 export const mailUnrouted = pgTable('mail_unrouted', {
   ...scope(), messageId: text('message_id').notNull(), address: text('address').notNull(), createdAt: ts('created_at').notNull().defaultNow(),
-}, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.address, t.messageId] })]);
+}, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.address, t.messageId] }), index('mail_unrouted_message').on(t.messageId)]);
 
 export const mailboxMessages = pgTable('mailbox_messages', {
   mailboxId: text('mailbox_id').notNull(), messageId: text('message_id').notNull(), ...scope(), threadId: text('thread_id').notNull(),
   direction: text('direction').$type<'inbound' | 'outbound'>().notNull(), read: boolean('read').notNull().default(false), receivedAt: ts('received_at').notNull(),
   labels: text('labels').array().notNull().default([]),
-}, t => [primaryKey({ columns: [t.mailboxId, t.messageId] })]);
+}, t => [primaryKey({ columns: [t.mailboxId, t.messageId] }), index('mailbox_messages_message_mailbox').on(t.messageId, t.mailboxId),
+  index('mailbox_messages_tenant_thread_page').on(t.workspaceId, t.environment, t.threadId, t.receivedAt.desc(), t.messageId.desc())]);
 
 export const mailboxThreads = pgTable('mailbox_threads', {
   mailboxId: text('mailbox_id').notNull(), threadId: text('thread_id').notNull(), ...scope(),

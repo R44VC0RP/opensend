@@ -4,7 +4,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
 import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { authenticate } from './auth.js';
+import { authenticate, chargeCredential } from './auth.js';
 import { domains } from './db/operations.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
@@ -14,7 +14,7 @@ import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToP
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
-import { resolveRegionRuntime } from './ses-region-state.js';
+import { withRegionSettings } from './ses-region-state.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses, wakeMailboxSend } from './inbound-threads.js';
 
 const BASE = '/mailbox/v1';
@@ -43,15 +43,11 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   const token = c.req.header('authorization')?.match(/^Bearer (.+)$/i)?.[1];
   if (token?.startsWith('os_mbx_')) {
     if (!/^os_mbx_[0-9a-f]{64}$/.test(token)) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
-    const [key] = await c.env.db.select().from(mailboxKeys).where(and(eq(mailboxKeys.hash, await digest(token)), isNull(mailboxKeys.revokedAt))).limit(1);
+    const key = await chargeCredential<{ id: string; workspace_id: string; mailbox_ids: string[] | null; permissions: MailboxPermission[] }>(c, mailboxKeys, sql`
+      SELECT id, workspace_id, id AS key_id, mailbox_ids, permissions, ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
+      FROM mailbox_keys WHERE hash = ${await digest(token)} AND revoked_at IS NULL`);
     if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The mailbox key is invalid or has been revoked.');
-    const limit = c.env.config.apiRateLimitPerMinute;
-    const budget = await c.env.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used) VALUES (${key.workspaceId}, ${key.id}, date_trunc('minute', now()), 1)
-      ON CONFLICT (workspace_id, key_id) DO UPDATE SET used = CASE WHEN api_request_budgets.window_start = excluded.window_start THEN least(api_request_budgets.used + 1, ${limit + 1}) ELSE 1 END, window_start = excluded.window_start RETURNING used`);
-    if (budget.rows[0]!.used > limit) { c.header('Retry-After', '60'); throw new ApiError(429, 'REQUEST_RATE_LIMITED', `This key exceeded its ${limit}-request minute budget. Retry after the window resets.`, undefined, true); }
-    await c.env.db.update(mailboxKeys).set({ lastUsedAt: new Date().toISOString() }).where(and(eq(mailboxKeys.id, key.id), or(isNull(mailboxKeys.lastUsedAt), sql`${mailboxKeys.lastUsedAt} < now() - interval '1 minute'`)));
-    c.set('mailboxAccess', { keyId: key.id, workspaceId: key.workspaceId, environment: LIVE, admin: false, mailboxIds: key.mailboxIds, permissions: key.permissions });
-    c.env = await resolveRegionRuntime(c.env, { workspaceId: key.workspaceId });
+    c.set('mailboxAccess', { keyId: key.id, workspaceId: key.workspace_id, environment: LIVE, admin: false, mailboxIds: key.mailbox_ids, permissions: key.permissions });
     return next();
   }
   return authenticate(c, async () => {
@@ -60,7 +56,6 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
     if (!actor.permissions.includes('manage')) throw new ApiError(403, 'ADMIN_REQUIRED', 'Inbound requires an address-scoped key or an unrestricted live manage credential.');
     c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: true, mailboxIds: null, permissions: ['read', 'send', 'modify'] });
-    c.env = await resolveRegionRuntime(c.env, { workspaceId: actor.workspaceId });
     await next();
   });
 }
@@ -316,6 +311,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
   // ---------- domains ----------
   app.openapi(createRoute({ ...meta, method: 'get', path: base, operationId: inbound ? 'listInboundDomains' : 'mailboxListDomains', summary: 'List domains and their receiving status', responses: { 200: response(z.object({ data: z.array(domain) }).openapi(`${prefix}DomainList`)), ...errors } }), async c => {
     const value = admin(c);
+    c.env = await withRegionSettings(c.env, value.workspaceId);
     const rows = await c.env.db.select().from(domains).where(and(eq(domains.workspaceId, value.workspaceId), eq(domains.environment, LIVE), inArray(domains.region, c.env.config.regions))).orderBy(asc(domains.name));
     return c.json({ data: await domainViews(c, rows, inbound) }, 200);
   });
@@ -335,6 +331,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
     description: 'Checks that the domain is verified in SES and that its MX records will not take mail from another provider, then queues setup: an OpenSend S3 bucket, SNS topic and a catch-all SES receipt rule for the domain. Publish the returned MX record to start receiving. Use force=true to take over a domain whose mail another provider receives today.',
     request: { params: IdParam, body: json(z.object({ catchAll: catchAll.optional(), force: z.boolean().default(false) }).strict().openapi(`Enable${prefix}Domain`)) }, responses: { 202: response(domain), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id); const input = c.req.valid('json');
+    c.env = await withRegionSettings(c.env, value.workspaceId);
     if (!c.env.config.regions.includes(row.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable the domain’s SES region first.');
     const identity = await getSes(c.env, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch(() => { throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true); });
     if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
@@ -467,6 +464,7 @@ function registerAddressSet(app: App, legacy: boolean) {
       if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
       const [local, publicHost] = publicAddress.split('@') as [string, string];
       if (local !== input.address.split('@')[0] || !host.endsWith(`.${publicHost}`)) throw new ApiError(422, 'PUBLIC_ADDRESS_MISMATCH', 'Use the same local part on a parent domain of the receiving address.', 'publicAddress');
+      c.env = await withRegionSettings(c.env, value.workspaceId);
       const identity = await getSes(c.env, domain.region).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
         if (error instanceof Error && error.name === 'NotFoundException') throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `Verify the exact SES domain identity ${publicHost} in ${domain.region}.`, 'publicAddress');
         throw new ApiError(503, 'SES_UNAVAILABLE', `Could not read the SES identity for ${publicHost} in ${domain.region}. Check GetEmailIdentity access.`, 'publicAddress', true);
@@ -536,6 +534,12 @@ function registerAddressSet(app: App, legacy: boolean) {
 export function registerMailbox(app: App) {
   app.use(`${BASE}/*`, mailboxAuth);
   app.use('/v1/inbound/*', mailboxAuth);
+  // These routes call the same region-checked send admission as /v1/emails/send.
+  app.on('POST', ['/v1/inbound/threads', '/v1/inbound/threads/:threadId/reply', `${BASE}/mailboxes/:mailboxId/messages`,
+    `${BASE}/mailboxes/:mailboxId/messages/:messageId/reply`, `${BASE}/mailboxes/:mailboxId/messages/:messageId/forward`, `${BASE}/mailboxes/:mailboxId/threads/:threadId/reply`], async (c, next) => {
+    c.env = await withRegionSettings(c.env, access(c).workspaceId);
+    await next();
+  });
   registerReceivingDomains(app);
   registerAddressSet(app, false);
   registerAddressSet(app, true);

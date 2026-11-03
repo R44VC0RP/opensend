@@ -1095,16 +1095,18 @@ export const statusForEvent: Record<string, EmailStatus> = { send: 'sent', deliv
 export const publicEventType: Record<string, string> = { send: 'email.sent', delivery: 'email.delivered', bounce: 'email.bounced', validation_suppressed: 'email.bounced', complaint: 'email.complained', reject: 'email.rejected', rendering_failure: 'email.rendering_failed', delivery_delay: 'email.delivery_delayed', open: 'email.opened', click: 'email.clicked' };
 export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acceptance_unknown: 2, accepted: 3, sent: 4, delayed: 4, delivered: 5, bounced: 6, complained: 7, rejected: 6, rendering_failed: 6, suppressed: 6, canceled: 6, simulated: 6 };
 type EmailEventInput = { workspaceId: string; environment: Mode; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
-type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
+type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
   return (await persistEmailEvent(runtime, input)).event;
 }
 // Only authenticated ingress and the guarded test-only callback handler use this.
 export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngress) {
-  const [result] = await ingestRoutineSesEvents(runtime, [input]);
-  return result!;
+  const result = (await ingestRoutineSesEvents(runtime, [input]))[0]!;
+  if (!result.error && input.type !== 'receipt') log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, environment: input.environment,
+    kind: input.type === 'send' ? 'Send' : 'Delivery', outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+  return result;
 }
-export type RoutineIngress = EmailEventInput & { type: 'send' | 'delivery'; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt };
+export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; type: 'send' | 'delivery' | 'receipt'; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt };
 /** The opensend_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
 export function taggedEmailId(message: unknown): string | undefined {
   const tag = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags?.opensend_email_id;
@@ -1112,55 +1114,75 @@ export function taggedEmailId(message: unknown): string | undefined {
   return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
 }
 // One statement persists a whole batch of verified Send/Delivery callbacks: receipts, matched
-// events, monotonic status, public events and webhook deliveries. Callbacks that arrive before
-// provider acceptance is recorded keep their receipt and one deferred recovery job instead.
-export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIngress[]): Promise<{ event: typeof emailEvents.$inferSelect | null; runnable: number }[]> {
+// events, monotonic status, public events and webhook deliveries. Other kinds only open their receipt.
+// Early callbacks with a known owner keep a recovery job; unresolved owners return an error for redelivery.
+export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIngress[]) {
   if (!inputs.length) return [];
   const rows = inputs.map((input, index) => ({
-    ordinal: index, workspace_id: input.workspaceId, environment: input.environment, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
+    ordinal: index, job_workspace: input.workspaceId, environment: input.environment, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
     external_id: input.externalId ?? null, data: input.data ?? {}, created_at: input.createdAt ?? now(),
     event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
-  const result = await runtime.db.execute<{ ordinal: number; event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH input AS (
-      SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(ordinal int, workspace_id text, environment text, topic_arn text, message_id text, region text, provider_id text,
+  const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH raw AS (
+      SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(ordinal int, job_workspace text, environment text, topic_arn text, message_id text, region text, provider_id text,
         type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
-    ), mail AS MATERIALIZED (
-      SELECT x.ordinal, e.id, e.status, e.region FROM input x JOIN sending_emails e
-         ON e.workspace_id = x.workspace_id AND e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
-          -- A lost provider response (timeout or interrupted attempt) never recorded the MessageId. The tag the dispatcher
-          -- stamped on the message proves SES accepted it; only such rows may be matched by tag.
-           AND (x.tagged_email_id IS NULL OR e.id = x.tagged_email_id)
-           AND (e.provider_id = x.provider_id OR (e.provider_id IS NULL AND e.status = 'acceptance_unknown' AND e.id = x.tagged_email_id))
+    ), candidates AS (
+      SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
+      WHERE x.tagged_email_id IS NULL AND e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
+        AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
+      UNION ALL
+      SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.id = x.tagged_email_id
+      WHERE e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
+        AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
+    ), locked AS MATERIALIZED (
+      SELECT x.ordinal, e.id, e.workspace_id, e.environment, e.status, e.provider_id FROM raw x
+      JOIN (SELECT ordinal, min(id) AS id FROM candidates GROUP BY ordinal HAVING count(*) = 1) c USING (ordinal)
+      JOIN sending_emails e ON e.id = c.id
+      WHERE e.provider_id = x.provider_id OR (e.id = x.tagged_email_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown'))
       ORDER BY e.id FOR UPDATE OF e
+    ), accounts AS (
+      -- Same single-account binding as resolveRegionRuntime: only the installation's own registered topics count.
+      SELECT s.workspace_id, CASE WHEN count(DISTINCT r.trusted_account_id) = 1 THEN min(r.trusted_account_id) END AS account
+      FROM (SELECT DISTINCT workspace_id FROM locked WHERE environment = 'live') l JOIN ses_installation_settings s USING (workspace_id)
+      LEFT JOIN ses_region_discovery r ON r.workspace_id = s.workspace_id AND r.trusted_account_id ~ '^[0-9]{12}$'
+        AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':opensend-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
+      GROUP BY s.workspace_id
+    ), input AS (
+      SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status,
+        CASE WHEN x.type <> 'receipt' AND (l.provider_id IS NOT NULL OR l.status = 'acceptance_unknown') THEN l.id END AS email_id,
+        CASE WHEN l.id IS NULL AND x.job_workspace IS NULL THEN 'SES_EMAIL_NOT_FOUND'
+             WHEN x.environment = 'live' AND a.workspace_id IS NULL THEN 'REGION_SETTINGS_NOT_INITIALIZED'
+             WHEN a.account IS NOT NULL AND to_jsonb(a.account) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}' THEN 'SES_ACCOUNT_MISMATCH' END AS error
+      FROM raw x LEFT JOIN locked l USING (ordinal) LEFT JOIN accounts a ON a.workspace_id = l.workspace_id AND x.environment = 'live'
     ), incoming AS (
       INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, environment, processed_at)
-       SELECT x.topic_arn, x.message_id, x.workspace_id, x.environment, CASE WHEN m.id IS NOT NULL THEN clock_timestamp() END
-       FROM input x LEFT JOIN mail m ON m.ordinal = x.ordinal ON CONFLICT DO NOTHING RETURNING topic_arn, message_id, workspace_id, environment
+       SELECT x.topic_arn, x.message_id, x.workspace_id, x.environment, CASE WHEN x.email_id IS NOT NULL THEN clock_timestamp() END
+       FROM input x WHERE x.error IS NULL ON CONFLICT DO NOTHING RETURNING topic_arn, message_id, workspace_id, environment
     ), recovery AS (
       INSERT INTO jobs(id, workspace_id, environment, type, payload, available_at)
-       SELECT x.recovery_job_id, x.workspace_id, x.environment, x.recovery_type, x.payload, clock_timestamp() + interval '15 seconds'
+       SELECT DISTINCT ON (topic_arn, message_id) x.recovery_job_id, x.workspace_id, x.environment, x.recovery_type, x.payload,
+         clock_timestamp() + CASE WHEN x.type = 'receipt' THEN interval '0 seconds' ELSE interval '15 seconds' END
        FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id, environment)
-      WHERE NOT EXISTS (SELECT 1 FROM mail m WHERE m.ordinal = x.ordinal) RETURNING id
+      WHERE x.error IS NULL AND x.email_id IS NULL AND x.recovery_type IS NOT NULL RETURNING id
     ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, provider_id, external_id, data, simulated, created_at)
-       SELECT x.event_id, x.workspace_id, x.environment, m.id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', m.id, 'providerId', x.provider_id), x.environment = 'test', x.created_at
-       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id, environment) JOIN mail m ON m.ordinal = x.ordinal
+       SELECT x.event_id, x.workspace_id, x.environment, x.email_id, x.type, x.provider_id, x.external_id,
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.environment = 'test', x.created_at
+       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id, environment) WHERE x.error IS NULL AND x.email_id IS NOT NULL
       ON CONFLICT DO NOTHING RETURNING *
     ), winner AS (
       -- Send and Delivery for one email can share a batch; only the highest-ranked new event moves status.
-       SELECT DISTINCT ON (m.id) m.id AS email_id, x.workspace_id, x.environment, m.status, x.next_status, x.next_rank, x.provider_id
-      FROM input x JOIN mail m ON m.ordinal = x.ordinal JOIN inserted ins ON ins.id = x.event_id
-      ORDER BY m.id, x.next_rank DESC
+       SELECT DISTINCT ON (x.email_id) x.email_id, x.workspace_id, x.environment, x.status, x.next_status, x.next_rank, x.provider_id
+      FROM input x JOIN inserted ins ON ins.id = x.event_id ORDER BY x.email_id, x.next_rank DESC
     ), updated AS (
       UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND e.environment = w.environment AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, environment, type, region, created_at, data)
-      SELECT ins.id, ins.workspace_id, ins.environment, x.public_type, m.region, ins.created_at,
-         x.data || jsonb_build_object('simulated', x.environment = 'test', 'providerId', x.provider_id, 'emailId', m.id)
-      FROM inserted ins JOIN input x ON x.event_id = ins.id JOIN mail m ON m.ordinal = x.ordinal WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
+      SELECT ins.id, ins.workspace_id, ins.environment, x.public_type, x.region, ins.created_at,
+         x.data || jsonb_build_object('simulated', x.environment = 'test', 'providerId', x.provider_id, 'emailId', x.email_id)
+      FROM inserted ins JOIN input x ON x.event_id = ins.id WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
     ), deliveries AS (
       INSERT INTO operation_deliveries(id, workspace_id, environment, webhook_id, event_id, payload)
       SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, p.environment, w.id, p.id,
@@ -1171,12 +1193,12 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), webhook_jobs AS (
       INSERT INTO jobs(id, workspace_id, environment, type, payload)
       SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
-    ) SELECT x.ordinal,
+    ) SELECT x.ordinal, x.workspace_id AS "workspaceId", x.error,
       (SELECT row_to_json(e) FROM (SELECT ins.id, ins.workspace_id AS "workspaceId", ins.environment, ins.email_id AS "emailId", ins.type,
         ins.provider_id AS "providerId", ins.external_id AS "externalId", ins.data, ins.simulated, ins.created_at::text AS "createdAt" FROM inserted ins WHERE ins.id = x.event_id) e) AS event,
       ((SELECT count(*) FROM webhook_jobs) + (SELECT count(*) FROM recovery r WHERE r.id = x.recovery_job_id))::int AS runnable
     FROM input x ORDER BY x.ordinal`);
-  return rows.map(row => { const found = result.rows.find(r => Number(r.ordinal) === row.ordinal); return { event: found?.event ?? null, runnable: Number(found?.runnable ?? 0) }; });
+  return result.rows;
 }
 async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
   const next = statusForEvent[input.type];

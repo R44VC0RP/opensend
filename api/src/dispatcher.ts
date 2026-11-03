@@ -127,15 +127,20 @@ function dailyRemaining(gate: GateState) {
 }
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
-async function leaseDue(runtime: Runtime, environment: Mode, region: string, limit: number): Promise<Leased[]> {
+type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind'] };
+async function leaseDue(runtime: Runtime, environment: Mode, region: string, limit: number, deferred: DeferredStream[]): Promise<Leased[]> {
   const eligible = sql`environment = ${environment} AND region = ${region} AND status = 'queued'
     AND (scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
   const priority = sql`ORDER BY (campaign_id IS NULL) DESC, created_at, id`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH owner AS MATERIALIZED (
-      SELECT workspace_id FROM sending_emails WHERE ${eligible} ${priority} LIMIT 1 FOR UPDATE SKIP LOCKED
+      SELECT workspace_id, snapshot->>'kind' AS stream FROM sending_emails e WHERE ${eligible}
+      ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
+        WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}
+      ${priority} LIMIT 1 FOR UPDATE SKIP LOCKED
     ), due AS (
       SELECT id FROM sending_emails
       WHERE workspace_id = (SELECT workspace_id FROM owner) AND ${eligible}
+      ${environment === 'live' ? sql`AND snapshot->>'kind' = (SELECT stream FROM owner)` : sql``}
       ${priority} LIMIT ${limit} FOR UPDATE SKIP LOCKED
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.id = due.id RETURNING e.*
@@ -433,7 +438,7 @@ async function recordSuppressed(runtime: Runtime, a: Actor, mails: Mail[]) {
     FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ id: m.id })))}::jsonb) AS x(id text) ON CONFLICT DO NOTHING`);
 }
 
-type Lane = { ownerRuntime: (workspaceId: string) => Promise<Runtime>; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { ownerRuntime: (workspaceId: string, stream: EmailSnapshot['kind']) => Promise<Runtime | null>; deferred: DeferredStream[]; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
@@ -448,14 +453,16 @@ async function releaseLeases(runtime: Runtime, a: Actor, mails: Mail[]) {
 // group's claim and sends; failures surface at the end of the batch.
 async function dispatchBatch(base: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
   const { gate, options, counters, phase } = lane;
-  const leased = await phase('lease', () => leaseDue(base, options.environment, options.region, options.batchSize));
+  const leased = await phase('lease', () => leaseDue(base, options.environment, options.region, options.batchSize, lane.deferred));
   if (!leased.length) return { processed: 0, blocked: false };
   // leaseDue selects exactly one owner before leasing the batch; the pacing gate remains regional.
   const { workspaceId, environment } = leased[0]!.mail;
   const a: Actor = { workspaceId, environment, keyId: 'worker', domains: [], permissions: ['manage'] };
-  const runtime = await lane.ownerRuntime(workspaceId);
-  const ses = providerClient(runtime, environment, options.region);
+  const runtime = await lane.ownerRuntime(workspaceId, leased[0]!.mail.snapshot.kind);
   counters.claimed += leased.length;
+  // Keep the queued rows' short lease as backoff. Other owners/streams stay eligible in this run.
+  if (!runtime) { counters.deferred += leased.length; return { processed: leased.length, blocked: false }; }
+  const ses = providerClient(runtime, environment, options.region);
   // Quota is loaded lazily so idle regions never touch the provider control plane.
   if (await phase('quota', () => ensureQuota(runtime, a, options.region, gate, ses, options.quotaRefreshMs))) await options.onGate?.(gate);
   if (dailyRemaining(gate) <= 0) {
@@ -517,21 +524,29 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
   const regionalRuntime = workspaceRuntimes(runtime);
-  const ready = new Map<string, Promise<Runtime>>();
-  const ownerRuntime = (workspaceId: string) => {
-    let resolved = ready.get(workspaceId);
+  const ready = new Map<string, Promise<Runtime | null>>(), deferred: DeferredStream[] = [];
+  const ownerRuntime = (workspaceId: string, stream: EmailSnapshot['kind']) => {
+    if (options.environment !== 'live') return regionalRuntime(workspaceId);
+    const key = `${workspaceId}\u0000${stream}`;
+    let resolved = ready.get(key);
     if (!resolved) {
       resolved = regionalRuntime(workspaceId).then(async owner => {
-        if (options.environment === 'live') await assertLiveRegionReady(owner, owner.db, options.region, 'marketing', true, workspaceId);
+        try { await assertLiveRegionReady(owner, owner.db, options.region, stream, true, workspaceId); }
+        catch (error) {
+          if (!(error instanceof ApiError) || error.code !== 'SES_SETUP_REQUIRED') throw error;
+          deferred.push({ workspace_id: workspaceId, stream });
+          log('warn', { code: error.code, workspaceId, region: options.region, stream });
+          return null;
+        }
         return owner;
       });
-      ready.set(workspaceId, resolved);
+      ready.set(key, resolved);
     }
     return resolved;
   };
   counters.recovered = await phase('recover', () => recoverInterrupted(runtime, options.environment, options.region));
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: options.environment === 'live' };
-  const lane: Lane = { ownerRuntime, gate, pacing, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const lane: Lane = { ownerRuntime, deferred, gate, pacing, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lanes = Math.max(1, options.lanes ?? 2);
   let idleLanes = 0, blocked = false;
   await Promise.all(Array.from({ length: lanes }, async () => {
