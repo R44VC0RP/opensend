@@ -353,6 +353,31 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     for (const field of ['token', 'secret', 'cookie', 'accessToken', 'refreshToken']) assert.equal(me[field], undefined);
   });
 
+  test('dashboard activity renews old sessions in both the browser and database, but not on every request', async t => {
+    for (const path of ['/v1/me', '/api/auth/get-session']) {
+      const fixture = await sessionFixture(t);
+      const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
+      // This includes sessions issued before the rolling policy: still valid but near the old cutoff.
+      await authDb!.query("UPDATE auth_session SET expires_at = now() + interval '30 minutes' WHERE id = $1", [fixture.sessionId]);
+      const expiry = async () => Number((await authDb!.query('SELECT extract(epoch FROM expires_at) * 1000 AS ms FROM auth_session WHERE id = $1', [fixture.sessionId])).rows[0].ms);
+      const old = await expiry();
+      await authDb!.query("UPDATE auth_account SET provider_id = 'detached' WHERE user_id = $1", [fixture.userId]);
+      const denied = await http('GET', path, undefined, undefined, headers);
+      if (path === '/v1/me') error(denied, 401, 'AUTH_REQUIRED'); else assert.equal(ok(denied), null);
+      assert.equal(await expiry(), old, 'A removed Google link cannot extend a session.');
+      await authDb!.query("UPDATE auth_account SET provider_id = 'google' WHERE user_id = $1", [fixture.userId]);
+      const renewed = await http('GET', path, undefined, undefined, headers); ok(renewed);
+      const cookies = renewed.headers.getSetCookie();
+      const token = cookies.find(value => value.startsWith(`${COOKIE_NAME}=`));
+      assert.ok(token && /;\s*Max-Age=604800(?:;|$)/i.test(token), 'The browser must receive a full seven-day session cookie.');
+      assert.ok(cookies.some(value => value.split('=')[0].endsWith('.session_data')), 'The short cache cookie is a separate Set-Cookie header.');
+      const active = await expiry();
+      assert.ok(Math.abs(active - Date.now() - 7 * 86400_000) < 60_000, 'Cookie and database expiry must agree.');
+      assert.equal(ok(await http('GET', '/v1/me', undefined, undefined, { ...headers, cookie: token.split(';')[0] })).id, fixture.userId);
+      assert.equal(await expiry(), active, 'A fresh session should not be rewritten on every dashboard request.');
+    }
+  });
+
   test('invalid Bearer credentials never fall back to a valid dashboard cookie; machine writes need no Origin', async t => {
     const headers = { cookie: manager!.cookie, origin: PUBLIC_ORIGIN };
     error(await http('GET', '/v1/me', 'not-a-valid-key', undefined, headers), 401, 'AUTH_INVALID');
@@ -583,6 +608,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.match(sessionCookie, /;\s*HttpOnly/i);
         assert.match(sessionCookie, /;\s*Secure/i);
         assert.match(sessionCookie, /;\s*SameSite=Lax/i);
+        assert.ok(/;\s*Max-Age=604800(?:;|$)/i.test(sessionCookie), 'A new Google login must last seven days in the browser.');
         approvedCookie = sessionCookie.split(';')[0];
         secrets.add(approvedCookie);
         const me = ok(await local('GET', '/v1/me', undefined, approvedCookie));

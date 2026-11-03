@@ -11,6 +11,8 @@ import { ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 
+const day = 24 * 60 * 60;
+
 function configured(runtime: Runtime) {
   return Boolean(runtime.config.googleClientId && runtime.config.googleClientSecret && runtime.config.authSecret);
 }
@@ -94,7 +96,7 @@ export function createAuth(runtime: Runtime) {
         profiles.set(context, { email: profile.email.toLowerCase(), subject: profile.sub, hostedDomain: typeof profile.hd === 'string' ? profile.hd.toLowerCase() : null });
       },
     },
-    session: { expiresIn: 8 * 60 * 60, disableSessionRefresh: true, cookieCache: { enabled: true, maxAge: 60 } },
+    session: { expiresIn: 7 * day, updateAge: day, cookieCache: { enabled: true, maxAge: 60 } },
     account: {
       accountLinking: { enabled: false, disableImplicitLinking: true }, encryptOAuthTokens: true,
       storeAccountCookie: false, storeStateStrategy: 'database', skipStateCookieCheck: false,
@@ -130,10 +132,18 @@ export function createAuth(runtime: Runtime) {
           return { data: { ...account, ...noTokens } };
         } },
       },
-      session: { create: { before: async (session, context) => {
-        profileFor(context);
-        if (!await isApprovedUser(runtime, session.userId)) throw new APIError('FORBIDDEN');
-      } } },
+      session: {
+        create: { before: async (session, context) => {
+          profileFor(context);
+          if (!await isApprovedUser(runtime, session.userId)) throw new APIError('FORBIDDEN');
+        } },
+        update: { before: async (changes, context) => {
+          if (!changes.expiresAt) return;
+          // Better Auth renews during getSession, before the request's ordinary authorization check.
+          const current = context?.context.session;
+          if (!current || !await approvedUser(runtime, current.user.id, runtime.db, current.session)) throw new APIError('UNAUTHORIZED');
+        } },
+      },
     },
     logger: { disabled: true },
     // Returning from onError still lets better-call console.error the raw error
@@ -148,11 +158,12 @@ export function requireDashboardOrigin(runtime: Runtime, headers: Headers) {
     throw new ApiError(403, 'CSRF_ORIGIN_INVALID', 'This request must originate from the dashboard.');
   }
 }
-export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders: (headers: Headers) => void = () => {}): Promise<Actor | null> {
+export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {
   requireConfigured(runtime);
   try {
-    const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, returnHeaders: true }));
-    applyHeaders(result.headers);
+    // A check-only preflight must not consume a renewal without delivering its cookies to the browser.
+    const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, query: { disableRefresh: !applyHeaders }, returnHeaders: true }));
+    applyHeaders?.(result.headers);
     const session = result.response;
     if (!session) return null;
     const user = await measure('approval-db', () => approvedUser(runtime, session.user.id, runtime.db, session.session));
@@ -162,6 +173,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     return { keyId: `user_${session.user.id}`, workspaceId: runtime.config.workspaceId, environment: mode ?? selected ?? 'live', permissions: ['manage'], domains: [], credential: 'dashboard', email: user.email, name: user.name };
   } catch (error) {
     if (error instanceof ApiError) throw error;
+    if (error instanceof APIError && error.statusCode === 401) return null;
     log('warn', { operation: 'dashboard-session', code: 'AUTH_UNAVAILABLE' });
     throw new ApiError(503, 'AUTH_UNAVAILABLE', 'The sign-in service is temporarily unavailable.', undefined, true);
   }
