@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments as sendingAttachments, emails } from './db/sending.js';
+import { domains } from './db/operations.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxRegions, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, type MailboxEventInput, type MailboxEventType } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3 } from './mailbox-setup.js';
@@ -156,16 +157,26 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   return { message: row!, runnable: queued };
 }
 
+/** Any From on a domain (or parent domain) registered in the sending region. SES enforces the final verification. */
+export async function assertRegisteredSender(db: DbExecutor, scope: Scope, region: string, from: string, field = 'from') {
+  const host = from.split('@')[1]!.toLowerCase();
+  const names = host.split('.').map((_, index, parts) => parts.slice(index).join('.')).filter(name => name.includes('.'));
+  const [registered] = await db.select({ name: domains.name }).from(domains).where(and(eq(domains.workspaceId, scope.workspaceId), eq(domains.environment, scope.environment), eq(domains.region, region), inArray(domains.name, names))).limit(1);
+  if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to OpenSend in ${region} before sending from it.`, field);
+}
+
 /** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */
 export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest, field: 'replyAddressId' | 'replyMailboxId') {
   if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for tracked sends.', field);
   const scope = { workspaceId: actor.workspaceId, environment: actor.environment };
-  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
+  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status, region: mailboxDomains.region }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
   if (!target) throw new ApiError(404, 'NOT_FOUND', 'Receivable address was not found.');
   if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The receiving domain must be active before starting a tracked conversation.', field);
   const { mailbox } = target;
   const owned = new Set((await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address));
-  if (!owned.has(input.from.toLowerCase()) || input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'From and Reply-To must belong to the selected receivable address.', field);
+  // Reply-To must route back into this address so the conversation keeps tracking. From can be any registered sender.
+  if (input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'Reply-To must belong to the selected receivable address.', field);
+  if (!owned.has(input.from.toLowerCase())) await assertRegisteredSender(tx, scope, target.region, input.from, 'from');
   const { message, runnable } = await sendFromMailbox(runtime, tx, {
     mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,

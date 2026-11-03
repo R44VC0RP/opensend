@@ -2145,7 +2145,7 @@ export type UpdateInboundThread = {
 
 export type CreateInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -2191,7 +2191,7 @@ export type MailboxAttachmentInput = {
 
 export type ReplyToInboundThread = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -2268,7 +2268,7 @@ export type MailboxAttachmentUpload = {
 
 export type MailboxSendInput = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -2294,7 +2294,7 @@ export type MailboxSendInput = {
 
 export type MailboxReplyInput = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;
@@ -2338,7 +2338,7 @@ export type MailboxReplyInput = {
 
 export type MailboxForwardInput = {
     /**
-     * Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.
+     * Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.
      */
     from?: string;
     text?: string;

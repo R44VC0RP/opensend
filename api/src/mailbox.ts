@@ -13,7 +13,7 @@ import { mailboxS3, queueReconcile } from './mailbox-setup.js';
 import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
-import { assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
+import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses, wakeMailboxSend } from './inbound-threads.js';
 
@@ -679,7 +679,7 @@ export function registerMailbox(app: App) {
     z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or an upload from POST /mailboxes/{mailboxId}/attachments (attachment_…).') }).strict(),
   ]).openapi('MailboxAttachmentInput');
   const Compose = {
-    from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox.'),
+    from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.'),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
     attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.'),
     replyTo: Recipients.max(10).default([]),
@@ -709,7 +709,13 @@ export function registerMailbox(app: App) {
   async function senderAddress(c: Ctx, mailbox: typeof mailboxes.$inferSelect, from?: string, db: DbExecutor = c.env.db) {
     if (from === mailbox.address) return from;
     const [owned] = await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(and(eq(mailboxAddresses.mailboxId, mailbox.id), from ? eq(mailboxAddresses.address, from) : eq(mailboxAddresses.kind, 'public')));
-    if (from && !owned) throw new ApiError(422, 'FROM_NOT_ALLOWED', 'Send from the mailbox address, its public address or one of its aliases.', 'from');
+    if (from && !owned) {
+      // Scoped keys may only speak as their own addresses; an administrator may use any registered sender.
+      if (!access(c).admin) throw new ApiError(403, 'FROM_NOT_ALLOWED', 'Inbound keys can send only from their own addresses. Use administrator access for another sender.', 'from');
+      const [domain] = await db.select({ region: mailboxDomains.region }).from(mailboxDomains).where(eq(mailboxDomains.id, mailbox.domainId));
+      await assertRegisteredSender(db, scopeOf(access(c)), domain!.region, from);
+      return from;
+    }
     return owned?.address ?? mailbox.address;
   }
   async function dispatch(c: Ctx, mailbox: typeof mailboxes.$inferSelect, scope: Scope, access: MailboxAccess, body: unknown, build: () => Promise<Omit<OutgoingMessage, 'mailbox' | 'actor' | 'scope'>>) {
@@ -735,7 +741,9 @@ export function registerMailbox(app: App) {
       attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers };
   }
   async function prepareReply(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, original: MessageRow, body: z.infer<typeof ReplyBody> & { expectedRecipients?: Pick<OutgoingMessage, 'to' | 'cc' | 'bcc'> }) {
-    const own = (await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address);
+    const from = await senderAddress(c, mailbox, body.from, db);
+    // The chosen sender is ours too: never copy it back on a reply-all.
+    const own = [...(await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address), from];
     const computed = replyRecipients(original, own, body.replyAll);
     const to = body.to ?? computed.to, cc = body.cc ?? computed.cc;
     if (body.expectedRecipients) assertInboundRecipients(body.expectedRecipients, { to, cc, bcc: body.bcc });
@@ -743,7 +751,7 @@ export function registerMailbox(app: App) {
     const parentId = await replyParentId(db, original);
     const quote = body.quote ? quoted(original) : null;
     return {
-      from: await senderAddress(c, mailbox, body.from, db), to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
+      from, to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), threadId: original.threadId,
       inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
