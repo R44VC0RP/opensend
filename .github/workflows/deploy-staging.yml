@@ -1,0 +1,44 @@
+name: Deploy staging
+
+on:
+  push:
+    branches: [opensend-mx]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Only the opensend-mx branch deploys staging, and only once its resources exist
+    # (set the repository variable STAGING_DEPLOY_ENABLED=true after `tofu apply`).
+    if: github.ref == 'refs/heads/opensend-mx' && vars.STAGING_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            api/package-lock.json
+            app/package-lock.json
+            sdk/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm ci
+        working-directory: api
+      - run: npm ci
+        working-directory: sdk
+      - run: npm run check
+        working-directory: api
+      - run: npm run docs:check
+        working-directory: api
+      - run: npm run build
+        working-directory: app
+      - run: npx wrangler deploy --config wrangler.staging.jsonc
+        working-directory: api
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
