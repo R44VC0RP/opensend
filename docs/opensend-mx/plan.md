@@ -18,7 +18,7 @@ This plan combines the five research reports in [`research/`](research/). They w
 2. **Bring your own AWS uses a cross-account IAM role, not pasted keys.** The user creates the role with a CloudFormation quick-create link. OpenSend assumes it using a unique external ID per connection. No long-lived customer secret is stored, and the customer can revoke access by deleting the role. The least-privilege policy is in report 2.
 3. **Shared sending uses SES tenants.** These launched in August 2025. Each workspace gets an SES tenant with its identities and configuration sets associated, a suppression list for that tenant only, and the Strict reputation policy, so a tenant with a problem is paused on its own. AWS warns that tenants still share the account's overall reputation. Full isolation needs one AWS member account per workspace, which can be offered later as an upgrade.
 4. **Domains are claimed exclusively.** A domain needs DNS proof before a workspace can use it, and two workspaces can never claim the same domain or overlapping parent and subdomains. Automatically importing identities that already exist in the SES account is turned off for shared accounts.
-5. **Separate deployment, same codebase.** MX gets its own Worker (`opensend-mx-api`), queues, R2 bucket, Postgres database, Google OAuth client, auth secret and AWS account. Production keeps deploying only from `main`. MX deploys only from the `opensend-mx` branch, and the SDK is never published from it.
+5. **Staging first, then upgrade production in place.** Staging gets its own Worker, queues, R2 bucket, Postgres database, Google OAuth client and auth secret, and deploys only from the `opensend-mx` branch. Production keeps deploying only from `main`, and the SDK is never published from the branch. See Decisions below.
 
 ## Phases
 
@@ -42,12 +42,14 @@ Each phase is a series of small PRs. Phases 0–4 must be done before strangers 
 4. **Campaigns you can stop.** Snapshot review, pacing, pause and resume, and a consent check at dispatch.
 5. **Open source with an exit.** The same code can be self-hosted.
 
-## Open decisions
+## Decisions (Ryan, Nov 3)
 
-| Question | Recommendation |
-|---|---|
-| Accept pasted access keys for bring-your-own AWS? | No at launch. Use the IAM role only, and add keys later if users ask. |
-| Isolation on shared infrastructure | SES tenants on one account first; one member account per workspace as a later option. |
-| Where multi-tenancy code lives | Build on `opensend-mx`, but merge phases 1–2 into `main` once they're backward compatible, so the two deployments don't drift apart. |
-| Cloudflare account for `opensend.mx` | One the production deploy token can't edit. |
-| Import production data into MX? | No. MX starts empty. |
+- **Scope:** everything OpenSend does today, working across many workspaces with every resource isolated per tenant. New inbox features come later.
+- **Connecting AWS:** a "Connect AWS" button opens a CloudFormation quick-create link. The user creates a role that OpenSend assumes with an external ID. Users never paste access keys.
+- **Shared infrastructure:** a fresh AWS account that hosts nothing else, sending from `us-east-1`. Our current AWS account already uses `us-east-1` for every Anomaly domain and for Inbound, so this has to be a different account, not just a different region. Each workspace is an SES tenant on the Strict reputation policy, plus OpenSend's own automatic pause when a tenant's bounce or complaint rate climbs.
+- **Moving Anomaly over:** production is upgraded in place rather than copied to a new deployment.
+  - The existing `default` workspace becomes the Anomaly workspace, owned by Ryan.
+  - The current AWS account becomes Anomaly's bring-your-own connection, so nothing is copied and no SES or SNS setup is re-pointed.
+  - `opensend.mx` and `opensend.anoma.ly` both point at the same Worker.
+  - Development and testing happen on a separate staging environment (`staging.opensend.mx`) with an empty database until cutover.
+- **Merging:** phases are merged into `main` as soon as each is backward compatible.
