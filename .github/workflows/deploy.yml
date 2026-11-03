@@ -11,6 +11,8 @@ concurrency:
 
 jobs:
   deploy:
+    # Manual dispatch is allowed, but only main may deploy production or publish the SDK.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
     steps:

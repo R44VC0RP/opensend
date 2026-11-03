@@ -34,6 +34,10 @@ async function wakeDispatchers(env: Env, environment: Mode, region: string) {
 // Optional Worker variable, default two active jobs; six matches the platform's
 // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
 const workerConcurrency = (env: Env) => jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+  const value: unknown = (env as unknown as Record<string, unknown>)[key];
+  return typeof value === 'string' && value ? value : fallback;
+};
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
@@ -115,7 +119,8 @@ export default {
   },
   // Queue/scheduled continuations bypass coalescing to preserve active worker chains and future due times.
   async queue(batch, env) {
-    if (batch.queue === 'opensend-feedback') {
+    // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
+    if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'opensend-feedback')) {
       // Each message is one verified callback; acknowledge and retry individually so one bad
       // payload never blocks a batch of routine deliveries.
       await withRuntime(env, async runtime => {
@@ -124,6 +129,11 @@ export default {
         for (const [index, message] of messages.entries()) outcomes[index]?.ok ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
         log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
       });
+      return;
+    }
+    if (batch.queue !== queueName(env, 'WORK_QUEUE_NAME', 'opensend-work')) {
+      log('error', { code: 'UNKNOWN_QUEUE', queue: batch.queue });
+      batch.retryAll();
       return;
     }
     await withRuntime(env, async runtime => {
