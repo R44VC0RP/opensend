@@ -18,7 +18,7 @@
   },
   "vars": {
     "PUBLIC_URL": "https://opensend.mx",
-    "DEFAULT_SES_REGION": "us-east-1",
+    "DEFAULT_SES_REGION": "us-east-2",
     // Simulated SES only until AWS connections exist.
     "ENABLE_LIVE_SES": "false",
     "JOB_CONCURRENCY": "6",
