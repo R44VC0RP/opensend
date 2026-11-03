@@ -2,37 +2,96 @@ import { createContext, useContext, useState, useMemo, useEffect, type ReactNode
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
-import { createLiveApi, request } from './live'
+import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
 import { regionCatalogKey } from './regions'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 
+type Session = { identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const ApiContext = createContext<OpenSendApi | null>(null)
-const SessionContext = createContext<{ identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void> } | null>(null)
+const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
+// Self-hosted installations have no workspace roles; every signed-in operator administers.
+export function useWorkspaceAccess() {
+  const identity = useContext(SessionContext)?.identity
+  const multiTenant = identity?.multiTenant === true
+  const role = multiTenant ? identity?.role ?? null : null
+  return { multiTenant, role, canAdminister: !multiTenant || role === 'owner' || role === 'admin' }
+}
+function invitationError(error: unknown) {
+  if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
+  return `Couldn’t accept the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
+}
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
   const publicRoute = window.location.pathname === '/docs'
   const [environment] = useState<'live' | 'test'>(() => new URLSearchParams(window.location.search).get('environment') === 'test' ? 'test' : 'live')
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
-  const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment])
+  // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
+  const [generation, setGeneration] = useState(0)
+  const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment, generation])
   const cache = useQueryClient()
+  const toast = useToast()
   const [authError, setAuthError] = useState<unknown>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [invitation, setInvitation] = useState(() => client.mode === 'demo' || publicRoute ? null : new URLSearchParams(window.location.search).get('invitation'))
+  const accept = useQuery({
+    queryKey: ['invitation', invitation], enabled: Boolean(invitation), retry: false, staleTime: Infinity, gcTime: Infinity,
+    queryFn: async () => {
+      try {
+        const { workspaceId } = await request<{ workspaceId: string }>(`/v1/workspaces/invitations/${encodeURIComponent(invitation!)}/accept`, { method: 'POST', body: {} })
+        selectWorkspace(workspaceId)
+        toast('Invitation accepted', 'success')
+      } catch (error) {
+        // Signed out: keep the link so sign-in returns here and accepts it.
+        if (error instanceof ApiError && error.status === 401) return 'signed-out'
+        setNotice(invitationError(error))
+      }
+      const url = new URL(window.location.href)
+      url.searchParams.delete('invitation')
+      window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+      setInvitation(null)
+      return 'done'
+    },
+  })
   const identity = useQuery({
-    queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute,
+    queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute && (!invitation || accept.isFetched),
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
       const started = performance.now()
-      const result = await request<Identity>('/v1/me', {signal, environment})
+      let result: Identity
+      try { result = await request<Identity>('/v1/me', {signal, environment}) }
+      catch (error) {
+        // A remembered workspace the user no longer belongs to: fall back to the server's choice.
+        if (!(error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace())) throw error
+        selectWorkspace(null)
+        result = await request<Identity>('/v1/me', {signal, environment})
+      }
+      selectWorkspace(result.multiTenant ? result.workspaceId : null)
       console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
       return result
     },
   })
+  async function switchWorkspace(id: string, path?: string) {
+    const previous = selectedWorkspace()
+    if (id === previous) return
+    await cache.cancelQueries()
+    selectWorkspace(id)
+    let next: Identity
+    try { next = await request<Identity>('/v1/me', {environment}) }
+    catch (error) { selectWorkspace(previous); throw error }
+    // Nothing from the previous workspace may remain visible or cached.
+    cache.clear()
+    cache.setQueryData(['identity', environment], next)
+    if (path) window.history.pushState(null, '', path)
+    setGeneration(value => value + 1)
+  }
   // Load the region catalog alongside /v1/me rather than after it; the shell reuses this cache entry.
+  // An invitation link selects its workspace first, so wait until it is accepted.
   useEffect(() => {
-    if (client.mode === 'demo' || publicRoute) return
+    if (client.mode === 'demo' || publicRoute || invitation) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
-  }, [cache, client, publicRoute])
+  }, [cache, client, publicRoute, invitation])
   useEffect(() => {
     if (!identity.data || client.mode === 'demo') return
     const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
@@ -43,7 +102,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity', environment]) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
-  async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
+  async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
     try {
@@ -64,7 +123,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
-  return <ApiContext.Provider key={environment} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout}}>
+  return <ApiContext.Provider key={`${environment}:${generation}`} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
     {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>

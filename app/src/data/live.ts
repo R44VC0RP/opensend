@@ -2,12 +2,20 @@ import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Cam
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
+// The dashboard's selected workspace (multi-tenant installations only). Sent with every request.
+const workspaceStorageKey = 'opensend.workspace'
+let workspaceSelection: string | null = (() => { try { return localStorage.getItem(workspaceStorageKey) } catch { return null } })()
+export const selectedWorkspace = () => workspaceSelection
+export function selectWorkspace(id: string | null) {
+  workspaceSelection = id
+  try { if (id) localStorage.setItem(workspaceStorageKey, id); else localStorage.removeItem(workspaceStorageKey) } catch { /* Selection can remain session-only. */ }
+}
 export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; environment?: 'live' | 'test'; idempotencyKey?: string } = {}): Promise<T> {
   const started = performance.now()
   let response: Response
   try {
     response = await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.environment ? { 'X-OpenSend-Environment': options.environment } : {}), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}) },
+      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.environment ? { 'X-OpenSend-Environment': options.environment } : {}), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-OpenSend-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error

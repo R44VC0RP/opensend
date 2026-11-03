@@ -30,6 +30,7 @@ const ApiKeysPage = lazy(() => loadSettings().then(m => ({ default: m.ApiKeysPag
 const DomainsPage = lazy(() => loadSettings().then(m => ({ default: m.DomainsPage })))
 const DomainDetailPage = lazy(() => loadSettings().then(m => ({ default: m.DomainDetailPage })))
 const SettingsPage = lazy(() => loadSettings().then(m => ({ default: m.SettingsPage })))
+const WorkspaceSettingsPage = lazy(() => loadSettings().then(m => ({ default: m.WorkspaceSettingsPage })))
 const WebhooksPage = lazy(() => loadSettings().then(m => ({ default: m.WebhooksPage })))
 const WebhookDetailPage = lazy(() => loadSettings().then(m => ({ default: m.WebhookDetailPage })))
 const DeveloperPage = lazy(() => loadDeveloper().then(m => ({ default: m.DeveloperPage })))
@@ -74,7 +75,7 @@ export function App() {
     <Route path="segments" element={<SegmentsPage />} /><Route path="segments/new" element={<SegmentEditorPage />} /><Route path="segments/:id" element={<SegmentEditorPage />} />
     <Route path="api-keys" element={<ApiKeysPage />} /><Route path="domains" element={<DomainsPage />} /><Route path="domains/:id" element={<DomainDetailPage />} />
     <Route path="developer" element={<DeveloperPage />} />
-    <Route path="settings" element={<SettingsPage />} /><Route path="settings/webhooks" element={<WebhooksPage />} /><Route path="settings/webhooks/new" element={<WebhookDetailPage />} /><Route path="settings/webhooks/:id" element={<WebhookDetailPage />} />
+    <Route path="settings" element={<SettingsPage />} /><Route path="settings/workspace" element={<WorkspaceSettingsPage />} /><Route path="settings/webhooks" element={<WebhooksPage />} /><Route path="settings/webhooks/new" element={<WebhookDetailPage />} /><Route path="settings/webhooks/:id" element={<WebhookDetailPage />} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/">Return to overview</Link>} />} />
   </Route></Routes></AppErrorBoundary>
 }

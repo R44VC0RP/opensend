@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useApi, useApiMutation } from '../../data/context'
+import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
 import type { Campaign, CampaignExpansion, CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
@@ -76,6 +76,8 @@ const message = (error: unknown) => error instanceof Error ? error.message : 'So
 export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const api = useApi()
   const cache = useQueryClient()
+  // Pausing, resuming and pacing are delivery controls: owners and admins only.
+  const { canAdminister } = useWorkspaceAccess()
   const expansion = campaign.expansion
   const pacing = expansion?.pacing
   const paused = expansion?.status === 'paused'
@@ -127,16 +129,16 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
     {paused && <Alert tone="warning" title="Sending paused">
       <div className="campaign-pacing-banner">
         <span>{expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
-        <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>
+        {canAdminister && <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>}
       </div>
     </Alert>}
     <div className="campaign-summary-line">
       <span>{perDay ? <>{released} · {number(perDay)}/day{nextSlice && <span title={atUtc(pacing!.nextWindowAt!)}>{nextSlice}</span>}</> : released}{rateShare}</span>
-      {active && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
+      {active && canAdminister && <Button variant="secondary" size="sm" loading={pause.isPending} disabled={busy} onClick={() => void run(() => pause.mutateAsync(campaign.id))}>Pause</Button>}
     </div>
     {perDay && (active || paused) && <div className="campaign-summary-line muted"><span>Released in this 24-hour slice</span><span>{number(pacing?.windowExpanded ?? 0)} / {number(perDay)}</span></div>}
     {active && expansion.waiting && <p className="muted" role="status" title={atUtc(expansion.waiting.until)}>{waitingLabel[expansion.waiting.reason] ?? 'Waiting to release more recipients'} · about {relativeTime(expansion.waiting.until)}</p>}
-    {(active || paused) && <form className="campaign-pacing-form" onSubmit={save}>
+    {(active || paused) && canAdminister && <form className="campaign-pacing-form" onSubmit={save}>
       <div className="campaign-pacing-limit">
         <label htmlFor="campaign-pacing-limit" className="muted">Daily limit</label>
         <Input id="campaign-pacing-limit" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} placeholder="No limit" value={limit} aria-invalid={Boolean(limitError) || undefined} onChange={event => { setLimit(event.target.value); setError('') }} disabled={busy} />

@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
+import { useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
 import type { Campaign, CampaignInput, CampaignReview as ReviewResult, SendCampaignInput } from '../../data/types'
 import {
@@ -370,6 +370,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '50' })
   const guard = useRef(false)
   const api = useApi()
+  const { canAdminister } = useWorkspaceAccess()
 
   const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
   const readinessError = campaignReadinessError(campaign)
@@ -464,7 +465,8 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
         <p className="muted">Sending also respects the SES daily quota.</p>
       </div>
       {error && <Alert tone="danger">{error}</Alert>}
-      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+      {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
+      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}

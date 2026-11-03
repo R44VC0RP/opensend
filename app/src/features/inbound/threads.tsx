@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { useApi, useApiMutation, useApiQuery } from '../../data/context'
+import { useApi, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { ApiError, type InboundAddress, type InboundMessage, type InboundThread, type InboundThreadDetail, type InboundThreadPatch, type InboundThreadView, type MailAddress } from '../../data/types'
 import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -274,6 +274,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
 }
 
 function LiveInboundPage() {
+  const { canAdminister } = useWorkspaceAccess()
   const [params, setParams] = useSearchParams()
   const addressId = params.get('address') || undefined
   const view = (views.some(item => item.value === params.get('view')) ? params.get('view') : 'inbox') as InboundThreadView
@@ -297,7 +298,7 @@ function LiveInboundPage() {
   return <div className="mailbox-page" data-thread-open={threadId ? true : undefined}>
     <PageHeader title="Inbound" actions={<>
       <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/addresses">Addresses</Link>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>
+      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>}
       <Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>
     </>} />
     <div className="mailbox-layout">

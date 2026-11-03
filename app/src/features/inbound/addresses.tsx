@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, Textarea } from '../../components/ui'
-import { useApi, useApiMutation, useApiQuery } from '../../data/context'
+import { useApi, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import type { InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
@@ -67,6 +67,7 @@ function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; o
 }
 
 function LiveAddressesPage() {
+  const { canAdminister } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
@@ -76,8 +77,8 @@ function LiveAddressesPage() {
   const domains = useApiQuery(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal))
   return <div className="stack">
     <PageHeader title="Addresses" backTo="/inbound" actions={<>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Inbound keys</Link>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>
+      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Inbound keys</Link>}
+      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>}
       <Button variant="primary" disabled={!domains.data || !receivingDomains(domains.data).length} onClick={() => setCreating(true)}>Create address</Button>
     </>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : domains.isPending ? <SkeletonText width={260} /> : <ReceivingDomains domains={domains.data} />}
