@@ -7,7 +7,7 @@ export type ContactStatus = 'unknown' | 'subscribed' | 'unsubscribed' | 'suppres
 export type CampaignStatus = 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled' | 'sent'
 export type WebhookEvent = 'send' | 'delivered' | 'bounced' | 'complaint' | 'rejected' | 'delivery_delayed' | 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'
 export type TimeRange = '24h' | '7d' | '30d'
-export interface PageRequest { page?: number; pageSize?: number; search?: string; regionId?: RegionId; status?: string; stream?: string; listId?: string; segmentId?: string; cursor?: string; to?: string; from?: string }
+export interface PageRequest { page?: number; pageSize?: number; search?: string; regionId?: RegionId; status?: string; stream?: string; listId?: string; segmentId?: string; campaignId?: string; cursor?: string; to?: string; from?: string }
 export interface PageResult<T> { items: T[]; total?: number; nextCursor?: string | null; page: number; pageSize: number; facets?: Record<string, number> }
 export interface RegionCatalogEntry {
   region: string; enabled: boolean; isDefault: boolean
@@ -35,7 +35,7 @@ export interface SesReputation { available: boolean; reason: string | null; boun
 interface SesConfigurationSet { name: string; exists: boolean | null; owned: boolean | null; sendingEnabled: boolean | null; eventDestinationExists: boolean | null; eventWired: boolean | null; autoValidation: AutoValidationMode | null }
 export interface Workspace { id: string; name: string; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 export interface EmailEvent { id: string; type: string; at: ISODate; description: string; diagnostic?: string }
-export interface Email { text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
+export interface Email { campaignId?: string | null; text?: string | null; eventsNextCursor?: string | null; fromName?: string; simulated?: boolean; attachments?: string[]; id: string; regionId: RegionId; to: string; from: string; subject: string; stream: Stream; status: EmailStatus; sentAt: ISODate; html: string; events: EmailEvent[] }
 export interface ChartPoint { at: ISODate; sent: number; delivered: number; bounced: number; complaints: number }
 export interface Overview { periodStart: ISODate; periodEnd: ISODate; sent: number; delivered: number; bounced: number; complaints: number; deferred: number; previousSent: number; points: ChartPoint[]; streams: { name: Stream; sent: number }[]; recentCampaigns: Campaign[] }
 export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; consent: { source: string; at: ISODate | null }; suppressionReason?: string }

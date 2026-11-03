@@ -420,7 +420,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     finally { guard.current = false }
   }
   return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster"><StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!['draft', 'reviewed'].includes(campaign.status) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}${api.environment ? `&environment=${api.environment}` : ''}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit', api.environment)}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}

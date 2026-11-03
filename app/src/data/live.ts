@@ -134,7 +134,7 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: previous.totals.emails, points, streams: [{name: 'transactional', sent: transactional.totals.emails}, {name: 'marketing', sent: marketing.totals.emails}], recentCampaigns: campaigns.items }
     } },
     emails: {
-      list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),
+      list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),
       get: async (id, signal) => { const path = `/emails/${idPath(id)}`; const [row, content, events] = await Promise.all([call(path, 'GET', undefined, signal), call(`${path}/content`, 'GET', undefined, signal), call(`${path}/events?limit=100`, 'GET', undefined, signal)]); return { ...mapEmail(row), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor } }
     },
     campaigns: {
