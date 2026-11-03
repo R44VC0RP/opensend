@@ -1,12 +1,15 @@
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { workspaceApi } from '../data/workspaces'
+import { connectionApi } from '../data/connections'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText, useToast } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
+
+const SendingOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.SendingOnboarding })))
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -24,7 +27,11 @@ export function AppShell() {
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
-  const discovery = useRegionDiscovery(current)
+  // Hosted workspaces choose a sending connection before using the app.
+  const needsConnection = access.multiTenant && access.canAdminister && api.mode !== 'demo'
+  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal), { enabled: needsConnection, interval: data => data?.kind === 'shared' && data.status === 'pending' ? 5000 : false })
+  const onboarding = needsConnection && connection.data?.status !== 'ready'
+  const discovery = useRegionDiscovery(onboarding ? undefined : current)
   const quota = discovery.data?.account?.quota
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
@@ -66,13 +73,24 @@ export function AppShell() {
       }
     }
   }
+  const workspaceSelect = access.multiTenant && <Select id="sidebar-workspace" aria-label="Workspace" value={session?.identity?.workspaceId ?? ''} onValueChange={id => void changeWorkspace(id)} options={(workspaces.data ?? []).map(workspace => ({ value: workspace.id, label: workspace.name }))} disabled={switching || workspaces.isPending} placeholder={workspaces.isPending ? 'Loading workspaces…' : 'Workspace'} />
+  if (onboarding) return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <aside className="sidebar">
+      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />opensend</span>
+      <ThemeToggle />
+      <div className="sidebar-context">{workspaceSelect}</div>
+      <div className="sidebar-footer"><Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button></div>
+    </aside>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{connection.isPending ? <RouteSkeleton /> : connection.isError ? <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> : <SendingOnboarding connection={connection.data} />}</Suspense></main>
+  </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to={`/${environmentSearch}`} aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
-        {access.multiTenant && <Select id="sidebar-workspace" aria-label="Workspace" value={session?.identity?.workspaceId ?? ''} onValueChange={id => void changeWorkspace(id)} options={(workspaces.data ?? []).map(workspace => ({ value: workspace.id, label: workspace.name }))} disabled={switching || workspaces.isPending} placeholder={workspaces.isPending ? 'Loading workspaces…' : 'Workspace'} />}
+        {workspaceSelect}
         {access.canAdminister && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
         {access.canAdminister && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}

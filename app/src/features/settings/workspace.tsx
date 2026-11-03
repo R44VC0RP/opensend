@@ -6,6 +6,7 @@ import type { Workspace } from '../../data/types'
 import { fieldError, MutationError, SettingsTabs } from './shared'
 import { SettingsBodySkeleton } from './skeletons'
 import { RegionSetup } from './region-setup'
+import { SendingConnection } from './sending'
 import { roleLabel } from '../../data/workspaces'
 
 function WorkspaceForm({workspace}: {workspace: Workspace}) {
@@ -32,7 +33,7 @@ function SesSettings({multiTenant}: {multiTenant: boolean}) {
   return <div className="stack settings-ses">
     <PageHeader title="Settings" />
     <SettingsTabs value="ses" />
-    {multiTenant ? <RegionSetup /> : workspace.isPending ? <SettingsBodySkeleton regionId={regionId} /> : <>
+    {multiTenant ? <><SendingConnection /><RegionSetup /></> : workspace.isPending ? <SettingsBodySkeleton regionId={regionId} /> : <>
       <RegionSetup />
       {workspace.error ? <ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /> : <WorkspaceForm key={workspace.data.id} workspace={workspace.data} />}
       <SignedInSection />

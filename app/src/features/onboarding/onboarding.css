@@ -1,0 +1,14 @@
+.onboarding { max-width: 880px; }
+.onboarding--narrow { max-width: 640px; }
+.onboarding-lead { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.onboarding-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
+.onboarding-option { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding: var(--space-16); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.onboarding-option h2, .onboarding-steps h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.onboarding-option p, .onboarding-steps p { margin: 0; }
+.onboarding-option > p:not(.onboarding-price) { margin-top: calc(-1 * var(--space-8)); }
+.onboarding-price { font-weight: var(--font-weight-bold); }
+.onboarding-option > .ui-button { align-self: flex-start; margin-top: auto; }
+.onboarding-steps { list-style: none; margin: 0; padding: 0; }
+.onboarding-steps > li { display: flex; flex-direction: column; gap: var(--space-12); padding-block: var(--space-20); border-top: 1px solid var(--color-border); }
+.onboarding-account { max-width: 240px; }
+@media (max-width: 900px) { .onboarding-options { grid-template-columns: 1fr; } }

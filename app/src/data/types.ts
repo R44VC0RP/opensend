@@ -215,6 +215,8 @@ export interface Identity { id: string; workspaceId: string; role?: WorkspaceRol
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }
+export type ConnectionKind = 'shared' | 'byo'
+export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; status: 'pending' | 'ready'; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
 export interface CampaignReview extends AudiencePreview { id: string; revision: number }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }
