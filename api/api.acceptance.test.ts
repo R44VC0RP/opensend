@@ -1060,6 +1060,12 @@ describe('Hosted MCP OAuth and tools', () => {
       await dispatchDue(runtime,'live',REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
       const solo=ok(await post('/threads',{addressId:a.id,to:['followup@example.net'],subject:'Only outbound',text:'First'},h),202);await dispatchDue(runtime,'live',REGION);
       const followup=ok(await post(`/threads/${solo.threadId}/reply`,{text:'Following up'},h),202);assert.equal(followup.inReplyTo,`ses-${solo.emailId}@${REGION==='us-east-1'?'email':REGION}.amazonses.com`);assert.equal(followup.to[0].address,'followup@example.net');
+      // Administrators may answer as any registered sender (or subdomain of one); scoped keys stay on their own addresses.
+      const asTeam=ok(await post(`/threads/${solo.threadId}/reply`,{from:'team@mail.example.com',text:'From the team',replyToMessageId:solo.id,expectedRecipients:{to:['followup@example.net'],cc:[],bcc:[]}}),202);
+      assert.equal(asTeam.from.address,'team@mail.example.com'); assert.equal(asTeam.threadId,solo.threadId);
+      error(await post(`/threads/${solo.threadId}/reply`,{from:'team@example.com',text:'Not my address'},h),403,'FROM_NOT_ALLOWED');
+      error(await post(`/threads/${solo.threadId}/reply`,{from:'someone@unregistered.invalid',text:'Unknown domain'}),422,'SENDER_DOMAIN_NOT_REGISTERED');
+      const started=ok(await post('/threads',{addressId:a.id,from:'hello@example.com',to:['new@example.net'],subject:'Custom sender',text:'Hi'}),202); assert.equal(started.from.address,'hello@example.com');
       const hook=ok(await post('/webhooks',{url:'https://example.com/inbound',addressIds:[a.id],eventTypes:['message.queued']}),201);assert.deepEqual(hook.addressIds,[a.id]);assert.ok(!('mailboxIds' in hook));
       assert.ok(ok(await get(`/events?after=0&addressId=${a.id}`,h)).data.every((x:Json)=>x.addressId===a.id && !('mailboxId' in x)));
       assert.equal((await success('deleteInboundAddress',{addressId:b.id,confirm:true})).ok,true);error(await get(`/addresses/${b.id}`),404);
@@ -3213,7 +3219,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,environment:'live',attempts:attempt });
       try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { receiver.mock.restore(); }
       const replyPath = `${inbox}/${selected.id}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
-      error(await post(replyPath,{ text:'unauthorized',from:'sales@example.com' },agent),422);
+      error(await post(replyPath,{ text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
       error(await post(replyPath,{ text:'no provider overrides',headers:[{name:'X-SeS-CONFIGURATION-SET',value:'override'}] },agent),422);
       const reply = ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202);
       assert.equal(ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202).id,reply.id);

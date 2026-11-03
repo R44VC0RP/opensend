@@ -8477,7 +8477,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -8654,7 +8654,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -8906,7 +8906,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -9018,7 +9018,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
@@ -9141,7 +9141,7 @@
             "type": "string",
             "maxLength": 254,
             "pattern": "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
-            "description": "Defaults to the public address if configured, otherwise the primary receiving address. May also be set to any address owned by this mailbox."
+            "description": "Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers."
           },
           "text": {
             "type": "string",
