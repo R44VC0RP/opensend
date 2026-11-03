@@ -14,8 +14,11 @@ const client = new Client(postgresConnection(process.env.DATABASE_URL));
 await client.connect();
 try {
   await client.query('SELECT pg_advisory_lock(78291344)');
-  // Google-only installations have one internal namespace. Never silently strand an older tenant.
-  const scopedTables = await client.query<{ table_name: string }>("SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'workspace_id'");
+  // Before workspaces existed (migration 038), installations had one internal namespace: never silently
+  // strand an older tenant. Once the workspaces table exists, other workspaces are legitimate data.
+  const workspacesTable = await client.query("SELECT to_regclass('public.workspaces') AS t");
+  const scopedTables = workspacesTable.rows[0]?.t ? { rows: [] as { table_name: string }[] }
+    : await client.query<{ table_name: string }>("SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'workspace_id'");
   for (const { table_name } of scopedTables.rows) {
     const table = table_name.replaceAll('"', '""');
     const foreign = await client.query(`SELECT 1 FROM public."${table}" WHERE workspace_id <> $1 LIMIT 1`, [config.workspaceId]);
