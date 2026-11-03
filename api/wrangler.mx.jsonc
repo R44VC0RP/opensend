@@ -18,9 +18,11 @@
   },
   "vars": {
     "PUBLIC_URL": "https://opensend.mx",
+    "MULTI_TENANT": "true",
     "DEFAULT_SES_REGION": "us-east-2",
-    // Simulated SES only until AWS connections exist.
-    "ENABLE_LIVE_SES": "false",
+    // Live SES uses the shared-account key (infra/aws-shared). Sends stay denied by its IAM policy
+    // until every send carries an SES TenantName.
+    "ENABLE_LIVE_SES": "true",
     "JOB_CONCURRENCY": "6",
     "SIMULATED_SES_LATENCY_MS": "170",
     "SIMULATED_SES_RATE": "5000",
