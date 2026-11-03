@@ -9,7 +9,8 @@
 #
 # Credentials come from the environment, never from files in this directory:
 # CLOUDFLARE_API_TOKEN for the provider, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the
-# R2 state bucket, and TF_VAR_database once the environment's Postgres exists.
+# R2 state bucket, TF_VAR_state_passphrase for state encryption, and TF_VAR_database once
+# the environment's Postgres exists.
 
 terraform {
   required_version = ">= 1.10"
@@ -29,6 +30,33 @@ terraform {
     skip_metadata_api_check     = true
     skip_s3_checksum            = true
   }
+  # State holds the Hyperdrive database password, so it is encrypted before it reaches R2.
+  # The passphrase is TF_VAR_state_passphrase (GitHub mx environment); losing it means
+  # re-importing the resources into a new state.
+  encryption {
+    key_provider "pbkdf2" "state" {
+      passphrase = var.state_passphrase
+    }
+    method "aes_gcm" "state" {
+      keys = key_provider.pbkdf2.state
+    }
+    # One-time: read the existing unencrypted state, then remove this fallback.
+    method "unencrypted" "migrate" {}
+    state {
+      method = method.aes_gcm.state
+      fallback {
+        method = method.unencrypted.migrate
+      }
+    }
+    plan {
+      method = method.aes_gcm.state
+    }
+  }
+}
+
+variable "state_passphrase" {
+  type      = string
+  sensitive = true
 }
 
 variable "account_id" {

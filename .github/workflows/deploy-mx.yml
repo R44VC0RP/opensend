@@ -5,6 +5,9 @@ on:
     branches: [opensend-mx]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-mx
   cancel-in-progress: false

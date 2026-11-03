@@ -6,6 +6,9 @@ on:
     paths: [infra/**, .github/workflows/infra-mx.yml]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: infra-mx
   cancel-in-progress: false
@@ -21,6 +24,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_INFRA_API_TOKEN }}
       TF_VAR_database: ${{ secrets.TF_VAR_DATABASE }}
+      TF_VAR_state_passphrase: ${{ secrets.TF_VAR_STATE_PASSPHRASE }}
     steps:
       - uses: actions/checkout@v4
       - uses: opentofu/setup-opentofu@v1
