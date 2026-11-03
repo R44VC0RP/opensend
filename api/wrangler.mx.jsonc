@@ -33,6 +33,8 @@
     "FEEDBACK_QUEUE_NAME": "opensend-mx-production-feedback"
   },
   "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }] },
+  // Run HTTP requests next to the opensend-public database (PlanetScale aws-us-east-2), as production does.
+  "placement": { "region": "aws:us-east-2" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DispatcherShard"] }],
   // From `tofu output hyperdrive_id` (infra/, production state).
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "3742f44f5c9344fd8e7c99b7b08b84cf" }],
