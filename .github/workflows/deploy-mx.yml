@@ -48,10 +48,19 @@ jobs:
           DATABASE_URL: ${{ secrets.MX_DATABASE_URL }}
           BETTER_AUTH_SECRET: ${{ secrets.MX_BETTER_AUTH_SECRET }}
           PUBLIC_URL: https://opensend.mx
-      - run: npx wrangler deploy --config wrangler.mx.jsonc
+      # Who may sign in and who owns the default workspace are deployment settings (GitHub mx
+      # environment variables), not code. Unset means nobody: both fail closed.
+      - run: >-
+          npx wrangler deploy --config wrangler.mx.jsonc
+          --var "AUTH_ALLOWED_EMAILS:$AUTH_ALLOWED_EMAILS"
+          --var "AUTH_ALLOWED_DOMAINS:$AUTH_ALLOWED_DOMAINS"
+          --var "DEFAULT_WORKSPACE_OWNERS:$DEFAULT_WORKSPACE_OWNERS"
         working-directory: api
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_INFRA_API_TOKEN }}
+          AUTH_ALLOWED_EMAILS: ${{ vars.MX_AUTH_ALLOWED_EMAILS }}
+          AUTH_ALLOWED_DOMAINS: ${{ vars.MX_AUTH_ALLOWED_DOMAINS }}
+          DEFAULT_WORKSPACE_OWNERS: ${{ vars.MX_DEFAULT_WORKSPACE_OWNERS }}
       # Worker secrets live in the GitHub mx environment and are re-applied on every deploy.
       - name: Sync Worker secrets
         working-directory: api
