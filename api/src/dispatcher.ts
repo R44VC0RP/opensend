@@ -4,6 +4,7 @@ import { ApiError, getSes, id, log, type Actor, type Mode, type Runtime } from '
 import { emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { attachmentRows, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { assertLiveRegionReady } from './ses-region-state.js';
+import { workspaceRuntimes } from './jobs.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
 import { screenSnapshot } from './screen.js';
 
@@ -45,7 +46,6 @@ export interface DispatcherOptions {
 }
 export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; recovered: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number }
 
-const worker = (runtime: Runtime, environment: Mode): Actor => ({ workspaceId: runtime.config.workspaceId, environment, keyId: 'worker', domains: [], permissions: ['manage'] });
 // Timestamps are cast to text so raw rows match Drizzle's string-mode timestamp columns.
 const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
 let rankJsonCache: string | undefined;
@@ -127,17 +127,21 @@ function dailyRemaining(gate: GateState) {
 }
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
-async function leaseDue(runtime: Runtime, a: Actor, region: string, limit: number): Promise<Leased[]> {
-  const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH due AS (
+async function leaseDue(runtime: Runtime, environment: Mode, region: string, limit: number): Promise<Leased[]> {
+  const eligible = sql`environment = ${environment} AND region = ${region} AND status = 'queued'
+    AND (scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
+  const priority = sql`ORDER BY (campaign_id IS NULL) DESC, created_at, id`;
+  const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH owner AS MATERIALIZED (
+      SELECT workspace_id FROM sending_emails WHERE ${eligible} ${priority} LIMIT 1 FOR UPDATE SKIP LOCKED
+    ), due AS (
       SELECT id FROM sending_emails
-      WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND region = ${region} AND status = 'queued'
-        AND (scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())
-      ORDER BY (campaign_id IS NULL) DESC, created_at, id LIMIT ${limit} FOR UPDATE SKIP LOCKED
+      WHERE workspace_id = (SELECT workspace_id FROM owner) AND ${eligible}
+      ${priority} LIMIT ${limit} FOR UPDATE SKIP LOCKED
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.id = due.id RETURNING e.*
     ) SELECT ${sql.join(mailColumns, sql`, `)}, r.draft AS review_draft, r.rendered AS review_rendered, r.status AS review_status, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
-    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = ${a.workspaceId} AND r.environment = ${a.environment}
+    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id AND r.environment = leased.environment
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
   return result.rows.map(row => {
@@ -148,14 +152,14 @@ async function leaseDue(runtime: Runtime, a: Actor, region: string, limit: numbe
 
 // A lease that expired while attempting means the provider call may have happened. SES has no
 // idempotency token, so the row becomes acceptance_unknown and is never automatically resent.
-async function recoverInterrupted(runtime: Runtime, a: Actor): Promise<number> {
+async function recoverInterrupted(runtime: Runtime, environment: Mode, region: string): Promise<number> {
   const result = await runtime.db.execute<{ count: number }>(sql`WITH stale AS (
       UPDATE sending_emails SET status = 'acceptance_unknown', error_code = 'INTERRUPTED_PROVIDER_ATTEMPT', lease_until = NULL, updated_at = clock_timestamp()
-      WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND status = 'attempting' AND attempt_started_at < clock_timestamp() - interval '3 minutes'
-      RETURNING id, dispatch_version
+      WHERE environment = ${environment} AND region = ${region} AND status = 'attempting' AND attempt_started_at < clock_timestamp() - interval '3 minutes'
+      RETURNING id, workspace_id, environment, dispatch_version
     ), events AS (
       INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-      SELECT 'event_' || replace(gen_random_uuid()::text, '-', ''), ${a.workspaceId}, ${a.environment}, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version, ${a.environment === 'test'}::boolean, '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb
+      SELECT 'event_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version, environment = 'test', '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb
       FROM stale ON CONFLICT DO NOTHING RETURNING id
     ) SELECT count(*)::int AS count FROM stale`);
   return result.rows[0]?.count ?? 0;
@@ -246,7 +250,7 @@ async function originDecisions(runtime: Runtime, a: Actor, prepared: Prepared[],
   }
   return decisions;
 }
-const originKey = (item: Prepared) => `${item.mail.actorKeyId}\u0000${(item.mail.actorKeyId.startsWith('mbk_') ? item.snapshot.from : item.snapshot.from.split('@')[1]!).toLowerCase()}`;
+const originKey = (item: Prepared) => `${item.mail.workspaceId}\u0000${item.mail.environment}\u0000${item.mail.actorKeyId}\u0000${(item.mail.actorKeyId.startsWith('mbk_') ? item.snapshot.from : item.snapshot.from.split('@')[1]!).toLowerCase()}`;
 
 // One statement elects every row in the group: key revocation under FOR SHARE, consent locks, campaign
 // cancellation, unsubscribe tokens and attempt events. Rows flip queued → attempting here, so the group
@@ -429,7 +433,7 @@ async function recordSuppressed(runtime: Runtime, a: Actor, mails: Mail[]) {
     FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ id: m.id })))}::jsonb) AS x(id text) ON CONFLICT DO NOTHING`);
 }
 
-type Lane = { ses: SESv2Client; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; a: Actor; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { ownerRuntime: (workspaceId: string) => Promise<Runtime>; gate: GateState; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; activated: Set<string>; origins: OriginCache; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
@@ -442,10 +446,15 @@ async function releaseLeases(runtime: Runtime, a: Actor, mails: Mail[]) {
 // One batch: lease up to batchSize rows and prepare them (CPU), then for each group of sendConcurrency
 // rows: one claim statement, paced provider calls, one record statement. Recording overlaps the next
 // group's claim and sends; failures surface at the end of the batch.
-async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
-  const { a, ses, gate, options, counters, phase } = lane;
-  const leased = await phase('lease', () => leaseDue(runtime, a, options.region, options.batchSize));
+async function dispatchBatch(base: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
+  const { gate, options, counters, phase } = lane;
+  const leased = await phase('lease', () => leaseDue(base, options.environment, options.region, options.batchSize));
   if (!leased.length) return { processed: 0, blocked: false };
+  // leaseDue selects exactly one owner before leasing the batch; the pacing gate remains regional.
+  const { workspaceId, environment } = leased[0]!.mail;
+  const a: Actor = { workspaceId, environment, keyId: 'worker', domains: [], permissions: ['manage'] };
+  const runtime = await lane.ownerRuntime(workspaceId);
+  const ses = providerClient(runtime, environment, options.region);
   counters.claimed += leased.length;
   // Quota is loaded lazily so idle regions never touch the provider control plane.
   if (await phase('quota', () => ensureQuota(runtime, a, options.region, gate, ses, options.quotaRefreshMs))) await options.onGate?.(gate);
@@ -501,18 +510,28 @@ async function dispatchBatch(runtime: Runtime, lane: Lane): Promise<{ processed:
  */
 export async function runDispatcher(runtime: Runtime, options: DispatcherOptions): Promise<DispatcherReport> {
   const started = Date.now();
-  const a = worker(runtime, options.environment);
   const gate = options.gate ?? initialGate();
   const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, recovered: 0, batches: 0, idle: false, durationMs: 0, timings: {}, statements: 0 };
   const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
     const startedAt = Date.now();
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
-  const ses = providerClient(runtime, options.environment, options.region);
-  if (options.environment === 'live') await assertLiveRegionReady(runtime, runtime.db, options.region, 'marketing', true);
-  counters.recovered = await phase('recover', () => recoverInterrupted(runtime, a));
+  const regionalRuntime = workspaceRuntimes(runtime);
+  const ready = new Map<string, Promise<Runtime>>();
+  const ownerRuntime = (workspaceId: string) => {
+    let resolved = ready.get(workspaceId);
+    if (!resolved) {
+      resolved = regionalRuntime(workspaceId).then(async owner => {
+        if (options.environment === 'live') await assertLiveRegionReady(owner, owner.db, options.region, 'marketing', true, workspaceId);
+        return owner;
+      });
+      ready.set(workspaceId, resolved);
+    }
+    return resolved;
+  };
+  counters.recovered = await phase('recover', () => recoverInterrupted(runtime, options.environment, options.region));
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: options.environment === 'live' };
-  const lane: Lane = { ses, gate, pacing, a, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const lane: Lane = { ownerRuntime, gate, pacing, activated: new Set(), origins: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lanes = Math.max(1, options.lanes ?? 2);
   let idleLanes = 0, blocked = false;
   await Promise.all(Array.from({ length: lanes }, async () => {

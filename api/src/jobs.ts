@@ -3,7 +3,24 @@ import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, id, log } from './core.js';
 import type { DbExecutor, JobHandler, Mode, Runtime } from './core.js';
 import { jobs } from './db/core.js';
+import { resolveRegionRuntime } from './ses-region-state.js';
 export const MAX_ATTEMPTS = 6;
+// Wake messages drain the installation, not a tenant. Reuse the existing singleton reservation on upgrade.
+export const WAKE_SCHEDULE_KEY = 'default';
+
+// Keep regional settings and clients invocation-local. Concurrent lanes for one owner share the lookup,
+// but never mutate the Node runner's installation config or reuse a different owner's settings.
+export function workspaceRuntimes(runtime: Runtime) {
+  const runtimes = new Map<string, Promise<Runtime>>();
+  return (workspaceId: string) => {
+    let resolved = runtimes.get(workspaceId);
+    if (!resolved) {
+      resolved = resolveRegionRuntime({ ...runtime, config: { ...runtime.config, workspaceId } }, { workspaceId });
+      runtimes.set(workspaceId, resolved);
+    }
+    return resolved;
+  };
+}
 
 // Counts enqueue() calls made while serving one request, so the response path wakes the queue only for new work.
 const enqueued = new AsyncLocalStorage<{ count: number }>();
@@ -43,6 +60,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const rotation = Math.floor(Math.random() * 8);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
+  const regionalRuntime = workspaceRuntimes(runtime);
   const handle = async (job: { id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
@@ -52,7 +70,9 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     try {
       const handler = handlers[job.type];
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
-      await handler(runtime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, environment: job.environment });
+      const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type.startsWith('mailbox.') || job.type === 'operation.ses'
+        ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
+      await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, environment: job.environment });
       await runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence);
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
@@ -87,13 +107,12 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
         SELECT ${(rotation + claimRequests) % 8}::int AS turn
       ), feedback AS (
         SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
-          AND j.workspace_id = ${runtime.config.workspaceId} AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
+          AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
         ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
       ), regular AS (
-        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE j.workspace_id = ${runtime.config.workspaceId}
-          AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
@@ -134,7 +153,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   } finally {
     // The time budget stops new claims, not already leased work or persistence.
     await Promise.all(active);
-    log('info', { code: 'JOB_DRAIN', workspaceId: runtime.config.workspaceId, processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, laneJobs, budgetMs, durationMs: Date.now() - started });
+    log('info', { code: 'JOB_DRAIN', processed, claims, claimRequests, concurrency: effectiveConcurrency, peakActiveJobs, laneJobs, budgetMs, durationMs: Date.now() - started });
   }
   if (failures.length) throw failures[0];
   return processed;
@@ -143,7 +162,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
 export async function nextWakeDelay(runtime: Runtime) {
   const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
     FROM (SELECT min(CASE WHEN status = 'running' THEN lease_until ELSE available_at END) AS due
-      FROM jobs WHERE workspace_id = ${runtime.config.workspaceId} AND status IN ('pending','running')) upcoming`);
+      FROM jobs WHERE status IN ('pending','running')) upcoming`);
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }
@@ -152,7 +171,7 @@ export async function nextWakeDelay(runtime: Runtime) {
 // completed job added a chain that never merged, and the duplicates crowded out the wakes that mattered.
 export async function reserveNextWake(runtime: Runtime, delaySeconds: number): Promise<boolean> {
   const reserved = await runtime.db.execute(sql`INSERT INTO job_schedule (workspace_id, next_wake_at)
-    VALUES (${runtime.config.workspaceId}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
+    VALUES (${WAKE_SCHEDULE_KEY}, clock_timestamp() + (${delaySeconds} * interval '1 second'))
     ON CONFLICT (workspace_id) DO UPDATE SET next_wake_at = excluded.next_wake_at
     WHERE job_schedule.next_wake_at IS NULL OR job_schedule.next_wake_at <= clock_timestamp()
       OR job_schedule.next_wake_at > excluded.next_wake_at + interval '1 second'

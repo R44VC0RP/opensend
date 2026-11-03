@@ -4,7 +4,6 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
-import { resolveRegionRuntime } from './ses-region-state.js';
 import { initialGate, runDispatcher, type GateState } from './dispatcher.js';
 import { ApiError, log, type Mode, type Runtime } from './core.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
@@ -93,8 +92,7 @@ export class DispatcherShard extends DurableObject<Env> {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 4, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    const base: Runtime = { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE) };
-    return resolveRegionRuntime(base);
+    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE) };
   }
 
   private async closePool() {

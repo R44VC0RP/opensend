@@ -5,7 +5,7 @@ import { CreateEmailIdentityCommand, GetAccountCommand, GetEmailIdentityCommand,
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
-import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { enqueue, MAX_ATTEMPTS, workspaceRuntimes } from './jobs.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -98,7 +98,7 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
   let cursor: string | undefined;
   for (;;) {
-    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, environment: webhooks.environment, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(eq(webhooks.workspaceId, config.workspaceId), inArray(webhooks.environment, ['live', 'test']), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
+    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, environment: webhooks.environment, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(inArray(webhooks.environment, ['live', 'test']), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
     if (!rows.length) return counts;
     for (const row of rows) {
       counts.scanned++;
@@ -331,6 +331,23 @@ function verifySesAccount(runtime: Runtime, message: unknown) {
   // SNS topics can receive cross-account SES events; only an explicit SES account binding is authoritative.
   if (runtime.config.awsAccountId && accountId !== runtime.config.awsAccountId) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this deployment.');
 }
+// Topic verification identifies the provider, not the tenant. Resolve all owners in one lookup. A tag can
+// identify an in-flight attempt before its provider response commits, but must not contradict a stored ID.
+async function feedbackOwners(runtime: Runtime, items: FeedbackItem[]) {
+  const keys = items.map((item, index) => ({ index, environment: item?.environment, region: item?.region,
+    provider_id: (item?.message?.mail as { messageId?: string } | undefined)?.messageId, tagged_id: taggedEmailId(item?.message) }));
+  const result = await runtime.db.execute<{ index: number; workspace_id: string }>(sql`
+    SELECT x.index, min(e.workspace_id) AS workspace_id FROM jsonb_to_recordset(${JSON.stringify(keys)}::jsonb)
+      AS x(index int, environment text, region text, provider_id text, tagged_id text)
+    JOIN sending_emails e ON e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
+      AND (x.tagged_id IS NULL OR e.id = x.tagged_id)
+      AND (e.provider_id = x.provider_id OR (e.id = x.tagged_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown')))
+    GROUP BY x.index HAVING count(*) = 1`);
+  return new Map(result.rows.map(row => [row.index, row.workspace_id]));
+}
+function unmatchedFeedback(item: FeedbackItem) {
+  log('warn', { code: 'SES_FEEDBACK_UNMATCHED', environment: item.environment, region: item.region, messageId: item.messageId });
+}
 function registerPublicEvents(app: App) {
   app.use('/v1/events/ses', async (c, next) => {
     // SNS sends JSON envelopes as text/plain. Normalize only the media type before
@@ -367,13 +384,16 @@ function registerPublicEvents(app: App) {
     }
     verifySesAccount(c.env, message);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
+    const item = { ...payload, environment: 'live' as const, message: message as Record<string, unknown> };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
     // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
     if (c.env.feedback) {
-      await c.env.feedback.enqueue([{ environment: 'live', region: trusted.region, topicArn: envelope.TopicArn, messageId: envelope.MessageId, message: message as Record<string, unknown> }]);
+      await c.env.feedback.enqueue([item]);
       return c.json({ accepted: true }, 202);
     }
-    const identity = { workspaceId: c.env.config.workspaceId, environment: 'live' as const };
+    const workspaceId = (await feedbackOwners(c.env, [item])).get(0);
+    if (!workspaceId) { unmatchedFeedback(item); return c.json({ accepted: true }, 202); }
+    const identity = { workspaceId, environment: item.environment };
     const routine = await ingestRoutineFeedback(c.env, payload, identity);
     const runnable = routine ?? await c.env.db.transaction(async tx => {
       const inserted = await tx.insert(snsReceipts).values({ topicArn: envelope.TopicArn, messageId: envelope.MessageId, ...identity }).onConflictDoNothing().returning(); if (!inserted.length) return 0;
@@ -533,7 +553,7 @@ async function ingestRoutineFeedback(runtime: Runtime, payload: Record<string, u
   const timestamp = data?.[kind.toLowerCase()]?.timestamp;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const result = await ingestRoutineSesEvent(runtime, {
-    ...identity, type: kind === 'Send' ? 'send' : 'delivery', providerId, createdAt,
+    ...identity, type: kind === 'Send' ? 'send' : 'delivery', providerId, taggedEmailId: taggedEmailId(data), createdAt,
     externalId: `${payload.topicArn}:${payload.messageId}`, data: { providerId },
     ingress: { topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), payload,
       recoveryType: identity.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' },
@@ -561,18 +581,22 @@ function routineInput(item: FeedbackItem, workspaceId: string): RoutineIngress |
  * signature check at ingress; test items must carry the simulator's synthetic identity.
  */
 export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[]): Promise<{ ok: boolean; error?: string }[]> {
-  const workspaceId = runtime.config.workspaceId;
+  const owners = await feedbackOwners(runtime, items);
+  const regionalRuntime = workspaceRuntimes(runtime);
   const outcomes: { ok: boolean; error?: string }[] = items.map(() => ({ ok: false }));
   const routine = new Map<Mode, { index: number; input: RoutineIngress }[]>();
-  const other: { index: number; item: FeedbackItem }[] = [];
+  const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
     try {
       if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
       else verifySesAccount(runtime, item.message);
+      const workspaceId = owners.get(index);
+      if (!workspaceId) { unmatchedFeedback(item); outcomes[index] = { ok: true }; continue; }
+      if (item.environment === 'live') verifySesAccount(await regionalRuntime(workspaceId), item.message);
       const input = routineInput(item, workspaceId);
       if (input) { const group = routine.get(item.environment) ?? []; group.push({ index, input }); routine.set(item.environment, group); }
       else if (item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
-      else other.push({ index, item });
+      else other.push({ index, item, workspaceId });
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
   }
   for (const [environment, group] of routine) {
@@ -581,7 +605,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       for (const [position, entry] of group.entries()) {
         const result = results[position]!;
         outcomes[entry.index] = { ok: true };
-        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId, environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: entry.input.workspaceId, environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
       }
       // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
       if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
@@ -591,8 +615,8 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   }
   if (other.length) {
     // Non-routine callbacks need a receipt row first; processing is idempotent per receipt.
-    await runtime.db.insert(snsReceipts).values(other.map(({ item }) => ({ topicArn: item.topicArn, messageId: item.messageId, workspaceId, environment: item.environment }))).onConflictDoNothing();
-    await Promise.all(other.map(async ({ index, item }) => {
+    await runtime.db.insert(snsReceipts).values(other.map(({ item, workspaceId }) => ({ topicArn: item.topicArn, messageId: item.messageId, workspaceId, environment: item.environment }))).onConflictDoNothing();
+    await Promise.all(other.map(async ({ index, item, workspaceId }) => {
       try {
         await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
         outcomes[index] = { ok: true };
@@ -614,7 +638,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
   } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), tagged
     // Fallback for a lost provider response: see ingestRoutineSesEvents.
-    ? or(eq(emails.providerId, providerId), and(isNull(emails.providerId), eq(emails.status, 'acceptance_unknown'), eq(emails.id, tagged)))
+    ? and(eq(emails.id, tagged), or(eq(emails.providerId, providerId), and(isNull(emails.providerId), eq(emails.status, 'acceptance_unknown'))))
     : eq(emails.providerId, providerId))).where(receiptWhere);
   if (!input || input.receipt.processedAt) return;
   const { receipt, email } = input;

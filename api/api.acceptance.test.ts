@@ -2937,7 +2937,7 @@ describe('Operational configuration and public event boundaries', () => {
         // These rows never commit: the external runner cannot see or deliver this
         // synthetic endpoint test. Only this normal drain uses the loopback transport.
         const queued = ok(await local('POST', `/v1/webhooks/${endpoint.id}/test`), 202);
-        assert.equal(await drain(runtime), 1);
+        await drain(runtime);
         const delivery = ok(await local('GET', `/v1/webhooks/${endpoint.id}/deliveries/${queued.id}`));
         assert.equal(delivery.status, 'pending');
         assert.equal(delivery.lastStatusCode, 302);
@@ -2946,7 +2946,7 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts.length, 1);
         assert.equal(delivery.attempts[0].statusCode, 302);
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
-        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook'", [runtime.config.workspaceId]);
+        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND environment = 'test' AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         throw rollback;

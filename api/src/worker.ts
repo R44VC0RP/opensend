@@ -4,8 +4,8 @@ import { sql } from 'drizzle-orm';
 import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
-import { drainJobs } from './dispatch.js';
-import { followDueJobs, jobConcurrency } from './jobs.js';
+import { dispatchRegions, drainJobs } from './dispatch.js';
+import { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
 import { mailboxHourly } from './mailbox-ingest.js';
@@ -51,7 +51,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
       if (count === 1) {
         // Compute conflict expiry under its row lock, not from an earlier EXCLUDED timestamp.
         const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)
-          VALUES (${config.workspaceId}, clock_timestamp() + interval '1 second')
+          VALUES (${WAKE_SCHEDULE_KEY}, clock_timestamp() + interval '1 second')
           ON CONFLICT (workspace_id) DO UPDATE SET wake_not_before = clock_timestamp() + interval '1 second'
           WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before <= clock_timestamp()
           RETURNING wake_not_before::text`);
@@ -67,7 +67,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>):
           // Keep the exact database timestamp: an older failed send must not clear a newer reservation.
           try {
             await db.execute(sql`UPDATE job_schedule SET wake_not_before = NULL
-              WHERE workspace_id = ${config.workspaceId} AND wake_not_before = ${fence}::timestamptz`);
+              WHERE workspace_id = ${WAKE_SCHEDULE_KEY} AND wake_not_before = ${fence}::timestamptz`);
           } catch { /* Preserve the original send error; the window also expires on its own. */ }
           throw error;
         }
@@ -125,7 +125,7 @@ export default {
       // payload never blocks a batch of routine deliveries.
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
-        const outcomes = await ingestFeedbackBatch(await resolveRegionRuntime(runtime), messages.map(message => message.body));
+        const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
         for (const [index, message] of messages.entries()) outcomes[index]?.ok ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
         log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
       });
@@ -158,7 +158,7 @@ export default {
       const resolved = await resolveRegionRuntime(runtime);
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       try { await syncOutboundMessages(resolved); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
-      await Promise.allSettled(resolved.config.regions.flatMap(region => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
+      await Promise.allSettled((await dispatchRegions(runtime)).flatMap(({ region }) => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
       const concurrency = workerConcurrency(env);
       // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));

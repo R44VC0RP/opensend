@@ -3,8 +3,8 @@ import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { ApiError, log, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
+import { sesSettings } from './db/ses-regions.js';
 import { enqueue } from './jobs.js';
-import { resolveRegionRuntime } from './ses-region-state.js';
 import { readReputation } from './ses-setup.js';
 
 // SES console thresholds. "Near" alerts fire at 80% of a threshold.
@@ -46,9 +46,10 @@ const DAY_MS = 24 * 3600_000;
  */
 export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
   if (!runtime.config.reputationAlertUrl || !runtime.config.aws || !runtime.config.liveEnabled) return 0;
-  const resolved = await resolveRegionRuntime(runtime);
+  // CloudWatch rates still describe one provider account. Read each region once, but keep alert ledgers per workspace.
+  const settings = await runtime.db.select({ workspaceId: sesSettings.workspaceId, regions: sesSettings.enabledRegions }).from(sesSettings);
   let queued = 0;
-  for (const region of resolved.config.regions) {
+  for (const region of new Set(settings.flatMap(row => row.regions))) {
     const cw = new CloudWatchClient({ region, credentials: runtime.config.aws, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) });
     try {
       const reputation = await readReputation(cw, AbortSignal.timeout(20000));
@@ -56,7 +57,7 @@ export async function checkReputationAlerts(runtime: Runtime): Promise<number> {
       for (const metric of Object.keys(THRESHOLDS) as Metric[]) {
         const value = reputation[metric];
         if (value == null) continue;
-        if (await queueIfChanged(runtime, region, metric, value)) queued++;
+        for (const owner of settings) if (owner.regions.includes(region) && await queueIfChanged(runtime, owner.workspaceId, region, metric, value)) queued++;
       }
     } finally { cw.destroy(); }
   }
@@ -77,8 +78,7 @@ export function decideAlert(metric: Metric, value: number, history: { level: Lev
   return { level: next, previous };
 }
 
-async function queueIfChanged(runtime: Runtime, region: string, metric: Metric, value: number) {
-  const workspaceId = runtime.config.workspaceId;
+async function queueIfChanged(runtime: Runtime, workspaceId: string, region: string, metric: Metric, value: number) {
   return runtime.db.transaction(async tx => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${JOB}:${workspaceId}:${region}:${metric}`}))`);
     const recent = await tx.select({ payload: jobs.payload, createdAt: jobs.createdAt }).from(jobs)
