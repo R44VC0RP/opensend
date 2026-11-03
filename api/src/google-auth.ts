@@ -47,11 +47,11 @@ export async function isApprovedUser(runtime: Runtime, userId: string, db: DbExe
 
 // Only call after Google approval. Until workspace selection exists, an ambiguous
 // login fails closed; an existing consent may select only its bound workspace.
-export async function membershipForApprovedUser(db: DbExecutor, userId: string, workspaceId?: string) {
+export async function membershipForApprovedUser(db: DbExecutor, userId: string, { workspaceId, bootstrapDefaultOwner }: { workspaceId?: string; bootstrapDefaultOwner: boolean }) {
   const fields = { workspaceId: workspaceMembers.workspaceId, role: workspaceMembers.role };
   const memberships = () => db.select(fields).from(workspaceMembers).where(eq(workspaceMembers.userId, userId)).for('share');
   let rows = await memberships();
-  if (!rows.length && (workspaceId === undefined || workspaceId === 'default')) {
+  if (!rows.length && workspaceId === undefined && bootstrapDefaultOwner) {
     rows = await db.insert(workspaceMembers).values({ id: crypto.randomUUID(), userId, workspaceId: 'default', role: 'owner' })
       .onConflictDoNothing({ target: [workspaceMembers.workspaceId, workspaceMembers.userId] }).returning(fields);
     if (!rows.length) rows = await memberships(); // Concurrent first use; read the winner's role.
@@ -184,7 +184,8 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
     if (!session) return null;
     const user = await measure('approval-db', () => approvedUser(runtime, session.user.id, runtime.db, session.session));
     if (!user) return null;
-    const member = await membershipForApprovedUser(runtime.db, session.user.id);
+    const owners = runtime.config.defaultWorkspaceOwners;
+    const member = await membershipForApprovedUser(runtime.db, session.user.id, { bootstrapDefaultOwner: owners === '*' || owners.includes(user.email.toLowerCase()) });
     if (!member) return null;
     const selected = headers.get('x-opensend-environment');
     if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');

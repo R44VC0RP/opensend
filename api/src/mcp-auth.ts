@@ -56,7 +56,7 @@ export function createMcpPlugin(runtime: Runtime) {
       page: '/mcp/consent', shouldRedirect: () => false,
       consentReferenceId: async ({ user, scopes: requested }) => {
         if (!user || !await isApprovedUser(runtime, user.id) || !requested.every(scope => scopes.includes(scope)) || !grantPermissions(requested).length) invalidGrant();
-        const member = await membershipForApprovedUser(runtime.db, user.id);
+        const member = await membershipForApprovedUser(runtime.db, user.id, { bootstrapDefaultOwner: false });
         if (!member) invalidGrant();
         const tag = workspaceTag(member.workspaceId);
         return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${tag ? `|${tag}` : ''}`;
@@ -98,7 +98,7 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const allowed = original.scopes.filter(scope => row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const member = await membershipForApprovedUser(db, row.userId, original.workspaceId);
+  const member = await membershipForApprovedUser(db, row.userId, { workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
   if (!member) return null;
   const actor: Actor = { keyId, workspaceId: member.workspaceId, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
   return { actor, scopes: allowed, userId: row.userId, clientId: row.clientId };

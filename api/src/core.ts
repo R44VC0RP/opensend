@@ -35,6 +35,7 @@ export interface Config {
   googleClientSecret?: string;
   allowedEmails: string[];
   allowedDomains: string[];
+  defaultWorkspaceOwners: '*' | string[];
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];
