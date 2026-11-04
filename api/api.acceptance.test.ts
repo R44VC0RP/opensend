@@ -644,7 +644,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
       cleanup(t, () => pool.end());
       runtime.db = drizzle(pool);
-      Object.assign(runtime.config, { multiTenant: true, sharedInboundDomain: 'in.opensend.mx', googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
+      Object.assign(runtime.config, { multiTenant: true, googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
       const base = '/v1/workspaces/current', workspaces: string[] = [];
       cleanup(t, async () => {
         for (const wid of workspaces) {
@@ -721,7 +721,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
             case 'CreateEmailIdentityCommand': {
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
-              assert.equal(i.Tags[0].Key,i.EmailIdentity==='in.opensend.mx'?'opensend:installation-id':'opensend:domain-claim');
+              assert.equal(i.Tags[0].Key,'opensend:domain-claim');
               identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
               if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
               return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
@@ -820,10 +820,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const discovery = `/v1/regions/${region}/discovery`;
         // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
-          let answer = '', lookups = 0;
+          let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>();
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
             const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
-            if(url.searchParams.get('type')==='MX') return Response.json({Status:0,Answer:[{name:url.searchParams.get('name'),type:15,data:'10 existing.invalid.'}]});
+            if (fault===url.searchParams.get('type')+'-servfail') return Response.json({Status:2});
+            if (fault===url.searchParams.get('type')+'-503') return new Response(null,{status:503});
+            if (fault===url.searchParams.get('type')+'-timeout') throw new DOMException('timed out','TimeoutError');
+            if(url.searchParams.get('type')==='MX') {
+              const name=url.searchParams.get('name')!,host=activeMx.has(name)?`inbound-smtp.${region}.amazonaws.com`:name===domain?'existing.invalid':null;
+              return Response.json({Status:0,Answer:host?[{name,type:15,data:`10 ${host}.`},...(fault==='mixed' && activeMx.has(name)?[{name,type:15,data:'20 other.invalid.'}]:[])]:[]});
+            }
             assert.equal(url.searchParams.get('type'),'TXT');
             lookups++; return Response.json({ Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] });
           });
@@ -840,7 +846,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           loseCreateResponse=true; error(await add(b.cookie,recovery),503,'SES_UNAVAILABLE');
           // The second failed request did reach SES. Recover only this claim's tagged identity.
           const restored=ok(await add(b.cookie,recovery),201);
-          assert.equal(restored.dns.filter((r:Json)=>r.purpose==='dkim').length,3); assert.equal(restored.verified,false);
+          assert.equal(restored.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.equal(restored.verified,false);
           assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand']);
           ok(await local('DELETE',`/v1/domains/${restored.id}`,undefined,b.cookie));
           const collisionStart=calls.length;
@@ -849,10 +855,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.ok(identities.has(`${platform}:${foreign}`));
           assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=$1',[foreign])).rowCount,0);
           const n=queries.mock.callCount(),creates=calls.length;
-          const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose === 'ownership');
+          const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose==='sending' && r.type==='TXT');
           dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
           assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
-          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='dkim').length,3);
+          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='sending').length,3);
+          assert.deepEqual(created.dns.find((r:Json)=>r.purpose==='receiving'),{name:domain,type:'MX',value:`inbound-smtp.${region}.amazonaws.com`,priority:10,purpose:'receiving',status:'pending'});
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
           for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
@@ -866,7 +873,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1);
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-          answer=proof.value; await check(); const readStart=calls.length;
+          answer=proof.value; await check(); const readStart=calls.length; // Sending-only setup completes without polling SES for MX.
           const readQueries=queries.mock.callCount();
           const checked=ok(await local('GET',detail,undefined,b.cookie)); assert.equal(checked.verified,true); assert.equal(checked.ready,true);
           dt.diagnostic(`GET domain detail: ${queries.mock.callCount()-readQueries} pg round trips including dashboard auth`);
@@ -874,14 +881,38 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
           assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,2);
           assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
-          await dt.test('MX inbound: instant and verified custom addresses split an envelope with private Bcc, without enable',async it=>{
+          await dt.test('MX inbound routes only MX-verified customer hosts, independently of DKIM, and splits private Bcc',async it=>{
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
-            const blind=`private@${a.org.slug}.in.opensend.mx`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
+            const otherHost=`${unique('receiving')}.invalid`,blind=`private@${otherHost}`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
             const hook=unique('hook'); // Non-routable fixture: inspect the durable snapshot, never POST externally.
             await pool.query(`INSERT INTO mailbox_webhooks(id,workspace_id,environment,url,event_types,encrypted_secret) VALUES ($1,$2,'live','https://fixture.invalid/','["message.received"]','fixture')`,[hook,b.org.id]);
             it.after(async()=>{await pool.query('DELETE FROM mailbox_webhooks WHERE id=$1',[hook]);});
-            assert.ok(checked.dns.some((r:Json)=>r.purpose==='inbound' && r.name===`reply.${domain}` && r.priority===10));
+            const mx=checked.dns.find((r:Json)=>r.purpose==='receiving');assert.equal(mx.name,`reply.${domain}`);assert.equal(mx.priority,10);assert.equal(mx.status,'pending');assert.ok(mx.note.includes('existing.invalid') && mx.note.includes(mx.name));
+            assert.equal(checked.sending,'verified');assert.equal(checked.receiving,'pending');
             const {BucketName:bucket,TopicArn:topicArn}=rules.get(region)!.Actions[0].S3Action;
+            const probe=async(addr:string)=>{const id=unique('probe');return acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});};
+            assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
+            const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+            const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id,environment:'live'});
+            const awsBefore=calls.length,txtBefore=lookups;
+            activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
+            assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly MX-only job must use neither SES nor TXT.');
+            const stable=ok(await local('GET',detail,undefined,b.cookie));
+            fault='mixed';for(let i=0;i<3;i++)await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified','Additional MX records are not proof that the verified record disappeared.');fault='';await mxCheck();
+            for (fault of ['MX-timeout','MX-503','TXT-servfail','TXT-503']) {
+              await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);
+            }
+            fault='MX-servfail';await assert.rejects(mxCheck(),{code:'DOMAIN_DNS_UNAVAILABLE'});assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);fault='';
+            assert.equal(await probe(`support@${domain}`),0,'Verifying the suggested reply host must not activate the conflicting root MX.');
+            const other=ok(await add(a.cookie,otherHost),201),otherProof=other.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT').value;
+            const identity=identities.get(`${platform}:${otherHost}`)!;identity.DkimAttributes={...identity.DkimAttributes,Status:'PENDING'};identity.VerifiedForSendingStatus=false;identity.VerificationStatus='PENDING';
+            const verifyOther=()=>operationJobs['domain.verify']!(runtime,{domainId:other.id,token:otherProof},{id:unique('job'),attempts:1,workspaceId:a.org.id,environment:'live'});
+            activeMx.add(otherHost);await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Correct MX alone is not proof of ownership.');
+            answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Ownership and MX cannot receive before SES verifies the identity.');
+            assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'pending');
+            identity.VerificationStatus='SUCCESS';identity.VerifiedForSendingStatus=true;await pace();await assert.rejects(verifyOther(),JobDeferred);const receiveOnly=ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie));
+            assert.equal(receiveOnly.sending,'pending');assert.equal(receiveOnly.receiving,'verified');assert.equal(receiveOnly.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
+            answer=proof.value;
             const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
             const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
             const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
@@ -903,10 +934,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             message.receipt.recipients=[custom];message.receipt.timestamp='2020-01-01T00:00:00Z';assert.equal(await accept(),0,'A delayed notification predating this domain claim does not transfer old mail.');
             const deliveries=await pool.query('SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1',[hook]);assert.equal(deliveries.rowCount,1);assert.ok(!JSON.stringify(deliveries.rows).includes(blind));
             const live={'x-opensend-environment':'live'},awsCount=calls.length;
-            error(await local('POST','/v1/inbound/addresses',{address:`escape@${b.org.slug}.in.opensend.mx`,publicAddress:'escape@in.opensend.mx'},b.cookie,live),409,'PUBLIC_DOMAIN_NOT_VERIFIED');
-            error(await local('POST','/v1/inbound/addresses',{address:`escape@${a.org.slug}.in.opensend.mx`,publicAddress:`escape@${a.org.slug}.in.opensend.mx`},b.cookie,live),409,'MAILBOX_DOMAIN_NOT_ENABLED');
+            const inboundPath=`/v1/inbound/domains/${created.id}`;
+            const inboundView=ok(await local('GET',inboundPath,undefined,b.cookie,live));assert.equal(inboundView.name,mx.name);assert.equal(inboundView.dns[0].name,mx.name);assert.equal(inboundView.status,'active');assert.equal(inboundView.addressCount,1);
+            assert.equal(ok(await local('PATCH',inboundPath,{catchAll:'store'},b.cookie,live)).catchAll,'store');
+            const policy=(await pool.query('SELECT receiving_host,catch_all FROM mailbox_domains WHERE domain_id=$1',[created.id])).rows;
+            assert.deepEqual(policy,[{receiving_host:mx.name,catch_all:'store'}]);
+            error(await local('POST','/v1/inbound/addresses',{address:blind},b.cookie,live),409,'MAILBOX_DOMAIN_NOT_ENABLED');
             const box=ok(await local('POST','/v1/inbound/addresses',{address:`archive@reply.${domain}`,publicAddress:`archive@${domain}`},b.cookie,live),201);
-            assert.equal(calls.length,awsCount);assert.equal((await pool.query("SELECT region FROM mailbox_domains WHERE id='instant:'||$1",[b.org.id])).rows[0].region,region);
+            assert.equal(calls.length,awsCount);
             const sourceBytes=new Map<string,Uint8Array>();it.mock.method(runtime.storage,'put',async(key:string,bytes:Uint8Array)=>{assert.equal((await pool.query('SELECT 1 FROM sending_attachments WHERE storage_key=$1',[key])).rowCount,1,'Reservation commits before storage upload');sourceBytes.set(key,bytes);});
             it.mock.method(runtime.storage,'get',async(key:string)=>({body:sourceBytes.get(key)!,contentType:'text/plain'}));
             failNextArchive=true;const out=ok(await local('POST','/v1/inbound/threads',{addressId:box.id,to:['outside@example.org'],subject:'archive',text:'attached',attachments:[{filename:'file.txt',contentType:'text/plain',content:Buffer.from('archive bytes').toString('base64')}]},b.cookie,live),202);
@@ -922,6 +957,25 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const n=queries.mock.callCount();assert.ok(await sync.syncOutboundMessages({...runtime,db:drizzle(conn)})>=2);assert.equal(queries.mock.callCount()-n,1);
               for(const {org} of [a,b]) assert.deepEqual((await conn.query("SELECT type FROM mailbox_events WHERE workspace_id=$1 AND type IN ('message.sent','message.delivered') ORDER BY seq",[org.id])).rows.map(r=>r.type),['message.sent','message.delivered']);
             } finally {await conn.query('ROLLBACK');conn.release();}
+            // Two definite misses cannot revoke a proven TXT/MX; a positive answer resets the streak.
+            answer='';for(let i=0;i<2;i++){await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);}
+            answer=proof.value;await pace();await check();
+            answer='';for(let i=0;i<3;i++){await pace();await assert.rejects(check(),JobDeferred);const observed=ok(await local('GET',detail,undefined,b.cookie));assert.equal(observed.sending,i===2?'pending':'verified');assert.equal(observed.receiving,observed.sending);}
+            assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),0,'Hourly MX alone cannot re-authorize lost ownership.');
+            answer=proof.value;await pace();await check();
+            activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
+            activeMx.add(mx.name);await mxCheck();activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
+            await mxCheck();assert.equal(await probe(custom),0,'Three confirmed MX misses revoke routing while sending stays verified.');
+            assert.equal(ok(await local('GET',detail,undefined,b.cookie)).sending,'verified');
+            // Exercise the hourly scheduler inside an isolated transaction: one job per claim, spread over the hour.
+            const {refreshMailboxDns}=await import('./src/mailbox-setup.js'),{sql}=await import('drizzle-orm');
+            const abort=new Error('rollback scheduled fixtures');await assert.rejects(runtime.db.transaction(async tx=>{
+              const rows=async()=>(await tx.execute<{at:string}>(sql`SELECT available_at AS at FROM jobs WHERE type='domain.mx' ORDER BY available_at`)).rows;
+              await refreshMailboxDns({...runtime,db:tx},1);assert.equal((await rows()).length,1);
+              await tx.execute(sql`DELETE FROM jobs WHERE type='domain.mx'`);await refreshMailboxDns({...runtime,db:tx},2);const queued=await rows();assert.equal(queued.length,2);assert.notEqual(queued[0]!.at,queued[1]!.at);
+              await refreshMailboxDns({...runtime,db:tx},2);assert.deepEqual(await rows(),queued);throw abort;
+            }),e=>e===abort);
+            ok(await local('DELETE',`/v1/domains/${other.id}`,undefined,a.cookie));
           });
           error(await send(`hi@not${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
           await pool.query("UPDATE jobs SET status='running',lease_until=now()+interval '3 minutes' WHERE id=$1",[job.id]);
@@ -934,7 +988,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await pool.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour' WHERE id=$1",[job.id]);
           ok(await local('DELETE',detail,undefined,b.cookie)); assert.ok(!identities.has(`${platform}:${domain}`)); error(await local('GET',detail,undefined,b.cookie),404);
           assert.equal((await pool.query('SELECT 1 FROM jobs WHERE id=$1',[job.id])).rowCount,0);
-          const reclaimed=ok(await add(a.cookie,domain),201); assert.notEqual(reclaimed.dns.find((r:Json)=>r.purpose==='ownership').value,proof.value);
+          const reclaimed=ok(await add(a.cookie,domain),201); assert.notEqual(reclaimed.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT').value,proof.value);
           await check(); assert.equal(ok(await local('GET',`/v1/domains/${reclaimed.id}`,undefined,a.cookie)).verified,false);
           ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
           const race = `${unique('race')}.invalid`;
@@ -958,12 +1012,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(ok(await local('GET','/v1/settings/ses',undefined,a.cookie)).region,region);
         identities.set(`${customer}:${foreign}`,verifiedIdentity);
         error(await add(a.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
-        const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['dkim','dkim','dkim']);
+        const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['sending','sending','sending','receiving']);
         const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
-        await (await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,j.payload,{id:j.id,attempts:1,workspaceId:a.org.id,environment:'live'});
         await providerTest.test('BYO inbound uses its assumed role and per-domain rule, never the platform catch-all',async bt=>{
           const headers={'x-opensend-environment':'live'},wid=a.org.id;
-          bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{assert.equal(new URL(String(input)).searchParams.get('type'),'MX');return Response.json({Status:0,Answer:[]});});
+          bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{assert.equal(new URL(String(input)).searchParams.get('type'),'MX');return Response.json({Status:0,Answer:[{name:domain,type:15,data:`10 inbound-smtp.${region}.amazonaws.com.`}]});});
           bt.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'customer-set'},Rules:[]};
             assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.RuleSetName,'customer-set');assert.deepEqual(cmd.input.Rule.Recipients,[domain]);return {};
@@ -973,13 +1026,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             if(cmd.constructor.name==='GetObjectCommand')return {Body:{transformToByteArray:async()=>Buffer.from('From: sender@example.org\r\nSubject: BYO\r\n\r\nBody')}};
             if(cmd.constructor.name==='CopyObjectCommand')copied=cmd.input.Key;return {};
           });
-          // The separate harness runner has no AWS mocks. Reserve its pending reconcile before the HTTP enable.
-          const scheduled=unique('reconcile');await pool.query(`INSERT INTO jobs(id,type,workspace_id,environment,payload,available_at) VALUES ($1,'mailbox.reconcile',$2,'live',jsonb_build_object('region',$3::text),now()+interval '1 day')`,[scheduled,wid,region]);
-          bt.after(async()=>{await pool.query('DELETE FROM jobs WHERE id=$1',[scheduled]);});
-          ok(await local('POST',`/v1/inbound/domains/${byoDomain.id}/enable`,{},a.cookie,headers),202);
-          await (await import('./src/mailbox-setup.js')).reconcileRegion(runtime,region,wid);
+          // Verify and claim its new reconcile atomically so the separate, unmocked runner never takes it.
+          const {operationJobs}=await import('./src/operations.js'),{sql}=await import('drizzle-orm');
+          const scheduled=await runtime.db.transaction(async tx=>{
+            await operationJobs['domain.verify']!({...runtime,db:tx},j.payload,{id:j.id,attempts:1,workspaceId:wid,environment:'live'});
+            return (await tx.execute<{id:string}>(sql`UPDATE jobs SET available_at=now()+interval '1 day' WHERE workspace_id=${wid} AND type='mailbox.reconcile' AND status='pending' RETURNING id`)).rows[0]!.id;
+          });
+          const getDomain=async()=>ok(await local('GET',`/v1/domains/${byoDomain.id}`,undefined,a.cookie));
+          const pendingRule=await getDomain();assert.equal(pendingRule.receiving,'pending');assert.equal(pendingRule.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
+          await (await import('./src/mailbox-setup.js')).mailboxSetupJobs['mailbox.reconcile']!(runtime,{region},{id:scheduled,attempts:1,workspaceId:wid,environment:'live'});
+          assert.equal((await getDomain()).receiving,'verified');
+          await pool.query('DELETE FROM jobs WHERE id=$1',[scheduled]);
           const {rows:[r]}=await pool.query('SELECT bucket,topic_arn AS arn FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,region]);
-          const sesMessageId=unique('byo'),recipient=`byo@${domain}`,other=`hidden@${b.org.slug}.in.opensend.mx`;
+          const sesMessageId=unique('byo'),recipient=`byo@${domain}`,other='hidden@unclaimed.invalid';
           const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
           const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
           assert.equal(await acceptInboundNotification(runtime,{topicArn:r.arn,region,message}),1);
@@ -1336,7 +1395,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
-      Object.assign(runtime.config, { multiTenant: true, sharedInboundDomain: 'in.opensend.mx', allowedDomains: [], allowedEmails: [] });
+      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
       // A cold hosted connection and unverified claim are sufficient for simulated delivery, even without AWS credentials.
@@ -3513,7 +3572,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const shared = runtime.config.workspaceId, byo = unique('customer'), pool = '111122223333', account = '444455556666', externalId = randomUUID();
       const poolTopic = `arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`, byoTopic = `arn:aws:sns:${REGION}:${account}:${setupResources(byo).topicName}`;
       const role = `arn:aws:iam::${account}:role/OpenSendMX-fixture`;
-      Object.assign(runtime.config, { multiTenant:true, sharedInboundDomain:'in.opensend.mx', liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
       await db.query('INSERT INTO workspaces(id,slug,name) VALUES ($1,$1,$1)',[byo]);
       await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
       await db.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $2,$2,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$1',[shared,byo]);

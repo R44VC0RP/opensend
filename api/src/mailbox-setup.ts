@@ -1,16 +1,15 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { and, eq, inArray, isNull, sql,type SQLWrapper } from 'drizzle-orm';
 import { SESClient, CreateReceiptRuleCommand, CreateReceiptRuleSetCommand, DeleteReceiptRuleCommand, DescribeActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, UpdateReceiptRuleCommand, type ReceiptRule } from '@aws-sdk/client-ses';
-import { SESv2Client, CreateEmailIdentityCommand, GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
 import { S3Client, CopyObjectCommand, CreateBucketCommand, HeadBucketCommand, PutBucketLifecycleConfigurationCommand, PutBucketPolicyCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand } from '@aws-sdk/client-s3';
 import { SNSClient, CreateTopicCommand, ListSubscriptionsByTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, SubscribeCommand } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { ApiError, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
-import { mailboxDomains, mailboxRegions } from './db/mailbox.js';
+import { mailboxDomains, mailboxRegions,type MxReport } from './db/mailbox.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { checkMx, expectedMx } from './mailbox-dns.js';
+import { checkMx } from './mailbox-dns.js';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, setupResources } from './ses-setup.js';
@@ -22,9 +21,6 @@ const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
 export const STAGING_PREFIX = 'staging/';
 export const workspacePrefix = (wid:string, kind:'raw'|'att') => `workspaces/${wid}/${kind}/`;
-// Unset on self-hosted installs: an empty domain matches no recipient host or reserved address.
-export const sharedInboundDomain = (runtime:Runtime) => runtime.config.sharedInboundDomain ?? '';
-export const instantRegion=(runtime:Runtime)=>sql`(SELECT p.region FROM provider_pool_regions p JOIN jsonb_array_elements_text(${JSON.stringify(runtime.config.sharedRegions??['us-east-2'])}::jsonb) WITH ORDINALITY offered(region,n) ON p.region=offered.region WHERE p.inbound_domain=${sharedInboundDomain(runtime)} ORDER BY offered.n LIMIT 1)`;
 export function assertMailboxKey(wid:string,key:string,kind:'raw'|'att') {
   if (!key.startsWith(workspacePrefix(wid,kind)) || key.split('/').some(s=>!s || s==='.' || s==='..')) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The object is not in this workspace.');
 }
@@ -41,7 +37,7 @@ function awsConfig(region:string, credentials:NonNullable<Runtime['config']['aws
 export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string|SQLWrapper) {
   return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (
       SELECT 'shared' AS kind,NULL AS id,aws_account_id,NULL AS role_arn,NULL::uuid AS external_id FROM provider_pool_regions
-      WHERE region=${region} AND inbound_bucket=${bucket} AND inbound_domain IS NOT NULL
+      WHERE region=${region} AND inbound_bucket=${bucket}
       UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id FROM provider_connections c JOIN mailbox_regions r
       ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.status='ready' AND r.bucket=${bucket}) matched)`;
@@ -197,11 +193,10 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
     && action?.BucketName === want.BucketName && action?.ObjectKeyPrefix === want.ObjectKeyPrefix && action?.TopicArn === want.TopicArn && !action?.KmsKeyArn;
 }
 
-/** Platform maintenance only. Easy DKIM tokens and signing zones are regional AWS output, not constants. */
+/** Platform maintenance only: customer identities share one regional catch-all rule. */
 export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
   const config=awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
-  const ses=new SESClient(config),v2=new SESv2Client(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
-  const domain=sharedInboundDomain(runtime);
+  const ses=new SESClient(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
   try {
     const resources=await ensureRegion(runtime,region,POOL_INSTALLATION,signal,clients,register,account);
     const rule=ruleFor(mailboxResources(POOL_INSTALLATION,region,account).rulePrefix+'all',[],resources);
@@ -212,19 +207,8 @@ export async function preparePoolReceiving(runtime:Runtime,region:string,account
       await clients.ses('ses:CreateReceiptRule',new CreateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule,After:after}));
     }
     else if (!ruleMatches(existing,rule)) await clients.ses('ses:UpdateReceiptRule',new UpdateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule}));
-    const get=()=>v2.send(new GetEmailIdentityCommand({EmailIdentity:domain}),{abortSignal:signal});
-    let dkim;
-    try {
-      const identity=await get();
-      if (!tags(POOL_INSTALLATION).every(t=>identity.Tags?.some(a=>a.Key===t.Key && a.Value===t.Value))) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The platform inbound identity belongs to another installation.');
-      dkim=identity.DkimAttributes;
-    } catch(e) {
-      if (errorName(e)!=='NotFoundException') throw e;
-      dkim=(await v2.send(new CreateEmailIdentityCommand({EmailIdentity:domain,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:tags(POOL_INSTALLATION)}),{abortSignal:signal})).DkimAttributes;
-    }
-    if (!dkim?.SigningHostedZone || dkim.Tokens?.length!==3) throw new ApiError(503,'INBOUND_DKIM_UNAVAILABLE','SES did not return the three Easy DKIM DNS records.',undefined,true);
-    return [expectedMx(`*.${domain}`,region),...dkim.Tokens.map(t=>({type:'CNAME',name:`${t}._domainkey.${domain}`,value:`${t}.${dkim.SigningHostedZone}`}))];
-  } finally { ses.destroy(); v2.destroy(); clients.s3.destroy(); clients.sns.destroy(); clients.sts.destroy(); }
+    return resources.bucket;
+  } finally { ses.destroy(); clients.s3.destroy(); clients.sns.destroy(); clients.sts.destroy(); }
 }
 
 /**
@@ -252,10 +236,10 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
       await runtime.db.update(mailboxRegions).set({ accountId:account,bucket,topicArn:arn,updatedAt:new Date().toISOString() }).where(and(eq(mailboxRegions.workspaceId,workspaceId),eq(mailboxRegions.region,region)));
     }), ses: clients.ses };
     const names = mailboxResources(settings.installationId, region);
-    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region),connection ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE dc.connection_id=${connection.id} AND dc.verified AND dc.workspace_id=${workspaceId} AND d.id=${mailboxDomains.domainId} AND d.region=${region} AND d.environment='live')` : undefined));
-    // Subdomain rows are covered by their parent's wildcard recipient (.example.com), not listed themselves.
+    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region),connection ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE dc.connection_id=${connection.id} AND dc.receiving_name=${mailboxDomains.receivingHost} AND dc.workspace_id=${workspaceId} AND d.id=${mailboxDomains.domainId} AND d.region=${region} AND d.environment='live')` : undefined));
+    // Self-hosted wildcard rows are covered by their parent. BYO rules list only MX-proven hostnames.
     const receiving = rows.filter(row => !row.parentId && ['provisioning', 'waiting_for_mx', 'active'].includes(row.status));
-    const desired = new Set(receiving.flatMap(row => row.acceptSubdomains ? [row.name, `.${row.name}`] : [row.name]));
+    const desired = new Set(connection ? rows.map(row=>row.receivingHost!) : receiving.flatMap(row => row.acceptSubdomains ? [row.name, `.${row.name}`] : [row.name]));
     const ours = resources.rules.filter(rule => rule.Name?.startsWith(names.rulePrefix)).sort((a, b) => a.Name!.localeCompare(b.Name!));
     const current = new Set(ours.flatMap(rule => rule.Recipients ?? []));
     const pending = [...desired].filter(name => !current.has(name)).sort();
@@ -275,6 +259,17 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
     }
     const now = new Date().toISOString();
     await runtime.db.update(mailboxRegions).set({ ruleSetName: resources.ruleSetName, lastReconciledAt: now, lastError: null, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region)));
+    if (connection) {
+      // DNS can move while AWS is working. Activate only still-claimed hosts in the rule we installed.
+      await runtime.db.execute(sql`WITH activated AS (
+        UPDATE mailbox_domains m SET status='active',last_error=NULL,updated_at=now(),enabled_at=now()
+        FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
+        WHERE dc.connection_id=${connection.id} AND dc.workspace_id=${workspaceId} AND d.environment='live' AND d.region=${region}
+          AND dc.receiving_name=m.receiving_host AND m.domain_id=d.id AND m.workspace_id=d.workspace_id AND m.status<>'active'
+          AND m.receiving_host IN (SELECT jsonb_array_elements_text(${JSON.stringify([...desired])}::jsonb)) RETURNING dc.token
+      ) UPDATE domain_claims SET readiness=jsonb_set(readiness,'{receiving}','"verified"') WHERE token IN (SELECT token FROM activated)`);
+      return;
+    }
     for (const row of rows) {
       if (row.parentId) continue;
       if (row.status === 'disabling') { await runtime.db.update(mailboxDomains).set({ status: 'disabled', lastError: null, updatedAt: now }).where(and(eq(mailboxDomains.id, row.id), eq(mailboxDomains.status, 'disabling'))); continue; }
@@ -315,13 +310,37 @@ const reconcileJob: JobHandler = async (runtime, payload, job) => {
   }
 };
 
+/** Self-hosted legacy routes have no domain_claims row. Keep their last good observation on outages too. */
+export async function saveMailboxMx(db:DbExecutor,wid:string,domainId:string,mx:MxReport) {
+  if (mx.state==='error') return;
+  const active=mx.state==='active';
+  const mixed=mx.state==='mixed';
+  const hold=sql`(status='active' AND NOT ${active} AND (${mixed} OR mx_misses<2))`;
+  await db.execute(sql`UPDATE mailbox_domains SET mx=CASE WHEN ${hold} THEN mx ELSE ${JSON.stringify(mx)}::jsonb END,
+    checked_at=${mx.checkedAt},updated_at=now(),mx_misses=CASE WHEN ${hold} AND NOT ${mixed} THEN mx_misses+1 ELSE 0 END,
+    status=CASE WHEN status NOT IN ('waiting_for_mx','active') OR ${hold} THEN status WHEN ${active} THEN 'active' ELSE 'waiting_for_mx' END
+    WHERE workspace_id=${wid} AND domain_id=${domainId} AND parent_id IS NULL`);
+}
 /** Hourly: refresh MX state for receiving domains so status follows DNS changes. */
 export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
-  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), sql`${mailboxDomains.domainId} NOT LIKE 'instant:%'`,runtime.config.multiTenant ? sql`EXISTS(SELECT 1 FROM provider_connections c WHERE c.workspace_id=${mailboxDomains.workspaceId} AND c.kind='byo' AND c.region=${mailboxDomains.region} AND c.status='ready')` : undefined, inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
+  if (runtime.config.multiTenant) {
+    // Rotate a bounded batch (never-checked first) across the hour, without reopening SES verification.
+    const batch=Math.max(1,Math.min(50,limit));
+    await runtime.db.execute(sql`WITH due AS (SELECT dc.token,dc.workspace_id,d.id,j.created_at FROM domain_claims dc
+      JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.status='ready'
+      JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region AND d.environment='live'
+      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.readiness IS NOT NULL AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
+      ORDER BY j.created_at NULLS FIRST,dc.token LIMIT ${batch})
+      INSERT INTO jobs(id,type,workspace_id,environment,payload,available_at)
+      SELECT 'domain.mx:'||token,'domain.mx',workspace_id,'live',jsonb_build_object('domainId',id,'token',token),
+        now()+interval '1 hour'*(row_number() OVER(ORDER BY created_at NULLS FIRST,token)-1)/${batch} FROM due
+      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status NOT IN ('pending','running')`);
+    return;
+  }
+  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
   for (const row of rows) {
     const mx = await checkMx(row.name, row.region);
-    if (mx.state === 'error') continue;
-    await runtime.db.update(mailboxDomains).set({ mx, checkedAt: mx.checkedAt, status: mx.state === 'active' ? 'active' : 'waiting_for_mx', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.id, row.id), inArray(mailboxDomains.status, ['waiting_for_mx', 'active'])));
+    await saveMailboxMx(runtime.db,row.workspaceId,row.domainId,mx);
   }
 }
 

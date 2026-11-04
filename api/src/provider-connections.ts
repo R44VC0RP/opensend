@@ -5,7 +5,7 @@ import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, type SesDiscovery } from './ses-setup.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { retryDatabaseFailures } from './jobs.js';
-import { preparePoolReceiving, sharedInboundDomain } from './mailbox-setup.js';
+import { preparePoolReceiving } from './mailbox-setup.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const Kind = z.enum(['shared', 'byo']);
@@ -49,7 +49,7 @@ const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
   if (row.kind === 'byo' && row.status === 'pending') {
-    const params = new URLSearchParams({ templateURL: template(runtime), stackName: stackName(row), param_ExternalId: row.external_id!, param_PlatformPrincipalArn: row.platform_principal_arn!, param_ReceiveMail: 'false',
+    const params = new URLSearchParams({ templateURL: template(runtime), stackName: stackName(row), param_ExternalId: row.external_id!, param_PlatformPrincipalArn: row.platform_principal_arn!, param_ReceiveMail: 'true',
       param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
   }
@@ -73,13 +73,13 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean) {
 // Fenced, expiring leases protect external side effects without holding a DB transaction during AWS calls.
 // A crashed isolate leaves a reclaimable pending row. Successful pool setup survives disconnects and restarts.
 async function getPool(runtime: Runtime, region: string) {
-  return (await runtime.db.execute<{ ready: boolean; aws_account_id: string; inbound_domain:string|null }>(sql`SELECT ready, aws_account_id,inbound_domain FROM provider_pool_regions WHERE region=${region}`)).rows[0];
+  return (await runtime.db.execute<{ ready: boolean; aws_account_id: string; inbound_bucket:string|null }>(sql`SELECT ready, aws_account_id,inbound_bucket FROM provider_pool_regions WHERE region=${region}`)).rows[0];
 }
 async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
   const account=principal.account;
   const lease = new Date(Date.now() + 180_000).toISOString();
   const result = await runtime.db.execute(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
-    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE (NOT provider_pool_regions.ready OR provider_pool_regions.inbound_domain IS DISTINCT FROM ${sharedInboundDomain(runtime)})
+    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE (NOT provider_pool_regions.ready OR provider_pool_regions.inbound_bucket IS NULL)
       AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ready`);
   if (!result.rowCount) {
     const pool = await getPool(runtime, region);
@@ -97,10 +97,10 @@ async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof 
       checkProvisioned(report, true);
       if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET ready=true WHERE ${owned}`)).rowCount) throw busy();
     }
-    const records=await preparePoolReceiving(scoped,region,account,async(_account,bucket,arn)=>{
-      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_bucket=${bucket},inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
+    const bucket=await preparePoolReceiving(scoped,region,account,async(_account,_bucket,arn)=>{
+      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
     });
-    if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_domain=${sharedInboundDomain(runtime)},inbound_dns=${JSON.stringify(records)}::jsonb,lease_until=NULL WHERE ${owned}`)).rowCount) throw busy();
+    if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_bucket=${bucket},lease_until=NULL WHERE ${owned}`)).rowCount) throw busy();
   } catch (e) { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); throw e; }
 }
 const busy = () => new ApiError(409, 'CONNECTION_BUSY', 'Connection setup is already in progress. Retry shortly.', undefined, true);
@@ -162,7 +162,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
   for (const region of sharedRegions(runtime)) {
     try {
       const pool = await getPool(runtime, region);
-      if (!pool?.ready || pool.inbound_domain!==sharedInboundDomain(runtime)) {
+      if (!pool?.ready || !pool.inbound_bucket) {
         const principal=await platformIdentity(runtime,pool?.aws_account_id);
         try { await ensurePool(runtime,principal,region); }
         catch (e) {

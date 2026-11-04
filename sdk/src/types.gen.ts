@@ -1075,6 +1075,8 @@ export type DomainReadiness = {
     verified: boolean;
     dkimStatus: string;
     ready: boolean;
+    sending: 'pending' | 'verified';
+    receiving: 'pending' | 'verified';
     mailFromDomain: string | null;
     mailFromStatus: string | null;
     dnsStatus: 'available' | 'unavailable';
@@ -1084,7 +1086,9 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
-        purpose?: 'dkim' | 'ownership' | 'mail_from' | 'inbound';
+        purpose: 'sending' | 'receiving' | 'mail_from';
+        status: 'pending' | 'verified';
+        note?: string;
     }>;
 };
 

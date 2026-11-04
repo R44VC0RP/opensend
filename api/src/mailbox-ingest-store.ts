@@ -41,7 +41,7 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
   ), target AS MATERIALIZED (SELECT * FROM stored UNION ALL SELECT * FROM known), routes AS MATERIALIZED (
     SELECT addr,base,n,d.id AS domain,d.catch_all,r.valid,o.owner,o.receives,rule.id AS ruled
     FROM target x CROSS JOIN jsonb_to_recordset(${JSON.stringify(recipients)}::jsonb) r(addr text,n int,valid boolean)
-    JOIN mailbox_domains d ON d.workspace_id=x.workspace_id AND d.environment=x.environment AND d.name=split_part(addr,'@',2) AND d.status IN ('active','waiting_for_mx','provisioning')
+    JOIN mailbox_domains d ON d.workspace_id=x.workspace_id AND d.environment=x.environment AND coalesce(d.receiving_host,d.name)=split_part(addr,'@',2) AND (d.status='active' OR (d.receiving_host IS NULL AND d.status IN ('waiting_for_mx','provisioning')))
     CROSS JOIN LATERAL (SELECT regexp_replace(addr,'[+][^@]*@','@') AS base) plus
     LEFT JOIN LATERAL (SELECT b.id AS owner,a.kind<>'public' AND (b.expires_at IS NULL OR (b.created_at<=least(x.received_at,${m.receivedAt}::timestamptz) AND b.expires_at>greatest(statement_timestamp(),least(x.received_at,${m.receivedAt}::timestamptz)))) AS receives
       FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id WHERE a.workspace_id=x.workspace_id AND a.environment=x.environment AND a.address IN(addr,base) ORDER BY (a.address=addr) DESC LIMIT 1) o ON true

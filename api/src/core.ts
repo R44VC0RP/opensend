@@ -42,7 +42,6 @@ export interface Config {
   byoTemplateUrl?: string;
   /** Regions offered for MX shared sending; defaults to us-east-2. */
   sharedRegions?: string[];
-  sharedInboundDomain?: string;
   publicUrl: string;
   sesFeedbackUrl?: string;
   regions: string[];

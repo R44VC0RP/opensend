@@ -33,8 +33,8 @@ type DohAnswer = { name: string; type: number; data: string };
 async function resolve(name: string, type: 'MX' | 'CNAME'): Promise<{ status: number; answers: DohAnswer[] }> {
   const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000) });
   if (!response.ok) { await response.body?.cancel(); throw new Error(`DNS_HTTP_${response.status}`); }
-  const body = await response.json() as { Status?: number; Answer?: DohAnswer[] };
-  return { status: body.Status ?? -1, answers: body.Answer ?? [] };
+  const body = await response.json() as { Status?: number; TC?: boolean; Answer?: DohAnswer[] };
+  return { status: body.TC ? -1 : body.Status ?? -1, answers: (body.Answer ?? []).filter(rr=>rr.name.toLowerCase().replace(/\.$/,'')===name) };
 }
 
 /** Reads public MX/CNAME records over DNS-over-HTTPS and classifies who receives the domain's mail. Read-only. */
@@ -47,7 +47,7 @@ export async function checkMx(domain: string, region: string): Promise<MxReport>
   if (mx.status !== 0 && mx.status !== 3) return { ...base, state: 'error', records: [], providers: [], message: `DNS lookup returned status ${mx.status}. Retry the check.` };
   // DoH follows a CNAME at the name and reports it in the answer; an MX cannot coexist with it.
   if (mx.answers.some(answer => answer.type === 5)) return { ...base, state: 'cname', records: [], providers: [], message: `${domain} is a CNAME, so it cannot also have an MX record. Use a different subdomain for inbound mail.` };
-  const records = mx.answers.filter(answer => answer.type === 15).map(answer => {
+  const records = mx.answers.filter(answer => mx.status===0 && answer.type === 15).map(answer => {
     const [priority, host = ''] = answer.data.trim().split(/\s+/);
     const name = host.replace(/\.$/, '').toLowerCase();
     return { priority: Number(priority) || 0, host: name, provider: provider(name) };

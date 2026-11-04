@@ -19,7 +19,6 @@
   "vars": {
     "PUBLIC_URL": "https://opensend.mx",
     "MULTI_TENANT": "true",
-    "SHARED_INBOUND_DOMAIN": "in.opensend.mx",
     // Bring-your-own AWS CloudFormation template, published from api/byo-template.yaml (public, versioned).
     "BYO_TEMPLATE_URL": "https://opensend-mx-templates.s3.us-east-2.amazonaws.com/byo/v3.yaml",
     "DEFAULT_SES_REGION": "us-east-2",

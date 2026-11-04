@@ -136,11 +136,10 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   message = { ...message, mailbox: current };
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   await enforceLimits(tx, message);
-  const bucket=runtime.config.multiTenant ? sql`CASE WHEN d.domain_id LIKE 'instant:%' THEN (SELECT p.inbound_bucket FROM provider_pool_regions p WHERE p.region=d.region AND p.inbound_domain IS NOT NULL)
-    ELSE (SELECT CASE c.kind WHEN 'shared' THEN p.inbound_bucket ELSE r.bucket END FROM provider_connections c
-      LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id AND p.inbound_domain IS NOT NULL
+  const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN p.inbound_bucket ELSE r.bucket END FROM provider_connections c
+      LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
-      WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND c.status='ready') END` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
+      WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND c.status='ready')` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
   const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`) : sql`true`} AS verified
     FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId} AND d.environment=${message.scope.environment}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.

@@ -7,7 +7,7 @@ import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from 
 import { MAX_ATTEMPTS } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
-import { mailboxS3, STAGING_PREFIX, sharedInboundDomain, workspacePrefix, refreshMailboxDns,storageBinding,instantRegion } from './mailbox-setup.js';
+import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
 import { messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 
 const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MIME only (Worker memory).
@@ -41,26 +41,22 @@ export async function acceptInboundNotification(runtime: Runtime, input: { topic
   const {timestamp,spamVerdict,virusVerdict,spfVerdict,dkimVerdict,dmarcVerdict}=message.receipt!;
   const common=message.mail?.commonHeaders;
   const metadata={mail:{source:message.mail?.source,timestamp:message.mail?.timestamp,commonHeaders:{from:common?.from,subject:common?.subject,messageId:common?.messageId}},receipt:{timestamp,spamVerdict,virusVerdict,spfVerdict,dkimVerdict,dmarcVerdict},legacy};
-  const account=input.topicArn.split(':')[4],hosted=runtime.config.multiTenant,domain=sharedInboundDomain(runtime);
+  const account=input.topicArn.split(':')[4],hosted=runtime.config.multiTenant;
   // A delayed/replayed signed notification must not transfer yesterday's mail to a new domain owner.
   const receivedAt=timestamp ?? message.mail?.timestamp;
   if (hosted && (!receivedAt || !Number.isFinite(Date.parse(receivedAt)))) throw new ApiError(400,'SES_INVALID_EVENT','The receiving timestamp is missing or invalid.');
   const at=receivedAt && Number.isFinite(Date.parse(receivedAt)) ? new Date(receivedAt).toISOString() : null;
-  const binding=hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions WHERE aws_account_id=${account} AND region=${input.region} AND inbound_topic_arn=${input.topicArn} AND inbound_bucket=${action.bucketName} AND inbound_domain=${domain}
+  const binding=hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions WHERE aws_account_id=${account} AND region=${input.region} AND inbound_topic_arn=${input.topicArn} AND inbound_bucket=${action.bucketName}
     UNION ALL SELECT c.workspace_id,'byo' FROM provider_connections c JOIN mailbox_regions r ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
     WHERE c.kind='byo' AND c.status='ready' AND c.region=${input.region} AND c.aws_account_id=${account} AND r.topic_arn=${input.topicArn} AND r.bucket=${action.bucketName}` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions WHERE region=${input.region} AND topic_arn=${input.topicArn} AND bucket=${action.bucketName}`;
   const result=await runtime.db.execute<{trusted:boolean;n:number}>(sql`WITH binding AS (${binding}), env AS (
     SELECT addr,split_part(addr,'@',2) AS host FROM jsonb_array_elements_text(${JSON.stringify(recipients)}::jsonb) e(addr)
-  ), instant AS (
-    SELECT w.id AS wid,e.host,e.addr FROM binding b JOIN env e ON b.kind='shared' JOIN workspaces w ON w.slug=split_part(e.host,'.',1) AND e.host=w.slug||'.'||${domain} AND w.created_at<=${at}::timestamptz
-  ), domains AS (INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status,enabled_at)
-    SELECT DISTINCT 'instant:'||wid,wid,'live','instant:'||wid,host,coalesce(${instantRegion(runtime)},${input.region}),'active',now() FROM instant ON CONFLICT(id) DO UPDATE SET name=excluded.name,region=excluded.region WHERE (mailbox_domains.name,mailbox_domains.region)<>(excluded.name,excluded.region)
   ), matched AS (
-    SELECT wid,addr FROM instant UNION SELECT m.workspace_id,e.addr FROM env e JOIN mailbox_domains m ON m.name=e.host AND m.environment='live' AND m.region=${input.region}
-    JOIN binding b ON b.wid=m.workspace_id OR b.kind='shared' WHERE m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active'))) AND (b.kind='self' OR (e.host<>${domain} AND right(e.host,length(${domain})+1)<>'.'||${domain} AND EXISTS (
-      SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.verified AND dc.ready
+    SELECT m.workspace_id AS wid,e.addr FROM env e JOIN mailbox_domains m ON ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.environment='live' AND m.region=${input.region}
+    JOIN binding b ON b.wid=m.workspace_id OR b.kind='shared' WHERE m.status IN ('provisioning','waiting_for_mx','active') AND ${hosted ? sql`m.status='active' AND EXISTS (
+      SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_name=e.host
       JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=b.kind AND c.region=d.region AND c.status='ready' AND c.aws_account_id=${account}
-      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.environment='live' AND d.created_at<=${at}::timestamptz AND (m.name=d.name OR right(m.name,length(d.name)+1)='.'||d.name))))
+      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.environment='live' AND d.created_at<=${at}::timestamptz AND m.enabled_at<=${at}::timestamptz)` : sql`(m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
   ), receipts AS (INSERT INTO mail_receipts(workspace_id,ses_message_id,environment,region,bucket,object_key,recipients,notification)
     SELECT wid,${sesMessageId},'live',${input.region},${action.bucketName},'workspaces/'||wid||'/raw/'||${sesMessageId}||'.eml',jsonb_agg(addr ORDER BY addr),${JSON.stringify(metadata)}::jsonb FROM matched GROUP BY wid ON CONFLICT DO NOTHING RETURNING workspace_id
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,'live',jsonb_build_object('sesMessageId',${sesMessageId}::text) FROM receipts RETURNING 1)

@@ -4370,6 +4370,20 @@
           "ready": {
             "type": "boolean"
           },
+          "sending": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verified"
+            ]
+          },
+          "receiving": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verified"
+            ]
+          },
           "mailFromDomain": {
             "type": [
               "string",
@@ -4420,17 +4434,28 @@
                 "purpose": {
                   "type": "string",
                   "enum": [
-                    "dkim",
-                    "ownership",
-                    "mail_from",
-                    "inbound"
+                    "sending",
+                    "receiving",
+                    "mail_from"
                   ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "verified"
+                  ]
+                },
+                "note": {
+                  "type": "string"
                 }
               },
               "required": [
                 "name",
                 "type",
-                "value"
+                "value",
+                "purpose",
+                "status"
               ]
             }
           }
@@ -4443,6 +4468,8 @@
           "verified",
           "dkimStatus",
           "ready",
+          "sending",
+          "receiving",
           "mailFromDomain",
           "mailFromStatus",
           "dnsStatus",
