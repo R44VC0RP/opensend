@@ -366,7 +366,7 @@ async function recordOutcomes(runtime: Runtime, a: Actor, outcomes: Outcome[]) {
     next_rank: o.type === 'provider_throttled' ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
     requeue_at: o.requeueAt ?? null,
   }));
-  await runtime.db.execute(sql`WITH input AS (
+  const result = await runtime.db.execute<{ webhooks: number }>(sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(email_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, requeue_at timestamptz)
     ), mail AS MATERIALIZED (
@@ -414,6 +414,8 @@ async function recordOutcomes(runtime: Runtime, a: Actor, outcomes: Outcome[]) {
           'message', jsonb_build_object('eventType', r.kind, 'mail', jsonb_build_object('messageId', r.provider_id), lower(r.kind), jsonb_build_object('timestamp', r.created_at)))
       FROM simulated_callbacks r RETURNING id
     ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`);
+  const readyJobs = result.rows[0]!.webhooks;
+  if (readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
   // With a feedback sink, simulated Send/Delivery callbacks travel the same queue live SNS feedback does.
   if (simulated && runtime.feedback) {
     const recorded = new Date().toISOString();

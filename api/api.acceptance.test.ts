@@ -3351,6 +3351,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(accepted.status, 'accepted');
       assert.match(accepted.providerId, /^sim_/);
       const feedback = await jobs('operation.simulatedFeedback');
+      assert.deepEqual((await db.query('SELECT type, data FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows, [{ type: 'email.sent', data: { emailId: email.id, providerId: accepted.providerId, simulated: true } }], 'Acceptance publishes exactly one email.sent without waiting for feedback.');
       assert.deepEqual(feedback.map(job => job.payload.message.eventType), ['Send', 'Delivery']);
       assert.equal(new Date(feedback[1]!.available_at).getTime() - new Date(feedback[0]!.available_at).getTime(), 250);
       await run('operation.simulatedFeedback');
@@ -3388,7 +3389,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const { operationJobs } = await import('./src/operations.js');
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
-      await run('email.dispatch');
       const otherRegion = REGION === 'eu-west-1' ? 'us-west-2' : 'eu-west-1';
       ok(await local('PUT', `/v1/regions/${otherRegion}`, { enabled: true }, 'live'));
       const matching: string[] = [];
@@ -3397,6 +3397,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (!Object.keys(options).length) matching.push(endpoint.id);
       }
       const liveEndpoint = ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('live-hook')}` }, 'live'), 201);
+      await run('email.dispatch');
       const feedback = await jobs('operation.simulatedFeedback');
       const deliver = feedback.find(job => job.payload.message.eventType === 'Delivery')!;
       const send = feedback.find(job => job.payload.message.eventType === 'Send')!;
@@ -3593,7 +3594,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok((await receipts())[0].processed_at);
       assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => event.type === 'delivery').length, 1);
-      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 1);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 2, 'The acceptance and recovered delivery each publish once.');
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_deliveries WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 1);
       assert.equal((await jobs('operation.webhook')).length, 1);
       assert.equal((await jobs('operation.simulatedFeedbackRecovery')).length, 1);
@@ -3642,7 +3643,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(ok(await local('GET', `/v1/emails/${email.id}`)), before);
       assert.deepEqual(page(await local('GET', `/v1/emails/${email.id}/events`)), beforeEvents);
       for (const table of ['operation_sns_receipts', 'operation_events', 'operation_deliveries']) {
-        assert.equal((await db.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id = $1`, [runtime.config.workspaceId])).rows[0].count, 0, `${table} must roll back with failed fanout.`);
+        assert.equal((await db.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id = $1`, [runtime.config.workspaceId])).rows[0].count, table === 'operation_events' ? 1 : 0, `${table} must roll back to its post-acceptance state with failed fanout.`);
       }
       assert.equal((await jobs('operation.webhook')).length, 0);
       await db.query('DROP TRIGGER acceptance_fanout_failure ON jobs');
