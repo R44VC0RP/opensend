@@ -53,9 +53,9 @@ const mapEmail = (r: Json): Email => ({ ...r, id: r.id, from: r.from, subject: r
 const sesStatus = (value: unknown) => typeof value !== 'string' ? null : value.toUpperCase() === 'SUCCESS' ? 'verified' : ['FAILED', 'TEMPORARY_FAILURE'].includes(value.toUpperCase()) ? 'failed' : 'pending'
 const mapDomain = (r: Json): Domain => {
   const dkimStatus = sesStatus(r.dkimStatus) ?? 'pending', mailFromStatus = sesStatus(r.mailFromStatus) ?? 'not_configured'
-  // Self-hosted records carry no purpose: CNAMEs are DKIM, the rest belong to MAIL FROM.
-  const recordStatus = (d: Json) => { const purpose = d.purpose ?? (d.type === 'CNAME' ? 'dkim' : 'mail_from'); return (purpose === 'dkim' ? dkimStatus === 'verified' : purpose === 'ownership' ? r.verified === true : mailFromStatus === 'verified') ? 'verified' : 'pending' }
-  return { ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', dkimStatus, mailFromStatus, records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: recordStatus(d) })) } as Domain
+  // The API reports each record's status; older APIs did not, so derive it from the record's purpose.
+  const recordStatus = (d: Json) => d.status === 'verified' || d.status === 'pending' ? d.status : ((d.purpose ?? (d.type === 'CNAME' ? 'sending' : 'mail_from')) === 'mail_from' ? mailFromStatus : dkimStatus) === 'verified' ? 'verified' : 'pending'
+  return { ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', dkimStatus, mailFromStatus, sending: r.sending ?? (r.ready ? 'verified' : 'pending'), receiving: r.receiving ?? 'pending', records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: recordStatus(d) })) } as Domain
 }
 const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload })
 const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Signing secret is hidden', deliveries: [] })

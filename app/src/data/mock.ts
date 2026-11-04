@@ -813,7 +813,7 @@ export function createMockApi(): OpenSendApi {
         const name = domainName(input.name)
         if (s.domains.some(domain => domain.regionId === input.regionId && domain.name === name)) throw new ApiError('This domain already exists in this region.', 'conflict', { name: 'This domain is already connected.' })
         const domainId = id('dom')
-        const domain: Domain = { id: domainId, name, regionId: input.regionId, status: 'pending', mailFromDomain: null, mailFromStatus: 'not_configured', createdAt: now(), records: [{ id: `${domainId}_dkim`, type: 'CNAME', name: `demo_key._domainkey.${name}`, value: 'demo_key.dkim.example.invalid', status: 'pending' }] }
+        const domain: Domain = { id: domainId, name, regionId: input.regionId, status: 'pending', mailFromDomain: null, mailFromStatus: 'not_configured', sending: 'pending', receiving: 'pending', createdAt: now(), records: [{ id: `${domainId}_dkim`, type: 'CNAME', purpose: 'sending', name: `demo_key._domainkey.${name}`, value: 'demo_key.dkim.example.invalid', status: 'pending' }, { id: `${domainId}_inbound`, type: 'MX', purpose: 'receiving', name, value: `10 inbound-smtp.${input.regionId}.amazonaws.com`, status: 'pending' }] }
         s.domains.push(domain)
         return domain
       }),
@@ -822,14 +822,15 @@ export function createMockApi(): OpenSendApi {
         if (mailFromDomain === domain.name || !mailFromDomain.endsWith(`.${domain.name}`)) throw new ApiError(`Use a subdomain of ${domain.name}.`, 'MAIL_FROM_DOMAIN_INVALID', {mailFromDomain: `Use a subdomain of ${domain.name}.`})
         domain.mailFromDomain = mailFromDomain
         domain.mailFromStatus = 'pending'
-        domain.records = [...domain.records.filter(record => !['MX', 'TXT'].includes(record.type)), {id: `${domainId}_mailfrom_mx`, type: 'MX', name: mailFromDomain, value: `10 feedback-smtp.${domain.regionId}.amazonses.com`, status: 'pending'}, {id: `${domainId}_mailfrom_spf`, type: 'TXT', name: mailFromDomain, value: 'v=spf1 include:amazonses.com ~all', status: 'pending'}]
+        domain.records = [...domain.records.filter(record => record.purpose !== 'mail_from' && (record.purpose || record.type === 'CNAME')), {id: `${domainId}_mailfrom_mx`, type: 'MX', purpose: 'mail_from', name: mailFromDomain, value: `10 feedback-smtp.${domain.regionId}.amazonses.com`, status: 'pending'}, {id: `${domainId}_mailfrom_spf`, type: 'TXT', purpose: 'mail_from', name: mailFromDomain, value: 'v=spf1 include:amazonses.com ~all', status: 'pending'}]
         return domain
       }),
       verify: (domainId, signal) => run(signal, true, s => {
         const domain = find(s.domains, domainId, 'Domain')
         // Deterministic simulation only: no DNS lookup, AWS call, or external mutation.
-        domain.status = 'verified'; domain.mailFromStatus = domain.mailFromDomain ? 'verified' : 'not_configured'
-        domain.records.forEach(record => { record.status = 'verified' })
+        domain.status = 'verified'; domain.sending = 'verified'; domain.mailFromStatus = domain.mailFromDomain ? 'verified' : 'not_configured'
+        // Receiving waits for an MX change at the user's DNS provider, so the demo leaves it pending.
+        domain.records.forEach(record => { if (record.purpose !== 'receiving') record.status = 'verified' })
         return domain
       }),
       remove: (domainId, signal) => run(signal, true, s => {

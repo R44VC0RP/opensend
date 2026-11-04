@@ -3,7 +3,7 @@ import { Copy } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
 import { useApi, useWorkspaceAccess } from '../../data/context'
-import type { DnsRecord, Domain } from '../../data/types'
+import type { DnsRecord, DnsRecordPurpose, Domain } from '../../data/types'
 import { settingsColumns } from './skeletons'
 import './settings.css'
 
@@ -20,8 +20,12 @@ export function useDomain(id: string) {
   })
 }
 
-const purposeOf = (record: DnsRecord) => record.purpose ?? (record.type === 'CNAME' ? 'dkim' : 'mail_from')
-export const recordsFor = (domain: Domain, purpose: NonNullable<DnsRecord['purpose']>) => domain.records.filter(record => purposeOf(record) === purpose)
+// Records saved before purposes split into sending and receiving may still say dkim or ownership.
+const purposeOf = (record: DnsRecord): DnsRecordPurpose => {
+  const purpose = record.purpose as string | undefined
+  return purpose === 'dkim' || purpose === 'ownership' ? 'sending' : record.purpose ?? (record.type === 'CNAME' ? 'sending' : 'mail_from')
+}
+export const recordsFor = (domain: Domain, purpose: DnsRecordPurpose) => domain.records.filter(record => purposeOf(record) === purpose)
 export function domainState(domain: Domain) {
   return domain.status === 'verified' ? { status: 'Verified', tone: 'success' as const } : domain.status === 'issue' ? { status: 'Failed', tone: 'danger' as const } : { status: 'Pending', tone: 'warning' as const }
 }
@@ -47,18 +51,19 @@ export function DnsRecordTable({ domain, records }: { domain: string; records: D
   ]} />
 }
 
-function RecordGroup({ title, description, domain, records }: { title: string; description: string; domain: string; records: DnsRecord[] }) {
+function RecordGroup({ title, description, notes = [], verified, domain, records }: { title: string; description: string; notes?: string[]; verified: boolean; domain: string; records: DnsRecord[] }) {
   return <div className="stack settings-discovery-section">
-    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}</h3><p className="muted">{description}</p></div><StatusBadge status={allVerified(records) ? 'Verified' : 'Pending'} /></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note}>{note}</p>)}</div><StatusBadge status={verified ? 'Verified' : 'Pending'} /></div>
     <DnsRecordTable domain={domain} records={records} />
   </div>
 }
 
-// DKIM and ownership records. MAIL FROM is optional and lives in the domain's Advanced section.
+// Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
 export function DomainRecords({ domain, actions }: { domain: Domain; actions?: ReactNode }) {
   const toast = useToast()
-  const dkim = recordsFor(domain, 'dkim'), ownership = recordsFor(domain, 'ownership')
-  const all = [...dkim, ...ownership]
+  const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving')
+  const all = [...sending, ...receiving]
+  const notes = [...new Set(receiving.flatMap(record => record.note ? [record.note] : []))]
   async function copyAll() {
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} records`, 'success') }
     catch { toast('Could not copy to clipboard.', 'error') }
@@ -68,7 +73,7 @@ export function DomainRecords({ domain, actions }: { domain: Domain; actions?: R
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
-    {dkim.length > 0 && <RecordGroup title="DKIM" description={`Signs mail sent from ${domain.name}.`} domain={domain.name} records={dkim} />}
-    {ownership.length > 0 && <RecordGroup title="Ownership" description="Proves this domain belongs to your workspace." domain={domain.name} records={ownership} />}
+    {sending.length > 0 && <RecordGroup title="Sending" description={`Signs mail sent from ${domain.name} and proves the domain is yours.`} verified={(domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'} domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordGroup title="Receiving" description="Optional — add to receive mail on this domain." notes={notes} verified={(domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'} domain={domain.name} records={receiving} />}
   </section>
 }

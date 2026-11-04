@@ -21,7 +21,7 @@ function downloadDnsRecords(domain: string, records: DnsRecord[]) {
 }
 
 function setupSummary(domain: Domain) {
-  const ownership = recordsFor(domain, 'ownership')
+  const ownership = recordsFor(domain, 'sending').filter(record => record.type === 'TXT')
   const parts = [domain.dkimStatus && domain.dkimStatus !== 'verified' && `DKIM ${domain.dkimStatus}`, ownership.length > 0 && !ownership.every(record => record.status === 'verified') && 'Ownership pending', ['pending', 'failed'].includes(domain.mailFromStatus) && `MAIL FROM ${domain.mailFromStatus}`].filter(Boolean)
   return parts.length ? parts.join(' · ') : 'Waiting for DNS'
 }
