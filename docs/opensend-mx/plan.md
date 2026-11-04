@@ -19,6 +19,10 @@ OpenSend MX is the hosted, multi-tenant OpenSend at `https://opensend.mx`. It be
 4. **Create an API key and send.** Test mode works immediately.
 5. **Invite teammates** as owner, admin or member.
 
+## Later ideas
+
+- Onboarding variant (Ryan, Nov 4): after sign-up, go straight to "Add your first domain" on Hosted mail, with "Want to use your own AWS account? Connect it" at the bottom, instead of the split choice. Keep the split for now.
+
 ## Build order
 
 | # | Step | Done when |
