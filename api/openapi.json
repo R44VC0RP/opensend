@@ -45961,7 +45961,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Shared setup is resumable by repeating this request. BYO returns a CloudFormation quick-create URL. Never sends mail.",
+        "description": "Choose a sending provider. Shared connections return ready, or pending while scheduled setup finishes; poll getConnection. BYO returns a CloudFormation quick-create URL. Never sends mail.",
         "requestBody": {
           "required": true,
           "content": {
@@ -45974,6 +45974,16 @@
         },
         "responses": {
           "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderConnection"
+                }
+              }
+            }
+          },
+          "202": {
             "description": "Success",
             "content": {
               "application/json": {

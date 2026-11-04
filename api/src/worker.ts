@@ -8,6 +8,7 @@ import { dispatchRegions, drainJobs } from './dispatch.js';
 import { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
+import { reconcileSharedConnections } from './provider-connections.js';
 import { mailboxHourly } from './mailbox-ingest.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied, secureResponse } from './core.js';
@@ -151,7 +152,8 @@ export default {
     });
     batch.ackAll();
   },
-  async scheduled(controller, env) {
+  async scheduled(controller, env, ctx) {
+    if (controller.cron === '* * * * *') ctx.waitUntil(withRuntime(env, reconcileSharedConnections));
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') {
         await cleanup(runtime);

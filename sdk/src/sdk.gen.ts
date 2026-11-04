@@ -4325,7 +4325,7 @@ export const getConnection = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * Choose a sending provider. Shared setup is resumable by repeating this request. BYO returns a CloudFormation quick-create URL. Never sends mail.
+ * Choose a sending provider. Shared connections return ready, or pending while scheduled setup finishes; poll getConnection. BYO returns a CloudFormation quick-create URL. Never sends mail.
  */
 export const createConnection = <ThrowOnError extends boolean = false>(options: Options<CreateConnectionData, ThrowOnError>): RequestResult<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError>({
     security: [{

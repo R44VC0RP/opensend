@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { ApiError, errors, id, json, notFound, response, type App, type Ctx, type Runtime } from './core.js';
+import { ApiError, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, type SesDiscovery } from './ses-setup.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
@@ -26,6 +26,12 @@ function template(runtime: Runtime) {
 }
 const platformRegion = 'us-east-2';
 const sharedRegions = (runtime: Runtime) => runtime.config.sharedRegions ?? [platformRegion];
+async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
+  const identity = await caller(platformRegion, platformCredentials(runtime));
+  if (!identity.Account || !/^\d{12}$/.test(identity.Account) || !identity.Arn?.startsWith(`arn:aws:iam::${identity.Account}:user/`)) throw new ApiError(503, 'PLATFORM_PRINCIPAL_INVALID', 'Use an IAM user in the commercial AWS partition for the platform connection.');
+  if (expectedAccount && identity.Account !== expectedAccount) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
+  return { account: identity.Account, arn: identity.Arn };
+}
 // Commercial regions with an SES sending endpoint: https://docs.aws.amazon.com/general/latest/gr/ses.html
 const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-south-1', 'ap-south-2', 'ap-southeast-3', 'ap-southeast-5', 'ap-south-1', 'ap-northeast-3', 'ap-northeast-2',
   'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1', 'ca-central-1', 'ca-west-1', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-north-1', 'eu-central-2',
@@ -57,20 +63,24 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean) {
 
 // Fenced, expiring leases protect external side effects without holding a DB transaction during AWS calls.
 // A crashed isolate leaves a reclaimable pending row. Successful pool setup survives disconnects and restarts.
+async function getPool(runtime: Runtime, region: string) {
+  return (await runtime.db.execute<{ ready: boolean; aws_account_id: string }>(sql`SELECT ready, aws_account_id FROM provider_pool_regions WHERE region=${region}`)).rows[0];
+}
 async function ensurePool(runtime: Runtime, account: string, region: string) {
   const lease = new Date(Date.now() + 180_000).toISOString();
   const result = await runtime.db.execute(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
     ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE NOT provider_pool_regions.ready
       AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING region`);
   if (!result.rowCount) {
-    const pool = (await runtime.db.execute<{ ready: boolean; aws_account_id: string }>(sql`SELECT ready, aws_account_id FROM provider_pool_regions WHERE region=${region}`)).rows[0];
+    const pool = await getPool(runtime, region);
     if (pool?.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
     if (pool.ready) return;
     throw busy();
   }
   const owned = sql`region=${region} AND lease_until=${lease}::timestamptz`;
   try {
-    const report = await provisionSes(runtime, { region, installationId: POOL_INSTALLATION, connectionSetup: true, registerTopic: async (_account, arn) => {
+    const scoped = { ...runtime, config: { ...runtime.config, awsAccountId: account, sesFeedbackUrl: undefined } };
+    const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, connectionSetup: true, registerTopic: async (_account, arn) => {
       if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
     } });
     checkProvisioned(report, true);
@@ -89,21 +99,25 @@ async function provision(runtime: Runtime, row: Row, account: string, roleArn?: 
   const credentials = pooled ? platform : await assume(runtime, row.region, roleArn!, row.external_id!, true);
   if (!pooled && (await caller(row.region, credentials)).Account !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer account.');
   const scoped = { ...runtime, config: { ...runtime.config, aws: credentials, awsAccountId: account, sesFeedbackUrl: undefined, workspaceId: row.workspace_id } };
-  const lease = new Date(Date.now() + 240_000).toISOString();
+  // Tenant-only AWS work has a 20s deadline. A dropped HTTP request is reclaimable after 30s.
+  const lease = new Date(Date.now() + (pooled ? 30_000 : 240_000)).toISOString();
   // Reserve the verified BYO account BEFORE creating resources in it. The unique index serializes racing workspaces.
   try {
     const claimed = await runtime.db.execute(sql`UPDATE provider_connections SET lease_until=${lease}, aws_account_id=${account}, role_arn=${roleArn ?? null}
       WHERE id=${row.id} AND status='pending' AND (aws_account_id IS NULL OR aws_account_id=${account}) AND coalesce(lease_until, '-infinity') <= now()`);
-    if (!claimed.rowCount) throw busy();
+    if (!claimed.rowCount) {
+      // A simultaneous POST or the scheduler owns the tenant; let the dashboard poll its result.
+      const current = pooled && await get(runtime, row.workspace_id);
+      if (current && current.id === row.id && current.aws_account_id === account) return current;
+      throw busy();
+    }
   } catch (e) { if (uniqueAccount(e)) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'This AWS account is already connected to a workspace.'); throw e; }
   const owned = sql`id=${row.id} AND lease_until=${lease}::timestamptz`;
-  const installationId = pooled ? POOL_INSTALLATION : row.id;
   try {
     if (pooled) {
-      await ensurePool(scoped, account, row.region);
       await provisionTenant(scoped, row.region, account, row.workspace_id);
     } else {
-      const report = await provisionSes(scoped, { region: row.region, installationId, connectionSetup: true, registerTopic: async (_account, arn) => {
+      const report = await provisionSes(scoped, { region: row.region, installationId: row.id, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_connections SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
       } });
       checkProvisioned(report, false);
@@ -116,6 +130,28 @@ async function provision(runtime: Runtime, row: Row, account: string, roleArn?: 
     return result.rows[0];
   } catch (e) { await runtime.db.execute(sql`UPDATE provider_connections SET lease_until=NULL WHERE ${owned}`); throw e; }
 }
+// Platform maintenance, never called by an HTTP request. One failed tenant or region must not stop the rest.
+export async function reconcileSharedConnections(runtime: Runtime) {
+  if (!runtime.config.multiTenant) return;
+  for (const region of sharedRegions(runtime)) {
+    try {
+      const pool = await getPool(runtime, region);
+      let account: string | undefined;
+      if (!pool?.ready) {
+        account = (await platformIdentity(runtime, pool?.aws_account_id)).account;
+        await ensurePool(runtime, account, region);
+      }
+      const pending = await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE kind='shared' AND region=${region}
+        AND status='pending' AND coalesce(lease_until, '-infinity') <= now()`);
+      if (!pending.rows.length) continue;
+      account ??= (await platformIdentity(runtime, pool?.aws_account_id)).account;
+      for (const row of pending.rows) {
+        try { await provision(runtime, row, account); }
+        catch (e) { log('warn', { operation: 'shared-tenant-setup', region, connectionId: row.id, code: awsError(e).code }); }
+      }
+    } catch (e) { log('warn', { operation: 'shared-pool-setup', region, code: awsError(e).code }); }
+  }
+}
 async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>) {
   const { region, kind } = input;
   if (kind === 'byo') template(runtime);
@@ -124,14 +160,17 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   if (kind === 'shared' && !offered.includes(region)) throw new ApiError(422, 'SHARED_REGION_UNAVAILABLE', `Shared sending is available in ${offered.join(', ')}.`, 'region');
   if (/^(cn-|us-gov-|us-iso|us-isob|eu-isoe|us-isof)/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region.', 'region');
   if (kind === 'byo' && !byoRegions.includes(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region where Amazon SES supports sending.', 'region');
-  const identity = await caller(platformRegion, platformCredentials(runtime));
-  if (!identity.Account || !/^\d{12}$/.test(identity.Account) || !identity.Arn?.startsWith(`arn:aws:iam::${identity.Account}:user/`)) throw new ApiError(503, 'PLATFORM_PRINCIPAL_INVALID', 'Use an IAM user in the commercial AWS partition for the platform connection.');
+  platformCredentials(runtime);
+  const principalArn = kind === 'byo' ? (await platformIdentity(runtime)).arn : null;
   const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version)
-    VALUES (${id('conn')},${wid},${kind},${region},${kind === 'byo' ? crypto.randomUUID() : null},${kind === 'byo' ? identity.Arn : null},${kind === 'byo' ? 'v1' : null})
+    VALUES (${id('conn')},${wid},${kind},${region},${kind === 'byo' ? crypto.randomUUID() : null},${principalArn},${kind === 'byo' ? 'v1' : null})
     ON CONFLICT(workspace_id) DO NOTHING RETURNING *`);
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');
-  return kind === 'byo' ? row : provision(runtime, row, identity.Account);
+  if (kind === 'byo') return row;
+  const pool = await getPool(runtime, region);
+  if (!pool?.ready) return row;
+  return provision(runtime, row, (await platformIdentity(runtime, pool.aws_account_id)).account);
 }
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
@@ -141,9 +180,12 @@ export function registerProviderConnections(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
     owner(c); return c.json({ shared: sharedRegions(c.env), byo: byoRegions }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Shared setup is resumable by repeating this request. BYO returns a CloudFormation quick-create URL. Never sends mail.', request: { body: json(Create) }, responses: { 201: response(Connection), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Shared connections return ready, or pending while scheduled setup finishes; poll getConnection. BYO returns a CloudFormation quick-create URL. Never sends mail.', request: { body: json(Create) }, responses: { 201: response(Connection), 202: response(Connection), ...errors } }), async c => {
     const wid = owner(c);
-    try { return c.json(view(c.env, await create(c.env, wid, c.req.valid('json'))), 201); } catch (e) { throw awsError(e); }
+    try {
+      const row = await create(c.env, wid, c.req.valid('json'));
+      return c.json(view(c.env, row), row.kind === 'shared' && row.status === 'pending' ? 202 : 201);
+    } catch (e) { throw awsError(e); }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/connection/verify', operationId: 'verifyConnection', tags, security, description: 'Verify the external-ID role in the AWS account from the CloudFormation stack output and provision its regional feedback resources. Safe to retry.', request: { body: json(z.object({ awsAccountId: AccountId }).strict()) }, responses: { 200: response(Connection), ...errors } }), async c => {
     const wid = owner(c); template(c.env);

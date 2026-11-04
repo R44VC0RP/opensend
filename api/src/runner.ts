@@ -5,6 +5,7 @@ import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
+import { reconcileSharedConnections } from './provider-connections.js';
 import { mailboxHourly } from './mailbox-ingest.js';
 import { syncOutboundMessages } from './mailbox-send.js';
 import { queueStartupDiscovery } from './ses-regions.js';
@@ -13,6 +14,7 @@ try {
   const { runtime, close } = nodeRuntime(process.env);
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0;
+  let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   // In-process pacing state per environment/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
@@ -22,6 +24,11 @@ try {
     await queueStartupDiscovery(runtime);
     while (!stopped) {
       try {
+        // Don't stall mail dispatch while waiting for a platform pool to come online.
+        if (runtime.config.multiTenant && !sharedSetup && Date.now() - lastSharedSetup >= 60_000) {
+          lastSharedSetup = Date.now();
+          sharedSetup = reconcileSharedConnections(runtime).catch(() => log('warn', { code: 'SHARED_SETUP_FAILED' })).finally(() => { sharedSetup = undefined; });
+        }
         if (Date.now() - lastCleanup > 3600000) {
           await cleanup(runtime); lastCleanup = Date.now();
           try { await checkReputationAlerts(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'REPUTATION_ALERT_CHECK_FAILED' }); }
@@ -38,7 +45,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { await close(); }
+  } finally { await sharedSetup; await close(); }
 } catch (error) {
   log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
   process.exitCode = 1;

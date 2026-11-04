@@ -106,7 +106,7 @@ export function awsError(error: unknown): ApiError {
   return new ApiError(503, 'AWS_SETUP_FAILED', 'AWS setup could not complete. Check regional service availability, network connectivity and the setup IAM policy.', undefined, true);
 }
 type SetupContext = { signal: AbortSignal; lastSesFinished: number; queue: Promise<void> };
-function setupContext(): SetupContext { return { signal: AbortSignal.timeout(90000), lastSesFinished: -Infinity, queue: Promise.resolve() }; }
+function setupContext(timeoutMs = 90_000): SetupContext { return { signal: AbortSignal.timeout(timeoutMs), lastSesFinished: -Infinity, queue: Promise.resolve() }; }
 
 // SES control-plane APIs are limited to one request per second. Keep this gate local
 // to the complete operation, including its nested discoveries and replacement clients.
@@ -443,7 +443,7 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
 }
 
 export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string) {
-  const context = setupContext(), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const context = setupContext(20_000), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
   const TenantName = `opensend-${workspaceId}`;
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(TenantName)) throw new ApiError(409, 'INVALID_TENANT_NAME', 'This workspace ID is not a valid SES tenant name.');
   const suppression = { SuppressionScope: 'TENANT' as const, SuppressedReasons: ['BOUNCE', 'COMPLAINT'] as ('BOUNCE' | 'COMPLAINT')[] };

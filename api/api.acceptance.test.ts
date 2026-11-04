@@ -678,10 +678,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
         const platformKey = { accessKeyId: 'synthetic-platform', secretAccessKey: 'synthetic-platform-secret' };
         const callerArn = `arn:aws:iam::${platform}:user/synthetic-platform`;
-        let externalIds: string[] = [], assumptions = 0;
+        let externalIds: string[] = [], assumptions = 0, identityChecks = 0, ohioConfirmationPending = true;
         providerTest.mock.method(STSClient.prototype, 'send', async function(this: InstanceType<typeof STSClient>, command: any) {
           const key = (await this.config.credentials()).accessKeyId;
-          if (command.constructor.name === 'GetCallerIdentityCommand') return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/OpenSendMX/synthetic` };
+          if (command.constructor.name === 'GetCallerIdentityCommand') { identityChecks++; return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/OpenSendMX/synthetic` }; }
           assert.equal(command.constructor.name, 'AssumeRoleCommand'); assert.equal(key, platformKey.accessKeyId);
           if (!command.input.ExternalId) throw Object.assign(new Error('Expected missing external ID denial'), { name: 'AccessDenied' });
           assert.ok(externalIds.includes(command.input.ExternalId)); assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/OpenSendMX-[a-f0-9]{20}$/);
@@ -691,15 +691,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
         async function aws(this: InstanceType<typeof SNSClient> | InstanceType<typeof SESv2Client>, command: any) {
           const account = (await this.config.credentials()).accessKeyId === platformKey.accessKeyId ? platform : customer;
-          const name = command.constructor.name, i = command.input, set = sets.get(i.ConfigurationSetName), topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
+          const region = await this.config.region(), name = command.constructor.name, i = command.input, setKey = `${region}:${i.ConfigurationSetName}`, set = sets.get(setKey), topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
           calls.push(name);
           switch (name) {
             case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
             case 'GetConfigurationSetCommand': return set ?? missing();
             case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: set!.destinations };
-            case 'CreateConfigurationSetCommand': assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'), account === platform); sets.set(i.ConfigurationSetName, { ...i, destinations: [] }); return {};
+            case 'CreateConfigurationSetCommand': assert.equal(i.ConfigurationSetName.startsWith('opensend-mx-'), account === platform); sets.set(setKey, { ...i, destinations: [] }); return {};
             case 'PutConfigurationSetSuppressionOptionsCommand': assert.equal(i.SuppressionScope, account === platform ? 'TENANT' : 'ACCOUNT'); set!.SuppressionOptions = i; return {};
             case 'CreateConfigurationSetEventDestinationCommand': set!.destinations.push({ ...i.EventDestination, Name: i.EventDestinationName }); return {};
+            case 'UpdateConfigurationSetEventDestinationCommand': set!.destinations = [{ ...i.EventDestination, Name: i.EventDestinationName }]; return {};
             case 'CreateTopicCommand': { const arn = `arn:aws:sns:${region}:${account}:${i.Name}`; topics.set(arn, { Tags: i.Tags, Attributes: { TopicArn: arn, Owner: account }, subs: [] }); return { TopicArn: arn }; }
             case 'GetTopicAttributesCommand': return topic ?? missing();
             case 'ListTagsForResourceCommand': return topic;
@@ -710,26 +711,51 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1', [i.TopicArn]);
               assert.equal(allowed.rowCount, 1); topic!.subs.push({ ...i, SubscriptionArn: `${i.TopicArn}:fixture` }); return {};
             }
-            case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: 'false', Owner: account, RawMessageDelivery: 'false' } };
-            case 'CreateTenantCommand': assert.deepEqual(i.SuppressionAttributes, { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE','COMPLAINT'] }); return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
+            case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: String(ohioConfirmationPending && region === 'us-east-2' && account === platform), Owner: account, RawMessageDelivery: 'false' } };
+            case 'CreateTenantCommand': {
+              assert.deepEqual(i.SuppressionAttributes, { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE','COMPLAINT'] });
+              const leased = await pool.query("SELECT 1 FROM provider_connections WHERE 'opensend-' || workspace_id=$1 AND lease_until BETWEEN now() AND now() + interval '30 seconds'", [i.TenantName]);
+              assert.equal(leased.rowCount, 1, 'A disconnected request must not hold a tenant lease for minutes.');
+              return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
+            }
             case 'UpdateReputationEntityPolicyCommand': assert.equal(i.ReputationEntityPolicy, `arn:aws:ses:${region}:aws:reputation-policy/strict`); return {};
             case 'CreateTenantResourceAssociationCommand': assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `opensend-${wid}`)); assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/); return {};
             default: throw new Error(`Unexpected AWS command ${name}`);
           }
         }
         providerTest.mock.method(SESv2Client.prototype, 'send', aws); providerTest.mock.method(SNSClient.prototype, 'send', aws);
-        runtime.config.aws = platformKey; runtime.config.liveEnabled = true;
-        providerTest.after(async () => { runtime.config.aws = undefined; runtime.config.liveEnabled = false; runtime.config.byoTemplateUrl = undefined; await pool.query('DELETE FROM provider_pool_regions WHERE region=$1 AND aws_account_id=$2', [region, platform]); });
+        const offered = [region, 'eu-west-1'], originalRegions = runtime.config.sharedRegions;
+        runtime.config.aws = platformKey; runtime.config.liveEnabled = true; runtime.config.sharedRegions = offered;
+        providerTest.after(async () => { runtime.config.aws = undefined; runtime.config.liveEnabled = false; runtime.config.byoTemplateUrl = undefined; runtime.config.sharedRegions = originalRegions; await pool.query('DELETE FROM provider_pool_regions WHERE region=ANY($1) AND aws_account_id=$2', [offered, platform]); });
         const choose = (kind: string, cookie: string) => local('POST', path, { kind, region }, cookie);
         const verify = (cookie: string) => local('POST', `${path}/verify`, { awsAccountId: customer }, cookie);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
         error(await local('GET', path, undefined, guest), 403); error(await choose('byo', a.cookie), 503, 'BYO_NOT_CONFIGURED');
-        for (const user of [a,b]) {
-          const connected = ok(await choose('shared', user.cookie), 201);
-          assert.equal(connected.status, 'ready'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
-          assert.deepEqual(ok(await local('GET', path, undefined, user.cookie)).connection, connected);
-        }
-        assert.equal(sets.size, 2); assert.equal(topics.size, 1); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 1);
+        const pending = ok(await choose('shared', a.cookie), 202);
+        assert.equal(pending.status, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
+        assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
+        assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
+        const { reconcileSharedConnections } = await import('./src/provider-connections.js');
+        await reconcileSharedConnections(runtime);
+        assert.ok(!calls.includes('CreateTenantCommand'), 'A tenant must wait for the confirmed regional feedback pool.');
+        const waitingStart = calls.length + identityChecks;
+        assert.deepEqual(ok(await choose('shared', a.cookie), 202), pending);
+        assert.equal(calls.length + identityChecks, waitingStart, 'Retrying a pending connection must not touch AWS.');
+        ohioConfirmationPending = false;
+        await reconcileSharedConnections(runtime);
+        const recovered = ok(await local('GET', path, undefined, a.cookie)).connection;
+        assert.deepEqual(recovered, { ...pending, status: 'ready', awsAccountId: platform });
+        assert.deepEqual((await pool.query('SELECT region FROM provider_pool_regions WHERE ready AND aws_account_id=$1 ORDER BY region', [platform])).rows.map(r => r.region), [...offered].sort(), 'Warm even regions with no customers.');
+        const warmStart = calls.length, warmChecks = identityChecks;
+        const connected = ok(await choose('shared', b.cookie), 201);
+        assert.equal(connected.status, 'ready'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
+        assert.deepEqual(ok(await local('GET', path, undefined, b.cookie)).connection, connected);
+        assert.equal(identityChecks - warmChecks, 1);
+        assert.deepEqual(calls.slice(warmStart), ['CreateTenantCommand', 'UpdateReputationEntityPolicyCommand', 'CreateTenantResourceAssociationCommand', 'CreateTenantResourceAssociationCommand']);
+        const idleStart = calls.length + identityChecks;
+        await reconcileSharedConnections(runtime);
+        assert.equal(calls.length + identityChecks, idleStart, 'Ready pools and connections need no AWS reconciliation.');
+        assert.equal(sets.size, 4); assert.equal(topics.size, 2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 2);
         assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);

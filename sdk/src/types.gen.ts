@@ -16214,6 +16214,10 @@ export type CreateConnectionResponses = {
      * Success
      */
     201: ProviderConnection;
+    /**
+     * Success
+     */
+    202: ProviderConnection;
 };
 
 export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
