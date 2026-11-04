@@ -26,6 +26,33 @@
   font-weight: 100 900;
   font-display: swap;
 }
+/* Local fallbacks sized to Inter and OpenTUI Mono, so text keeps its width and lines if a web font swaps in late. */
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial'), local('ArialMT'), local('Helvetica');
+  font-weight: 400;
+  size-adjust: 107.2%;
+  ascent-override: 90.4%;
+  descent-override: 22.5%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Inter Fallback';
+  src: local('Arial Bold'), local('Arial-BoldMT'), local('Helvetica Bold');
+  font-weight: 700;
+  size-adjust: 100.3%;
+  ascent-override: 96.6%;
+  descent-override: 24.1%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'OpenTUI Mono Fallback';
+  src: local('Menlo'), local('Courier New');
+  size-adjust: 100%;
+  ascent-override: 96%;
+  descent-override: 22%;
+  line-gap-override: 10%;
+}
 :root {
   color-scheme: light;
   --color-email-surface: #FFFFFF;
@@ -74,8 +101,8 @@
   --color-transparent: transparent;
   --color-on-accent: #FFFFFF;
   --color-focus: #7698FD;
-  --font-body: 'Inter', sans-serif;
-  --font-mono: 'OpenTUI Mono', monospace;
+  --font-body: 'Inter', 'Inter Fallback', sans-serif;
+  --font-mono: 'OpenTUI Mono', 'OpenTUI Mono Fallback', monospace;
   --font-email: 'Inter', Arial, sans-serif;
   --tracking-email: -0.01em;
   --text-xs: 12px;

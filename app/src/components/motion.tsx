@@ -31,9 +31,10 @@ const liveTone: Record<LiveState, Tone> = { pending: 'warning', verified: 'succe
 const liveLabels: Record<LiveState, string> = { pending: 'Pending', verified: 'Verified', failed: 'Failed' }
 const liveStates = Object.keys(liveLabels) as LiveState[]
 
-// Status pill that pulses while pending and morphs its dot into a check once verified.
-export function LiveStatus({ state, labels }: { state: LiveState; labels?: Partial<Record<LiveState, string>> }) {
-  return <span className={cx('ui-status', `ui-tone--${liveTone[state]}`, 'live-status')} data-state={state}>
+// Status that pulses while pending and morphs its dot into a check once verified. Plain drops the pill.
+// Every label is laid out in one cell, so the width never changes between states.
+export function LiveStatus({ state, labels, plain = false }: { state: LiveState; labels?: Partial<Record<LiveState, string>>; plain?: boolean }) {
+  return <span className={cx(!plain && 'ui-status', `ui-tone--${liveTone[state]}`, 'live-status', plain && 'live-status--plain')} data-state={state}>
     <span className="live-status__mark" aria-hidden="true"><span className="live-status__dot" /><Check className="live-status__check" size={11} strokeWidth={3} /></span>
     <span className="live-status__label">{liveStates.map(key => <span key={key} data-active={key === state || undefined} aria-hidden={key === state ? undefined : true}>{labels?.[key] ?? liveLabels[key]}</span>)}</span>
   </span>

@@ -64,9 +64,12 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   const [access, setAccess] = useState(chooseAccess ? 'read' : 'manage')
   const selected = accessOptions.find(option => option.value === access) ?? accessOptions[0]
   const serverUrl = new URL('/mcp', usePublicOrigin()).href
-  const snippet = client === 'claude' ? `claude mcp add --transport http opensend ${serverUrl}`
-    : client === 'cursor' ? JSON.stringify({ mcpServers: { opensend: { url: serverUrl } } }, null, 2)
-    : JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { opensend: { type: 'remote', url: serverUrl, oauth: { scope: selected.scope } } } } }, null, 2)
+  const snippets: Record<string, string> = {
+    claude: `claude mcp add --transport http opensend ${serverUrl}`,
+    cursor: JSON.stringify({ mcpServers: { opensend: { url: serverUrl } } }, null, 2),
+    opencode: JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { opensend: { type: 'remote', url: serverUrl, oauth: { scope: selected.scope } } } } }, null, 2),
+  }
+  const snippet = snippets[client]
   const label = clients.find(item => item.value === client)!.label
   return <section className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
@@ -76,24 +79,27 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
       <Tabs label="MCP client" value={client} onValueChange={setClient} items={clients} />
       <CopyAction key={`${client}-${access}`} value={snippet} label={`Copy ${label} setup`} />
     </div>
-    {client === 'opencode' && chooseAccess && <div className="developer-access">
-      <Field label="Requested access" htmlFor="developer-mcp-access" hint={selected.hint}>
-        <Select id="developer-mcp-access" value={access} onValueChange={setAccess} options={accessOptions} />
-      </Field>
-    </div>}
-    <pre className={client === 'claude' ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${label} setup`}><code>{snippet}</code></pre>
-    {client === 'opencode' ? <ol className="developer-steps">
-      <li>Merge this entry into your project or global <code>opencode.json</code>. Keep your existing servers and settings.</li>
-      <li>Open <code>/mcps</code>, select <strong>opensend</strong>, then choose <strong>Sign in</strong>.</li>
-      <li>Approve the requested access in your browser. A dashboard session in that browser profile skips Google sign-in.</li>
-    </ol> : client === 'claude' ? <ol className="developer-steps">
-      <li>Run this in your project’s terminal.</li>
-      <li>In Claude Code, run <code>/mcp</code>, select <strong>opensend</strong>, then choose <strong>Authenticate</strong>.</li>
-    </ol> : <ol className="developer-steps">
-      <li>Merge this into <code>.cursor/mcp.json</code> in your project, or <code>~/.cursor/mcp.json</code> for every project.</li>
-      <li>In Cursor Settings, open <strong>MCP</strong> and sign in to <strong>opensend</strong>.</li>
-    </ol>}
-    {client === 'opencode' && chooseAccess && <p className="muted developer-copy">Code Mode is enabled by default. Tools include typed input and output schemas. The access selection only changes the configuration above; reconnect and authorize after changing scopes.</p>}
-    {client !== 'opencode' && <p className="muted developer-copy">{label} signs in with read access. Your code sends with the SDK and API key.</p>}
+    {/* Every client's setup is laid out in one cell, so switching tabs never changes the section's height. */}
+    <div className="developer-client-panels">{clients.map(({ value, label: name }) => <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client}>
+      {value === 'opencode' && chooseAccess && <div className="developer-access">
+        <Field label="Requested access" htmlFor="developer-mcp-access" hint={selected.hint}>
+          <Select id="developer-mcp-access" value={access} onValueChange={setAccess} options={accessOptions} />
+        </Field>
+      </div>}
+      <pre className={value === 'claude' ? 'developer-code developer-code--wrap' : 'developer-code'} tabIndex={0} aria-label={`${name} setup`}><code>{snippets[value]}</code></pre>
+      {value === 'opencode' ? <ol className="developer-steps">
+        <li>Merge this entry into your project or global <code>opencode.json</code>. Keep your existing servers and settings.</li>
+        <li>Open <code>/mcps</code>, select <strong>opensend</strong>, then choose <strong>Sign in</strong>.</li>
+        <li>Approve the requested access in your browser. A dashboard session in that browser profile skips Google sign-in.</li>
+      </ol> : value === 'claude' ? <ol className="developer-steps">
+        <li>Run this in your project’s terminal.</li>
+        <li>In Claude Code, run <code>/mcp</code>, select <strong>opensend</strong>, then choose <strong>Authenticate</strong>.</li>
+      </ol> : <ol className="developer-steps">
+        <li>Merge this into <code>.cursor/mcp.json</code> in your project, or <code>~/.cursor/mcp.json</code> for every project.</li>
+        <li>In Cursor Settings, open <strong>MCP</strong> and sign in to <strong>opensend</strong>.</li>
+      </ol>}
+      {value !== 'opencode' && <p className="muted developer-copy">{name} signs in with read access. Your code sends with the SDK and API key.</p>}
+      {value === 'opencode' && chooseAccess && <p className="muted developer-copy">Code Mode is enabled by default. Tools include typed input and output schemas. The access selection only changes the configuration above; reconnect and authorize after changing scopes.</p>}
+    </div>)}</div>
   </section>
 }

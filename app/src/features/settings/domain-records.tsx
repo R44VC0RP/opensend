@@ -65,26 +65,28 @@ const liveState = (verified: boolean): LiveState => verified ? 'verified' : 'pen
 // Long hostnames wrap at their dots rather than mid-label.
 const breakable = (text: string) => text.split('.').flatMap((part, index) => index === 0 ? [part] : [<wbr key={index} />, `.${part}`])
 
-function CopyField({ label, display, value, copyLabel }: { label: string; display: string; value: string; copyLabel: string }) {
-  return <div className="dns-field">
+function CopyText({ label, display, value, copyLabel }: { label: string; display: string; value: string; copyLabel: string }) {
+  return <div className="dns-cell">
     <span className="dns-label">{label}</span>
-    <div className="dns-well"><code title={value}>{breakable(display)}</code><CopyAction value={value} label={copyLabel} size="sm" /></div>
+    <span className="dns-text"><code title={value}>{breakable(display)}</code><CopyAction value={value} label={copyLabel} variant="ghost" size="sm" compact className="dns-copy" /></span>
   </div>
 }
 
-// Guided layout (onboarding): each group is a card and every record is a row of large copy targets.
-function RecordCard({ title, optional = false, description, notes = [], verified, domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; verified: boolean; domain: string; records: DnsRecord[] }) {
-  return <div className="dns-card" data-state={liveState(verified)}>
-    <div className="dns-card-header">
-      <div className="dns-card-title"><h3>{title}{optional && <span className="dns-card-optional">Optional</span>}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note} className="muted">{note}</p>)}</div>
-      <LiveStatus state={liveState(verified)} />
+// Guided layout (onboarding): a heading with one quiet status per group, then plain hairline rows.
+function RecordRows({ title, optional = false, description, notes = [], verified, domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; verified: boolean; domain: string; records: DnsRecord[] }) {
+  return <div className="dns-group" data-state={liveState(verified)}>
+    <div className="dns-group-head">
+      <h3>{title}{optional && <span className="muted"> · optional</span>}</h3>
+      <LiveStatus state={liveState(verified)} plain />
     </div>
-    <div className="dns-columns" aria-hidden="true"><span>Type</span><span>Name</span><span>Value</span><span>Status</span></div>
-    <ul className="dns-list">{records.map((record, index) => <li key={record.id} className="dns-record" style={{ '--i': index } as CSSProperties}>
-      <div className="dns-type"><span className="dns-label">Type</span><code>{record.type}</code></div>
-      <CopyField label="Name" display={relativeHost(record.name, domain)} value={record.name} copyLabel={`Copy full ${record.type} name`} />
-      <CopyField label="Value" display={record.value} value={record.value} copyLabel={`Copy ${record.type} value`} />
-      <div className="dns-status"><span className="dns-label">Status</span><LiveStatus state={liveState(record.status === 'verified')} /></div>
+    <p className="dns-group-copy muted">{description}</p>
+    {notes.map(note => <p key={note} className="dns-group-copy muted">{note}</p>)}
+    <div className="dns-columns" aria-hidden="true"><span>Type</span><span>Name</span><span>Value</span><span /></div>
+    <ul className="dns-rows">{records.map((record, index) => <li key={record.id} className="dns-row" style={{ '--i': index } as CSSProperties}>
+      <div className="dns-cell dns-type"><span className="dns-label">Type</span><code>{record.type}</code></div>
+      <CopyText label="Name" display={relativeHost(record.name, domain)} value={record.name} copyLabel={`Copy full ${record.type} name`} />
+      <CopyText label="Value" display={record.value} value={record.value} copyLabel={`Copy ${record.type} value`} />
+      <div className="dns-cell dns-status"><span className="dns-label">Status</span><LiveStatus state={liveState(record.status === 'verified')} plain /></div>
     </li>)}</ul>
   </div>
 }
@@ -104,8 +106,8 @@ export function DomainRecords({ domain, actions, guided = false }: { domain: Dom
   if (guided) return <section className="dns-guided" aria-label="DNS records">
     <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
-    {sending.length > 0 && <RecordCard title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordCard title="Receiving" optional description={`Add this to receive mail at ${domain.name}.`} notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
+    {sending.length > 0 && <RecordRows title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordRows title="Receiving" optional description={`Add this to receive mail at ${domain.name}.`} notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
     <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. They usually verify within minutes; you can leave this page and OpenSend keeps checking.</p></div>

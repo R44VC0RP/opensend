@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, ArrowUpRight, Check, Cloud, Send } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, Check, Send } from 'lucide-react'
 import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, SectionHeader } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
@@ -69,7 +69,8 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 
 type View = 'loading' | 'choose' | 'domain' | 'records' | 'agent' | 'admin' | 'error'
 const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, domain: 2, records: 3, agent: 4 }
-const viewStep: Partial<Record<View, number>> = { choose: 1, domain: 2, records: 2, agent: 3 }
+// The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
+const viewStep: Partial<Record<View, number>> = { loading: 1, error: 1, choose: 1, domain: 2, records: 2, agent: 3 }
 const rise = (index: number) => ({ '--i': index }) as CSSProperties
 
 // One component owns every step, so the domain form keeps its input from the choice through a ready connection.
@@ -98,7 +99,9 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
       onError: () => { tab?.close(); setPicked(null) },
     })
   }
-  const reset = () => { setPicked(null); setQueued(false) }
+  const reset = () => { setPicked(null); setQueued(false); setAwsShown(false) }
+  // A bring-your-own card stays in place once it has appeared, and shows Connected when AWS is ready.
+  const [awsShown, setAwsShown] = useState(false)
   const current = connection.data
   const pendingAws = sending && current?.kind === 'byo' && current.status === 'pending' ? current : null
   let view: View, content: ReactNode
@@ -109,18 +112,19 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   else if (sending && !pendingAws && !picked && connection.isPending) { view = 'loading'; content = <BootLoader inline /> }
   else if (sending && !pendingAws && !picked) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
   else {
-    const aws = pendingAws || (sending && picked === 'byo')
+    const aws = !!pendingAws || (sending && picked === 'byo')
+    if (aws && !awsShown) setAwsShown(true)
     view = 'domain'
     content = <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
       ready={stage.step === 'domain'} region={identity?.connection?.region ?? ''}
       onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)}
-      aws={aws ? <ConnectAws connection={pendingAws} onReset={reset} /> : null} />
+      aws={aws || awsShown ? <ConnectAws connection={pendingAws} connected={!aws} onReset={reset} /> : null} />
   }
   // Steps slide in the direction of travel; the first paint and the loader stay still.
   const [frame, setFrame] = useState<{ view: View; previous: View | null }>({ view, previous: null })
   if (frame.view !== view) setFrame({ view, previous: frame.view })
   const previous = frame.view === view ? frame.previous : frame.view
-  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || !viewStep[view] ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
+  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || view === 'error' || !viewStep[view] ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   const step = viewStep[view]
   return <>
@@ -138,7 +142,7 @@ function StepIndicator({ current }: { current: number }) {
       return <li key={label} data-state={state} aria-current={state === 'current' ? 'step' : undefined}>
         {index > 0 && <span className="onboarding-progress-line" aria-hidden="true" />}
         <span className="onboarding-progress-mark" aria-hidden="true"><span>{index + 1}</span><Check size={13} strokeWidth={2.75} /></span>
-        <span className="onboarding-progress-label">{label}{state === 'done' && <span className="sr-only"> (done)</span>}</span>
+        <span className="onboarding-progress-label" data-label={label}>{label}{state === 'done' && <span className="sr-only"> (done)</span>}</span>
       </li>
     })}
     <li className="onboarding-progress-caption" aria-hidden="true">Step {current} of {steps.length} · {steps[current - 1]}</li>
@@ -188,7 +192,7 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
         <span className="onboarding-option-foot"><span className="onboarding-option-price">$0.11 per 1,000 emails</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
-        <span className="onboarding-option-icon" aria-hidden="true"><Cloud size={18} /></span>
+        <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
         <span className="onboarding-option-body">Use your own AWS account. Setup opens AWS in a new tab.</span>
         <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Open AWS<ArrowUpRight size={16} aria-hidden /></span></span>
@@ -198,9 +202,17 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
   </div>
 }
 
+// The AWS mark: the wordmark follows the text colour, the smile stays AWS orange in both themes.
+function AwsLogo() {
+  return <svg viewBox="0 0 24 24" width="26" height="26">
+    <path fill="currentColor" d="M6.763 10.036c0 .296.032.535.088.71.064.176.144.368.256.576.04.063.056.127.056.183 0 .08-.048.16-.152.24l-.503.335a.383.383 0 0 1-.208.072c-.08 0-.16-.04-.239-.112a2.47 2.47 0 0 1-.287-.375 6.18 6.18 0 0 1-.248-.471c-.622.734-1.405 1.101-2.347 1.101-.67 0-1.205-.191-1.596-.574-.391-.384-.59-.894-.59-1.533 0-.678.239-1.23.726-1.644.487-.415 1.133-.623 1.955-.623.272 0 .551.024.846.064.296.04.6.104.918.176v-.583c0-.607-.127-1.03-.375-1.277-.255-.248-.686-.367-1.3-.367-.28 0-.568.031-.863.103-.295.072-.583.16-.862.272a2.287 2.287 0 0 1-.28.104.488.488 0 0 1-.127.023c-.112 0-.168-.08-.168-.247v-.391c0-.128.016-.224.056-.28a.597.597 0 0 1 .224-.167c.279-.144.614-.264 1.005-.36a4.84 4.84 0 0 1 1.246-.151c.95 0 1.644.216 2.091.647.439.43.662 1.085.662 1.963v2.586zm-3.24 1.214c.263 0 .534-.048.822-.144.287-.096.543-.271.758-.51.128-.152.224-.32.272-.512.047-.191.08-.423.08-.694v-.335a6.66 6.66 0 0 0-.735-.136 6.02 6.02 0 0 0-.75-.048c-.535 0-.926.104-1.19.32-.263.215-.39.518-.39.917 0 .375.095.655.295.846.191.2.47.296.838.296zm6.41.862c-.144 0-.24-.024-.304-.08-.064-.048-.12-.16-.168-.311L7.586 5.55a1.398 1.398 0 0 1-.072-.32c0-.128.064-.2.191-.2h.783c.151 0 .255.025.31.08.065.048.113.16.16.312l1.342 5.284 1.245-5.284c.04-.16.088-.264.151-.312a.549.549 0 0 1 .32-.08h.638c.152 0 .256.025.32.08.063.048.12.16.151.312l1.261 5.348 1.381-5.348c.048-.16.104-.264.16-.312a.52.52 0 0 1 .311-.08h.743c.127 0 .2.065.2.2 0 .04-.009.08-.017.128a1.137 1.137 0 0 1-.056.2l-1.923 6.17c-.048.16-.104.263-.168.311a.51.51 0 0 1-.303.08h-.687c-.151 0-.255-.024-.32-.08-.063-.056-.119-.16-.15-.32l-1.238-5.148-1.23 5.14c-.04.16-.087.264-.15.32-.065.056-.177.08-.32.08zm10.256.215c-.415 0-.83-.048-1.229-.143-.399-.096-.71-.2-.918-.32-.128-.071-.215-.151-.247-.223a.563.563 0 0 1-.048-.224v-.407c0-.167.064-.247.183-.247.048 0 .096.008.144.024.048.016.12.048.2.08.271.12.566.215.878.279.319.064.63.096.95.096.502 0 .894-.088 1.165-.264a.86.86 0 0 0 .415-.758.777.777 0 0 0-.215-.559c-.144-.151-.416-.287-.807-.415l-1.157-.36c-.583-.183-1.014-.454-1.277-.813a1.902 1.902 0 0 1-.4-1.158c0-.335.073-.63.216-.886.144-.255.335-.479.575-.654.24-.184.51-.32.83-.415.32-.096.655-.136 1.006-.136.175 0 .359.008.535.032.183.024.35.056.518.088.16.04.312.08.455.127.144.048.256.096.336.144a.69.69 0 0 1 .24.2.43.43 0 0 1 .071.263v.375c0 .168-.064.256-.184.256a.83.83 0 0 1-.303-.096 3.652 3.652 0 0 0-1.532-.311c-.455 0-.815.071-1.062.223-.248.152-.375.383-.375.71 0 .224.08.416.24.567.159.152.454.304.877.44l1.134.358c.574.184.99.44 1.237.767.247.327.367.702.367 1.117 0 .343-.072.655-.207.926-.144.272-.336.511-.583.703-.248.2-.543.343-.886.447-.36.111-.734.167-1.142.167z" />
+    <path fill="#FF9900" d="M21.698 16.207c-2.626 1.94-6.442 2.969-9.722 2.969-4.598 0-8.74-1.7-11.87-4.526-.247-.223-.024-.527.272-.351 3.384 1.963 7.559 3.153 11.877 3.153 2.914 0 6.114-.607 9.06-1.852.439-.2.814.287.383.607zM22.792 14.961c-.336-.43-2.22-.207-3.074-.103-.255.032-.295-.192-.063-.36 1.5-1.053 3.967-.75 4.254-.399.287.36-.08 2.826-1.485 4.007-.215.184-.423.088-.327-.151.32-.79 1.03-2.57.695-2.994z" />
+  </svg>
+}
+
 function verifyError(error: unknown, region: string) {
   switch (code(error)) {
-    case 'AWS_ACCESS_DENIED': return `OpenSend couldn’t use the role in that account yet. Check the stack shows CREATE_COMPLETE in ${region}, in this account, then try again.`
+    case 'AWS_ACCESS_DENIED': return `OpenSend can’t use the role yet. Check the stack shows CREATE_COMPLETE in ${region} in this account, then try again.`
     case 'EXTERNAL_ID_REQUIRED': return 'The role doesn’t require this setup’s external ID. Delete the stack in AWS and open it again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
@@ -209,7 +221,8 @@ function verifyError(error: unknown, region: string) {
 }
 
 // Compact status above the domain form while a bring-your-own setup waits for its CloudFormation stack.
-function ConnectAws({ connection, onReset }: { connection: ProviderConnection | null; onReset: () => void }) {
+// Once AWS is connected the card keeps its size and swaps to a confirmation, so nothing below moves.
+function ConnectAws({ connection, connected, onReset }: { connection: ProviderConnection | null; connected: boolean; onReset: () => void }) {
   const [account, setAccount] = useState('')
   const [accountError, setAccountError] = useState('')
   const verify = useConnectionMutation((id: string) => retrying(() => connectionApi.verify(id)))
@@ -221,20 +234,29 @@ function ConnectAws({ connection, onReset }: { connection: ProviderConnection | 
     try { await verify.mutateAsync(id) } catch { /* Shown inline. */ }
   }
   const link = connection?.quickCreateUrl
-  return <section className="onboarding-aws" aria-labelledby="onboarding-aws-title">
-    <div className="onboarding-aws-status">
-      <p id="onboarding-aws-title" role="status"><span className="onboarding-aws-dot" aria-hidden="true" /><strong>Connect your AWS account</strong><span className="muted">{verify.isPending ? 'Checking the role…' : 'Waiting for the stack in AWS'}</span></p>
-      <div className="cluster">
-        {link ? <a className="ui-button ui-button--ghost ui-button--sm" href={link} target="_blank" rel="noopener noreferrer">Open AWS again <ArrowUpRight size={16} aria-hidden /></a> : <Button variant="ghost" size="sm" disabled>Open AWS again <ArrowUpRight size={16} aria-hidden /></Button>}
-        {connection && !verify.isPending && <StartOver onReset={onReset} />}
+  const canStartOver = !!connection && !verify.isPending
+  return <section className="onboarding-aws onboarding-slot" data-connected={connected || undefined} aria-labelledby="onboarding-aws-title">
+    <div className="onboarding-aws-pending" data-active={!connected || undefined} inert={connected}>
+      <div className="onboarding-aws-status">
+        <p id="onboarding-aws-title" role="status"><span className="onboarding-aws-dot" aria-hidden="true" /><strong>Connect your AWS account</strong><span className="muted">{verify.isPending ? 'Checking the role…' : 'Waiting for the stack in AWS'}</span></p>
+        <div className="cluster">
+          {link ? <a className="ui-button ui-button--ghost ui-button--sm" href={link} target="_blank" rel="noopener noreferrer">Open AWS again <ArrowUpRight size={16} aria-hidden /></a> : <Button variant="ghost" size="sm" disabled>Open AWS again <ArrowUpRight size={16} aria-hidden /></Button>}
+          <span className="onboarding-reserve" data-hidden={!canStartOver || undefined} inert={!canStartOver}><StartOver onReset={onReset} /></span>
+        </div>
       </div>
+      <form className="onboarding-inline-form" onSubmit={submit} noValidate>
+        <div className="onboarding-field onboarding-field--aws">
+          <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="Once the stack shows CREATE_COMPLETE. It’s the 12 digits in the AWS console’s account menu.">
+            <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
+          </Field>
+        </div>
+        <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
+      </form>
     </div>
-    <form className="onboarding-inline-form" onSubmit={submit} noValidate>
-      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint={accountError || verify.error ? undefined : 'Once the stack shows CREATE_COMPLETE. It’s the 12 digits in the AWS console’s account menu.'}>
-        <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
-      </Field>
-      <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
-    </form>
+    <div className="onboarding-aws-connected" data-active={connected || undefined} inert={!connected}>
+      <span className="onboarding-aws-check" aria-hidden="true"><Check size={18} strokeWidth={2.5} /></span>
+      <div><strong>AWS account connected</strong><p>{verify.data?.awsAccountId ? `Account ${verify.data.awsAccountId}. ` : ''}Add your domain below.</p></div>
+    </div>
   </section>
 }
 
@@ -262,16 +284,19 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Add your domain</h1>
-      <p className="onboarding-lead">Your email will come from it, like <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></p>
+      <p className="onboarding-lead">Use a domain you own. Next, you’ll add a few DNS records.</p>
     </div>
     {aws && <div className="onb-rise" style={rise(1)}>{aws}</div>}
     <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
-      <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued && !invalid ? `${value} is added as soon as your AWS account is connected.` : undefined}>
-        <Input id="onboarding-domain" autoFocus={!aws} autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
-      </Field>
-      <Button type="submit" variant="primary" loading={create.isPending}>Add domain{!create.isPending && <ArrowRight size={16} aria-hidden />}</Button>
+      <div className="onboarding-field onboarding-field--domain">
+        {/* The hint line is always there: the live preview, the queued note or an error take turns in it. */}
+        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued ? `${value} is added as soon as your AWS account is connected.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
+          <Input id="onboarding-domain" autoFocus={!aws} autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
+        </Field>
+      </div>
+      <Button type="submit" variant="primary" loading={create.isPending}>Add domain<ArrowRight size={16} aria-hidden /></Button>
     </form>
-    {ready && <div className="onb-rise" style={rise(3)}><button type="button" className="onboarding-skip" disabled={create.isPending} onClick={onFinish}>Skip for now</button></div>}
+    <div className="onb-rise onboarding-reserve" style={rise(3)} data-hidden={!ready || undefined} inert={!ready}><button type="button" className="onboarding-skip" disabled={create.isPending} onClick={onFinish}>Skip for now</button></div>
   </div>
 }
 
@@ -288,13 +313,17 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
   return <div className="onboarding onboarding--wide">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title onboarding-domain-title"><span>{current.name}</span><LiveStatus state={verified ? 'verified' : current.status === 'issue' ? 'failed' : 'pending'} /></h1>
-      {current.status === 'issue' ? <Alert tone="danger">Verification stopped. Check the records below, then use Check now on the domain’s page in Domains.</Alert>
-        : !verified && <p className="onboarding-lead" role="status">Add these records at your DNS provider. We’ll check automatically, and you can continue while it verifies.</p>}
-      {verified && <div className="onboarding-verified" role="status">
-        <span className="onboarding-verified-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
-        <div><strong>{current.name} is verified</strong><p>You can send email now. Taking you to the last step…</p></div>
-        <span className="onboarding-verified-timer" aria-hidden="true" />
-      </div>}
+      {/* One slot for the lead, the failure note and the verified moment: each replaces the other in place. */}
+      <div className="onboarding-slot">
+        <p className="onboarding-lead" data-active={(!verified && current.status !== 'issue') || undefined} aria-hidden={verified || current.status === 'issue' || undefined}>Add these records at your DNS provider. We’ll check automatically, and you can continue while it verifies.</p>
+        <div data-active={(!verified && current.status === 'issue') || undefined} inert={verified || current.status !== 'issue'}><Alert tone="danger">Verification stopped. Check the records below, then use Check now on the domain’s page in Domains.</Alert></div>
+        <div className="onboarding-verified" data-active={verified || undefined} aria-hidden={!verified || undefined}>
+          <span className="onboarding-verified-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+          <p><strong>{current.name} is verified.</strong> You can send email now. Taking you to the last step…</p>
+          <span className="onboarding-verified-timer" aria-hidden="true" />
+        </div>
+      </div>
+      <span className="sr-only" role="status">{verified ? `${current.name} is verified. Continuing to the last step.` : ''}</span>
     </div>
     <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided /></div>
     <div className="onboarding-actions">
@@ -303,6 +332,9 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
     </div>
   </div>
 }
+
+// Same length as a real key (os_ and 64 hex digits), so the reveal takes exactly the reserved space.
+const keyPlaceholder = `os_${'0'.repeat(64)}`
 
 // Last step: everything a coding agent needs. Domain verification keeps running in the background.
 function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => void }) {
@@ -327,14 +359,17 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
         <SectionHeader title="API key" />
-        {secret ? <div className="onboarding-reveal stack">
-          <div className="developer-url"><code>{secret}</code><CopyAction value={secret} label="Copy API key" size="sm" /></div>
-          <p className="muted developer-copy" role="status">Shown once. Store it as <code>OPENSEND_API_KEY</code> in your project’s environment.</p>
-        </div> : <>
-          <p className="muted developer-copy">Full access to send and manage this workspace, for every domain.</p>
-          <div><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
-          {create.error ? <Alert tone="danger">{message(create.error)}</Alert> : null}
-        </>}
+        {/* The key replaces the button in a slot sized for both, so the cards below never move. */}
+        <div className="onboarding-slot">
+          <div className="stack" data-active={!secret || undefined} inert={!!secret}>
+            <p className={create.error ? 'developer-copy onboarding-error' : 'muted developer-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : 'Full access to send and manage this workspace, for every domain.'}</p>
+            <div><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
+          </div>
+          <div className="stack onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}>
+            <div className="developer-url"><code>{secret ?? keyPlaceholder}</code><CopyAction value={secret ?? ''} label="Copy API key" size="sm" /></div>
+            <p className="muted developer-copy" role="status">Shown once. Store it as <code>OPENSEND_API_KEY</code> in your project’s environment.</p>
+          </div>
+        </div>
       </section>
       <div className="onb-rise" style={rise(2)}><AgentPrompt prompt={prompt} /></div>
       <div className="onb-rise" style={rise(3)}><McpSetup /></div>

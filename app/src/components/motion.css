@@ -37,3 +37,8 @@
 .live-status__label > span { grid-area: 1 / 1; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong); }
 .live-status__label > span:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s 240ms; }
 @keyframes live-status-ping { 0% { opacity: .7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.8); } }
+
+/* Plain: a dot and a word, no pill. */
+.live-status--plain { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); white-space: nowrap; }
+.live-status--plain[data-state='verified'] { color: var(--color-success); }
+.live-status--plain[data-state='failed'] { color: var(--color-danger); }

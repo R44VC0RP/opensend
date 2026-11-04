@@ -19,3 +19,6 @@
 .developer-client-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
 .developer-client-bar > :first-child { min-width: 0; }
 @media (max-width: 560px) { .developer-code.developer-code--wrap { white-space: pre-wrap; } }
+.developer-client-panels { display: grid; min-width: 0; }
+.developer-client-panel { grid-area: 1 / 1; min-width: 0; }
+.developer-client-panel:not([data-active]) { visibility: hidden; }
