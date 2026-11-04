@@ -1273,7 +1273,7 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this environment as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.
+ * Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.
  */
 export const createCampaign = <ThrowOnError extends boolean = false>(options: Options<CreateCampaignData, ThrowOnError>): RequestResult<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError> => (options.client ?? client).post<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError>({
     security: [
@@ -1359,7 +1359,7 @@ export const updateCampaign = <ThrowOnError extends boolean = false>(options: Op
 });
 
 /**
- * Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Rates are fractions, null for zero denominators or test mode; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.
+ * Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.
  */
 export const getCampaignStats = <ThrowOnError extends boolean = false>(options: Options<GetCampaignStatsData, ThrowOnError>): RequestResult<GetCampaignStatsResponses, GetCampaignStatsErrors, ThrowOnError> => (options.client ?? client).get<GetCampaignStatsResponses, GetCampaignStatsErrors, ThrowOnError>({
     security: [
@@ -2150,7 +2150,7 @@ export const listRegions = <ThrowOnError extends boolean = false>(options?: Opti
 });
 
 /**
- * Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.
+ * Enable/disable a region or choose the default. Requires unrestricted management access. Disabling never deletes AWS resources or historical mail.
  */
 export const configureRegion = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionData, ThrowOnError>): RequestResult<ConfigureRegionResponses, ConfigureRegionErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionResponses, ConfigureRegionErrors, ThrowOnError>({
     security: [
@@ -2221,7 +2221,7 @@ export const provisionRegion = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.
+ * Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.
  */
 export const configureRegionAutoValidation = <ThrowOnError extends boolean = false>(options: Options<ConfigureRegionAutoValidationData, ThrowOnError>): RequestResult<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError> => (options.client ?? client).put<ConfigureRegionAutoValidationResponses, ConfigureRegionAutoValidationErrors, ThrowOnError>({
     security: [

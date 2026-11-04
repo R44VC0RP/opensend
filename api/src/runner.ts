@@ -15,7 +15,7 @@ try {
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
   let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
-  // In-process pacing state per environment/region. Run one runner per installation (or split
+  // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });

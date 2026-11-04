@@ -2,7 +2,6 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
-import type { Mode } from './core.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -63,12 +62,12 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('jobs', batch(sql`jobs`, sql`status IN ('completed','failed') AND type <> 'maintenance.deleteAttachment' AND created_at < ${cutoff}`));
   // Delete metadata only when no draft or message references it. The outbox retains the object key until deletion succeeds.
   await runtime.db.transaction(async tx => {
-    const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; environment: Mode; source_template_asset_id: string | null }>(sql`WITH old AS (
-      SELECT a.id FROM sending_attachments a WHERE a.created_at < ${cutoff}
+    const unused = await tx.execute<{ id: string; storage_key: string; workspace_id: string; source_template_asset_id: string | null }>(sql`WITH old AS (
+      SELECT a.id FROM sending_attachments a WHERE a.environment='live' AND a.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM sending_attachment_links l WHERE l.attachment_id = a.id)
       LIMIT 50 FOR UPDATE SKIP LOCKED
-    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.workspace_id, a.environment, a.source_template_asset_id`);
-    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, environment: object.environment, payload: { key: object.storage_key } });
+    ) DELETE FROM sending_attachments a USING old WHERE a.id = old.id RETURNING a.id, a.storage_key, a.workspace_id, a.source_template_asset_id`);
+    for (const object of unused.rows) if (!object.source_template_asset_id) await enqueue(tx, { type: 'maintenance.deleteAttachment', workspaceId: object.workspace_id, environment: 'live', payload: { key: object.storage_key } });
     const unusedTemplateAssets = await tx.execute<{ storage_key: string; workspace_id: string }>(sql`WITH old AS (
       SELECT a.id FROM template_assets a WHERE a.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM template_asset_links l WHERE l.workspace_id = a.workspace_id AND l.asset_id = a.id)

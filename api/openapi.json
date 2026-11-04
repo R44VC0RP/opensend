@@ -3,7 +3,7 @@
   "info": {
     "title": "OpenSend API",
     "version": "0.1.0",
-    "description": "Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending."
+    "description": "Transactional and marketing email. 202 means queued, not delivered. Sending is simulated when live SES is disabled or AWS credentials are not configured."
   },
   "components": {
     "securitySchemes": {
@@ -155,13 +155,6 @@
               ]
             }
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "domains": {
             "type": "array",
             "items": {
@@ -177,7 +170,6 @@
           "token",
           "expiresAt",
           "permissions",
-          "environment",
           "domains",
           "purpose"
         ]
@@ -190,13 +182,6 @@
           },
           "grantId": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "permissions": {
             "type": "array",
@@ -240,7 +225,6 @@
         "required": [
           "id",
           "grantId",
-          "environment",
           "permissions",
           "domains",
           "purpose",
@@ -258,13 +242,6 @@
           },
           "name": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "permissions": {
             "type": "array",
@@ -305,7 +282,6 @@
         "required": [
           "id",
           "name",
-          "environment",
           "permissions",
           "domains",
           "prefix",
@@ -321,14 +297,6 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 100
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ],
-            "default": "test"
           },
           "permissions": {
             "type": "array",
@@ -390,13 +358,6 @@
           },
           "workspaceId": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "email": {
             "type": "string"
@@ -490,7 +451,6 @@
         "required": [
           "id",
           "workspaceId",
-          "environment",
           "email",
           "name",
           "properties",
@@ -525,13 +485,6 @@
           },
           "workspaceId": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "createdAt": {
             "type": "string"
@@ -575,7 +528,6 @@
           "name",
           "id",
           "workspaceId",
-          "environment",
           "createdAt",
           "updatedAt",
           "counts"
@@ -601,13 +553,6 @@
           "workspaceId": {
             "type": "string"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "createdAt": {
             "type": "string"
           },
@@ -619,7 +564,6 @@
           "name",
           "id",
           "workspaceId",
-          "environment",
           "createdAt",
           "updatedAt"
         ],
@@ -642,13 +586,6 @@
           "workspaceId": {
             "type": "string"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "createdAt": {
             "type": "string"
           },
@@ -661,7 +598,6 @@
           "rule",
           "id",
           "workspaceId",
-          "environment",
           "createdAt",
           "updatedAt"
         ],
@@ -1006,13 +942,6 @@
           "workspaceId": {
             "type": "string"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "listId": {
             "type": [
               "string",
@@ -1103,7 +1032,6 @@
         "required": [
           "id",
           "workspaceId",
-          "environment",
           "listId",
           "status",
           "rows",
@@ -1677,13 +1605,6 @@
               "queued"
             ]
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "simulated": {
             "type": "boolean"
           },
@@ -1702,7 +1623,6 @@
         "required": [
           "id",
           "status",
-          "environment",
           "simulated"
         ],
         "description": "For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation."
@@ -1817,7 +1737,7 @@
               "name"
             ],
             "additionalProperties": false,
-            "description": "Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template."
+            "description": "Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates."
           },
           "attachments": {
             "type": "array",
@@ -1834,13 +1754,13 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured."
+            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured."
           },
           "replyAddressId": {
             "type": "string",
             "minLength": 1,
             "maxLength": 120,
-            "description": "Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted live manage permission; From and Reply-To must belong to the address."
+            "description": "Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address."
           },
           "replyMailboxId": {
             "type": "string",
@@ -1882,13 +1802,6 @@
               "queued"
             ]
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "simulated": {
             "type": "boolean"
           }
@@ -1896,7 +1809,6 @@
         "required": [
           "id",
           "status",
-          "environment",
           "simulated"
         ]
       },
@@ -2027,7 +1939,7 @@
               "name"
             ],
             "additionalProperties": false,
-            "description": "Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template."
+            "description": "Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates."
           },
           "attachments": {
             "type": "array",
@@ -2044,7 +1956,7 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured."
+            "description": "Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured."
           }
         },
         "required": [
@@ -2058,13 +1970,6 @@
         "properties": {
           "id": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "region": {
             "type": "string"
@@ -2167,7 +2072,6 @@
         },
         "required": [
           "id",
-          "environment",
           "region",
           "campaignId",
           "from",
@@ -2267,13 +2171,6 @@
           "simulated": {
             "type": "boolean"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "createdAt": {
             "type": "string"
           },
@@ -2288,7 +2185,6 @@
           "type",
           "providerId",
           "simulated",
-          "environment",
           "createdAt",
           "data"
         ]
@@ -2323,13 +2219,6 @@
           },
           "createdAt": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           }
         },
         "required": [
@@ -2339,8 +2228,7 @@
           "size",
           "disposition",
           "contentId",
-          "createdAt",
-          "environment"
+          "createdAt"
         ]
       },
       "AttachmentUpload": {
@@ -2434,14 +2322,7 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review."
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
+            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review."
           },
           "revision": {
             "type": "integer"
@@ -2575,7 +2456,6 @@
         "required": [
           "id",
           "url",
-          "environment",
           "revision",
           "draft",
           "sourceTemplateId",
@@ -3096,14 +2976,7 @@
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review."
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
+            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review."
           },
           "revision": {
             "type": "integer"
@@ -3237,7 +3110,6 @@
         "required": [
           "id",
           "url",
-          "environment",
           "revision",
           "sourceTemplateId",
           "sourceTemplateRevision",
@@ -3338,13 +3210,6 @@
           },
           "name": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           },
           "status": {
             "type": "string",
@@ -3480,7 +3345,7 @@
               "deliveryDelayed",
               "simulated"
             ],
-            "description": "Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events in test mode. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus."
+            "description": "Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus."
           },
           "rates": {
             "type": "object",
@@ -3494,7 +3359,7 @@
                       "null"
                     ],
                     "minimum": 0,
-                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                    "description": "Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
                   },
                   "numerator": {
                     "type": "integer",
@@ -3521,7 +3386,7 @@
                       "null"
                     ],
                     "minimum": 0,
-                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                    "description": "Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
                   },
                   "numerator": {
                     "type": "integer",
@@ -3548,7 +3413,7 @@
                       "null"
                     ],
                     "minimum": 0,
-                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                    "description": "Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
                   },
                   "numerator": {
                     "type": "integer",
@@ -3575,7 +3440,7 @@
                       "null"
                     ],
                     "minimum": 0,
-                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                    "description": "Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
                   },
                   "numerator": {
                     "type": "integer",
@@ -3602,7 +3467,7 @@
                       "null"
                     ],
                     "minimum": 0,
-                    "description": "Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
+                    "description": "Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator."
                   },
                   "numerator": {
                     "type": "integer",
@@ -3633,7 +3498,6 @@
         "required": [
           "id",
           "name",
-          "environment",
           "status",
           "tracking",
           "counts",
@@ -3641,7 +3505,7 @@
           "totals",
           "rates"
         ],
-        "description": "Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Test outcomes are simulated, never evidence of real delivery."
+        "description": "Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery."
       },
       "CampaignContentGuide": {
         "type": "object",
@@ -3702,13 +3566,6 @@
           "id": {
             "type": "string"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "revision": {
             "type": "integer"
           },
@@ -3747,7 +3604,6 @@
         },
         "required": [
           "id",
-          "environment",
           "revision",
           "updatedAt",
           "status",
@@ -4255,18 +4111,10 @@
         "properties": {
           "name": {
             "type": "string"
-          },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
           }
         },
         "required": [
-          "name",
-          "environment"
+          "name"
         ]
       },
       "UpdateWorkspaceSettings": {
@@ -4850,13 +4698,6 @@
           "workspaceId": {
             "type": "string"
           },
-          "environment": {
-            "type": "string",
-            "enum": [
-              "live",
-              "test"
-            ]
-          },
           "region": {
             "type": [
               "string",
@@ -4873,7 +4714,6 @@
           "type",
           "createdAt",
           "workspaceId",
-          "environment",
           "region",
           "data"
         ]
@@ -8722,6 +8562,9 @@
                     "multiTenant": {
                       "type": "boolean"
                     },
+                    "simulated": {
+                      "type": "boolean"
+                    },
                     "email": {
                       "type": [
                         "string",
@@ -8732,13 +8575,6 @@
                       "type": [
                         "string",
                         "null"
-                      ]
-                    },
-                    "environment": {
-                      "type": "string",
-                      "enum": [
-                        "live",
-                        "test"
                       ]
                     },
                     "permissions": {
@@ -8774,9 +8610,9 @@
                     "workspaceId",
                     "role",
                     "multiTenant",
+                    "simulated",
                     "email",
                     "name",
-                    "environment",
                     "permissions",
                     "domains",
                     "origin",
@@ -8940,13 +8776,6 @@
                     "minItems": 1,
                     "maxItems": 3
                   },
-                  "environment": {
-                    "type": "string",
-                    "enum": [
-                      "live",
-                      "test"
-                    ]
-                  },
                   "expiresInSeconds": {
                     "type": "integer",
                     "minimum": 30,
@@ -8969,7 +8798,6 @@
                 },
                 "required": [
                   "permissions",
-                  "environment",
                   "expiresInSeconds",
                   "purpose"
                 ],
@@ -9094,12 +8922,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { createAgentToken } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createAgentToken({\n  client,\n  body: {\n    \"permissions\": [\n      \"read\"\n    ],\n    \"environment\": \"live\",\n    \"expiresInSeconds\": 30,\n    \"domains\": [],\n    \"purpose\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { createAgentToken } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createAgentToken({\n  client,\n  body: {\n    \"permissions\": [\n      \"read\"\n    ],\n    \"expiresInSeconds\": 30,\n    \"domains\": [],\n    \"purpose\": \"Your message is ready.\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/agent-tokens' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"permissions\": [\n    \"read\"\n  ],\n  \"environment\": \"live\",\n  \"expiresInSeconds\": 30,\n  \"domains\": [],\n  \"purpose\": \"Your message is ready.\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/agent-tokens' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"permissions\": [\n    \"read\"\n  ],\n  \"expiresInSeconds\": 30,\n  \"domains\": [],\n  \"purpose\": \"Your message is ready.\"\n}'"
           }
         ]
       },
@@ -9626,12 +9454,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { createApiKey } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createApiKey({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"environment\": \"live\",\n    \"permissions\": [\n      \"send\"\n    ],\n    \"domains\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { createApiKey } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createApiKey({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"permissions\": [\n      \"send\"\n    ],\n    \"domains\": []\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/api-keys' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"environment\": \"live\",\n  \"permissions\": [\n    \"send\"\n  ],\n  \"domains\": []\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/api-keys' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"permissions\": [\n    \"send\"\n  ],\n  \"domains\": []\n}'"
           }
         ]
       },
@@ -11213,13 +11041,6 @@
                           "workspaceId": {
                             "type": "string"
                           },
-                          "environment": {
-                            "type": "string",
-                            "enum": [
-                              "live",
-                              "test"
-                            ]
-                          },
                           "contactId": {
                             "type": "string"
                           },
@@ -11264,7 +11085,6 @@
                         "required": [
                           "id",
                           "workspaceId",
-                          "environment",
                           "contactId",
                           "email",
                           "status",
@@ -14199,13 +14019,6 @@
                           "workspaceId": {
                             "type": "string"
                           },
-                          "environment": {
-                            "type": "string",
-                            "enum": [
-                              "live",
-                              "test"
-                            ]
-                          },
                           "listId": {
                             "type": [
                               "string",
@@ -14232,7 +14045,6 @@
                         "required": [
                           "id",
                           "workspaceId",
-                          "environment",
                           "listId",
                           "status",
                           "imported",
@@ -17548,10 +17360,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -17717,10 +17529,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -18656,10 +18468,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -19267,7 +19079,7 @@
     "/v1/campaigns": {
       "post": {
         "operationId": "createCampaign",
-        "description": "Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this environment as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.",
+        "description": "Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.",
         "tags": [
           "Campaigns"
         ],
@@ -19290,10 +19102,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -20142,7 +19954,7 @@
     "/v1/campaigns/{id}/stats": {
       "get": {
         "operationId": "getCampaignStats",
-        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Rates are fractions, null for zero denominators or test mode; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.",
+        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.",
         "tags": [
           "Campaigns"
         ],
@@ -21108,10 +20920,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -21288,10 +21100,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -21634,10 +21446,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -21814,10 +21626,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -21993,10 +21805,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -26598,7 +26410,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.",
+        "description": "Enable/disable a region or choose the default. Requires unrestricted management access. Disabling never deletes AWS resources or historical mail.",
         "parameters": [
           {
             "schema": {
@@ -27098,7 +26910,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.",
+        "description": "Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.",
         "parameters": [
           {
             "schema": {
@@ -30111,10 +29923,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }
@@ -31259,10 +31071,10 @@
               "maxLength": 200,
               "pattern": "^[\\x21-\\x7E]+$",
               "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
+              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
             },
             "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
+            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
             "name": "Idempotency-Key",
             "in": "header"
           }

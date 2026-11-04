@@ -9,7 +9,7 @@ import type { Subscription } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
-import { ApiError, log } from './core.js';
+import { ApiError, assertSesConfigured, log } from './core.js';
 import type { Config, Runtime } from './core.js';
 
 const flag = z.boolean().nullable();
@@ -133,7 +133,7 @@ function sesSend<T>(context: SetupContext, send: () => Promise<T>): Promise<T> {
 
 function clients(runtime: Runtime, region: string, context: SetupContext) {
   const deadlineSignal = context.signal;
-  if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'Configure AWS access credentials to discover or provision SES.');
+  assertSesConfigured(runtime);
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Use a valid AWS region.', 'region');
   const config = { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) };
   const result = { ses: new SESv2Client(config), sns: new SNSClient(config), sts: new STSClient(config), cw: new CloudWatchClient(config) };
@@ -354,7 +354,7 @@ export async function discoverSes(runtime: Runtime, options: SesSetupOptions): P
 
 export function assertProvisionable(runtime: Runtime): void {
   feedbackUrl(runtime.config);
-  if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'Configure AWS access credentials to discover or provision SES.');
+  assertSesConfigured(runtime);
 }
 
 /** Explicit provisioning; caller persists the job and the topic trust before SNS Subscribe. */

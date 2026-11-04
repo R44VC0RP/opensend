@@ -62,8 +62,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const active = new Set<Promise<void>>();
   const failures: unknown[] = [];
   let activeFeedback = 0;
-  // Spread short drains across the 8-turn cycle without a shared scheduler-row lock.
-  // Live/test and job-class fairness is approximate across invocations, not serialized.
+  // Hold each class preference for four claims so it cannot line up with alternating feedback reservations.
   const rotation = Math.floor(Math.random() * 8);
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
@@ -110,20 +109,16 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const claimStarted = Date.now();
       const claimed = await runtime.db.execute<{
         id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
-      }>(sql`WITH rotation AS (
-        SELECT ${(rotation + claimRequests) % 8}::int AS turn
-      ), feedback AS (
-        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
+      }>(sql`WITH feedback AS (
+        SELECT j.id FROM jobs j WHERE j.environment='live' AND ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
-        ORDER BY CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
+        ORDER BY j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
       ), regular AS (
-        SELECT j.id FROM jobs j CROSS JOIN rotation r WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+        SELECT j.id FROM jobs j WHERE j.environment='live' AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
-          CASE WHEN j.environment = CASE WHEN r.turn % 4 = 0 THEN 'test' ELSE 'live' END THEN 0 ELSE 1 END,
-          CASE WHEN (r.turn / 4) = CASE WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
+          CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
           CASE WHEN j.type = 'campaign.finish' THEN 0
             WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
@@ -169,7 +164,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
 export async function nextWakeDelay(runtime: Runtime) {
   const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
     FROM (SELECT min(CASE WHEN status = 'running' THEN lease_until ELSE available_at END) AS due
-      FROM jobs WHERE status IN ('pending','running')) upcoming`);
+      FROM jobs WHERE environment='live' AND status IN ('pending','running')) upcoming`);
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }

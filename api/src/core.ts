@@ -28,7 +28,7 @@ export interface Storage {
   delete(key: string): Promise<void>;
 }
 export interface Config {
-  /** Requests per minute per live credential; test credentials get half. */
+  /** Requests per minute per credential. */
   apiRateLimitPerMinute: number;
   workspaceId: string;
   authSecret: string;
@@ -64,15 +64,15 @@ export interface Config {
 }
 export interface RenderedImage { data: Uint8Array; mimeType: 'image/png'; }
 export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'; }
-export type FeedbackItem = { environment: Mode; region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
+export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   wake?: (readyJobs?: number) => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
-  // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
+  // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
-  dispatch?: (environment: Mode, region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind']) => Promise<void>;
-  // Verified provider feedback (and test-mode simulated callbacks) leave the request path through this
+  dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind']) => Promise<void>;
+  // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
@@ -114,9 +114,13 @@ export function region(runtime: Runtime, value: string) {
 // Runtime identities are invocation-local in Workers; never reuse an I/O client
 // across requests. Node drains also receive a fresh resolved runtime.
 const sesClients = new WeakMap<Runtime, Map<string, SESv2Client>>();
+export const isSimulatedSes = (runtime: Runtime) => !runtime.config.liveEnabled || !runtime.config.aws;
+export function assertSesConfigured(runtime: Runtime) {
+  if (isSimulatedSes(runtime)) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
+}
 export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection): SESv2Client {
   region(runtime, selectedRegion);
-  if (!runtime.config.liveEnabled || !runtime.config.aws) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
+  assertSesConfigured(runtime);
   let clients = sesClients.get(runtime);
   if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
   const key = connection ? `${selectedRegion}:${connection.id}` : selectedRegion;

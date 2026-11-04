@@ -63,10 +63,3 @@ jobs:
           AUTH_ALLOWED_EMAILS: ${{ vars.MX_AUTH_ALLOWED_EMAILS }}
           AUTH_ALLOWED_DOMAINS: ${{ vars.MX_AUTH_ALLOWED_DOMAINS }}
           DEFAULT_WORKSPACE_OWNERS: ${{ vars.MX_DEFAULT_WORKSPACE_OWNERS }}
-      # The old Worker could still write legacy events after the pre-deploy migration.
-      # The migration runner skips recorded files; replay just this idempotent data cleanup.
-      - name: Normalize inbound events written during rollout
-        run: psql --no-psqlrc --dbname="$DATABASE_URL&sslrootcert=system" --set=ON_ERROR_STOP=1 --single-transaction --file=migrations/050_inbound_event_names.sql
-        working-directory: api
-        env:
-          DATABASE_URL: ${{ secrets.MX_DATABASE_URL }}

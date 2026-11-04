@@ -5,19 +5,19 @@ import { sql } from 'drizzle-orm';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
 import { initialGate, runDispatcher, type GateState } from './dispatcher.js';
-import { ApiError, log, type Mode, type Runtime } from './core.js';
+import { ApiError, log, type Runtime } from './core.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
 
-// One Durable Object per environment/region/shard hosts the dispatcher loop. The object
+// One Durable Object per account/region/shard hosts the dispatcher loop. The object
 // keeps its database pool and pacing state across alarms, so a busy region never pays the
 // per-invocation setup the queue consumer did, and an evicted object resumes from storage
 // without bursting past its quota share. PostgreSQL rows remain the only queue.
 
-type Identity = { environment: Mode; region: string; accountId?: string; shard: { index: number; count: number } };
+type Identity = { region: string; accountId?: string; shard: { index: number; count: number } };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
 
-export function dispatcherName(identity: Identity) { return `dispatcher:${identity.environment}:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
+export function dispatcherName(identity: Identity) { return `dispatcher:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
 
 export class DispatcherShard extends DurableObject<Env> {
@@ -46,9 +46,8 @@ export class DispatcherShard extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname !== '/wake') return new Response('Not found', { status: 404 });
+    if (url.pathname !== '/wake' || url.searchParams.has('environment')) return new Response('Not found', { status: 404 });
     const identity: Identity = {
-      environment: url.searchParams.get('environment') === 'live' ? 'live' : 'test',
       region: url.searchParams.get('region') ?? '',
       accountId: url.searchParams.get('account') ?? undefined,
       shard: { index: Number(url.searchParams.get('shard') ?? 0), count: Math.max(1, Number(url.searchParams.get('count') ?? 1)) },
@@ -65,7 +64,7 @@ export class DispatcherShard extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     const identity = this.identity ??= await this.ctx.storage.get<Identity>('identity');
-    if (!identity) return;
+    if (!identity || 'environment' in identity) return; // Retire alarms from the old shard names.
     if (this.running) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
     this.running = true;
     const started = Date.now();

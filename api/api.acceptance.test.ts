@@ -36,7 +36,7 @@ const DATABASE_FIXTURE_SKIP = false; // Bootstrap already requires an explicitly
 const mail = (extra: Json = {}): Json => ({ from: 'sender@example.com', to: address(), region: REGION, subject: unique('Acceptance'), text: 'Synthetic acceptance message; no SES send is authorized.', ...extra });
 type Json = Record<string, any>;
 type Reply = { status: number; body: any; headers: Headers };
-type Key = { id: string; secret: string; environment: 'test' | 'live' };
+type Key = { id: string; secret: string };
 const cleanups = new WeakMap<TestContext, Array<() => Promise<void>>>();
 function cleanup(t: TestContext, action: () => Promise<void>) {
   let stack = cleanups.get(t);
@@ -99,6 +99,7 @@ before(async () => {
   const identity = ok(await http('GET', '/v1/me', MANAGER));
   assert.equal(identity.id, manager.userId, 'Fixture DB, session secret and API must match; no machine keys may be provisioned otherwise.');
   assert.equal(identity.email, AUTH_EMAIL);
+  if (!identity.simulated) assert.ok(process.env.LIVE_SES_TEST === '1' && process.execArgv.includes('--test-name-pattern=^LIVE SES:'), 'Synthetic scenarios require a simulated deployment. An explicitly authorized live check must run alone with --test-name-pattern=^LIVE SES:.');
 });
 after(async () => {
   if (authDb) {
@@ -156,7 +157,7 @@ async function allPages(path: string, key: string): Promise<Json[]> {
 function redact(value: unknown): string {
   let text = JSON.stringify(value, (key, item) => /^(secret|token|authorization|signingSecret|signingKey|unsubscribeUrl|unsubscribeToken)$/i.test(key) ? '[REDACTED]' : item) ?? String(value);
   for (const secret of secrets) text = text.replaceAll(secret, '[REDACTED]');
-  return text.replace(/os_(?:test|live)_[A-Za-z0-9_-]+/g, '[REDACTED_API_KEY]')
+  return text.replace(/os_(?:(?:test|live)_)?[0-9a-f]{64}/g, '[REDACTED_API_KEY]')
     .replace(/(\/unsubscribe\/)[^\s"<>?]+/g, '$1[REDACTED]');
 }
 function diagnostic(reply: Reply): string {
@@ -165,7 +166,7 @@ function diagnostic(reply: Reply): string {
 async function http(method: string, path: string, key?: string, body?: unknown, headers: Record<string, string> = {}, timeout = 5_000, base = BASE, transport: (request: Request) => Response | Promise<Response> = fetch): Promise<Reply> {
   if (key === MANAGER) assert.ok(manager, 'Synthetic dashboard session has not been bootstrapped.');
   const credentials: Record<string, string> = key === MANAGER
-    ? { cookie: manager!.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': path.startsWith('/v1/api-keys') ? 'live' : 'test' }
+    ? { cookie: manager!.cookie, origin: PUBLIC_ORIGIN }
     : key ? { authorization: `Bearer ${key}` } : {};
   const response = await transport(new Request(`${base}${path}`, {
     method,
@@ -205,14 +206,14 @@ function page(reply: Reply): Json[] {
   assert.ok(body.nextCursor === null || typeof body.nextCursor === 'string', diagnostic(reply));
   return body.data;
 }
-async function keyFixture(t: TestContext, options: { environment?: 'test' | 'live'; permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
+async function keyFixture(t: TestContext, options: { permissions?: string[]; domains?: string[] } = {}): Promise<Key> {
   const body = ok(await http('POST', '/v1/api-keys', MANAGER, {
-    name: unique('acceptance'), environment: options.environment ?? 'test',
+    name: unique('acceptance'),
     permissions: options.permissions ?? ['read', 'send', 'manage'], domains: options.domains ?? [],
   }), 201);
   assert.equal(typeof body.id, 'string');
   assert.equal(typeof body.secret, 'string', 'API-key creation must return the secret exactly once.');
-  assert.ok(body.secret.startsWith(options.environment === 'live' ? 'os_live_' : 'os_test_'), 'Key prefix must identify its environment.');
+  assert.match(body.secret, /^os_[0-9a-f]{64}$/);
   secrets.add(body.secret);
   cleanup(t, async () => { ok(await http('POST', `/v1/api-keys/${body.id}/revoke`, MANAGER), [200, 204]); });
   return body;
@@ -232,7 +233,7 @@ async function poll(path: string, key: string, predicate: (body: Json) => boolea
 // Each top-level scenario owns its own randomly named fixtures. Operations inside
 // a scenario are sequential; no shared ordering dependency exists between scenarios.
 describe('Public contract and authentication', () => {
-  test('health and OpenAPI are public, protected routes reject missing and invalid credentials', async () => {
+  test('health and OpenAPI are public, protected routes require credentials', async () => {
     const healthReply = await http('GET', '/health');
     const health = ok(healthReply);
     assert.equal(health.status, 'ok');
@@ -282,13 +283,26 @@ describe('Public contract and authentication', () => {
     const contactSchema = resolve(document.paths['/v1/contacts'].post.requestBody.content['application/json'].schema);
     assert.equal(contactSchema.properties?.email?.format, 'email');
     const queuedSchema = resolve(document.paths['/v1/emails/send'].post.responses['202'].content['application/json'].schema);
-    assert.ok(queuedSchema.properties?.id && queuedSchema.properties?.simulated && queuedSchema.properties?.environment);
+    assert.ok(queuedSchema.properties?.id && queuedSchema.properties?.simulated && !queuedSchema.properties?.environment);
     error(await http('GET', '/v1/api-keys'), 401);
-    error(await http('GET', '/v1/api-keys', 'not-a-valid-key'), 401);
   });
 
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
+    const db = await fixtureDatabase(t);
+    // Seed both old formats with valid hashes, so a 401 cannot pass just because no row exists.
+    for (const mode of ['live', 'test']) {
+      const old = `os_${mode}_${key.secret.slice(3)}`, id = unique('legacy-key');
+      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) VALUES($1,'default',$2,'fixture',$3,$4,'["read"]','[]')`, [id, mode, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
+      cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
+      const me = await http('GET','/v1/me',old);
+      if (mode === 'live') assert.equal(ok(me).id,id); else {
+        error(me,401,'AUTH_INVALID');
+        assert.ok(!(await allPages('/v1/api-keys?includeRevoked=true', MANAGER)).some(row => row.id === id));
+        error(await http('POST', `/v1/api-keys/${id}/revoke`, MANAGER),404,'NOT_FOUND');
+        assert.equal((await db.query('SELECT revoked_at FROM api_keys WHERE id=$1',[id])).rows[0].revoked_at,null);
+      }
+    }
     const rows = await allPages('/v1/api-keys', MANAGER);
     const saved = rows.find(row => row.id === key.id);
     assert.ok(saved, 'Newly created API key must be visible in the key list.');
@@ -298,7 +312,7 @@ describe('Public contract and authentication', () => {
       assert.equal(row.secretHash, undefined, 'API-key listing must never return credential hashes.');
     }
     page(await http('GET', '/v1/contacts', key.secret));
-    error(await http('POST', '/v1/api-keys', key.secret, { name: unique('forbidden'), environment: 'test', permissions: ['manage'], domains: [] }), 403);
+    error(await http('POST', '/v1/api-keys', key.secret, { name: unique('forbidden'), permissions: ['manage'], domains: [] }), 403);
     error(await http('GET', '/v1/api-keys?includeRevoked=false', key.secret), 403);
     ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]);
     error(await http('GET', '/v1/contacts', key.secret), 401);
@@ -329,15 +343,15 @@ describe('Public contract and authentication', () => {
 });
 
 describe('Google dashboard sessions and current-policy authorization', () => {
-  test('approved synthetic Google sessions identify the operator and select an environment without exposing credentials', async t => {
+  test('approved synthetic Google sessions identify the operator and reject obsolete test-mode requests without exposing credentials', async t => {
     const me = ok(await http('GET', '/v1/me', MANAGER));
     assert.equal(me.id, manager!.userId);
     assert.equal(me.email, AUTH_EMAIL);
     assert.equal(me.name, 'Synthetic acceptance operator');
-    assert.equal(me.environment, 'test');
+    assert.equal(me.environment, undefined);
     assert.ok(me.permissions.includes('manage'));
-    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'live' })).environment, 'live');
-    error(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'invalid' }), 422, 'ENVIRONMENT_INVALID');
+    assert.equal(ok(await http('GET', '/v1/me', MANAGER, undefined, { 'x-opensend-environment': 'live' })).environment, undefined);
+    error(await http('POST', '/v1/emails/send', MANAGER, mail(), { 'x-opensend-environment': 'test' }), 400, 'ENVIRONMENT_REMOVED');
     const inspected = ok(await http('GET', '/api/auth/get-session', MANAGER));
     assert.equal(inspected.user.id, manager!.userId);
     assert.equal(inspected.user.emailVerified, true);
@@ -348,7 +362,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     assert.equal(machineMe.id, machine.id);
     assert.equal(machineMe.email, null);
     assert.equal(machineMe.name, null);
-    assert.equal(machineMe.environment, 'test', 'Dashboard headers cannot elevate an API key into live scope.');
+    assert.equal(machineMe.environment, undefined, 'Dashboard headers cannot elevate an API key into live scope.');
     assert.deepEqual(machineMe.permissions, ['read']);
     for (const field of ['token', 'secret', 'cookie', 'accessToken', 'refreshToken']) assert.equal(me[field], undefined);
   });
@@ -393,7 +407,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
   test('cookie-authenticated unsafe requests require the canonical Origin and leave no rejected writes', async () => {
     for (const origin of [undefined, 'https://attacker.invalid', `${PUBLIC_ORIGIN}.attacker.invalid`]) {
       const email = address();
-      const headers: Record<string, string> = { cookie: manager!.cookie, 'x-opensend-environment': 'test' };
+      const headers: Record<string, string> = { cookie: manager!.cookie };
       if (origin) headers.origin = origin;
       error(await http('POST', '/v1/contacts', undefined, { email }, headers), 403, 'CSRF_ORIGIN_INVALID');
       assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, 'Rejected CSRF writes must never create a contact.');
@@ -405,7 +419,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
 
   test('each request rechecks verified Google identity and exact allowlists, not cached session inspection', async t => {
     const fixture = await sessionFixture(t);
-    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN, 'x-opensend-environment': 'test' };
+    const headers = { cookie: fixture.cookie, origin: PUBLIC_ORIGIN };
     const initial = await http('GET', '/v1/me', undefined, undefined, headers);
     assert.equal(ok(initial).id, fixture.userId, 'An exact approved hd must authorize a verified Google account.');
     // Replay the same credentials as a browser, including its signed session-data cache.
@@ -473,7 +487,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       }
       error(await http('GET', '/v1/me', undefined, undefined, headers), 401, 'AUTH_REQUIRED');
       const email = address();
-      error(await http('POST', '/v1/contacts', undefined, { email }, { ...headers, 'x-opensend-environment': 'test' }), 401, 'AUTH_REQUIRED');
+      error(await http('POST', '/v1/contacts', undefined, { email }, headers), 401, 'AUTH_REQUIRED');
       assert.equal((await authDb!.query('SELECT id FROM audience_contacts WHERE email = $1', [email])).rowCount, 0, `${state} sessions must not write.`);
     }
   });
@@ -863,9 +877,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
           for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
-          const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',environment:'test',permissions:['send'] },b.cookie),201).secret;
+          const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',permissions:['send'] },b.cookie),201).secret;
           const send = (from:string) => local('POST','/v1/emails/send',mail({ region,from }),undefined,{ authorization:`Bearer ${key}` });
-          const sent=ok(await send(`hi@sub.${domain}`),202); assert.equal(sent.simulated,true); await pool.query('DELETE FROM sending_emails WHERE id=$1',[sent.id]);
+          error(await send(`hi@sub.${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
           const detail = `/v1/domains/${created.id}`;
           const {operationJobs}=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const {rows:[job]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
@@ -1055,7 +1069,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
         await pool.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
-          VALUES ($1,$2,'test',$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
+          VALUES ($1,$2,'live',$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
         try { error(await local('DELETE', path, undefined, a.cookie), 409, 'CONNECTION_IN_USE'); }
         finally { await pool.query('DELETE FROM sending_emails WHERE id=$1 AND workspace_id=$2', [queued, a.org.id]); }
         ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
@@ -1072,7 +1086,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
       error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
       const { originAllowed } = await import('./src/sending.js');
-      const queued = { workspaceId: a.org.id, environment: 'test' as const, actorKeyId: `user_${me.id}`, snapshot: { from: 'sender@example.com' } };
+      const queued = { workspaceId: a.org.id, environment: 'live' as const, actorKeyId: `user_${me.id}`, snapshot: { from: 'sender@example.com' } };
       assert.equal(await originAllowed(runtime, runtime.db, queued), true);
       assert.equal(await originAllowed(runtime, runtime.db, { ...queued, campaignId: 'campaign' }), false);
       const owner = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.role === 'owner');
@@ -1172,7 +1186,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(String(tokens.token_type).toLowerCase(), 'bearer');
     const grant = await db.query('SELECT id FROM oauth_consent WHERE client_id = $1 AND user_id = $2', [client.client_id, manager!.userId]);
     assert.equal(grant.rowCount, 1);
-    return { token: tokens.access_token as string, consentId: grant.rows[0].id as string };
+    return { token: tokens.access_token as string, refreshToken: tokens.refresh_token as string, clientId: client.client_id as string, consentId: grant.rows[0].id as string };
   }
   async function rpc(token: string, method: string, params: Json = {}): Promise<Json> {
     const id = unique('acceptance-mcp-rpc');
@@ -1225,13 +1239,14 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 41);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 15);
+    assert.equal(catalog.tools.length, 55);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 24);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
       'importContacts', 'importTemplateImage', 'previewCampaign', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
     for (const tool of tools.values()) {
@@ -1244,7 +1259,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual(Object.keys(tools.get('previewCampaign')!.inputSchema.properties), ['id']);
     for (const removed of ['getDomains', 'createDomain', 'configureDomainMailFrom', 'discoverRegion', 'configureRegion', 'provisionRegion', 'listApiKeys', 'revokeApiKey', 'getWorkspaceSettings', 'updateWorkspaceSettings', 'getCampaignState']) assert.ok(!tools.has(removed), removed);
     const context = await callTool(token, 'getContext');
-    assert.equal(context.environment, 'test');
+    assert.equal(context.environment, undefined);
     const contentGuide = await callTool(token, 'getContentGuide');
     assert.equal(contentGuide.format, 'markdown');
     assert.match(contentGuide.markdown, /campaign and template content/i);
@@ -1328,7 +1343,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const editorUrl = new URL(unfinished.url);
     assert.equal(editorUrl.origin, PUBLIC_ORIGIN);
     assert.equal(editorUrl.pathname, `/campaigns/${unfinished.id}/edit`);
-    assert.equal(editorUrl.searchParams.get('environment'), 'test');
+    assert.equal(editorUrl.searchParams.get('environment'), null);
     assert.equal(editorUrl.searchParams.get('region'), null);
     assert.equal((await callTool(token, 'saveCampaign', draftArgs, 201)).id, unfinished.id);
     assert.equal((await callTool(token, 'findCampaigns', { id: unfinished.id })).data[0].url, unfinished.url);
@@ -1368,17 +1383,23 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal((await callTool(token, 'findCampaigns', { search: campaign.draft.name, archived: 'true' })).data[0].id, campaign.id);
     assert.equal((await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: false }, confirm: true })).archivedAt, null);
 
-    const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
+    const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
-    assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, 'test');
-    error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
-    const managed = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], environment: 'test', expiresInSeconds: 30, domains: [], purpose: 'Synthetic managed acceptance script' }, confirm: true }, 201);
+    assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, undefined);
+    error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
+    const managed = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic managed acceptance script' }, confirm: true }, 201);
     secrets.add(managed.token);
     const managedList = ok(await http('POST', '/v1/lists', managed.token, { name: unique('agent-managed-list') }), 201);
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
-    error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', environment: 'live', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
+    const legacyAgent = unique('retired-agent');
+    await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,environment,permissions,domains,purpose,expires_at) SELECT $1,workspace_id,grant_id,'test',permissions,domains,purpose,expires_at FROM agent_tokens WHERE id=$2`, [legacyAgent, temporary.id]);
+    cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id=$1', [legacyAgent]); });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-opensend-environment': 'live' }));
+    assert.ok(!trackedTokens.some(row => row.id === legacyAgent));
+    error(await http('POST', `/v1/agent-tokens/${legacyAgent}/revoke`, MANAGER),404,'NOT_FOUND');
+    assert.equal((await db.query('SELECT revoked_at FROM agent_tokens WHERE id=$1',[legacyAgent])).rows[0].revoked_at,null);
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
     ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-opensend-environment': 'live' }));
@@ -1388,6 +1409,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
+    assert.equal((await db.query('SELECT revoked_at FROM agent_tokens WHERE id=$1',[legacyAgent])).rows[0].revoked_at,null);
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
@@ -1408,8 +1430,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const denied = await request('GET', `/api/auth/oauth2/authorize?${query}`, MANAGER, undefined, { accept: 'application/json' });
       assert.equal(denied.status, 400, 'A member must not authorize manage scope.');
       assert.equal((await db.query('SELECT id FROM oauth_consent WHERE client_id=$1', [deniedClient.client_id])).rowCount, 0);
-      const { token } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
-      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'test',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result.structuredContent;
+      const { token, refreshToken, clientId, consentId } = await oauthGrant(t, db, 'opensend:read opensend:send offline_access', request);
+      const call = async (name: string, args: Json = {}) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method:'tools/call', params:{ name, arguments:args } },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result.structuredContent;
       assert.equal((await call('getContext')).response.workspaceId, wid);
       const send = async () => {
         const reply = await call('sendEmail', { mode: 'single', body: { from: address(), to: address(), subject:'Synthetic MX', text:'Synthetic MX' }, confirm:true });
@@ -1417,6 +1439,18 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const first = await send(); await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
+      const oldMail = await send();
+      const { reference_id: reference } = (await db.query('SELECT reference_id FROM oauth_consent WHERE id=$1', [consentId])).rows[0];
+      assert.match(reference, /^mcp_v2_/);
+      const oldReference = reference.replace(/^mcp_v2_/, 'mcp_');
+      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [oldReference, consentId]);
+      await db.query('UPDATE oauth_refresh_token SET reference_id=$1 WHERE client_id=$2 AND reference_id=$3', [oldReference, clientId, reference]);
+      assert.equal((await request('POST', '/mcp', token, { jsonrpc:'2.0', id:1, method:'tools/list', params:{} }, rpcHeaders)).status, 401);
+      const refresh = await request('POST', '/api/auth/oauth2/token', undefined, new URLSearchParams({ grant_type:'refresh_token', client_id:clientId, refresh_token:refreshToken, resource:resourceUrl }).toString(), { 'content-type':'application/x-www-form-urlencoded' });
+      assert.equal(refresh.status, 400); assert.equal(refresh.body.error, 'invalid_grant');
+      await run('email.dispatch');
+      assert.deepEqual((await db.query('SELECT status,provider_id FROM sending_emails WHERE id=$1', [oldMail])).rows, [{status:'canceled',provider_id:null}]);
+      await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [reference, consentId]);
       const lostProof = await send(); await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]); await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still exist at dispatch.');
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
@@ -1521,7 +1555,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'create_address'},'live')).catchAll,'create_address');
       const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
       assert.deepEqual(ok(await get('/addresses',h)).data.map((x:Json)=>x.id),[a.id]);error(await get(`/addresses/${b.id}`,h),404);error(await post('/addresses',{address:'denied@example.com'},h),403);
-      error(await local('GET',`${base}/addresses`,undefined,'test'),403);
+      error(await local('GET',`${base}/addresses`,undefined,'test'),400,'ENVIRONMENT_REMOVED');
       const startArgs={mode:'start',body:{addressId:a.id,to:['customer@example.net'],subject:'Invoice',text:'Opening message'},idempotencyKey:'thread-start',confirm:true};
       assert.equal((await tool('sendInboundThread',{...startArgs,confirm:false})).isError,true);
       const first=await success('sendInboundThread',startArgs);assert.equal(first.status,'queued');assert.match(first.threadId,/^thr_/);assert.equal((await success('sendInboundThread',startArgs)).id,first.id);
@@ -1571,8 +1605,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const confirmed=await success('sendInboundThread',reviewed);assert.deepEqual(confirmed.to.map((x:Json)=>x.address),['reply@example.net']);
       const newId=unique('msg');await deliver(newId,[a.id],'Fresh inbound',new Date(Date.now()+3000).toISOString());
       assert.equal(ok(await post(`${path}/reply`,{text:'Answering latest visible'},replayHeaders),202).id,reply.id);assert.equal((await success('sendInboundThread',reviewed)).id,confirmed.id);
-      await dispatchDue(runtime,'live',REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
-      const solo=ok(await post('/threads',{addressId:a.id,to:['followup@example.net'],subject:'Only outbound',text:'First'},h),202);await dispatchDue(runtime,'live',REGION);
+      await dispatchDue(runtime, REGION);assert.equal(sent.size,3);assert.equal(sent.get(confirmed.emailId).Content.Simple.Headers.find((x:Json)=>x.Name==='In-Reply-To').Value,`<${shared}@example.net>`);
+      const solo=ok(await post('/threads',{addressId:a.id,to:['followup@example.net'],subject:'Only outbound',text:'First'},h),202);await dispatchDue(runtime, REGION);
       const followup=ok(await post(`/threads/${solo.threadId}/reply`,{text:'Following up'},h),202);assert.equal(followup.inReplyTo,`ses-${solo.emailId}@${REGION==='us-east-1'?'email':REGION}.amazonses.com`);assert.equal(followup.to[0].address,'followup@example.net');
       // Administrators may answer as any registered sender (or subdomain of one); scoped keys stay on their own addresses.
       const asTeam=ok(await post(`/threads/${solo.threadId}/reply`,{from:'team@mail.example.com',text:'From the team',replyToMessageId:solo.id,expectedRecipients:{to:['followup@example.net'],cc:[],bcc:[]}}),202);
@@ -1621,8 +1655,8 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query('DELETE FROM sending_emails WHERE id = $1', [emailId]);
     });
     await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status)
-      VALUES ($1,'default','test',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
-    for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,'default','test',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
+      VALUES ($1,'default','live',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
+    for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,'default','live',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
     const populated = await callTool(token, 'getCampaignStats', { id: campaign.id });
     assert.deepEqual(populated, ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)));
     assert.equal(populated.totals.delivered, 1);
@@ -1769,7 +1803,7 @@ describe('DB region catalog and explicit SES setup', () => {
           return { status: response.status, body: await response.json(), headers: response.headers };
         }
         async function machine(environment: 'test' | 'live', permissions: string[], domains: string[] = []) {
-          return ok(await local('POST', '/v1/api-keys', { name: unique('mock-ses-key'), environment, permissions, domains }), 201).secret as string;
+          return ok(await local('POST', '/v1/api-keys', { name: unique('mock-ses-key'), permissions, domains }), 201).secret as string;
         }
         const testKey = await machine('test', ['read', 'send', 'manage']);
         const reader = await machine('live', ['read']);
@@ -1781,7 +1815,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.deepEqual(ok(await local('GET', '/v1/regions', undefined, reader)), initial);
         error(await local('GET', '/v1/regions', undefined, scoped), 403);
         const second = REGION === 'eu-west-1' ? 'us-west-2' : 'eu-west-1';
-        error(await local('PUT', `/v1/regions/${second}`, { enabled: true }, testKey), 403);
+        ok(await local('PUT', `/v1/regions/${second}`, { enabled: true }, testKey));
         error(await local('PUT', `/v1/regions/${second}`, { enabled: true }, reader), 403);
         error(await local('PUT', '/v1/regions/not-a-region', { enabled: true }, admin), 422);
         ok(await local('PUT', `/v1/regions/${second}`, { enabled: true, makeDefault: true }, admin));
@@ -1793,23 +1827,22 @@ describe('DB region catalog and explicit SES setup', () => {
         error(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin), 409, undefined);
         // Avoid routing the simulator's quota read through the live AWS mock; this
         // fixture is testing persisted region selection, not quota discovery.
-        await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, environment: 'test', region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
+        await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, environment: 'live', region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
         for (let count = 0; count < 5 && await drain(runtime, 10); count++) { /* Drain only this transaction's unique workspace. */ }
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'accepted');
         ok(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin));
         error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: second, subject: 'Disabled region', text: 'Synthetic only' }, testKey), 422);
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).region, second, 'Disabling a region must not hide its historical email.');
         assert.equal(observed.length, 0, 'Catalog reads/writes and simulated sends must never access AWS.');
-        error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, testKey), 403);
+        error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, testKey), 503, 'SES_NOT_CONFIGURED');
         error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, scoped), 403);
-        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, testKey), 403);
+        error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, testKey), 503, 'SES_NOT_CONFIGURED');
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, reader), 403);
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, scoped), 403);
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: false }, admin), 422);
         const originalUrl = runtime.config.publicUrl;
         runtime.config.publicUrl = 'https://ses-acceptance.opensend.dev';
-        const blocked = ok(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader));
-        assert.equal(blocked.status, 'blocked');
+        error(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader), 503, 'SES_NOT_CONFIGURED');
         error(await local('POST', `/v1/regions/${REGION}/provision`, { confirm: true }, admin), 503);
         assert.equal(observed.length, 0, 'Missing explicit AWS credentials must fail without SDK calls.');
         runtime.config.aws = { accessKeyId: 'synthetic-access-key', secretAccessKey: 'synthetic-secret-key' };
@@ -1889,7 +1922,6 @@ describe('DB region catalog and explicit SES setup', () => {
           assert.deepEqual([...set.destinations[0].MatchingEventTypes].sort(), ['DELIVERY', 'BOUNCE', 'COMPLAINT', 'REJECT', 'RENDERING_FAILURE', 'DELIVERY_DELAY', 'OPEN', 'CLICK'].sort());
         }
         const validationPath = `/v1/regions/${REGION}/auto-validation`;
-        error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, testKey), 403);
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, reader), 403);
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: true }, scoped), 403);
         error(await local('PUT', validationPath, { stream: 'transactional', mode: 'high', confirm: false }, admin), 422);
@@ -1953,14 +1985,14 @@ describe('DB region catalog and explicit SES setup', () => {
   });
 });
 
-describe('Contacts, explicit consent, and environment isolation', () => {
+describe('Contacts and explicit consent', () => {
   test('profiles persist, require manage scope, and cannot implicitly grant marketing consent', async t => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
     const email = address();
     const contact = await resource(t, key.secret, '/v1/contacts', { email, name: 'Before', properties: { plan: 'free' } });
     assert.equal(contact.marketingConsent, 'unknown');
-    assert.equal(contact.environment, 'test');
+    assert.equal(contact.environment, undefined);
     assert.equal(contact.suppressed, false);
     error(await http('POST', '/v1/contacts', reader.secret, { email: address() }), 403, 'PERMISSION_DENIED');
     error(await http('POST', '/v1/contacts', key.secret, { email: 'not-an-email' }), 422);
@@ -1989,22 +2021,12 @@ describe('Contacts, explicit consent, and environment isolation', () => {
     error(await http('POST', '/v1/contacts', key.secret, { email }), 409, 'CONTACT_EXISTS');
   });
 
-  test('test consent changes and resource IDs do not mutate or expose production records', async t => {
-    const testKey = await keyFixture(t);
-    const liveKey = await keyFixture(t, { environment: 'live' });
-    const email = address();
-    const liveContact = await resource(t, liveKey.secret, '/v1/contacts', { email, name: unique('production-fixture') });
-    const testContact = await resource(t, testKey.secret, '/v1/contacts', { email, name: unique('simulation-fixture') });
-    assert.notEqual(liveContact.id, testContact.id);
-    assert.equal(liveContact.environment, 'live');
-    error(await http('GET', `/v1/contacts/${liveContact.id}`, testKey.secret), 404, 'NOT_FOUND');
-    error(await http('PATCH', `/v1/contacts/${liveContact.id}`, testKey.secret, { name: 'Not allowed' }), 404, 'NOT_FOUND');
-    error(await http('GET', `/v1/contacts/${testContact.id}`, liveKey.secret), 404, 'NOT_FOUND');
-    assert.equal(ok(await consent(testKey.secret, testContact.id, 'unsubscribed')).marketingConsent, 'unsubscribed');
-    const production = ok(await http('GET', `/v1/contacts/${liveContact.id}`, liveKey.secret));
-    assert.equal(production.marketingConsent, 'unknown');
-    assert.equal(production.name, liveContact.name);
-    assert.equal(page(await http('GET', `/v1/contacts/${liveContact.id}/consent`, liveKey.secret)).length, 0);
+  test('two keys in a workspace share one contact and consent history', async t => {
+    const first = await keyFixture(t), second = await keyFixture(t);
+    const contact = await resource(t, first.secret, '/v1/contacts', { email: address() });
+    error(await http('POST', '/v1/contacts', second.secret, { email: contact.email }), 409, 'CONTACT_EXISTS');
+    ok(await consent(second.secret, contact.id, 'unsubscribed'));
+    assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, first.secret)).marketingConsent, 'unsubscribed');
   });
 });
 
@@ -2133,14 +2155,14 @@ describe('Import property boundaries', () => {
 });
 
 describe('Transactional sending, idempotency and scoped authorization', () => {
-  test('test sends use the provider-parity simulated lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
+  test('sends on a simulated deployment use the provider-parity lifecycle; exact retries reuse identity and conflicts do not create mail', async t => {
     const key = await keyFixture(t);
-    const liveKey = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const liveKey = await keyFixture(t, { permissions: ['read'] });
     const payload = mail();
     const headers = { 'Idempotency-Key': unique('send') };
     const queued = ok(await http('POST', '/v1/emails/send', key.secret, payload, headers), 202);
     assert.equal(queued.status, 'queued');
-    assert.equal(queued.environment, 'test');
+    assert.equal(queued.environment, undefined);
     assert.equal(queued.simulated, true);
     const retry = ok(await http('POST', '/v1/emails/send', key.secret, payload, headers), 202);
     assert.equal(retry.id, queued.id);
@@ -2148,7 +2170,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('POST', '/v1/emails/send', key.secret, { ...payload, subject: 'Different payload' }, headers), 409, 'IDEMPOTENCY_CONFLICT');
     const completed = await poll(`/v1/emails/${queued.id}`, key.secret, body => body.status === 'delivered');
     assert.equal(completed.simulated, true);
-    assert.equal(completed.environment, 'test');
+    assert.equal(completed.environment, undefined);
     assert.match(completed.providerId, /^sim_/, 'Simulation must return an isolated provider-shaped message ID.');
     assert.deepEqual(completed.to, [payload.to]);
     assert.equal(completed.subject, payload.subject);
@@ -2157,13 +2179,13 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.equal(content.simulated, true);
     const events = page(await http('GET', `/v1/emails/${queued.id}/events`, key.secret));
     for (const type of ['dispatch_attempt', 'accepted', 'send', 'delivery']) assert.equal(events.filter(event => event.type === type).length, 1, 'Exact retry must not duplicate lifecycle events.');
-    assert.ok(events.every(event => event.simulated && event.environment === 'test'));
+    assert.ok(events.every(event => event.simulated && event.environment === undefined));
     assert.ok(events.every(event => event.providerId === null || /^sim_/.test(event.providerId)));
-    error(await http('GET', `/v1/emails/${queued.id}`, liveKey.secret), 404, 'NOT_FOUND');
+    ok(await http('GET', `/v1/emails/${queued.id}`, liveKey.secret));
     const testMetrics = ok(await http('GET', '/v1/metrics', key.secret));
     const liveMetrics = ok(await http('GET', '/v1/metrics', liveKey.secret));
     assert.ok(testMetrics.totals.simulated >= 1, 'Test metrics must count the persisted simulated lifecycle.');
-    assert.equal(liveMetrics.totals.simulated, 0, 'Production metrics must exclude test simulations.');
+    assert.equal(liveMetrics.totals.simulated, testMetrics.totals.simulated);
     const messages = await allPages('/v1/emails', key.secret);
     assert.equal(messages.filter(message => message.subject === payload.subject).length, 1);
   });
@@ -2189,7 +2211,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     const first = ok(await http('POST', '/v1/emails/batch', key.secret, payload, headers), 202);
     assert.equal(first.data.length, 2);
     assert.equal(new Set(first.data.map((row: Json) => row.id)).size, 2);
-    assert.ok(first.data.every((row: Json) => row.simulated && row.environment === 'test'));
+    assert.ok(first.data.every((row: Json) => row.simulated && row.environment === undefined));
     const retry = ok(await http('POST', '/v1/emails/batch', key.secret, payload, headers), 202);
     assert.deepEqual(retry.data.map((row: Json) => row.id), first.data.map((row: Json) => row.id));
     for (const item of first.data) await poll(`/v1/emails/${item.id}`, key.secret, body => body.status === 'delivered');
@@ -2199,28 +2221,28 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
 });
 
 describe('Private attachment assets and campaign revisions', () => {
-  test('uploads persist safe metadata, reject unsafe/oversized inputs, and enforce environment ownership', async t => {
+  test('uploads persist safe metadata, reject unsafe/oversized inputs, and share access within the workspace', async t => {
     const key = await keyFixture(t);
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read', 'send'] });
+    const live = await keyFixture(t, { permissions: ['read', 'send'] });
     const bytes = Buffer.from('Acceptance attachment\n', 'utf8');
     const attachment = await resource(t, key.secret, '/v1/attachments', { filename: 'acceptance.txt', contentType: 'text/plain', content: bytes.toString('base64') });
     assert.equal(attachment.size, bytes.length);
-    assert.equal(attachment.environment, 'test');
+    assert.equal(attachment.environment, undefined);
     const stored = ok(await http('GET', `/v1/attachments/${attachment.id}`, key.secret));
     assert.equal(stored.filename, 'acceptance.txt');
     assert.equal(stored.size, bytes.length);
     for (const field of ['content', 'url', 'publicUrl', 'storageKey']) assert.equal(stored[field], undefined, `Attachment metadata must not expose ${field}.`);
-    error(await http('GET', `/v1/attachments/${attachment.id}`, live.secret), 404, 'ATTACHMENT_NOT_FOUND');
+    ok(await http('GET', `/v1/attachments/${attachment.id}`, live.secret));
     const reader = await keyFixture(t, { permissions: ['read'] });
     const downloaded = await http('GET', `/v1/attachments/${attachment.id}/content`, reader.secret);
     assert.equal(ok(downloaded).content, bytes.toString('base64'));
     assert.equal(downloaded.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(downloaded.headers.get('cache-control'), 'no-store');
     assert.equal(downloaded.body.storageKey, undefined);
-    error(await http('GET', `/v1/attachments/${attachment.id}/content`, live.secret), 404, 'ATTACHMENT_NOT_FOUND');
+    ok(await http('GET', `/v1/attachments/${attachment.id}/content`, live.secret));
     error(await http('GET', `/v1/attachments/${attachment.id}/content`), 401, 'AUTH_REQUIRED');
     const liveAsset = await resource(t, live.secret, '/v1/attachments', { filename: 'production-fixture.txt', content: bytes.toString('base64') });
-    error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [liveAsset.id] })), 404, 'ATTACHMENT_NOT_FOUND');
+    assert.equal(ok(await http('GET', `/v1/attachments/${liveAsset.id}`, key.secret)).id, liveAsset.id);
     error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [unique('attachment-missing')] })), 404, 'ATTACHMENT_NOT_FOUND');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'unsafe.exe', content: bytes.toString('base64') }), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content: '!!!!' }), 422, 'INVALID_BASE64');
@@ -2396,7 +2418,7 @@ describe('Dashboard API capabilities', () => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
     const sender = await keyFixture(t, { permissions: ['send'] });
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const live = await keyFixture(t, { permissions: ['read'] });
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('state-audience') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
@@ -2406,9 +2428,9 @@ describe('Dashboard API capabilities', () => {
     });
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
-      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [campaign.id, list.workspaceId]);
     });
-    const stateFields = ['id', 'environment', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
+    const stateFields = ['id', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
     const project = (value: Json) => Object.fromEntries(stateFields.map(field => [field, value[field]]));
     const initial = await http('GET', `${path}/state`, reader.secret);
     assert.deepEqual(ok(initial), project(campaign));
@@ -2418,11 +2440,11 @@ describe('Dashboard API capabilities', () => {
     error(await http('GET', `${path}/state`), 401, 'AUTH_REQUIRED');
     error(await http('GET', `${path}/state`, 'not-a-valid-key'), 401);
     error(await http('GET', `${path}/state`, sender.secret), 403, 'PERMISSION_DENIED');
-    error(await http('GET', `${path}/state`, live.secret), 404, 'NOT_FOUND');
+    ok(await http('GET', `${path}/state`, live.secret));
     error(await http('GET', `/v1/campaigns/${unique('missing')}/state`, reader.secret), 404, 'NOT_FOUND');
     const foreignId = unique('foreign-campaign'), foreignWorkspace = unique('foreign-workspace');
-    cleanup(t, async () => { await db.query("DELETE FROM sending_campaigns WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [foreignId, foreignWorkspace]); });
-    await db.query("INSERT INTO sending_campaigns (id, workspace_id, environment, draft) VALUES ($1,$2,'test',$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
+    cleanup(t, async () => { await db.query("DELETE FROM sending_campaigns WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [foreignId, foreignWorkspace]); });
+    await db.query("INSERT INTO sending_campaigns (id, workspace_id, environment, draft) VALUES ($1,$2,'live',$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
     error(await http('GET', `/v1/campaigns/${foreignId}/state`, reader.secret), 404, 'NOT_FOUND');
 
     const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
@@ -2459,7 +2481,7 @@ describe('Dashboard API capabilities', () => {
     // Seed only state, never emails or dispatch jobs, to exercise each delivery lifecycle value.
     const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
     for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 AND environment = 'test' RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 AND environment = 'live' RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
       assert.equal(seeded.rowCount, 1);
       const state = ok(await http('GET', `${path}/state`, reader.secret));
       assert.deepEqual(state, project(ok(await http('GET', path, reader.secret))));
@@ -2602,13 +2624,13 @@ describe('Dashboard API capabilities', () => {
     const reader = await keyFixture(t, { permissions: ['read'] });
     const sender = await keyFixture(t, { permissions: ['send'] });
     const restricted = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read', 'send'] });
+    const live = await keyFixture(t, { permissions: ['read', 'send'] });
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('archive-guards') });
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
       ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
-      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2 AND environment = 'test'", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [campaign.id, list.workspaceId]);
     });
     for (const body of [{}, { archived: 'true' }, { archived: null }, { archived: 1 }, { archived: true, revision: 1 }]) error(await http('PATCH', `${path}/archive`, key.secret, body), 422);
     for (const value of ['1', 'TRUE', 'all', '']) error(await http('GET', `/v1/campaigns?archived=${value}`, key.secret), 422);
@@ -2617,34 +2639,34 @@ describe('Dashboard API capabilities', () => {
     for (const archived of [true, false]) {
       error(await http('PATCH', `${path}/archive`, reader.secret, { archived }), 403, 'PERMISSION_DENIED');
       error(await http('PATCH', `${path}/archive`, restricted.secret, { archived }), 403, 'SENDER_DOMAIN_FORBIDDEN');
-      error(await http('PATCH', `${path}/archive`, live.secret, { archived }), 404, 'NOT_FOUND');
+
     }
     assert.deepEqual(ok(await http('GET', path, key.secret)), campaign, 'Invalid or unauthorized requests must not change the campaign.');
     const archived = ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: true }));
     assert.equal(typeof archived.archivedAt, 'string', 'Send permission alone is sufficient to archive.');
     assert.deepEqual(ok(await http('GET', path, reader.secret)), archived);
     assert.equal(typeof ok(await http('GET', `${path}/preview`, reader.secret)).html, 'string');
-    error(await http('GET', path, live.secret), 404, 'NOT_FOUND');
-    assert.deepEqual(page(await http('GET', `/v1/campaigns?archived=true&search=${campaign.id}`, live.secret)), []);
+    ok(await http('GET', path, live.secret));
+    assert.equal(page(await http('GET', `/v1/campaigns?archived=true&search=${campaign.id}`, live.secret))[0].id, campaign.id);
     assert.equal(ok(await http('PATCH', `${path}/archive`, sender.secret, { archived: false })).archivedAt, null);
     // Seed a terminal synthetic log and event, never a dispatch job, to verify nonzero counts and retained history.
     const emailId = unique('archive-email'), eventId = unique('archive-event');
     const snapshot = { from: campaign.draft.from, to: [address()], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic archive history', text: 'Retained without sending.', attachments: [], tracking: false, headers: [] };
     cleanup(t, async () => {
-      await db.query("DELETE FROM sending_email_events WHERE id = $1 AND email_id = $2 AND workspace_id = $3 AND environment = 'test'", [eventId, emailId, list.workspaceId]);
-      await db.query("DELETE FROM sending_emails WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3 AND environment = 'test'", [emailId, campaign.id, list.workspaceId]);
+      await db.query("DELETE FROM sending_email_events WHERE id = $1 AND email_id = $2 AND workspace_id = $3 AND environment = 'live'", [eventId, emailId, list.workspaceId]);
+      await db.query("DELETE FROM sending_emails WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3 AND environment = 'live'", [emailId, campaign.id, list.workspaceId]);
     });
     await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
-      VALUES ($1,$2,'test',$3,$4,$5,$6,$7::jsonb,'[]','[]',$8,'simulated',$9::jsonb,true)`, [emailId, list.workspaceId, REGION, key.id, campaign.id, snapshot.from, JSON.stringify(snapshot.to), snapshot.subject, JSON.stringify(snapshot)]);
+      VALUES ($1,$2,'live',$3,$4,$5,$6,$7::jsonb,'[]','[]',$8,'simulated',$9::jsonb,true)`, [emailId, list.workspaceId, REGION, key.id, campaign.id, snapshot.from, JSON.stringify(snapshot.to), snapshot.subject, JSON.stringify(snapshot)]);
     await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
-      VALUES ($1,$2,'test',$3,'simulated','{"synthetic":true}',true)`, [eventId, list.workspaceId, emailId]);
+      VALUES ($1,$2,'live',$3,'simulated','{"synthetic":true}',true)`, [eventId, list.workspaceId, emailId]);
     const email = ok(await http('GET', `/v1/emails/${emailId}`, key.secret));
     const content = ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret));
     const history = page(await http('GET', `/v1/emails/${emailId}/events`, key.secret));
     assert.equal(history.length, 1);
     // Scoped terminal/active states exercise guards without scheduling or sending email.
     for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 AND environment = 'test' RETURNING id", [status, campaign.id, list.workspaceId]);
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 AND environment = 'live' RETURNING id", [status, campaign.id, list.workspaceId]);
       assert.equal(seeded.rowCount, 1);
       const before = ok(await http('GET', path, key.secret));
       assert.equal(before.status, status);
@@ -2707,7 +2729,7 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
     // The sent row stores only a stub and its unsubscribe URL; the body above was rebuilt from the frozen review.
     const db = await fixtureDatabase(t);
-    const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1 AND environment = 'test'", [messages[0].id])).rows;
+    const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1 AND environment = 'live'", [messages[0].id])).rows;
     assert.equal(stored.snapshot.html, undefined, 'Sent campaign emails must not persist rendered HTML.');
     assert.equal(stored.snapshot.text, undefined);
     assert.equal(stored.snapshot.deferredCampaign, true);
@@ -2728,9 +2750,9 @@ describe('Dashboard API capabilities', () => {
 
   test('campaign stats expose lifetime unique outcomes, explicit rates and progress through the API', async t => {
     const db = await fixtureDatabase(t);
-    const live = await keyFixture(t, { environment: 'live' });
+    const live = await keyFixture(t);
     const testKey = await keyFixture(t);
-    const sendOnly = await keyFixture(t, { environment: 'live', permissions: ['send'] });
+    const sendOnly = await keyFixture(t, { permissions: ['send'] });
     const campaign = await campaignFixture(t, live.secret, {});
     const untracked = await campaignFixture(t, live.secret, {}, { tracking: false });
     const simulated = await campaignFixture(t, testKey.secret, {});
@@ -2741,7 +2763,7 @@ describe('Dashboard API capabilities', () => {
     assert.ok(Object.values(empty.totals).every(value => value === 0));
     assert.ok(Object.values(empty.rates).every((rate: any) => rate.value === null && rate.denominator === 0));
     error(await http('GET', path), 401);
-    error(await http('GET', path, testKey.secret), 404, 'NOT_FOUND');
+    assert.deepEqual(ok(await http('GET', path, testKey.secret)), empty);
     error(await http('GET', path, sendOnly.secret), 403, 'PERMISSION_DENIED');
     error(await http('GET', `/v1/campaigns/${unique('missing')}/stats`, live.secret), 404, 'NOT_FOUND');
 
@@ -2762,7 +2784,8 @@ describe('Dashboard API capabilities', () => {
       // SES Auto Validation drop: the provider accepted the call but never sent; neither accepted nor bounced.
       { status: 'sent', events: ['send', 'validation_suppressed'], accepted: true },
       { status: 'delivered', events: [], accepted: true, campaignId: untracked.id },
-      { status: 'delivered', events: ['delivery'], campaignId: simulated.id, environment: 'test' },
+      { status: 'delivered', events: ['delivery'], campaignId: simulated.id, simulated: true },
+      { status: 'delivered', events: ['delivery', 'open', 'click'], simulated: true },
       { status: 'delivered', events: [], workspaceId: 'foreign-stats-workspace' },
       { status: 'delivered', events: [], environment: 'test' },
     ];
@@ -2779,7 +2802,7 @@ describe('Dashboard API capabilities', () => {
       ids.push(emailId);
       await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, created_at)
         VALUES ($1,$2,$3,$4,$5,$6,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',$7,$8,$9,'2020-01-01T00:00:00Z')`,
-      [emailId, workspaceId, environment, REGION, live.id, fixture.campaignId ?? campaign.id, environment === 'test', fixture.status, fixture.accepted ? unique('synthetic-provider') : null]);
+      [emailId, workspaceId, environment, REGION, live.id, fixture.campaignId ?? campaign.id, !!fixture.simulated, fixture.status, fixture.accepted ? unique('synthetic-provider') : null]);
       for (const type of fixture.events) await recordEmailEvent(runtime, { workspaceId, environment: environment as 'live' | 'test', emailId, type, externalId: unique('stats-feedback'), data: { synthetic: true, isBotEvent: 'Likely' } });
     }
     // Even corrupt cross-scope feedback for a matching email ID must not be counted.
@@ -2791,16 +2814,16 @@ describe('Dashboard API capabilities', () => {
     const stats = ok(await http('GET', path, live.secret));
     assert.equal(stats.status, 'completed');
     assert.equal(stats.tracking, true);
-    assert.equal(stats.counts.total, 12);
+    assert.equal(stats.counts.total, 13);
     assert.equal(stats.counts.byStatus.suppressed, 2);
     assert.equal(stats.counts.byStatus.bounced, 1);
-    assert.equal(stats.counts.byStatus.delivered, 1);
+    assert.equal(stats.counts.byStatus.delivered, 2);
     assert.equal(stats.counts.byStatus.complained, 1);
     assert.equal(stats.counts.byStatus.canceled, 1);
     assert.equal(stats.expansion.total, 13);
     assert.equal(stats.expansion.expanded, 11);
     assert.equal(stats.expansion.canceled, 2, 'Unmaterialized cancellations are separate from email counts.');
-    assert.deepEqual(stats.totals, { accepted: 6, delivered: 2, bounced: 1, complained: 1, opened: 2, clicked: 1, failed: 2, deliveryDelayed: 1, simulated: 0 });
+    assert.deepEqual(stats.totals, { accepted: 6, delivered: 3, bounced: 1, complained: 1, opened: 3, clicked: 2, failed: 2, deliveryDelayed: 1, simulated: 1 });
     assert.deepEqual(stats.rates.delivery, { value: 2 / 6, numerator: 2, denominator: 6 });
     assert.deepEqual(stats.rates.bounce, { value: 1 / 6, numerator: 1, denominator: 6 });
     assert.deepEqual(stats.rates.complaint, { value: 1 / 6, numerator: 1, denominator: 6 });
@@ -2815,13 +2838,13 @@ describe('Dashboard API capabilities', () => {
     assert.equal(testStats.totals.accepted, 0);
     assert.equal(testStats.totals.delivered, 1);
     assert.equal(testStats.totals.simulated, 1);
-    assert.ok(Object.values(testStats.rates).every((rate: any) => rate.value === null));
+    assert.ok(Object.values(testStats.rates).every((rate: any) => rate.value === null && rate.numerator === 0 && rate.denominator === 0));
   });
 
   test('dashboard email queries bind literal search, kind, region, time and cursors while cohort metrics deduplicate event replays', async t => {
     const db = await fixtureDatabase(t);
     const key = await keyFixture(t);
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const live = await keyFixture(t, { permissions: ['read'] });
     const marker = unique('query');
     const from = new Date(Date.now() - 1000).toISOString();
     const ids: string[] = [];
@@ -2851,7 +2874,7 @@ describe('Dashboard API capabilities', () => {
     assert.equal(page(third)[0].id, ids[0]);
     assert.equal(third.body.nextCursor, null);
     query.set('cursor', cursor);
-    error(await http('GET', `/v1/emails?${query}`, live.secret), 422, 'INVALID_CURSOR');
+    assert.deepEqual(page(await http('GET', `/v1/emails?${query}`, live.secret)), second.body.data);
     query.set('kind', 'marketing');
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'INVALID_CURSOR');
     query.delete('cursor');
@@ -2870,22 +2893,22 @@ describe('Dashboard API capabilities', () => {
     assert.ok(before.totals.emails >= 3);
     assert.equal(before.totals.accepted, 0, 'Simulated mail is not provider acceptance.');
     assert.equal(before.daily.reduce((sum: number, day: Json) => sum + day.count, 0), before.totals.emails);
-    const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND actor_key_id = $4', [ids[0], contact.workspaceId, 'test', key.id]);
+    const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND actor_key_id = $4', [ids[0], contact.workspaceId, 'live', key.id]);
     assert.equal(matched.rowCount, 1, 'Only an exact HTTP-created scoped email can receive synthetic replay source events.');
     const events = [unique('cohort-click'), unique('cohort-click-replay')];
-    cleanup(t, async () => { for (const id of events) await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [id, contact.workspaceId, 'test']); });
-    for (const id of events) await db.query('INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)', [id, contact.workspaceId, 'test', 'email.clicked', REGION, JSON.stringify({ emailId: ids[0], synthetic: true }), new Date(Date.parse(to) + 3_600_000)]);
+    cleanup(t, async () => { for (const id of events) await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [id, contact.workspaceId, 'live']); });
+    for (const id of events) await db.query('INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)', [id, contact.workspaceId, 'live', 'email.clicked', REGION, JSON.stringify({ emailId: ids[0], synthetic: true }), new Date(Date.parse(to) + 3_600_000)]);
     const after = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(after.totals.clicked, before.totals.clicked + 1, 'Two source events for one email count once, even when observed after the cohort end.');
     assert.equal(after.totals.emails, before.totals.emails);
     assert.equal(after.totals.accepted, 0);
-    assert.equal(ok(await http('GET', `/v1/metrics?${metricQuery}`, live.secret)).totals.clicked, 0, 'Synthetic test events cannot leak into live metrics.');
+    assert.equal(ok(await http('GET', `/v1/metrics?${metricQuery}`, live.secret)).totals.clicked, after.totals.clicked);
   });
 
   test('dashboard audience memberships and list counts partition active consent and suppression without scope leaks', async t => {
     const db = await fixtureDatabase(t);
     const key = await keyFixture(t);
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const live = await keyFixture(t, { permissions: ['read'] });
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('partition-list') });
     const other = await resource(t, key.secret, '/v1/lists', { name: unique('other-list') });
     const members: Json[] = [];
@@ -2895,9 +2918,9 @@ describe('Dashboard API capabilities', () => {
     ok(await consent(key.secret, members[3].id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: members.map(row => row.id) }));
     ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [members[0].id] }));
-    const suppression = await db.query('UPDATE audience_contacts SET suppressed = true, suppression_reason = $1 WHERE id = $2 AND workspace_id = $3 AND environment = $4 AND email = $5 AND marketing_consent = $6 AND suppressed = false RETURNING id', ['synthetic-acceptance-source', members[3].id, list.workspaceId, 'test', members[3].email, 'subscribed']);
+    const suppression = await db.query('UPDATE audience_contacts SET suppressed = true, suppression_reason = $1 WHERE id = $2 AND workspace_id = $3 AND environment = $4 AND email = $5 AND marketing_consent = $6 AND suppressed = false RETURNING id', ['synthetic-acceptance-source', members[3].id, list.workspaceId, 'live', members[3].email, 'subscribed']);
     assert.equal(suppression.rowCount, 1, 'Synthetic suppression must match the exact HTTP-created subscribed contact.');
-    cleanup(t, async () => { await db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL WHERE id = $1 AND workspace_id = $2 AND environment = $3', [members[3].id, list.workspaceId, 'test']); });
+    cleanup(t, async () => { await db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL WHERE id = $1 AND workspace_id = $2 AND environment = $3', [members[3].id, list.workspaceId, 'live']); });
     const expected = { total: 4, subscribed: 1, unsubscribed: 1, unknown: 1, suppressed: 1 };
     assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, expected);
     assert.deepEqual(page(await http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}`, key.secret))[0].counts, expected);
@@ -2907,8 +2930,8 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(ok(await http('GET', `/v1/contacts/${members[0].id}`, key.secret)).listIds, [list.id, other.id].sort());
     assert.deepEqual(page(await http('GET', `/v1/contacts?listId=${list.id}&consent=subscribed&suppressed=false`, key.secret)).map(row => row.id), [members[1].id]);
     assert.deepEqual(page(await http('GET', `/v1/contacts?listId=${list.id}&suppressed=true`, key.secret)).map(row => row.id), [members[3].id]);
-    error(await http('GET', `/v1/lists/${list.id}`, live.secret), 404, 'NOT_FOUND');
-    error(await http('GET', `/v1/contacts/${members[0].id}`, live.secret), 404, 'NOT_FOUND');
+    ok(await http('GET', `/v1/lists/${list.id}`, live.secret));
+    ok(await http('GET', `/v1/contacts/${members[0].id}`, live.secret));
     ok(await http('DELETE', `/v1/contacts/${members[0].id}`, key.secret));
     assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, { ...expected, total: 3, unknown: 0 });
     assert.deepEqual(ok(await http('GET', `/v1/lists/${other.id}`, key.secret)).counts, { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 });
@@ -2995,7 +3018,7 @@ describe('Campaign authorization and dispatch credentials', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
-  test('revoking the originating test send key stops its future scheduled job before simulation or SES acceptance', async t => {
+  test('revoking the originating send key stops its future scheduled job before simulation or SES acceptance', async t => {
     const owner = await keyFixture(t);
     const origin = await keyFixture(t, { permissions: ['send'] });
     const reader = await keyFixture(t, { permissions: ['read'] });
@@ -3024,13 +3047,13 @@ describe('Campaign authorization and dispatch credentials', () => {
 });
 
 describe('Hosted unsubscribe and dispatch-time consent', () => {
-  test('footer GET and provider POST are idempotent, private, environment-isolated, and block queued marketing but not transactional mail', async t => {
+  test('footer GET and provider POST are idempotent, private, and block queued marketing but not transactional mail', async t => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
-    const live = await keyFixture(t, { environment: 'live' });
+    const live = await keyFixture(t);
     const email = address();
     const contact = await resource(t, key.secret, '/v1/contacts', { email });
-    const production = await resource(t, live.secret, '/v1/contacts', { email });
+    const production = ok(await http('GET', `/v1/contacts/${contact.id}`, live.secret));
     ok(await consent(key.secret, contact.id, 'subscribed'));
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('unsubscribe') });
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
@@ -3080,7 +3103,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const html = confirmed;
     assert.equal(ok(await http('POST', path, undefined, 'List-Unsubscribe=One-Click', { 'content-type': 'application/x-www-form-urlencoded' })), html);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'unsubscribed');
-    assert.equal(ok(await http('GET', `/v1/contacts/${production.id}`, live.secret)).marketingConsent, 'unknown');
+    assert.equal(ok(await http('GET', `/v1/contacts/${production.id}`, live.secret)).marketingConsent, 'unsubscribed');
     const audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret));
     assert.equal(audit.filter(row => row.source === 'footer-confirm' && row.status === 'unsubscribed').length, 1, 'The footer confirmation must be attributed to footer-confirm, not provider one-click consent.');
     assert.equal(audit.filter(row => row.status === 'unsubscribed').length, 1, 'Repeated GET and POST capability use must not duplicate or rewrite the original consent decision.');
@@ -3153,32 +3176,32 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
       JOIN operation_webhooks w ON w.workspace_id = e.workspace_id AND w.environment = e.environment
       WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND e.actor_key_id = $4
         AND w.id = $5 AND w.paused = true AND w.url = $6`,
-    [queued.id, contact.workspaceId, 'test', manager.id, endpoint.id, endpoint.url]);
+    [queued.id, contact.workspaceId, 'live', manager.id, endpoint.id, endpoint.url]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created email/key/paused endpoint; no synthetic rows were inserted.');
     const eventId = unique('acceptance-click');
     const operationId = unique('acceptance-operation');
     const deliveryId = unique('acceptance-delivery');
     const data = { emailId: queued.id, link: capabilityUrl, nested: { links: [capabilityUrl, { link: capabilityUrl }], label: 'ordinary click metadata', [`key-${token}`]: token }, values: [7, true, null] };
-    const payload = { id: operationId, type: 'email.clicked', createdAt: new Date().toISOString(), workspaceId: contact.workspaceId, environment: 'test', region: REGION, data };
+    const payload = { id: operationId, type: 'email.clicked', createdAt: new Date().toISOString(), workspaceId: contact.workspaceId, environment: 'live', region: REGION, data };
     // Only event-source arrangement uses SQL: no SNS signature claim, provider
     // request, dispatch job, or webhook callback is manufactured or performed.
     await db.query('BEGIN');
     try {
       await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [eventId, contact.workspaceId, 'test', queued.id, 'click', JSON.stringify(data), true]);
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [eventId, contact.workspaceId, 'live', queued.id, 'click', JSON.stringify(data), true]);
       await db.query(`INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [operationId, contact.workspaceId, 'test', payload.type, REGION, JSON.stringify(data), payload.createdAt]);
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [operationId, contact.workspaceId, 'live', payload.type, REGION, JSON.stringify(data), payload.createdAt]);
       await db.query(`INSERT INTO operation_deliveries (id, workspace_id, environment, webhook_id, event_id, payload, synthetic, status)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`, [deliveryId, contact.workspaceId, 'test', endpoint.id, operationId, JSON.stringify(payload), true, 'paused']);
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`, [deliveryId, contact.workspaceId, 'live', endpoint.id, operationId, JSON.stringify(payload), true, 'paused']);
       await db.query('COMMIT');
     } catch (cause) {
       await db.query('ROLLBACK');
       throw cause;
     }
     cleanup(t, async () => {
-      await db.query('DELETE FROM operation_deliveries WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND webhook_id = $4 AND event_id = $5', [deliveryId, contact.workspaceId, 'test', endpoint.id, operationId]);
-      await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [operationId, contact.workspaceId, 'test']);
-      await db.query('DELETE FROM sending_email_events WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND email_id = $4', [eventId, contact.workspaceId, 'test', queued.id]);
+      await db.query('DELETE FROM operation_deliveries WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND webhook_id = $4 AND event_id = $5', [deliveryId, contact.workspaceId, 'live', endpoint.id, operationId]);
+      await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [operationId, contact.workspaceId, 'live']);
+      await db.query('DELETE FROM sending_email_events WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND email_id = $4', [eventId, contact.workspaceId, 'live', queued.id]);
     });
     const observations: Array<{ route: string; managed: Json; readable: Json }> = [];
     const managerEvents = await allPages(`/v1/emails/${queued.id}/events`, manager.secret);
@@ -3208,7 +3231,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, manager.secret)).marketingConsent, 'subscribed', 'Reading redacted event metadata must not consume the underlying capability.');
   });
 
-  test('a test key at its seeded 600-request budget receives HTTP 429 and recovers after its own budget resets', { skip: DATABASE_FIXTURE_SKIP }, async t => {
+  test('a test key at its seeded 1,200-request budget receives HTTP 429 and recovers after its own budget resets', { skip: DATABASE_FIXTURE_SKIP }, async t => {
     const db = await fixtureDatabase(t);
     const key = await keyFixture(t);
     let fixtureWorkspace: string | undefined;
@@ -3221,7 +3244,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email })), 202);
     const matched = await db.query(`SELECT e.id FROM sending_emails e JOIN api_keys k
       ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id AND k.environment = e.environment
-      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND k.id = $4`, [queued.id, contact.workspaceId, 'test', key.id]);
+      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND k.id = $4`, [queued.id, contact.workspaceId, 'live', key.id]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created test email/key; no request budget was seeded.');
     fixtureWorkspace = contact.workspaceId;
     // This cleanup is registered after the key/contact fixtures, so it restores
@@ -3232,7 +3255,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
       const seeded = await db.query(`INSERT INTO api_request_budgets (workspace_id, key_id, window_start, used)
         VALUES ($1, $2, date_trunc('minute', now()), $3)
         ON CONFLICT (workspace_id, key_id) DO UPDATE SET window_start = excluded.window_start, used = excluded.used
-        RETURNING window_start`, [contact.workspaceId, key.id, 600]);
+        RETURNING window_start`, [contact.workspaceId, key.id, 1200]);
       limited = await http('GET', `/v1/contacts/${contact.id}`, key.secret);
       if (limited.status === 429) break;
       const current = await db.query('SELECT window_start FROM api_request_budgets WHERE workspace_id = $1 AND key_id = $2', [contact.workspaceId, key.id]);
@@ -3250,24 +3273,23 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
 });
 
 describe('Operational configuration and public event boundaries', () => {
-  test('workspace settings persist independently and test keys cannot touch real SES domains or readiness', async t => {
+  test('workspace settings are shared and simulated deployments reject real SES control-plane requests', async t => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
-    const live = await keyFixture(t, { environment: 'live', permissions: ['read'] });
+    const live = await keyFixture(t, { permissions: ['read'] });
     const before = ok(await http('GET', '/v1/settings/workspace', key.secret));
-    const liveBefore = ok(await http('GET', '/v1/settings/workspace', live.secret));
     cleanup(t, async () => { ok(await http('PATCH', '/v1/settings/workspace', key.secret, { name: before.name })); });
     const name = unique('acceptance-workspace');
     assert.equal(ok(await http('PATCH', '/v1/settings/workspace', key.secret, { name })).name, name);
     assert.equal(ok(await http('GET', '/v1/settings/workspace', reader.secret)).name, name);
-    assert.equal(ok(await http('GET', '/v1/settings/workspace', live.secret)).name, liveBefore.name);
+    assert.equal(ok(await http('GET', '/v1/settings/workspace', live.secret)).name, name);
     error(await http('PATCH', '/v1/settings/workspace', reader.secret, { name: 'Forbidden' }), 403, 'PERMISSION_DENIED');
-    error(await http('GET', '/v1/settings/ses', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
+    error(await http('GET', '/v1/settings/ses', key.secret), 503, 'SES_NOT_CONFIGURED');
     const catalog = ok(await http('GET', '/v1/regions', key.secret));
     assert.equal(typeof catalog.defaultRegion, 'string');
     assert.ok(catalog.data.some((entry: Json) => entry.region === catalog.defaultRegion && entry.enabled && entry.isDefault));
-    error(await http('GET', '/v1/domains', key.secret), 403, 'TEST_EXTERNAL_OPERATION');
-    error(await http('POST', '/v1/domains', key.secret, { name: `${unique('acceptance')}.example.com`, region: REGION }), 403, 'TEST_EXTERNAL_OPERATION');
+    error(await http('GET', '/v1/domains', key.secret), 503, 'SES_NOT_CONFIGURED');
+    error(await http('POST', '/v1/domains', key.secret, { name: `${unique('acceptance')}.example.com`, region: REGION }), 503, 'SES_NOT_CONFIGURED');
   });
 
   test('SES Auto Validation feedback records its subtype and suppresses the contact distinctly from a hard bounce', { skip: DATABASE_FIXTURE_SKIP }, async t => {
@@ -3332,7 +3354,7 @@ describe('Operational configuration and public event boundaries', () => {
   test('webhook configuration rejects SSRF targets, defaults to seven events, and protects rotatable signing secrets without making deliveries', async t => {
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
-    const live = await keyFixture(t, { environment: 'live' });
+    const live = await keyFixture(t);
     // These fixtures are always paused. Never invoke /test or delivery /retry:
     // no public HTTP callback is authorized by the ordinary acceptance suite.
     const endpoint = await resource(t, key.secret, '/v1/webhooks', { url: `https://example.com/hooks/${unique('acceptance')}`, paused: true });
@@ -3363,7 +3385,7 @@ describe('Operational configuration and public event boundaries', () => {
     for (const item of [endpoint, metadata, ...(await allPages('/v1/webhooks', reader.secret))]) {
       for (const field of ['secret', 'encryptedSecret', 'signingSecret', 'signingKey']) assert.equal(item[field], undefined, `Ordinary webhook metadata must not contain ${field}.`);
     }
-    error(await http('GET', `/v1/webhooks/${endpoint.id}`, live.secret), 404, 'NOT_FOUND');
+    ok(await http('GET', `/v1/webhooks/${endpoint.id}`, live.secret));
     assert.equal(page(await http('GET', `/v1/webhooks/${endpoint.id}/deliveries`, key.secret)).length, 0);
     assert.equal(ok(await http('DELETE', `/v1/webhooks/${endpoint.id}`, key.secret)).deleted, true);
     error(await http('GET', `/v1/webhooks/${endpoint.id}`, key.secret), 404, 'NOT_FOUND');
@@ -3439,7 +3461,7 @@ describe('Operational configuration and public event boundaries', () => {
         await tx.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region: REGION, trustedAccountId: '111122223333', trustedTopicArn: topicArn });
         async function local(method: string, path: string, body?: Json): Promise<Reply> {
           const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
-            headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': 'test', ...(body ? { 'content-type': 'application/json' } : {}) },
+            headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, ...(body ? { 'content-type': 'application/json' } : {}) },
             ...(body ? { body: JSON.stringify(body) } : {}),
           }), runtime);
           return { status: response.status, body: await response.json(), headers: response.headers };
@@ -3465,7 +3487,7 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts.length, 1);
         assert.equal(delivery.attempts[0].statusCode, 302);
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
-        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND environment = 'test' AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
+        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND environment = 'live' AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         throw rollback;
@@ -3481,12 +3503,12 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
   const to = process.env.SES_TEST_RECIPIENT;
   const from = process.env.SES_TEST_FROM;
   assert.ok(to && from, 'LIVE_SES_TEST=1 requires explicit SES_TEST_RECIPIENT and SES_TEST_FROM; no live send was attempted.');
-  const key = await keyFixture(t, { environment: 'live', permissions: ['read', 'send'], domains: [from.split('@')[1]] });
+  const key = await keyFixture(t, { permissions: ['read', 'send'], domains: [from.split('@')[1]] });
   const queued = ok(await http('POST', '/v1/emails/send', key.secret, {
     from, to, region: process.env.SES_TEST_REGION ?? REGION,
     subject: unique('OpenSend authorized live acceptance'), text: 'One explicitly authorized OpenSend acceptance email. Provider acceptance is not a delivery claim.', kind: 'transactional',
   }, { 'Idempotency-Key': unique('authorized-live') }), 202);
-  assert.equal(queued.environment, 'live');
+  assert.equal(queued.environment, undefined);
   assert.equal(queued.simulated, false);
   const accepted = await poll(`/v1/emails/${queued.id}`, key.secret, body => typeof body.providerId === 'string' && body.providerId.length > 0);
   assert.equal(accepted.simulated, false);
@@ -3530,7 +3552,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       await db.query("UPDATE workspace_members SET workspace_id = $1 WHERE user_id = $2 AND workspace_id = 'default'", [runtime.config.workspaceId, manager!.userId]);
       const request: typeof http = (method, path, key, body, headers, timeout) => http(method, path, key, body, headers, timeout, PUBLIC_ORIGIN, req => app.fetch(req, runtime));
       await ensureRegionSettings(runtime.db, runtime.config);
-      async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'test', headers: Record<string, string> = {}): Promise<Reply> {
+      async function local(method: string, path: string, body?: Json, environment: 'test' | 'live' = 'live', headers: Record<string, string> = {}): Promise<Reply> {
         const response = await app.fetch(new Request(`${PUBLIC_ORIGIN}${path}`, { method,
           headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-opensend-environment': environment, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
           ...(body ? { body: JSON.stringify(body) } : {}),
@@ -3542,7 +3564,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         // Mail is no longer a job: the dispatcher claims due rows for one environment/region directly.
         if (type === 'email.dispatch') {
           const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_test_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
-          await dispatchDue(runtime, 'test', REGION, {accountId}); return;
+          await dispatchDue(runtime, REGION, {accountId}); return;
         }
         assert.ok(handlers[type], `No handler for ${type}`);
         const pending = (await jobs(type)).filter(job => job.status === 'pending');
@@ -3607,17 +3629,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
         return {MessageId:'same-provider-id-in-both-accounts'};
       });
-      const wakes: string[]=[]; runtime.dispatch=async (mode, region, accountId)=>{ wakes.push(`${mode}:${region}:${accountId}`); };
+      const wakes: string[]=[]; runtime.dispatch=async (region, accountId)=>{ wakes.push(`${region}:${accountId}`); };
       const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-opensend-workspace':wid});
       const template={template:{name:'fixture',data:{}}}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
       const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-opensend-workspace':shared}),201);
       const a=ok(await send(shared,{subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id]}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
-      assert.deepEqual(wakes,[pool,account,pool].map(id=>`live:${REGION}:${id}`));
+      assert.deepEqual(wakes,[pool,account,pool].map(id=>`${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
-      const drain=(accountId:string)=>runDispatcher(runtime,{environment:'live',region:REGION,accountId,lanes:1});
+      const drain=(accountId:string)=>runDispatcher(runtime,{region:REGION,accountId,lanes:1});
       assert.equal((await drain(account)).sent,0); assert.deepEqual(sends,[]);
       // Two independent cold shard gates race the same pool refresh, but cannot repeat GetAccount.
-      const shards=await Promise.all([0,1].map(index=>runDispatcher(runtime,{environment:'live',region:REGION,accountId:pool,lanes:1,batchSize:1,shard:{index,count:2}})));
+      const shards=await Promise.all([0,1].map(index=>runDispatcher(runtime,{region:REGION,accountId:pool,lanes:1,batchSize:1,shard:{index,count:2}})));
       assert.equal(shards.reduce((n,r)=>n+r.sent,0),1); assert.deepEqual(sends,[shared,shared]);
       assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[paused.id])).rows,[{status:'rejected',error_code:'SES_TENANT_SENDING_PAUSED'}]);
       assert.equal((await drain(account)).sent,0); assert.deepEqual(quotaReads,['fixture-customer','fixture-platform']);
@@ -3643,15 +3665,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id) SELECT id,id,'shared','ready',$1,$2 FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id,role_arn,external_id,template_version,platform_principal_arn,feedback_topic_arn)
         VALUES ('bench-100','bench-100','byo','ready',$1,$2,'fixture-role',gen_random_uuid(),'v1','fixture-platform',$3)`,[REGION,accounts[1],`arn:aws:sns:${REGION}:${accounts[1]}:fixture`]);
-      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) SELECT id,id,'test','fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) SELECT id,id,'live','fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,verified) SELECT id||'.example',id,id,true FROM workspaces WHERE id LIKE 'bench-%'`);
       await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT 'email_'||id,id,'test',$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
+        SELECT 'email_'||id,id,'live',$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
           $2::jsonb || jsonb_build_object('from','sender@'||id||'.example'),true FROM workspaces WHERE id LIKE 'bench-%'`,[REGION,JSON.stringify({to:['fixture@example.net'],cc:[],bcc:[],replyTo:[],region:REGION,kind:'transactional',subject:'fixture',text:'fixture',tracking:false,attachments:[],headers:[]})]);
       // Count actual pg round trips (including cache reads/writes), not timed dispatcher phases.
       const queries=t.mock.method(db,'query'); const counts:number[]=[];
       for (const [i,accountId] of accounts.entries()) {
-        const start=queries.mock.callCount(), report=await runDispatcher(runtime,{environment:'test',region:REGION,accountId});
+        const start=queries.mock.callCount(), report=await runDispatcher(runtime,{region:REGION,accountId});
         counts.push(queries.mock.callCount()-start); assert.equal(report.sent,i===0?99:1);
       }
       queries.mock.restore(); t.diagnostic(`100 MX dispatches (99 shared workspaces + 1 BYO): ${counts[0]} + ${counts[1]} = ${counts[0]+counts[1]} pg statements (two lanes, cold quotas)`);
@@ -3707,7 +3729,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const agent = { authorization: `Bearer ${scoped.secret}` };
       const webhook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/support-hook', addressIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
       const payload = { from: support.address, to: 'customer@example.net', subject: 'Case 42', text: 'An update', replyMailboxId: support.id }, idem = { 'Idempotency-Key': 'fixture-case-42' };
-      error(await local('POST', '/v1/emails/send', payload, 'test'), 403);
+      error(await local('POST', '/v1/emails/send', payload, 'live', agent), 401);
       error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address }, 'live'), 422);
       error(await local('POST', '/v1/emails/send', { ...payload, replyTo: [temporary.address] }, 'live'), 422);
       await db.query(`UPDATE mailbox_domains SET status='waiting_for_mx' WHERE workspace_id=$1`, [scope]);
@@ -3722,7 +3744,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const ordinary = ok(await local('POST', '/v1/emails/send', { from: support.address, to: 'customer@example.net', subject: 'Private', text: 'Not part of the inbox' }, 'live'), 202);
       assert.equal(ordinary.threadId, undefined); error(await local('POST', replyPath, { addressId: support.id, replyToMessageId: ordinary.id, text: 'not linked' }, 'live', agent), 404);
       error(await local('POST', replyPath, { addressId: support.id, replyToMessageId: sent.inboundMessageId, text: 'too soon' }, 'live', agent), 409, 'REPLY_TARGET_NOT_ACCEPTED');
-      await dispatchDue(runtime, 'live', REGION);
+      await dispatchDue(runtime, REGION);
       const wire = `fixture-${sent.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com`;
       const followup = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: sent.inboundMessageId, text: 'Follow up' }, 'live', agent), 202);
       assert.equal(followup.inReplyTo, wire); assert.equal(followup.threadId, sent.threadId);
@@ -3747,7 +3769,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, environment: 'live', attempts: 1 }); } finally { hook.mock.restore(); }
       assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
       const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
-      await dispatchDue(runtime, 'live', REGION);
+      await dispatchDue(runtime, REGION);
       assert.equal(reply.threadId, sent.threadId); assert.deepEqual(sends.get(reply.emailId).Destination.ToAddresses, ['customer@example.net']);
       assert.deepEqual(sends.get(reply.emailId).Content.Simple.Headers, [{ Name: 'In-Reply-To', Value: `<${inboundId}>` }, { Name: 'References', Value: `<${wire}> <${inboundId}>` }]);
 
@@ -3850,7 +3872,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202);
       assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
-      await dispatchDue(runtime,'live',REGION);
+      await dispatchDue(runtime, REGION);
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
       const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
       assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
@@ -3894,10 +3916,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('job scheduling serves both environments and remaining job classes while retiring old dispatch jobs', async t => {
+  test('job scheduling serves every class without claiming legacy test rows', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { processJobs, enqueue } = await import('./src/jobs.js');
       const { jobHandlers } = await import('./src/sending.js');
+      // processJobs drains the whole installation; isolate this queue from the harness runner.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const seen = new Set<string>();
       const types = ['campaign.prepare', 'operation.webhook', 'operation.simulatedFeedback'];
       const handlers: Record<string, import('./src/core.js').JobHandler> = { 'email.dispatch': jobHandlers['email.dispatch']! };
@@ -3909,12 +3933,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       t.mock.method(Math, 'random', () => 0);
       assert.equal(await processJobs(runtime, handlers, 16, 2), 16);
-      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[0]))].sort(), ['live', 'test']);
+      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[0]))].sort(), ['live']);
       assert.deepEqual([...new Set([...seen].map(value => value.split(':')[1]))].sort(), [...types].sort());
-      assert.equal(await processJobs(runtime, handlers, 100, 2), 56);
-      assert.deepEqual([...seen].sort(), types.flatMap(type => [`live:${type}`, `test:${type}`]).sort());
+      assert.equal(await processJobs(runtime, handlers, 100, 2), 20);
+      assert.deepEqual([...seen].sort(), types.map(type => `live:${type}`).sort());
       await db.query('DELETE FROM jobs WHERE workspace_id = $1', [runtime.config.workspaceId]);
-      const retired = await enqueue(runtime.db, { type: 'email.dispatch', workspaceId: runtime.config.workspaceId, environment: 'test', payload: {} });
+      const retired = await enqueue(runtime.db, { type: 'email.dispatch', workspaceId: runtime.config.workspaceId, environment: 'live', payload: {} });
       assert.equal(await processJobs(runtime, handlers, 1, 1), 1);
       assert.deepEqual((await db.query('SELECT status FROM jobs WHERE id = $1', [retired])).rows, [{ status: 'completed' }]);
     });
@@ -3928,7 +3952,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(shardRate(gate, undefined, pacing), 22);
     assert.equal(shardRate(gate, { index: 0, count: 4 }, pacing), 5.5, 'Shards split the target evenly.');
     assert.equal(shardRate(gate, undefined, { rateFactor: 1.1, targetRate: 30, live: true }), 30, 'An absolute live target replaces the quota-derived rate.');
-    assert.equal(shardRate(gate, undefined, { rateFactor: 1.1, targetRate: 30, live: false }), 22, 'The absolute target never applies to the test environment.');
+    assert.equal(shardRate(gate, undefined, { rateFactor: 1.1, targetRate: 30, live: false }), 22, 'The absolute target never applies to simulated SES.');
     const started = Date.now();
     const waits = Array.from({ length: 44 }, () => reserve(gate, 1, undefined, pacing));
     assert.equal(waits[0], 0, 'The first slot is immediate.');
@@ -3984,7 +4008,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');
       const observed = page(await local('GET', `/v1/emails/${email.id}/events`));
       for (const type of ['accepted', 'send', 'delivery']) assert.equal(observed.filter(event => event.type === type).length, 1);
-      assert.ok(observed.every(event => event.environment === 'test' && event.simulated));
+      assert.ok(observed.every(event => event.environment === undefined && event.simulated));
       assert.equal((await jobs('operation.publish')).length, 0);
       assert.equal((await jobs('operation.webhook')).length, 0, 'Zero subscribers must enqueue zero publication work.');
       assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 2, 'Public events must already be persisted without a publication job.');
@@ -4011,7 +4035,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('duplicate/out-of-order feedback fans out once and cannot cross test/live or public SNS boundaries', async t => {
+  for (const simulated of [true, false]) test(`campaign expansion rejects a worker mode change after ${simulated ? 'simulated' : 'real-SES'} launch`, async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      // Provision only a synthetic discovery record; this scenario must never call a provider.
+      runtime.config.aws = { accessKeyId: 'fixture', secretAccessKey: 'fixture' };
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const topic = `arn:aws:sns:${REGION}:111122223333:fixture`;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn)
+        VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [runtime.config.workspaceId, REGION, {provisioned:true, account:{id:'111122223333',sendingEnabled:true}, resources:{topic:{arn:topic}, marketing:{sendingEnabled:true}}}, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      const list = ok(await local('POST', '/v1/lists', { name: unique('mode-fence') }), 201);
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, {status:'subscribed', source:'fixture'}));
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+      runtime.config.liveEnabled = !simulated;
+      const campaign = ok(await local('POST', '/v1/campaigns', {name: unique('mode-fence'), from:'sender@example.com', subject:'Fixture', html:'<p>Fixture</p>', audience:{listId:list.id}}), 201);
+      const path = `/v1/campaigns/${campaign.id}`, revision = campaign.revision;
+      // Exercise both launch paths: automatic preparation and an explicitly selected review.
+      const review = simulated ? null : ok(await local('POST', `${path}/reviews`, {revision}), 202);
+      if (review) await run('campaign.prepare');
+      assert.equal(ok(await local('POST', `${path}/send`, {revision, reviewId:review?.id}), 202).simulated, simulated);
+      if (!review) await run('campaign.prepare');
+      runtime.config.liveEnabled = simulated;
+      await run('campaign.expand');
+      const result = ok(await local('GET', path));
+      assert.equal(result.expansion.status, 'failed');
+      assert.equal(result.expansion.error.code, 'SES_MODE_CHANGED');
+      assert.equal(result.expansion.expanded, 0); assert.equal(result.counts.total, 0);
+    });
+  });
+
+  test('duplicate/out-of-order simulated feedback fans out once and cannot impersonate public SNS feedback', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const { operationJobs } = await import('./src/operations.js');
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
@@ -4027,25 +4080,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const feedback = await jobs('operation.simulatedFeedback');
       const deliver = feedback.find(job => job.payload.message.eventType === 'Delivery')!;
       const send = feedback.find(job => job.payload.message.eventType === 'Send')!;
-      const context = (job: Json) => ({ id: job.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const });
+      const context = (job: Json) => ({ id: job.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const });
       for (const job of [deliver, deliver, send, send]) await operationJobs['operation.simulatedFeedback']!(runtime, job.payload, context(job));
       const { recordEmailEvent } = await import('./src/sending.js');
-      assert.equal(await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'test', emailId: email.id, type: 'delivery', providerId: deliver.payload.message.mail.messageId, externalId: `${deliver.payload.topicArn}:${deliver.payload.messageId}` }), null, 'Replaying the same external event must not fan out again even without the receipt guard.');
+      assert.equal(await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'live', emailId: email.id, type: 'delivery', providerId: deliver.payload.message.mail.messageId, externalId: `${deliver.payload.topicArn}:${deliver.payload.messageId}` }), null, 'Replaying the same external event must not fan out again even without the receipt guard.');
       assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered', 'Late Send feedback must not regress Delivery.');
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => ['send', 'delivery'].includes(event.type)).length, 2);
       const published = (await db.query('SELECT * FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
       assert.deepEqual(published.map(event => event.type).sort(), ['email.delivered', 'email.sent']);
       const deliveries = (await db.query('SELECT * FROM operation_deliveries WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
-      assert.equal(deliveries.length, 4);
-      assert.ok(deliveries.every(delivery => matching.includes(delivery.webhook_id) && delivery.webhook_id !== liveEndpoint.id && delivery.environment === 'test' && delivery.payload.data.simulated === true));
-      assert.equal(new Set(deliveries.map(delivery => `${delivery.webhook_id}:${delivery.event_id}`)).size, 4);
-      assert.equal((await jobs('operation.webhook')).length, 4);
+      assert.equal(deliveries.length, 6);
+      assert.ok(deliveries.every(delivery => [...matching, liveEndpoint.id].includes(delivery.webhook_id) && delivery.environment === 'live' && delivery.payload.data.simulated === true));
+      assert.equal(new Set(deliveries.map(delivery => `${delivery.webhook_id}:${delivery.event_id}`)).size, 6);
+      assert.equal((await jobs('operation.webhook')).length, 6);
       assert.equal((await jobs('operation.publish')).length, 0);
       assert.equal((await jobs('operation.publishBatch')).length, 0);
-      await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, deliver.payload, { ...context(deliver), environment: 'live' }), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
-      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ENVIRONMENT_MISMATCH' });
+      await assert.rejects(operationJobs['operation.simulatedFeedback']!({ ...runtime, config: { ...runtime.config, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' } } }, deliver.payload, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
+      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ACCOUNT_MISMATCH' });
       await assert.rejects(operationJobs['operation.simulatedFeedback']!(runtime, { ...deliver.payload, message: { mail: { messageId: 'real-provider-id' } } }, context(deliver)), { code: 'SIMULATED_FEEDBACK_FORBIDDEN' });
-      error(await local('GET', `/v1/emails/${email.id}`, undefined, 'live'), 404);
+      assert.equal(ok(await local('GET', `/v1/emails/${email.id}`, undefined, 'live')).id, email.id);
 
       const [{ getRegionSettings }, { setupResources }, { sesRegions }] = await Promise.all([import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js')]);
       const settings = await getRegionSettings(runtime.db, runtime.config.workspaceId);
@@ -4096,10 +4149,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
       // is by contact ID; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test' ORDER BY id", [runtime.config.workspaceId])).rows;
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live' ORDER BY id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
-      assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND environment = 'test' AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
+      assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND environment = 'live' AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
       ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(contact => contact.id) }));
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('static-validation'), from: 'sender@example.com', subject: 'Unpersonalized subject', html: '<p>Unpersonalized content.</p>', audience: { listId: list.id } }), 201);
       const review = ok(await local('POST', `/v1/campaigns/${campaign.id}/reviews`, { revision: campaign.revision }), 202);
@@ -4132,7 +4185,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await receipts(), [], 'Provider acceptance queues callback vehicles, not received feedback.');
       for (const [index, kind] of ['Send', 'Delivery'].entries()) {
         const callback = callbacks.find(job => job.payload.message.eventType === kind)!;
-        const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+        const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
         await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
         const persisted = await receipts();
         assert.equal(persisted.length, index + 1);
@@ -4160,7 +4213,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('email.dispatch');
       assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'With a sink, acceptance must not create feedback jobs.');
       assert.equal(sink.length, 4, 'Two accepted emails produce Send and Delivery callbacks each.');
-      assert.ok(sink.every(item => item.environment === 'test' && item.topicArn === `urn:opensend:simulated-ses:${REGION}` && String(item.message.mail && (item.message.mail as Json).messageId).startsWith('sim_')));
+      assert.ok(sink.every(item => item.topicArn === `urn:opensend:simulated-ses:${REGION}` && String(item.message.mail && (item.message.mail as Json).messageId).startsWith('sim_')));
       const receipts = async () => (await db.query('SELECT message_id, processed_at FROM operation_sns_receipts WHERE workspace_id = $1 ORDER BY message_id', [runtime.config.workspaceId])).rows;
       assert.deepEqual(await receipts(), []);
       // Out of order, duplicated, plus one non-routine item the simulator can never legitimately emit.
@@ -4196,7 +4249,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const providerId = `sim_${randomUUID()}`;
       const payload = { topicArn: `urn:opensend:simulated-ses:${REGION}`, messageId: unique('early-delivery'), region: REGION,
         message: { eventType: 'Delivery', mail: { messageId: providerId }, delivery: { timestamp: new Date().toISOString() } } };
-      const context = { id: unique('callback'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+      const context = { id: unique('callback'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
       const receipts = async () => (await db.query('SELECT processed_at FROM operation_sns_receipts WHERE workspace_id = $1 AND message_id = $2', [runtime.config.workspaceId, payload.messageId])).rows;
       for (let duplicate = 0; duplicate < 2; duplicate++) await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
       assert.deepEqual(await receipts(), [{ processed_at: null }]);
@@ -4213,7 +4266,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('recovery-hook')}`, eventTypes: ['email.delivered'] }), 201);
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
       // Simulate the provider association becoming durable after the callback.
-      await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'test', emailId: email.id, providerId, type: 'accepted', externalId: unique('late-acceptance') });
+      await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'live', emailId: email.id, providerId, type: 'accepted', externalId: unique('late-acceptance') });
       await run('operation.simulatedFeedbackRecovery');
       await operationJobs['operation.simulatedFeedbackRecovery']!(runtime, payload, context);
       await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
@@ -4235,7 +4288,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
       await run('email.dispatch');
       const callback = (await jobs('operation.simulatedFeedback')).find(job => job.payload.message.eventType === 'Delivery')!;
-      const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'test' as const };
+      const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
       const before = ok(await local('GET', `/v1/emails/${email.id}`));
       const beforeEvents = page(await local('GET', `/v1/emails/${email.id}/events`));
       // DDL and this workspace-only trigger are rollback-only. PostgreSQL itself
@@ -4290,15 +4343,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('refill-buffer') }), 201);
       // Bulk-seed reserved-domain contacts before the normal immutable snapshot.
       await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
-        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'refill-' || n || '@example.com', 'subscribed'
+        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'refill-' || n || '@example.com', 'subscribed'
         FROM generate_series(1, 500) AS n`, [runtime.config.workspaceId]);
       await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id)
-        SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [runtime.config.workspaceId, list.id]);
+        SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [runtime.config.workspaceId, list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('refill-buffer'), from: 'sender@example.com', subject: 'Synthetic refill capacity', html: '<p>Synthetic buffer acceptance only.</p>', audience: { listId: list.id } }), 201);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 500);
       await run('campaign.prepare');
       // Without a cached regional rate the buffer is the 400-row floor: one chunk fills it and the continuation waits.
-      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'test' AND region = $2", [runtime.config.workspaceId, REGION]);
+      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'live' AND region = $2", [runtime.config.workspaceId, REGION]);
       await run('campaign.expand');
       const floor = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(floor.counts.total, 400);
@@ -4307,10 +4360,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('email.dispatch')).length, 0, 'Expansion materializes rows, never per-email dispatch jobs.');
       for (const rate of [20, null]) {
         if (rate === null) {
-          await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'test' AND region = $2", [runtime.config.workspaceId, REGION]);
+          await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'live' AND region = $2", [runtime.config.workspaceId, REGION]);
         } else {
           await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
-            VALUES ($1, 'test', $2, $3, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+            VALUES ($1, 'live', $2, $3, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
             DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION, rate]);
         }
         const before = Date.now();
@@ -4330,7 +4383,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       // A high cached rate widens the buffer (ten seconds of sends), so the remaining recipients materialize at once.
       await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
-        VALUES ($1, 'test', $2, 5000, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+        VALUES ($1, 'live', $2, 5000, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
         DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION]);
       await run('campaign.expand');
       const widened = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
@@ -4355,11 +4408,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('paced') }), 201);
       // Bulk-seed reserved-domain contacts; every fourth one is plan=active so priority ordering is observable.
       await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent, properties)
-        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'paced-' || n || '@example.com', 'subscribed', CASE WHEN n % 4 = 0 THEN '{"plan":"active"}'::jsonb ELSE '{"plan":"none"}'::jsonb END
+        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'paced-' || n || '@example.com', 'subscribed', CASE WHEN n % 4 = 0 THEN '{"plan":"active"}'::jsonb ELSE '{"plan":"none"}'::jsonb END
         FROM generate_series(1, 1400) AS n`, [ws]);
-      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [ws, list.id]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [ws, list.id]);
       // A high cached rate keeps the dispatch buffer out of the way; the daily SES quota is unknown (0) until set below.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 5000, clock_timestamp())
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'live', $2, 5000, clock_timestamp())
         ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('paced'), from: 'sender@example.com', subject: 'Synthetic paced send', html: '<p>Synthetic pacing acceptance only.</p>', audience: { listId: list.id, priority: { property: 'plan', values: ['active'] } } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 99 } }), 422);
@@ -4414,18 +4467,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
       // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.expansion.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
       await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
-      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.expansion.expanded, 1200, 'Nothing is released into the reserved SES quota.');
       assert.equal(view.expansion.waiting.reason, 'ses_daily_quota');
       // With quota available, the rest of the new 200/day window (100 already released) goes out.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND environment = 'test' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
       pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
       await run('campaign.expand');
@@ -4448,10 +4501,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const ws = runtime.config.workspaceId;
       const list = ok(await local('POST', '/v1/lists', { name: unique('shared') }), 201);
       await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
-        SELECT 'con_' || md5($1 || n::text), $1, 'test', 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
-      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'test'`, [ws, list.id]);
+        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [ws, list.id]);
       // 20/s regional rate: the 400-row campaign buffer only limits the final full-rate step.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'test', $2, 20, clock_timestamp())
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'live', $2, 20, clock_timestamp())
         ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 20, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('shared'), from: 'sender@example.com', subject: 'Synthetic shared rate', html: '<p>Synthetic rate share acceptance only.</p>', audience: { listId: list.id } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { rateShare: 0.01 } }), 422);
@@ -4570,8 +4623,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
       const versions = (await db.query('SELECT environment, dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
-      assert.deepEqual(versions, [{ environment: 'test', dispatch_version: 1 }, { environment: 'test', dispatch_version: 0 }, { environment: 'test', dispatch_version: 0 }]);
-      assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'live'", [runtime.config.workspaceId])).rows[0].count, 0);
+      assert.deepEqual(versions, [{ environment: 'live', dispatch_version: 1 }, { environment: 'live', dispatch_version: 0 }, { environment: 'live', dispatch_version: 0 }]);
+      assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'test'", [runtime.config.workspaceId])).rows[0].count, 0);
     });
   });
 
@@ -4625,7 +4678,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const spam = await send({ subject: spamSubject, html: `<p>You were invited to <b>${marker}</b>.</p>`, screen: true });
       const clean = await send({ subject: 'Join Acme on OpenCode', screen: true });
       const unscreened = await send({ subject: `Join ${marker} unscreened on OpenCode` });
-      await dispatchDue(runtime, 'live', REGION);
+      await dispatchDue(runtime, REGION);
       const rejected = await get(spam);
       assert.equal(rejected.status, 'rejected');
       assert.equal(rejected.errorCode, 'CONTENT_REJECTED_SPAM');
@@ -4643,7 +4696,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       classifierDown = true;
       const outage = await send({ subject: `Join ${marker} during an outage`, screen: true });
-      await dispatchDue(runtime, 'live', REGION);
+      await dispatchDue(runtime, REGION);
       assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
       assert.ok(sent.includes(outage));
       assert.equal(classified.length, 3);

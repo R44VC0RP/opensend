@@ -47,7 +47,6 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   }
   return authenticate(c, async () => {
     const actor = c.get('actor');
-    if (actor.environment !== 'live') throw new ApiError(403, 'MAILBOX_LIVE_ONLY', 'Inbound receives real mail; use live access.');
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
     if (actor.role === 'member' && actor.credential === 'dashboard') {
       c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, environment: LIVE, admin: false, mailboxIds: null, permissions: ['read', 'send'] });
@@ -629,7 +628,7 @@ function registerInboundWebhooks(app: App) {
     const mailboxIds = input.addressIds;
     checkScope(mailboxIds, input.eventTypes);
     const webhookId = id('mwh'), secret = webhookSecret();
-    const [row] = await c.env.db.insert(mailboxWebhooks).values({ id: webhookId, workspaceId: value.workspaceId, environment: LIVE, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, LIVE, webhookId)) }).returning();
+    const [row] = await c.env.db.insert(mailboxWebhooks).values({ id: webhookId, workspaceId: value.workspaceId, environment: LIVE, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, webhookId)) }).returning();
     c.header('Cache-Control', 'no-store');
     return c.json({ ...webhookView(row!), secret }, 201);
   });
@@ -659,7 +658,7 @@ function registerInboundWebhooks(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: `${path}/{id}/rotate-secret`, operationId: 'rotateInboundWebhookSecret', security, tags, request: { params: IdParam }, responses: { 200: response(z.object({ secret: z.string() }).openapi('InboundWebhookRotatedSecret')), ...errors } }), async c => {
     const { value, row } = await getWebhook(c, c.req.valid('param').id); const secret = webhookSecret();
-    await c.env.db.update(mailboxWebhooks).set({ encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, LIVE, row.id)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, row.id));
+    await c.env.db.update(mailboxWebhooks).set({ encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, row.id)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, row.id));
     c.header('Cache-Control', 'no-store');
     return c.json({ secret }, 200);
   });

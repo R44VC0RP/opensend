@@ -17,7 +17,6 @@ export interface UploadedAttachment {
   disposition: 'attachment' | 'inline'
   contentId: string | null
   createdAt: string
-  environment: 'live' | 'test'
 }
 export class OpenSendUploadError extends Error {
   constructor(message: string, readonly code: string, readonly status: number, readonly requestId?: string) { super(message); this.name = 'OpenSendUploadError' }

@@ -7,8 +7,8 @@ import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, exists, gt, inArray, ne, sql } from 'drizzle-orm';
-import { ApiError, errors, log, response, security, timed } from './core.js';
-import type { Actor, App, DbExecutor, Mode, Runtime } from './core.js';
+import { isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
+import type { Actor, App, DbExecutor, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
 import { claimInvitation, onboardNewUser, WorkspaceRole } from './workspaces.js';
@@ -216,7 +216,7 @@ export async function invitationRecipient(runtime: Runtime, headers: Headers) {
   if (!user || !session) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with the invited Google account.');
   return { userId: session.user.id, email: user.email };
 }
-export async function getDashboardActor(runtime: Runtime, headers: Headers, mode?: Mode, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {
+export async function getDashboardActor(runtime: Runtime, headers: Headers, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {
   requireConfigured(runtime);
   try {
     // A check-only preflight must not consume a renewal without delivering its cookies to the browser.
@@ -249,9 +249,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, mode
       if (!member) return null;
       principal = { ...member, email: user.email, name: user.name };
     }
-    const selected = headers.get('x-opensend-environment');
-    if (selected !== null && selected !== 'test' && selected !== 'live') throw new ApiError(422, 'ENVIRONMENT_INVALID', 'Select live or test with X-OpenSend-Environment.', 'X-OpenSend-Environment');
-    return { keyId: `user_${session.user.id}`, ...principal, environment: mode ?? selected ?? 'live', permissions: principal.role === 'member' ? ['read', 'send'] : ['manage'], domains: [], credential: 'dashboard' };
+    return { keyId: `user_${session.user.id}`, ...principal, environment: 'live', permissions: principal.role === 'member' ? ['read', 'send'] : ['manage'], domains: [], credential: 'dashboard' };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof APIError && error.statusCode === 401) return null;
@@ -280,7 +278,7 @@ export function registerGoogleAuth(app: App) {
       const input = SignIn.safeParse(await c.req.raw.clone().json().catch(() => null));
       if (!input.success) throw new ApiError(422, 'AUTH_INPUT_INVALID', 'Use Google browser sign-in without custom scopes or identity fields.');
     }
-    if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, undefined, async (name, work) => timed(c, name, work))) return c.json(null);
+    if (path === '/get-session' && !await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work))) return c.json(null);
     const started = performance.now();
     try {
       const result = await timed(c, 'auth-handler-db', () => createAuth(c.env).handler(c.req.raw));
@@ -301,11 +299,11 @@ export function registerGoogleAuth(app: App) {
     }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/me', operationId: 'getCurrentIdentity', tags: ['Auth'], security,
-    responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), role: WorkspaceRole.nullable(), multiTenant: z.boolean(), email: z.string().nullable(), name: z.string().nullable(), environment: z.enum(['live', 'test']), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string(), connection: ConnectionSummary.nullable().openapi({ description: 'Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).' }) })), ...errors },
+    responses: { 200: response(z.object({ id: z.string(), workspaceId: z.string(), role: WorkspaceRole.nullable(), multiTenant: z.boolean(), simulated: z.boolean(), email: z.string().nullable(), name: z.string().nullable(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), origin: z.string().url(), host: z.string(), connection: ConnectionSummary.nullable().openapi({ description: 'Multi-tenant sending connection for the current workspace, or null (always null when self-hosted).' }) })), ...errors },
   }), async c => {
     const identity = c.get('actor');
     const userId = identity.keyId.startsWith('user_') ? identity.keyId.slice(5) : null;
     const origin = new URL(c.env.config.publicUrl).origin;
-    return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, role: WorkspaceRole.nullable().parse(identity.role ?? null), multiTenant: c.env.config.multiTenant, email: identity.email ?? null, name: identity.name ?? null, environment: identity.environment, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host, connection: c.env.config.multiTenant ? await connectionSummary(c.env, identity.workspaceId) : null }, 200);
+    return c.json({ id: userId ?? identity.keyId, workspaceId: identity.workspaceId, role: WorkspaceRole.nullable().parse(identity.role ?? null), multiTenant: c.env.config.multiTenant, simulated: isSimulatedSes(c.env), email: identity.email ?? null, name: identity.name ?? null, permissions: identity.permissions, domains: identity.domains, origin, host: new URL(origin).host, connection: c.env.config.multiTenant ? await connectionSummary(c.env, identity.workspaceId) : null }, 200);
   });
 }

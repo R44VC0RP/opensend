@@ -76,6 +76,7 @@ export const reviewRecipients = pgTable('sending_review_recipients', {
 }, t => [primaryKey({ columns: [t.reviewId, t.ordinal] })]);
 export const campaignExpansions = pgTable('sending_campaign_expansions', {
   campaignId: text('campaign_id').primaryKey(), reviewId: text('review_id').notNull().unique(), ...scope(), actorKeyId: text('actor_key_id').notNull(),
+  simulated: boolean('simulated').notNull().default(false),
   total: integer('total').notNull(), expanded: integer('expanded').notNull().default(0), canceled: integer('canceled').notNull().default(0),
   status: text('status').$type<'pending' | 'expanding' | 'paused' | 'completed' | 'failed' | 'canceled'>().notNull().default('pending'),
   error: jsonb('error').$type<{ code: string; message: string }>(), requestId: text('request_id'), jobId: text('job_id'),

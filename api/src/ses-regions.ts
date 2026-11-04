@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { actor, ApiError, errors, id, json, response, security, type Actor, type App, type JobHandler, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, response, security, type Actor, type App, type JobHandler, type Runtime } from './core.js';
 import { apiKeys, jobs } from './db/core.js';
 import { domains } from './db/operations.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -25,7 +25,7 @@ const ValidationSettings = z.object({ stream: z.enum(['transactional', 'marketin
 function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   const value = actor(c, mutate ? 'manage' : 'read');
   if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Region configuration requires unrestricted workspace access.');
-  if ((mutate || aws) && value.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Use live administrator context for AWS discovery and region configuration.');
+  if (aws) assertSesConfigured(c.env);
   if (c.env.config.multiTenant && mutate) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use the workspace sending connection to manage its AWS region.');
   return value;
 }
@@ -49,7 +49,7 @@ export function registerSesRegions(app: App) {
     responses: { 200: response(Catalog), ...errors },
   }), async c => { const value = access(c); return c.json(Catalog.parse(await regionCatalog(c.env, value.workspaceId)), 200); });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}', operationId: 'configureRegion', tags: ['Regions'], security,
-    description: 'Enable/disable a region or choose the default. Changes are shared by live and test modes; requires unrestricted live management access. Disabling never deletes AWS resources or historical mail.',
+    description: 'Enable/disable a region or choose the default. Requires unrestricted management access. Disabling never deletes AWS resources or historical mail.',
     request: { params: Params, body: json(z.object({ enabled: z.boolean().optional(), makeDefault: z.boolean().optional() }).strict().refine(value => value.enabled !== undefined || value.makeDefault === true, 'Choose enabled or makeDefault.').openapi('ConfigureRegion')) },
     responses: { 200: response(Catalog), ...errors },
   }), async c => { const value = access(c, true); return c.json(Catalog.parse(await configureRegion(c.env, value.workspaceId, c.req.valid('param').region, c.req.valid('json'))), 200); });
@@ -78,7 +78,7 @@ export function registerSesRegions(app: App) {
     description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',
     request: { params: Params, body: json(z.object({ confirm: z.literal(true) }).strict().openapi('ProvisionRegion')) }, responses: { 202: response(Receipt), ...errors },
   }), async c => {
-    const value = access(c, true); const { region } = c.req.valid('param');
+    const value = access(c, true, true); const { region } = c.req.valid('param');
     const receipt = await c.env.db.transaction(async tx => {
       const settings = await getRegionSettings(tx, value.workspaceId, 'share');
       assertProvisionable(c.env);
@@ -98,10 +98,10 @@ export function registerSesRegions(app: App) {
     return c.json(receipt, 202);
   });
   app.openapi(createRoute({ method: 'put', path: '/v1/regions/{region}/auto-validation', operationId: 'configureRegionAutoValidation', tags: ['Regions'], security,
-    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted live management access plus explicit confirmation.',
+    description: 'Set SES Auto Validation for one OpenSend-owned configuration set. This changes real AWS behavior and requires unrestricted management access plus explicit confirmation.',
     request: { params: Params, body: json(ValidationSettings.extend({ confirm: z.literal(true) }).strict().openapi('ConfigureSesAutoValidation')) }, responses: { 200: response(ValidationSettings), ...errors },
   }), async c => {
-    const value = access(c, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');
+    const value = access(c, true, true); const { region } = c.req.valid('param'); const input = c.req.valid('json');
     const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before configuring Auto Validation.', 'region');
     await setAutoValidation(c.env, { region, installationId: settings.installationId }, input.stream, input.mode);
@@ -118,7 +118,7 @@ async function approvedOrigin(runtime: Runtime, keyId: string) {
   if (keyId.startsWith('user_')) return runtime.config.multiTenant ? (await runtime.db.execute(approvedOriginUser(runtime, sql`${runtime.config.workspaceId}`, sql`${keyId.slice(5)}`))).rows.length > 0 : isApprovedUser(runtime, keyId.slice(5));
   if (keyId.startsWith('mcp_')) {
     const grant = await getMcpGrantActor(runtime, keyId);
-    return !!grant && (!runtime.config.multiTenant || grant.workspaceId === runtime.config.workspaceId) && grant.environment === 'live' && grant.permissions.includes('manage') && !grant.domains.length;
+    return !!grant && (!runtime.config.multiTenant || grant.workspaceId === runtime.config.workspaceId) && grant.permissions.includes('manage') && !grant.domains.length;
   }
   const [key] = await runtime.db.select().from(apiKeys).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, runtime.config.workspaceId), eq(apiKeys.environment, 'live'), isNull(apiKeys.revokedAt))).limit(1);
   return Boolean(key?.permissions.includes('manage') && !key.domains.length);
@@ -126,7 +126,7 @@ async function approvedOrigin(runtime: Runtime, keyId: string) {
 const provision: JobHandler = async (runtime, payload, job) => {
   if (runtime.config.multiTenant) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use connection setup for hosted workspaces.');
   const parsed = Params.safeParse(payload);
-  if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId || typeof payload.actorKeyId !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES provisioning job.');
+  if (!parsed.success || job.workspaceId !== runtime.config.workspaceId || typeof payload.actorKeyId !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES provisioning job.');
   const { region } = parsed.data;
   if (payload.credentialsFingerprint !== await credentialFingerprint(runtime.config) || payload.publicUrl !== discoveryTarget(runtime.config)) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'AWS credentials or public URL changed; request provisioning again.');
   if (!await approvedOrigin(runtime, payload.actorKeyId)) throw new ApiError(403, 'ORIGIN_KEY_REVOKED', 'The provisioning principal is no longer authorized.');
@@ -145,7 +145,7 @@ const provision: JobHandler = async (runtime, payload, job) => {
 };
 // Startup schedules only read-only discovery. Concurrent worker starts reuse active jobs.
 export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
-  if (!runtime.config.aws || runtime.config.multiTenant) return 0;
+  if (isSimulatedSes(runtime) || runtime.config.multiTenant) return 0;
   const fingerprint = await credentialFingerprint(runtime.config), target = discoveryTarget(runtime.config);
   return runtime.db.transaction(async tx => {
     const settings = await getRegionSettings(tx, runtime.config.workspaceId, 'update');
@@ -165,7 +165,7 @@ export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
 const discover: JobHandler = async (runtime, payload, job) => {
   if (runtime.config.multiTenant) return;
   const parsed = Params.safeParse(payload);
-  if (!parsed.success || job.environment !== 'live' || job.workspaceId !== runtime.config.workspaceId) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES discovery job.');
+  if (!parsed.success || job.workspaceId !== runtime.config.workspaceId) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid SES discovery job.');
   if (payload.credentialsFingerprint !== await credentialFingerprint(runtime.config) || payload.publicUrl !== discoveryTarget(runtime.config)) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'Discovery connection settings changed.');
   const settings = await getRegionSettings(runtime.db, job.workspaceId);
   if (!settings.enabledRegions.includes(parsed.data.region)) return;

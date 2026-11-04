@@ -9,7 +9,7 @@ type MailboxEventType = typeof inboundEventTypes[number];
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 
 export const eventView = (row: typeof mailboxEvents.$inferSelect) => ({ id: `mev_${row.seq}`, cursor: String(row.seq), type: row.type as MailboxEventType, createdAt: new Date(row.createdAt).toISOString(), addressId: row.mailboxId, threadId: row.threadId, messageId: row.messageId, data: row.data });
-export const webhookSecretBinding = (workspaceId: string, environment: Mode, webhookId: string) => `${workspaceId}:${environment}:mailbox:${webhookId}`;
+export const webhookSecretBinding = (workspaceId: string, webhookId: string) => `${workspaceId}:live:mailbox:${webhookId}`;
 
 function subscribed(endpoint: typeof mailboxWebhooks.$inferSelect, { type, addressId }: Record<string, unknown>) {
   return typeof type === 'string' && endpoint.eventTypes.includes(type) && (endpoint.mailboxIds === null ||
@@ -66,7 +66,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
     const url = webhookUrl(runtime, endpoint.url);
-    const secret = await decrypt(runtime, endpoint.encryptedSecret, webhookSecretBinding(job.workspaceId, job.environment, endpoint.id));
+    const secret = await decrypt(runtime, endpoint.encryptedSecret, webhookSecretBinding(job.workspaceId, endpoint.id));
     const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
     const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body, redirect: 'manual', signal: AbortSignal.timeout(5000) });

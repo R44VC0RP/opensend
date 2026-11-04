@@ -103,7 +103,7 @@ function curlSample(document: Json, path: string, method: string, pathItem: Json
 }
 
 export function createOpenApiDocument(app: App) {
-  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Test keys simulate sending.' } }) as Json;
+  const document = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'OpenSend API', version: '0.1.0', description: 'Transactional and marketing email. 202 means queued, not delivered. Sending is simulated when live SES is disabled or AWS credentials are not configured.' } }) as Json;
   for (const [path, pathItem] of Object.entries<Json>(document.paths ?? {})) for (const method of METHODS) {
     const operation = pathItem[method];
     if (!operation?.operationId) continue;

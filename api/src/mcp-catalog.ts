@@ -202,7 +202,7 @@ function combineReads(operations: Map<string, McpOperation>, spec: ObjectValue):
     const lookupNotes = spec.paths[detail.path][detail.method].description;
     const notes = `${typeof listingNotes === 'string' ? ` Listing: ${listingNotes.slice(0, 4000)}` : ''}${typeof lookupNotes === 'string' && lookupNotes !== listingNotes ? ` Lookup: ${lookupNotes.slice(0, 4000)}` : ''}`;
     const tool: Tool = { ...list.tool, name, inputSchema: schema,
-      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; search covers sender, recipients, subject, status, kind, region, IDs, error code, simulation state and timestamps.' : ''} Permissions and environment are enforced by OpenSend.${notes}`,
+      description: `Get ${label}. Supply id alone for one exact record, or omit id to list/filter one page. Always returns response.data as an array and response.nextCursor; an unknown id remains a 404 error. Pass response.nextCursor as cursor for another page.${name === 'getEmails' ? ' The from/to filters are creation-date bounds, not email addresses; search covers sender, recipients, subject, status, kind, region, IDs, error code, simulation state and timestamps.' : ''} Permissions are enforced by OpenSend.${notes}`,
     };
     const combined = { ...list, tool, singlePath: detail.path, validate: validator(schema) };
     freeze(tool); Object.freeze(combined);
@@ -307,7 +307,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   const add = (operation: McpOperation) => { if (result.has(operation.tool.name)) invalid(`Duplicate curated tool ${operation.tool.name}.`); result.set(operation.tool.name, operation); };
   const direct = (name: string, description: string, source: string) => add(alias(need(source), name, description));
 
-  direct('getContext', 'Return the active OpenSend environment, canonical instance origin and host, workspace, granted permissions, and domain restrictions.', 'getCurrentIdentity');
+  direct('getContext', 'Return the canonical instance origin and host, workspace, granted permissions, and domain restrictions.', 'getCurrentIdentity');
   direct('getContentGuide', 'Return the complete supported block HTML, personalization syntax, restrictions and examples for campaign and template content. Call this before writing html; external documentation research is unnecessary.', 'getCampaignContentGuide');
   const campaignList = need('listCampaigns', raw), campaignDetail = need('getCampaign', raw);
   const campaignFindSchema = findSchema(campaignList, { id: { type: 'string', minLength: 1, maxLength: 120 } }) as ObjectValue;
@@ -411,7 +411,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
   direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
-  direct('getCampaignStats', 'Read lifetime delivery, unique opens/clicks, bounce/complaint/failure counts and progress for one campaign. Rates include explicit numerators/denominators and are fractions, not percentages. Delivery is receiving-server acceptance, not inbox placement; engagement includes bots/privacy proxies. Test-mode rates are null.', 'getCampaignStats');
+  direct('getCampaignStats', 'Read lifetime delivery, unique opens/clicks, bounce/complaint/failure counts and progress for one campaign. Rates include explicit numerators/denominators and are fractions, not percentages. Delivery is receiving-server acceptance, not inbox placement; engagement includes bots/privacy proxies. Rates are null for simulated-only campaigns.', 'getCampaignStats');
   direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read, send or manage delegation within the originating MCP approval and optional sender-domain restrictions. Cannot manage credentials.', 'createAgentToken');
   direct('findDomains', 'List SES sending identities or inspect DKIM and custom MAIL FROM. For inbound receiving status, use getInboundDomain with the same domain ID when available.', 'getDomains');
   add(actionTool('saveDomain', 'Create or adopt an SES domain identity, or configure its custom MAIL FROM subdomain.', { create: need('createDomain', raw), mailFrom: need('configureDomainMailFrom', raw) }));
@@ -439,7 +439,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (!input) continue;
       const tool: Tool = {
         name,
-        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions and environment are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
+        description: `${name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (letter: string) => letter.toUpperCase())}. ${EMAIL_SEND_TOOLS.has(name) ? `${EMAIL_SEND_CONFIRMATION} ` : ''}${write ? 'Write: confirm=true required. ' : ''}Path IDs and query filters are top-level arguments; request data stays in body.${queryParameters.includes('cursor') ? ' Returns one page; pass response.nextCursor as cursor to continue.' : ''} Permissions are enforced by OpenSend.${operation.description ? ` ${String(operation.description).slice(0, 4000)}` : ''} API: ${method.toUpperCase()} ${path}.`,
         inputSchema: input,
         outputSchema: outputSchema(spec, operation),
         annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true },

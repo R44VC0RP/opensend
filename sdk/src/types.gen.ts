@@ -38,7 +38,6 @@ export type AgentToken = {
     token: string;
     expiresAt: string;
     permissions: Array<'read' | 'send' | 'manage'>;
-    environment: 'live' | 'test';
     domains: Array<string>;
     purpose: string;
 };
@@ -46,7 +45,6 @@ export type AgentToken = {
 export type AgentTokenRecord = {
     id: string;
     grantId: string;
-    environment: 'live' | 'test';
     permissions: Array<'read' | 'send' | 'manage'>;
     domains: Array<string>;
     purpose: string;
@@ -59,7 +57,6 @@ export type AgentTokenRecord = {
 export type ApiKey = {
     id: string;
     name: string;
-    environment: 'live' | 'test';
     permissions: Array<'read' | 'send' | 'manage'>;
     domains: Array<string>;
     prefix: string;
@@ -70,7 +67,6 @@ export type ApiKey = {
 
 export type CreateApiKey = {
     name: string;
-    environment?: 'live' | 'test';
     permissions?: Array<'read' | 'send' | 'manage'>;
     domains?: Array<string>;
 };
@@ -82,7 +78,6 @@ export type ContactRead = Contact & {
 export type Contact = {
     id: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     email: string;
     name: string | null;
     properties: {
@@ -106,7 +101,6 @@ export type ContactListRead = {
     description?: string;
     id: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     createdAt: string;
     updatedAt: string;
     /**
@@ -126,7 +120,6 @@ export type ContactList = {
     description?: string;
     id: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     createdAt: string;
     updatedAt: string;
 };
@@ -136,7 +129,6 @@ export type Segment = {
     rule: SegmentRule;
     id: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     createdAt: string;
     updatedAt: string;
 };
@@ -187,7 +179,6 @@ export type SegmentRule = {
 export type AudienceImport = {
     id: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     listId: string | null;
     status: 'preview' | 'committed';
     rows: Array<{
@@ -344,7 +335,6 @@ export type TemplateImageImport = {
 export type SingleEmailQueued = {
     id: string;
     status: 'queued';
-    environment: 'live' | 'test';
     simulated: boolean;
     inboundMessageId?: string;
     /**
@@ -372,7 +362,7 @@ export type SendEmailInput = {
     html?: string;
     text?: string;
     /**
-     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.
+     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.
      */
     template?: {
         name: string;
@@ -386,11 +376,11 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
+     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
     /**
-     * Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted live manage permission; From and Reply-To must belong to the address.
+     * Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.
      */
     replyAddressId?: string;
     /**
@@ -408,7 +398,6 @@ export type EmailBatchQueued = {
 export type EmailQueued = {
     id: string;
     status: 'queued';
-    environment: 'live' | 'test';
     simulated: boolean;
 };
 
@@ -432,7 +421,7 @@ export type BatchSendEmailItem = {
     html?: string;
     text?: string;
     /**
-     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.
+     * Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.
      */
     template?: {
         name: string;
@@ -446,14 +435,13 @@ export type BatchSendEmailItem = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
-     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.
+     * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
 };
 
 export type Email = {
     id: string;
-    environment: 'live' | 'test';
     region: string;
     campaignId: string | null;
     from: string;
@@ -490,7 +478,6 @@ export type EmailEvent = {
     type: string;
     providerId: string | null;
     simulated: boolean;
-    environment: 'live' | 'test';
     createdAt: string;
     data: {
         [key: string]: unknown;
@@ -505,7 +492,6 @@ export type Attachment = {
     disposition: 'attachment' | 'inline';
     contentId: string | null;
     createdAt: string;
-    environment: 'live' | 'test';
 };
 
 export type AttachmentUpload = {
@@ -532,10 +518,9 @@ export type Campaign = {
     expansion?: CampaignExpansion;
     id: string;
     /**
-     * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review.
      */
     url: string;
-    environment: 'live' | 'test';
     revision: number;
     draft: CampaignDraft;
     sourceTemplateId: string | null;
@@ -709,10 +694,9 @@ export type CampaignSummary = {
     expansion?: CampaignExpansion;
     id: string;
     /**
-     * Dashboard URL for opening this campaign in its environment. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review.
      */
     url: string;
-    environment: 'live' | 'test';
     revision: number;
     sourceTemplateId: string | null;
     sourceTemplateRevision: number | null;
@@ -764,12 +748,11 @@ export type CampaignDraftSummary = {
 };
 
 /**
- * Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Test outcomes are simulated, never evidence of real delivery.
+ * Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.
  */
 export type CampaignStats = {
     id: string;
     name: string;
-    environment: 'live' | 'test';
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
     tracking: boolean;
     /**
@@ -796,7 +779,7 @@ export type CampaignStats = {
     };
     expansion: CampaignExpansion;
     /**
-     * Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events in test mode. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.
+     * Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.
      */
     totals: {
         accepted: number;
@@ -815,7 +798,7 @@ export type CampaignStats = {
          */
         delivery: {
             /**
-             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             * Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
              */
             value: number | null;
             numerator: number;
@@ -826,7 +809,7 @@ export type CampaignStats = {
          */
         bounce: {
             /**
-             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             * Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
              */
             value: number | null;
             numerator: number;
@@ -837,7 +820,7 @@ export type CampaignStats = {
          */
         complaint: {
             /**
-             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             * Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
              */
             value: number | null;
             numerator: number;
@@ -848,7 +831,7 @@ export type CampaignStats = {
          */
         open: {
             /**
-             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             * Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
              */
             value: number | null;
             numerator: number;
@@ -859,7 +842,7 @@ export type CampaignStats = {
          */
         click: {
             /**
-             * Fraction, not percent. Null when the denominator is zero, in test mode, or (for engagement) tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
+             * Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.
              */
             value: number | null;
             numerator: number;
@@ -894,7 +877,6 @@ export type CampaignPreviewImage = {
  */
 export type CampaignState = {
     id: string;
-    environment: 'live' | 'test';
     revision: number;
     updatedAt: string;
     status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
@@ -1043,7 +1025,6 @@ export type CampaignPacingUpdate = {
 
 export type WorkspaceSettings = {
     name: string;
-    environment: 'live' | 'test';
 };
 
 export type UpdateWorkspaceSettings = {
@@ -1170,7 +1151,6 @@ export type Event = {
     type: 'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed';
     createdAt: string;
     workspaceId: string;
-    environment: 'live' | 'test';
     region: string | null;
     data: {
         [key: string]: unknown;
@@ -2216,9 +2196,9 @@ export type GetCurrentIdentityResponses = {
         workspaceId: string;
         role: 'owner' | 'admin' | 'member' | null;
         multiTenant: boolean;
+        simulated: boolean;
         email: string | null;
         name: string | null;
-        environment: 'live' | 'test';
         permissions: Array<'read' | 'send' | 'manage'>;
         domains: Array<string>;
         origin: string;
@@ -2300,7 +2280,6 @@ export type ListAgentTokensResponse = ListAgentTokensResponses[keyof ListAgentTo
 export type CreateAgentTokenData = {
     body: {
         permissions: Array<'read' | 'send' | 'manage'>;
-        environment: 'live' | 'test';
         expiresInSeconds: number;
         domains?: Array<string>;
         purpose: string;
@@ -3031,7 +3010,6 @@ export type ListContactConsentEventsResponses = {
         data: Array<{
             id: string;
             workspaceId: string;
-            environment: 'live' | 'test';
             contactId: string;
             email: string;
             status: 'subscribed' | 'unsubscribed';
@@ -4119,7 +4097,6 @@ export type ListContactImportsResponses = {
         data: Array<{
             id: string;
             workspaceId: string;
-            environment: 'live' | 'test';
             listId: string | null;
             status: 'preview' | 'committed';
             imported: number;
@@ -5428,7 +5405,7 @@ export type SendEmailData = {
     body: SendEmailInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -5495,7 +5472,7 @@ export type SendEmailBatchData = {
     body: SendEmailBatchInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -5831,7 +5808,7 @@ export type UploadAttachmentData = {
     body: AttachmentUpload;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6161,7 +6138,7 @@ export type CreateCampaignData = {
     body: CreateCampaignInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6793,7 +6770,7 @@ export type TestCampaignData = {
     body: CampaignTestInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6862,7 +6839,7 @@ export type StartCampaignReviewData = {
     body: CampaignRevisionInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6995,7 +6972,7 @@ export type SendCampaignData = {
     body: CampaignSendInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -7064,7 +7041,7 @@ export type ScheduleCampaignData = {
     body: CampaignScheduleInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -7133,7 +7110,7 @@ export type CancelCampaignData = {
     body?: never;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10324,7 +10301,7 @@ export type CreateInboundThreadData = {
     body: CreateInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10748,7 +10725,7 @@ export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };

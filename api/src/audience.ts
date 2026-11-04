@@ -9,7 +9,7 @@ const Email = z.string().trim().email().max(320).transform(v => v.toLowerCase())
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= 50, 'At most 50 properties are supported.');
 const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: Properties.default({}) }).strict();
 const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: Properties.optional() }).strict();
-const Scope = { workspaceId: z.string(), environment: z.enum(['live', 'test']) };
+const Scope = { workspaceId: z.string() };
 const Dates = { createdAt: z.string(), updatedAt: z.string() };
 const Contact = z.object({ id: z.string(), ...Scope, email: z.string(), name: z.string().nullable(), properties: Properties, marketingConsent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean(), suppressionReason: z.string().nullable(), lastOpenAt: z.string().nullable(), lastClickAt: z.string().nullable(), observedSince: z.string().nullable(), openObservedSince: z.string().nullable(), clickObservedSince: z.string().nullable(), deletedAt: z.string().nullable(), ...Dates }).openapi('Contact');
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
@@ -42,6 +42,7 @@ const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), lis
 
 function scope(table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, identity: Pick<Actor, 'workspaceId' | 'environment'>) { return and(eq(table.workspaceId, identity.workspaceId), eq(table.environment, identity.environment))!; }
 function scopeValues(identity: Pick<Actor, 'workspaceId' | 'environment'>) { return { workspaceId: identity.workspaceId, environment: identity.environment }; }
+const publicRow = <T extends {environment: Mode}>({environment: _environment, ...row}: T) => row;
 function paginate<T extends { id: string }>(rows: T[], limit: number) { return { data: rows.slice(0, limit), nextCursor: rows.length > limit ? rows[limit - 1]!.id : null }; }
 async function findContact(db: DbExecutor, identity: Actor, contactId: string) { const [row] = await db.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1); return row ?? notFound('Contact'); }
 async function findList(db: DbExecutor, identity: Actor, listId: string) { const [row] = await db.select().from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1); return row ?? notFound('List'); }
@@ -57,13 +58,13 @@ async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof 
   const memberships = await db.select({ contactId: listMembers.contactId, listId: listMembers.listId }).from(listMembers).innerJoin(lists, and(eq(lists.id, listMembers.listId), eq(lists.workspaceId, listMembers.workspaceId), eq(lists.environment, listMembers.environment))).where(and(scope(listMembers, identity), scope(lists, identity), inArray(listMembers.contactId, rows.map(row => row.id)))).orderBy(asc(listMembers.listId));
   const byContact = new Map<string, string[]>();
   for (const member of memberships) { const ids = byContact.get(member.contactId) ?? []; ids.push(member.listId); byContact.set(member.contactId, ids); }
-  return rows.map(row => ({ ...row, listIds: byContact.get(row.id) ?? [] }));
+  return rows.map(row => ({ ...publicRow(row), listIds: byContact.get(row.id) ?? [] }));
 }
 async function readLists(db: DbExecutor, identity: Actor, rows: Array<typeof lists.$inferSelect>) {
   if (!rows.length) return [];
   const totals = await db.select({ listId: listMembers.listId, total: sql<number>`count(*)::int`, subscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int`, unsubscribed: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unsubscribed')::int`, unknown: sql<number>`count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'unknown')::int`, suppressed: sql<number>`count(*) FILTER (WHERE ${contacts.suppressed})::int` }).from(listMembers).innerJoin(contacts, and(eq(contacts.id, listMembers.contactId), eq(contacts.workspaceId, listMembers.workspaceId), eq(contacts.environment, listMembers.environment))).where(and(scope(listMembers, identity), scope(contacts, identity), isNull(contacts.deletedAt), inArray(listMembers.listId, rows.map(row => row.id)))).groupBy(listMembers.listId);
   const byList = new Map(totals.map(({ listId, ...counts }) => [listId, counts]));
-  return rows.map(row => ({ ...row, counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
+  return rows.map(row => ({ ...publicRow(row), counts: byList.get(row.id) ?? { total: 0, subscribed: 0, unsubscribed: 0, unknown: 0, suppressed: 0 } }));
 }
 
 export function compileRule(rule: SegmentRule): SQL { return sql`coalesce((${compileRuleCondition(rule)}), false)`; }
@@ -230,7 +231,7 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
     const [contact] = await c.env.db.insert(contacts).values({ id: id('con'), ...scopeValues(identity), ...input }).onConflictDoNothing({ target: [contacts.workspaceId, contacts.environment, contacts.email] }).returning();
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
-    return c.json(contact, 201);
+    return c.json(publicRow(contact), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactRead), ...errors } }), async c => {
     const identity = actor(c), row = await findContact(c.env.db, identity, c.req.valid('param').id);
@@ -239,7 +240,7 @@ export function registerAudience(app: App) {
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
     const [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
-    return c.json(contact ?? notFound('Contact'), 200);
+    return c.json(publicRow(contact ?? notFound('Contact')), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/contacts/{id}', operationId: 'deleteContact', tags: ['Audience'], security, description: 'Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.', request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id;
@@ -267,26 +268,26 @@ export function registerAudience(app: App) {
       if (existing.marketingConsent !== input.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId, status: input.status } } } });
       const [updated] = await tx.update(contacts).set({ marketingConsent: input.status, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId))).returning();
       return updated!;
-    }); return c.json(contact, 200);
+    }); return c.json(publicRow(contact), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}/consent', operationId: 'listContactConsentEvents', tags: ['Consent'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Audit)), ...errors } }), async c => {
     const identity = actor(c), contactId = c.req.valid('param').id, query = c.req.valid('query'); await findContact(c.env.db, identity, contactId);
     const rows = await c.env.db.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId), query.cursor ? gt(consentAudit.id, query.cursor) : undefined)).orderBy(asc(consentAudit.id)).limit(query.limit + 1);
-    return c.json(paginate(rows, query.limit), 200);
+    return c.json(paginate(rows.map(publicRow), query.limit), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/lists', operationId: 'listContactLists', tags: ['Audience'], security, request: { query: ListQuery }, responses: { 200: response(page(ListRead)), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(lists).where(and(scope(lists, identity), query.search ? searchText(lists.name, query.search) : undefined, query.cursor ? gt(lists.id, query.cursor) : undefined)).orderBy(asc(lists.id)).limit(query.limit + 1);
-    const result = paginate(rows, query.limit); return c.json({ ...result, data: query.counts === 'false' ? result.data.map(row => ({ ...row, counts: null })) : await readLists(c.env.db, identity, result.data) }, 200);
+    const result = paginate(rows, query.limit); return c.json({ ...result, data: query.counts === 'false' ? result.data.map(row => ({ ...publicRow(row), counts: null })) : await readLists(c.env.db, identity, result.data) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/lists', operationId: 'createContactList', tags: ['Audience'], security, request: { body: json(ListInput) }, responses: { 201: response(List), ...errors } }), async c => {
-    const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(lists).values({ id: id('lst'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(row!, 201);
+    const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(lists).values({ id: id('lst'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(publicRow(row!), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/lists/{id}', operationId: 'getContactList', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ListRead), ...errors } }), async c => {
     const identity = actor(c), row = await findList(c.env.db, identity, c.req.valid('param').id);
     return c.json((await readLists(c.env.db, identity, [row]))[0]!, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/lists/{id}', operationId: 'updateContactList', tags: ['Audience'], security, request: { params: IdParams, body: json(ListInput.partial()) }, responses: { 200: response(List), ...errors } }), async c => {
-    const identity = actor(c, 'manage'); const [row] = await c.env.db.update(lists).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(lists, identity), eq(lists.id, c.req.valid('param').id))).returning(); return c.json(row ?? notFound('List'), 200);
+    const identity = actor(c, 'manage'); const [row] = await c.env.db.update(lists).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(lists, identity), eq(lists.id, c.req.valid('param').id))).returning(); return c.json(publicRow(row ?? notFound('List')), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/lists/{id}', operationId: 'deleteContactList', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), listId = c.req.valid('param').id;
@@ -305,14 +306,14 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'manage'), params = c.req.valid('param'); await findList(c.env.db, identity, params.id); await c.env.db.delete(listMembers).where(and(scope(listMembers, identity), eq(listMembers.listId, params.id), eq(listMembers.contactId, params.contactId))); return c.json({ id: params.contactId, deleted: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/segments', operationId: 'listSegments', tags: ['Audience'], security, request: { query: SearchQuery }, responses: { 200: response(page(Segment)), ...errors } }), async c => {
-    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.search ? searchText(segments.name, query.search) : undefined, query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select().from(segments).where(and(scope(segments, identity), query.search ? searchText(segments.name, query.search) : undefined, query.cursor ? gt(segments.id, query.cursor) : undefined)).orderBy(asc(segments.id)).limit(query.limit + 1); return c.json(paginate(rows.map(publicRow), query.limit), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/segments', operationId: 'createSegment', tags: ['Audience'], security, request: { body: json(SegmentInput) }, responses: { 201: response(Segment), ...errors } }), async c => {
-    const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(segments).values({ id: id('seg'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(row!, 201);
+    const identity = actor(c, 'manage'); const [row] = await c.env.db.insert(segments).values({ id: id('seg'), ...scopeValues(identity), ...c.req.valid('json') }).returning(); return c.json(publicRow(row!), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/segments/{id}', operationId: 'getSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Segment), ...errors } }), async c => c.json(await findSegment(c.env.db, actor(c), c.req.valid('param').id), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/segments/{id}', operationId: 'getSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Segment), ...errors } }), async c => c.json(publicRow(await findSegment(c.env.db, actor(c), c.req.valid('param').id)), 200));
   app.openapi(createRoute({ method: 'patch', path: '/v1/segments/{id}', operationId: 'updateSegment', tags: ['Audience'], security, request: { params: IdParams, body: json(SegmentInput.partial()) }, responses: { 200: response(Segment), ...errors } }), async c => {
-    const identity = actor(c, 'manage'); const [row] = await c.env.db.update(segments).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(segments, identity), eq(segments.id, c.req.valid('param').id))).returning(); return c.json(row ?? notFound('Segment'), 200);
+    const identity = actor(c, 'manage'); const [row] = await c.env.db.update(segments).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(segments, identity), eq(segments.id, c.req.valid('param').id))).returning(); return c.json(publicRow(row ?? notFound('Segment')), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/segments/{id}', operationId: 'deleteSegment', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'manage'), segmentId = c.req.valid('param').id; const [row] = await c.env.db.delete(segments).where(and(scope(segments, identity), eq(segments.id, segmentId))).returning(); if (!row) notFound('Segment'); return c.json({ id: segmentId, deleted: true as const }, 200);
@@ -323,13 +324,13 @@ export function registerAudience(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: 'Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns. Map headers explicitly. Valid rows can commit alongside a retained row-error report; imports never modify consent or suppression.', request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), input = c.req.valid('json'); if (input.listId) await findList(c.env.db, identity, input.listId);
-    const preview = previewImport(input); const [row] = await c.env.db.insert(imports).values({ id: id('imp'), ...scopeValues(identity), listId: input.listId, ...preview }).returning(); return c.json(row!, 201);
+    const preview = previewImport(input); const [row] = await c.env.db.insert(imports).values({ id: id('imp'), ...scopeValues(identity), listId: input.listId, ...preview }).returning(); return c.json(publicRow(row!), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
-    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select({ id: imports.id, workspaceId: imports.workspaceId, environment: imports.environment, listId: imports.listId, status: imports.status, imported: imports.imported, createdAt: imports.createdAt, updatedAt: imports.updatedAt }).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
+    const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select({ id: imports.id, workspaceId: imports.workspaceId, environment: imports.environment, listId: imports.listId, status: imports.status, imported: imports.imported, createdAt: imports.createdAt, updatedAt: imports.updatedAt }).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); return c.json(paginate(rows.map(publicRow), query.limit), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
-    const identity = actor(c); const [row] = await c.env.db.select().from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1); return c.json(row ?? notFound('Import'), 200);
+    const identity = actor(c); const [row] = await c.env.db.select().from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1); return c.json(publicRow(row ?? notFound('Import')), 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), importId = c.req.valid('param').id;
@@ -362,6 +363,6 @@ export function registerAudience(app: App) {
       const byEmail = new Map(upserted.map(contact => [contact.email, contact]));
       for (const row of job.rows) if (!Properties.safeParse(byEmail.get(row.email)!.properties).success) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${row.row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${row.row}.properties`);
       const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rows.length, updatedAt: new Date().toISOString() }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning(); return updated!;
-    }); return c.json(result, 200);
+    }); return c.json(publicRow(result), 200);
   });
 }

@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { ApiError, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
+import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, type SesDiscovery } from './ses-setup.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
@@ -154,11 +154,11 @@ export async function ensureTenant(runtime: Runtime, wid: string, connectionId: 
   } catch (e) { await runtime.db.execute(sql`UPDATE provider_connections SET lease_until=NULL WHERE ${owned}`); throw e; }
 }
 export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
-  if (runtime.config.multiTenant && job.environment==='live' && typeof payload.connectionId==='string') await ensureTenant(runtime,job.workspaceId,payload.connectionId);
+  if (runtime.config.multiTenant && !isSimulatedSes(runtime) && typeof payload.connectionId==='string') await ensureTenant(runtime,job.workspaceId,payload.connectionId);
 });
 // Platform maintenance, never called by an HTTP request. One failed tenant or region must not stop the rest.
 export async function reconcileSharedConnections(runtime: Runtime) {
-  if (!runtime.config.multiTenant) return;
+  if (!runtime.config.multiTenant || isSimulatedSes(runtime)) return;
   for (const region of sharedRegions(runtime)) {
     try {
       const pool = await getPool(runtime, region);
@@ -189,7 +189,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   if (kind === 'shared' && !offered.includes(region)) throw new ApiError(422, 'SHARED_REGION_UNAVAILABLE', `Shared sending is available in ${offered.join(', ')}.`, 'region');
   if (/^(cn-|us-gov-|us-iso|us-isob|eu-isoe|us-isof)/.test(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region.', 'region');
   if (kind === 'byo' && !byoRegions.includes(region)) throw new ApiError(422, 'INVALID_REGION', 'Choose a commercial AWS region where Amazon SES supports sending.', 'region');
-  platformCredentials(runtime);
+  assertSesConfigured(runtime);
   if (kind==='shared') {
     const row = (await runtime.db.execute<Row & { queued: boolean }>(sql`WITH pool AS (SELECT aws_account_id FROM provider_pool_regions WHERE region=${region} AND ready), connection AS (
       INSERT INTO provider_connections(id,workspace_id,kind,region,status,aws_account_id) VALUES (${id('conn')},${wid},'shared',${region},'ready',(SELECT aws_account_id FROM pool))
@@ -226,7 +226,7 @@ export function registerProviderConnections(app: App) {
     } catch (e) { throw awsError(e); }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/connection/verify', operationId: 'verifyConnection', tags, security, description: 'Verify the external-ID role in the AWS account from the CloudFormation stack output and provision its regional feedback resources. Safe to retry.', request: { body: json(z.object({ awsAccountId: AccountId }).strict()) }, responses: { 200: response(Connection), ...errors } }), async c => {
-    const wid = owner(c); template(c.env);
+    const wid = owner(c); assertSesConfigured(c.env); template(c.env);
     const row = await get(c.env, wid) ?? notFound('Connection');
     if (row.kind !== 'byo') throw new ApiError(409, 'BYO_CONNECTION_REQUIRED', 'Only bring-your-own connections require verification.');
     const account = c.req.valid('json').awsAccountId;

@@ -1,6 +1,6 @@
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, isSimulatedSes, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { domains } from './db/operations.js';
 import { unverifiedSender, verifiedClaim } from './domain-claims.js';
@@ -18,14 +18,16 @@ export const NO_REPLY = /^(?:no-?reply|do-?not-?reply|donotreply|mailer-daemon|p
 
 export type AttachmentInput = { content: string; filename: string; contentType?: string; disposition?: 'attachment' | 'inline'; contentId?: string } | { id: string };
 type ResolvedAttachment = typeof sendingAttachments.$inferSelect;
-const ownsUpload=(wid:string,file:ResolvedAttachment)=>file.storageKey===(file.sourceTemplateAssetId ? `${wid}/templates/assets/${file.sourceTemplateAssetId}` : `${wid}/${file.environment}/attachments/${file.id}`);
+const ownsUpload = (wid: string, file: ResolvedAttachment) => file.sourceTemplateAssetId
+  ? file.storageKey === `${wid}/templates/assets/${file.sourceTemplateAssetId}`
+  : file.storageKey === `${wid}/attachments/${file.id}` || file.storageKey === `${wid}/live/attachments/${file.id}`;
 type MailboxRow = typeof mailboxes.$inferSelect;
 type MessageRow = typeof mailMessages.$inferSelect;
 
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */
 export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
   const scope={workspaceId:mailbox.workspaceId,environment:mailbox.environment}, out:ResolvedAttachment[]=[];
-  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`)}`)).rowCount)throw unverifiedSender();
+  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
       if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.content) || item.content.length%4) throw new ApiError(422,'ATTACHMENT_CONTENT_INVALID','Use standard padded base64.','attachments');
@@ -140,7 +142,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND c.status='ready')` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
-  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`) : sql`true`} AS verified
+  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`,runtime) : sql`true`} AS verified
     FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId} AND d.environment=${message.scope.environment}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
@@ -213,7 +215,7 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
     attachments: files, inReplyTo: null, references: [], headers: [],
   });
   if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
-  return { id: message.sendingEmailId!, status: 'queued' as const, environment: scope.environment, simulated: false, mailboxMessageId: message.id, threadId: message.threadId };
+  return { id: message.sendingEmailId!, status: 'queued' as const, simulated: isSimulatedSes(runtime), mailboxMessageId: message.id, threadId: message.threadId };
 }
 
 /** Reply recipients: Reply-To (or From) of an inbound message; the original recipients of an outbound one. */

@@ -12,7 +12,8 @@ import { agentTokens } from './db/core.js';
 import { authAccount, authUser } from './db/google-auth.js';
 import { oauthAccessToken, oauthClient, oauthClientResource, oauthConsent, oauthRefreshToken, oauthResource } from './db/mcp-auth.js';
 
-const scopes = ['opensend:read', 'opensend:send', 'opensend:manage', 'opensend:live', 'offline_access'];
+const scopes = ['opensend:read', 'opensend:send', 'opensend:manage', 'offline_access'];
+const stripLegacyScope = (scope: string) => scope.split(' ').filter(value => value && value !== 'opensend:live').join(' ');
 const permissions: Permission[] = ['read', 'send', 'manage'];
 const originOf = (runtime: Runtime) => new URL(runtime.config.publicUrl).origin;
 const resourceOf = (runtime: Runtime) => `${originOf(runtime)}/mcp`;
@@ -23,10 +24,13 @@ const issuerOf = (runtime: Runtime) => `${originOf(runtime)}/api/auth`;
 const workspaceTag = (workspaceId: string) => workspaceId === 'default' ? '' : encodeURIComponent(workspaceId);
 const consentInWorkspace = (workspaceId: string) => eq(sql<string>`split_part(${oauthConsent.referenceId}, '|', 3)`, workspaceTag(workspaceId));
 function originalGrant(reference: string | null) {
-  const match = reference?.match(/^mcp_[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
-  const values = match?.[1]?.split(' ') ?? [];
+  const match = reference?.match(/^mcp_(v2_)?[0-9a-f-]{36}\|([^|]+)(?:\|([^|]*)(\|member)?)?$/);
+  if (!match) return null;
+  const legacy = !match[1];
+  if (legacy && !match[2]!.split(' ').includes('opensend:live')) return null;
+  const values = stripLegacyScope(match[2]!).split(' ').filter(Boolean);
   if (!values.length || !values.every(value => scopes.includes(value))) return null;
-  try { return { scopes: values, workspaceId: match?.[2] ? decodeURIComponent(match[2]) : 'default', memberCeiling: !!match?.[3] }; }
+  try { return { scopes: values, legacy, workspaceId: match[3] ? decodeURIComponent(match[3]) : 'default', memberCeiling: !!match[4] }; }
   catch { return null; }
 }
 function grantPermissions(values: readonly string[]): Permission[] {
@@ -60,7 +64,7 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
         const member = await membershipForApprovedUser(runtime.db, user.id, { multiTenant: runtime.config.multiTenant, workspaceId: consentWorkspace, bootstrapDefaultOwner: false });
         if (!member || (member.role === 'member' && requested.includes('opensend:manage'))) invalidGrant();
         const tag = workspaceTag(member.workspaceId);
-        return `mcp_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}`;
+        return `mcp_v2_${authorizationId}|${[...new Set(requested)].sort().join(' ')}${member.role === 'member' ? `|${tag}|member` : tag ? `|${tag}` : ''}`;
       },
     },
     extensions: [{ claims: { accessToken: async ({ user, client, referenceId, scopes: requested, resources }) => {
@@ -69,7 +73,7 @@ export function createMcpPlugin(runtime: Runtime, consentWorkspace?: string) {
         .where(and(eq(oauthConsent.userId, user.id), eq(oauthConsent.clientId, client.clientId), eq(oauthConsent.referenceId, referenceId))).limit(1);
       if (!consent) invalidGrant();
       const grant = await loadGrant(runtime, `mcp_${consent.id}`);
-      if (!grant || !requested.every(scope => grant.scopes.includes(scope))) invalidGrant();
+      if (!grant || (grant.legacy && !requested.includes('opensend:live')) || !requested.every(scope => scope === 'opensend:live' || grant.scopes.includes(scope))) invalidGrant();
       return { opensend_grant: grant.actor.keyId };
     } } }],
   });
@@ -96,14 +100,16 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
     !currentGoogleIdentity(runtime, row.email, row.emailVerified, row.googleHostedDomain)) return null;
   const original = originalGrant(row.referenceId);
   if (!original) return null;
+  // Before v2, live authority had to survive every policy intersection, not just the original consent.
+  if (original.legacy && [row.scopes, row.clientScopes, row.resourceScopes].some(policy => policy && !policy.includes('opensend:live'))) return null;
   const member = await membershipForApprovedUser(db, row.userId, { multiTenant: runtime.config.multiTenant, workspaceId: original.workspaceId, bootstrapDefaultOwner: false });
   if (!member) return null;
   const role = original.memberCeiling ? 'member' : member.role;
   const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'opensend:manage') && row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, environment: allowed.includes('opensend:live') ? 'live' : 'test', permissions: granted, domains: [], credential: 'mcp' };
-  return { actor, scopes: allowed, userId: row.userId, clientId: row.clientId };
+  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, environment: 'live', permissions: granted, domains: [], credential: 'mcp' };
+  return { actor, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 
 export async function getMcpGrantActor(runtime: Runtime, keyId: string, db: DbExecutor = runtime.db): Promise<Actor | null> {
@@ -141,13 +147,13 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
     }
     const audience = claims.aud;
     if (audience !== resourceOf(runtime) && !(Array.isArray(audience) && audience.length === 1 && audience[0] === resourceOf(runtime))) return deniedToken(runtime);
-    if (typeof claims.opensend_grant !== 'string' || typeof claims.scope !== 'string' || !claims.scope || claims.scope.split(' ').some(scope => !scopes.includes(scope))) return deniedToken(runtime);
+    if (typeof claims.opensend_grant !== 'string' || typeof claims.scope !== 'string' || !claims.scope || stripLegacyScope(claims.scope).split(' ').some(scope => !scopes.includes(scope))) return deniedToken(runtime);
     const grant = await loadGrant(runtime, claims.opensend_grant);
-    if (!grant || claims.sub !== grant.userId || claims.client_id !== grant.clientId) return deniedToken(runtime);
-    const tokenScopes = claims.scope.split(' ').filter(scope => grant.scopes.includes(scope));
+    if (!grant || claims.sub !== grant.userId || claims.client_id !== grant.clientId || (grant.legacy && !claims.scope.split(' ').includes('opensend:live'))) return deniedToken(runtime);
+    const tokenScopes = stripLegacyScope(claims.scope).split(' ').filter(scope => grant.scopes.includes(scope));
     const granted = grantPermissions(tokenScopes);
     if (!granted.length) return deniedToken(runtime);
-    actor = { ...grant.actor, permissions: granted, environment: tokenScopes.includes('opensend:live') ? 'live' : 'test' };
+    actor = { ...grant.actor, permissions: granted };
   } catch {
     log('warn', { operation: 'mcp-authorization', code: 'AUTH_UNAVAILABLE' });
     return oauthError(503, 'temporarily_unavailable', 'OpenSend authorization is temporarily unavailable.');
@@ -216,6 +222,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
       const input: unknown = JSON.parse(body ?? '');
       if (!input || typeof input !== 'object' || Array.isArray(input)) return publicCors(oauthError(400, 'invalid_client_metadata', 'Invalid client metadata.'));
       const metadata = input as Record<string, unknown>;
+      if (typeof metadata.scope === 'string') metadata.scope = stripLegacyScope(metadata.scope);
       // No attacker-selected network fetches in Workers: CIMD, remote JWKS,
       // request objects, and back-channel logout are deliberately not enabled.
       if (metadata.jwks_uri !== undefined || metadata.backchannel_logout_uri !== undefined || metadata.request_uris !== undefined ||
@@ -237,8 +244,14 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
       body = JSON.stringify(metadata);
       headers.delete('content-length');
     }
+    if (path === '/oauth2/token' && body && headers.get('content-type')?.startsWith('application/x-www-form-urlencoded')) {
+      const params = new URLSearchParams(body), scope = params.get('scope');
+      if (scope?.split(' ').includes('opensend:live')) {
+        params.set('scope', stripLegacyScope(scope)); body = params.toString(); headers.delete('content-length');
+      }
+    }
     if (path === '/oauth2/authorize') {
-      if (!url.searchParams.has('scope')) url.searchParams.set('scope', 'opensend:read');
+      url.searchParams.set('scope', stripLegacyScope(url.searchParams.get('scope') ?? 'opensend:read'));
       if (!url.searchParams.has('resource')) url.searchParams.set('resource', resourceOf(runtime));
       const resources = url.searchParams.getAll('resource');
       if (resources.length !== 1 || resources[0] !== resourceOf(runtime)) return oauthError(400, 'invalid_target', 'Request the canonical OpenSend MCP resource.');
@@ -353,9 +366,8 @@ async function consentPage(runtime: Runtime, request: Request) {
     const hostname = host.replace(/:\d+$/, '');
     const destination = ['localhost', '127.0.0.1', '[::1]'].includes(hostname) ? `an app on this computer (${escapeHtml(host)})` : `<strong>${escapeHtml(host)}</strong>`;
     const warning = `<p class="warn"><strong>Self-registered client.</strong> OpenSend has not verified "${escapeHtml(name)}". After you allow, access is sent to ${destination}.</p>`;
-    const live = requested.includes('opensend:live');
-    const labels = requested.filter(scope => scope !== 'opensend:live' && !(requested.includes('opensend:manage') && ['opensend:read', 'opensend:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
-    return page(`Allow ${name} to access OpenSend?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>${live ? 'Live environment — email can reach real recipients.' : 'Test environment — no real email is sent.'}</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
+    const labels = requested.filter(scope => !(requested.includes('opensend:manage') && ['opensend:read', 'opensend:send'].includes(scope))).map(scope => `<li>${escapeHtml(scopeLabels[scope]!)}</li>`).join('');
+    return page(`Allow ${name} to access OpenSend?`, `<p class="identity">${escapeHtml(approvedSession.user.email)}${workspace ? ` · ${escapeHtml(workspace.name)}` : ''}</p><p><strong>Sending access may deliver email to real recipients.</strong></p><ul>${labels}</ul>${warning}<form method="post" action="/mcp/consent">${hidden}<div class="actions"><button name="action" value="approve">Allow access</button><button name="action" value="deny">Cancel</button></div></form>`);
   } catch (error) {
     if (error instanceof ApiError) return oauthError(error.status, 'access_denied', error.message);
     return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
@@ -375,7 +387,7 @@ export function registerMcpAuth(app: App): void {
     const rows = await c.env.db.select({ id: oauthConsent.id, clientId: oauthConsent.clientId, name: oauthClient.name, userEmail: authUser.email, scopes: oauthConsent.scopes, createdAt: oauthConsent.createdAt, updatedAt: oauthConsent.updatedAt }).from(oauthConsent)
       .innerJoin(oauthClient, eq(oauthConsent.clientId, oauthClient.clientId)).innerJoin(authUser, eq(oauthConsent.userId, authUser.id))
       .where(and(like(oauthConsent.referenceId, 'mcp\_%'), consentInWorkspace(identity.workspaceId), query.cursor ? gt(oauthConsent.id, query.cursor) : undefined)).orderBy(oauthConsent.id).limit(query.limit + 1);
-    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, query.limit).map(row => ({ ...row, scopes: row.scopes.filter(scope => scope !== 'opensend:live'), id: `mcp_${row.id}`, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })), nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/mcp-connections/{id}/revoke', operationId: 'revokeMcpConnection', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = dashboardOwner(c); const connectionId = c.req.valid('param').id; const consentId = connectionId.startsWith('mcp_') ? connectionId.slice(4) : '';
@@ -387,7 +399,7 @@ export function registerMcpAuth(app: App): void {
         await tx.update(oauthAccessToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthAccessToken.clientId, connection.clientId), eq(oauthAccessToken.userId, connection.userId), eq(oauthAccessToken.referenceId, connection.referenceId)));
         await tx.update(oauthRefreshToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthRefreshToken.clientId, connection.clientId), eq(oauthRefreshToken.userId, connection.userId), eq(oauthRefreshToken.referenceId, connection.referenceId)));
       }
-      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.grantId, connectionId)));
+      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.environment, 'live'), eq(agentTokens.grantId, connectionId)));
       await tx.delete(oauthConsent).where(eq(oauthConsent.id, consentId));
       return true;
     });

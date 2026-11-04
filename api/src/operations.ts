@@ -4,7 +4,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, DeleteEmailIdentityCommand, DeleteTenantResourceAssociationCommand, GetAccountCommand, GetEmailIdentityCommand, ListResourceTenantsCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { ensureTenant } from './provider-connections.js';
 import { jobs } from './db/core.js';
@@ -26,8 +26,8 @@ import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes
 export type { PublishedEvent } from './db/operations.js';
 
 const now = () => new Date().toISOString();
-const scoped = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
-const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), environment: z.enum(['live', 'test']), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
+const scoped = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, 'live'));
+const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
 const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
 const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false) }).openapi('CreateWebhook');
 const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
@@ -38,12 +38,11 @@ const dnsState = z.enum(['pending','verified']);
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from']), status:dnsState, note:z.string().optional() });
 const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
-const settingsSchema = z.object({ name: z.string(), environment: z.enum(['live', 'test']) }).openapi('WorkspaceSettings');
+const settingsSchema = z.object({ name: z.string() }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
 const regionQuery = z.object({ region: z.string().optional() }).openapi('RegionQuery');
 const listSchema = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
-function external(a: Actor) { if (a.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Test keys cannot access or modify live SES resources.'); }
 function workspaceActor(c: Ctx, permission: Permission = 'read') { const a = actor(c, permission); if (a.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Workspace-wide operations require a key without domain restrictions.'); return a; }
 function allowedDomain(a: Actor, name: string) { if (!senderDomainAllowed(a.domains, name)) throw new ApiError(403, 'DOMAIN_NOT_ALLOWED', 'The API key is not authorized for this domain or its parent domain.'); }
 async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
@@ -97,7 +96,7 @@ export async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: stri
 }
 export function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
 export async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
-const secretBinding = (a: Pick<Actor, 'workspaceId' | 'environment'>, webhookId: string) => `${a.workspaceId}:${a.environment}:${webhookId}`;
+const secretBinding = (a: Pick<Actor, 'workspaceId'>, webhookId: string) => `${a.workspaceId}:live:${webhookId}`;
 
 // Installer-only, resumable rewrapping; no webhook signing secret is rotated or returned.
 // Decryption failure aborts, leaving earlier successful updates safe to skip on rerun.
@@ -106,7 +105,7 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
   let cursor: string | undefined;
   for (;;) {
-    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, environment: webhooks.environment, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(inArray(webhooks.environment, ['live', 'test']), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
+    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(eq(webhooks.environment, 'live'), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
     if (!rows.length) return counts;
     for (const row of rows) {
       counts.scanned++;
@@ -124,7 +123,7 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
 }
 
 function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
-  return a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } };
+  return deliverySchema.parse(a.permissions.includes('manage') ? row : { ...row, payload: { ...row.payload, data: redactCapabilityData(row.payload.data) } });
 }
 
 export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake = true): Promise<void> {
@@ -136,8 +135,6 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
     let count = 0;
     for (const endpoint of endpoints) {
       if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
-      // Simulated emails must never enter a live-configured endpoint, even if a caller supplied a wrong mode.
-      if (event.environment === 'live' && event.data.simulated === true) continue;
       const deliveryId = id('whd');
       await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event });
       await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
@@ -281,7 +278,7 @@ function recheckJob(wid: string, source: SQL, supersede=false) {
     payload=excluded.payload,created_at=now() ${supersede ? sql`` : sql`WHERE jobs.status<>'running'`}`;
 }
 const domainVerify: JobHandler = async (runtime,payload,job) => {
-  if (!runtime.config.multiTenant || job.environment!=='live' || typeof payload.domainId!=='string') return;
+  if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row || row.token!==payload.token) return; // Deleted, reclaimed or disconnected.
   const start=Number(payload.start ?? Date.now()), poll=Number(payload.poll ?? 0), deadline=start+72*3600_000;
@@ -343,7 +340,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
   await expire();
 };
 const domainMx:JobHandler=async(runtime,payload,job)=>{
-  if (!runtime.config.multiTenant || job.environment!=='live' || typeof payload.domainId!=='string') return;
+  if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row?.readiness || row.token!==payload.token) return;
   const observation=await receivingMx(row);
@@ -354,6 +351,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   });
 };
 async function account(runtime: Runtime, wid: string, requested?: string) {
+  assertSesConfigured(runtime);
   const connection=runtime.config.multiTenant ? await workspaceConnection({...runtime,config:{...runtime.config,workspaceId:wid}},requested) : undefined;
   if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
   const selectedRegion=connection?.region ?? requested ?? runtime.config.regions[0]!;
@@ -366,17 +364,17 @@ export function registerOperations(app: App) {
     const a = workspaceActor(c); const [row] = c.env.config.multiTenant
       ? await c.env.db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, a.workspaceId))
       : await c.env.db.select().from(workspaceSettings).where(scoped(workspaceSettings, a));
-    return c.json({ name: row?.name ?? 'OpenSend', environment: a.environment }, 200);
+    return c.json({ name: row?.name ?? 'OpenSend' }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
     if (c.env.config.multiTenant) await c.env.db.update(workspaces).set({ name }).where(eq(workspaces.id, a.workspaceId));
     else await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
-    return c.json({ name, environment: a.environment }, 200);
+    return c.json({ name }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'); external(a); if (!c.env.config.multiTenant) getSes(c.env, q.region ?? c.env.config.regions[0]!);
+    const a = actor(c), q = c.req.valid('query'); if (!c.env.config.multiTenant) getSes(c.env, q.region ?? c.env.config.regions[0]!);
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
@@ -405,7 +403,7 @@ export function registerOperations(app: App) {
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
+    const a = actor(c, 'manage'); const body = c.req.valid('json'); allowedDomain(a, body.name); assertSesConfigured(c.env);
     if (c.env.config.multiTenant) {
       const claim=await reserveClaim(c.env,a.workspaceId,body.name,body.region), row={...body,id:claim.id};
       if (claim.readiness != null) return c.json(domainSchema.parse(claim.readiness),201);
@@ -445,7 +443,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row!, identity), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, 'manage'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
+    const a = actor(c, 'manage'); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const { mailFromDomain } = c.req.valid('json');
     if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
@@ -469,7 +467,7 @@ export function registerOperations(app: App) {
     return c.json(await domainReadiness(c.env, row), 200);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, verifyRoute ? 'manage' : 'read'); external(a);
+    const a = actor(c, verifyRoute ? 'manage' : 'read');
     if (c.env.config.multiTenant) {
       const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,verifyRoute?a.domains:undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
       if (verifyRoute) a.wakeJobs=1;
@@ -478,7 +476,7 @@ export function registerOperations(app: App) {
     const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
   });
   app.openapi(createRoute({method:'delete',path:'/v1/domains/{id}',operationId:'deleteDomain',tags:['Domains'],security,description:'MX only. Delete this claim’s tagged SES identity and release the domain. Does not remove DNS records.',request:{params:IdParams},responses:{200:response(z.object({deleted:z.literal(true)})),...errors}}),async c=>{
-    const a=actor(c,'manage'); external(a); if (!c.env.config.multiTenant) return notFound('Endpoint');
+    const a=actor(c,'manage'); if (!c.env.config.multiTenant) return notFound('Endpoint');
     await c.env.db.transaction(async db=>{
       const row=await hostedDomain(db,a.workspaceId,c.req.valid('param').id,true) ?? notFound('Domain'); allowedDomain(a,row.name);
       if (!row.readiness && Date.now()-new Date(row.created_at).getTime()<60000) throw new ApiError(409,'DOMAIN_BUSY','Domain creation is in progress.',undefined,true);
@@ -552,7 +550,7 @@ export function registerOperations(app: App) {
   });
   const deliveryParams = z.object({ id: z.string(), deliveryId: z.string() }).openapi('WebhookDeliveryParams');
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries/{deliveryId}', operationId: 'getWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 200: response(deliverySchema.extend({ attempts: z.array(attemptSchema) }).openapi('WebhookDeliveryDetail')), ...errors } }), async c => {
-    const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...visibleDelivery(row, a), attempts }, 200);
+    const a = workspaceActor(c), p = c.req.valid('param'); const [row] = await c.env.db.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))); if (!row) return notFound('Delivery'); const attempts = await c.env.db.select().from(deliveryAttempts).where(and(scoped(deliveryAttempts, a), eq(deliveryAttempts.deliveryId, row.id))).orderBy(asc(deliveryAttempts.createdAt)); return c.json({ ...visibleDelivery(row, a), attempts: attempts.map(row => attemptSchema.parse(row)) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/deliveries/{deliveryId}/retry', operationId: 'retryWebhookDelivery', tags: ['Webhooks'], security, request: { params: deliveryParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), p = c.req.valid('param'); await getWebhook(c.env, a, p.id);
@@ -673,7 +671,7 @@ function registerPublicEvents(app: App) {
     }
     verifySesAccount(c.env, message, envelope.TopicArn);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
-    const item = { ...payload, environment: 'live' as const, message: message as Record<string, unknown> };
+    const item = { ...payload, message: message as Record<string, unknown> };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
     // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
     if (c.env.feedback) {
@@ -695,7 +693,7 @@ function registerPublicEvents(app: App) {
   const tokenParams = z.object({ token: z.string().regex(/^u_[a-f0-9]{64}$/) }).openapi('UnsubscribeToken');
   for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...errors } }), async c => {
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-    const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
+    const [token] = await c.env.db.select().from(unsubscribeTokens).where(and(eq(unsubscribeTokens.environment, 'live'), eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token)))); if (!token) return notFound('Unsubscribe link');
     // Link scanners and mail security gateways fetch every link in a message, so a footer GET only asks for
     // confirmation. Mailbox one-click (RFC 8058, List-Unsubscribe-Post) and the confirmation form are POSTs.
     if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', '<p>You will no longer receive marketing emails from this workspace.</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>'), 200);
@@ -814,9 +812,8 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   }
   const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
-    if (delivery.payload.environment !== job.environment || (job.environment === 'live' && !delivery.synthetic && delivery.payload.data.simulated === true)) throw new ApiError(403, 'WEBHOOK_ENVIRONMENT_MISMATCH', 'Test events cannot be delivered to live endpoints.');
     const url = webhookUrl(runtime, endpoint.url), secret = await decrypt(runtime, endpoint.encryptedSecret, secretBinding(job, endpoint.id));
-    const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000));
+    const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.eventId}.${timestamp}.${body}`);
     const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, redirect: 'manual', signal: AbortSignal.timeout(5000) });
     statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';
@@ -834,34 +831,34 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const kind = data?.eventType ?? data?.notificationType;
   const providerId = data?.mail?.messageId;
   const type = kind === 'Send' ? 'send' : kind === 'Delivery' ? 'delivery' : 'receipt';
-  if (type === 'receipt' && item.environment === 'test') throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
+  const simulated = item.topicArn === `urn:opensend:simulated-ses:${item.region}`;
+  if (type === 'receipt' && simulated) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
   if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
   const timestamp = type !== 'receipt' ? data[type]?.timestamp : undefined;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  return { environment: item.environment, type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
-    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther ? undefined : item.environment === 'live' ? 'operation.ses' : 'operation.simulatedFeedbackRecovery' } };
+  return { environment: 'live', type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
+    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther ? undefined : simulated ? 'operation.simulatedFeedbackRecovery' : 'operation.ses' } };
 }
 /**
  * Batch feedback ingestion for the feedback queue consumer. Routine Send/Delivery callbacks are
- * persisted in one statement per environment; everything else (bounce, complaint, engagement,
+ * persisted in one statement per batch; everything else (bounce, complaint, engagement,
  * subscription) is processed inline with its receipt. Returns one outcome per input so the caller
  * can acknowledge or retry messages individually. Live items are trusted only after the SNS
- * signature check at ingress; test items must carry the simulator's synthetic identity.
+ * signature check at ingress; simulated items must carry the simulator's synthetic identity.
  */
 export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[]): Promise<{ ok: boolean; error?: string }[]> {
   const outcomes: { ok: boolean; error?: string }[] = items.map(() => ({ ok: false }));
-  const groups = new Map<Mode | 'receipt', { index: number; input: RoutineIngress }[]>();
+  const group: { index: number; input: RoutineIngress }[] = [];
   const other: { index: number; item: FeedbackItem; workspaceId: string }[] = [];
   for (const [index, item] of items.entries()) {
     try {
-      if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
+      if (item.topicArn.startsWith('urn:opensend:simulated-ses:')) assertSimulatedFeedback(runtime, item);
       else verifySesAccount(runtime, item.message, item.topicArn);
-      const input = routineInput(item), key = input.type === 'receipt' ? 'receipt' : item.environment;
-      const group = groups.get(key) ?? []; group.push({ index, input }); groups.set(key, group);
+      group.push({ index, input: routineInput(item) });
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
   }
-  for (const group of groups.values()) {
+  if (group.length) {
     try {
       const results = await ingestRoutineSesEvents(runtime, group.map(entry => entry.input));
       for (const [position, entry] of group.entries()) {
@@ -880,11 +877,11 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   // The feedback consumer has one connection; finish each non-routine receipt before starting the next.
   for (const { index, item, workspaceId } of other) {
     try {
-      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
+      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: 'live' });
       outcomes[index] = { ok: true };
     } catch (error) {
       outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
-      log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', environment: item.environment, message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
+      log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
     }
   }
   return outcomes;
@@ -904,7 +901,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   if (!input || input.receipt.processedAt) return;
   const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
-  if (email.simulated !== (job.environment === 'test')) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
+  if (email.simulated !== (payload.topicArn === `urn:opensend:simulated-ses:${payload.region}`)) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
   const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;
@@ -953,39 +950,39 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere);
 };
 const sesJob: JobHandler = async (runtime, payload, job) => {
-  if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
+  if (String(payload.topicArn).startsWith('urn:opensend:simulated-ses:')) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'Synthetic callbacks are not SNS events.');
   verifySesAccount(runtime, payload.message, String(payload.topicArn));
   await processSesReceipt(runtime, payload, job);
 };
-function assertSimulatedFeedback(payload: Record<string, unknown>, job: { environment: Mode }) {
+function assertSimulatedFeedback(runtime: Runtime, payload: Record<string, unknown>) {
   const message = payload.message as { mail?: { messageId?: unknown } } | undefined;
-  if (job.environment !== 'test' ||
+  if (!isSimulatedSes(runtime) ||
     payload.topicArn !== `urn:opensend:simulated-ses:${payload.region}` ||
     typeof message?.mail?.messageId !== 'string' || !message.mail.messageId.startsWith('sim_')) {
-    throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires test mode and a synthetic provider identity.');
+    throw new ApiError(403, 'SIMULATED_FEEDBACK_FORBIDDEN', 'Synthetic feedback requires a simulated deployment and a synthetic provider identity.');
   }
 }
 const simulatedFeedbackJob: JobHandler = async (runtime, payload, job) => {
-  assertSimulatedFeedback(payload, job);
-  const input = routineInput({ environment: job.environment, topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), message: payload.message as Record<string, unknown> });
+  assertSimulatedFeedback(runtime, payload);
+  const input = routineInput({ topicArn: String(payload.topicArn), messageId: String(payload.messageId), region: String(payload.region), message: payload.message as Record<string, unknown> });
   await ingestRoutineSesEvent(runtime, { ...input, workspaceId: job.workspaceId });
 };
 const simulatedFeedbackRecovery: JobHandler = async (runtime, payload, job) => {
-  assertSimulatedFeedback(payload, job);
+  assertSimulatedFeedback(runtime, payload);
   await processSesReceipt(runtime, payload, job);
 };
 const publishJob: JobHandler = async (runtime, payload, job) => {
   const parsed = eventSchema.safeParse(payload.event);
-  if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'The queued event is invalid or has mismatched scope.');
-  await publishEvent(runtime, parsed.data as PublishedEvent);
+  if (!parsed.success || parsed.data.workspaceId !== job.workspaceId) throw new ApiError(422, 'INVALID_EVENT_JOB', 'The queued event is invalid or has mismatched scope.');
+  await publishEvent(runtime, { ...parsed.data, environment: 'live' });
 };
 const publishBatchJob: JobHandler = async (runtime, payload, job) => {
   if (!Array.isArray(payload.events) || payload.events.length < 1 || payload.events.length > 100) throw new ApiError(422, 'INVALID_EVENT_BATCH', 'Event batches must contain between one and 100 events.');
   const batch: PublishedEvent[] = [];
   for (const value of payload.events) {
     const parsed = eventSchema.safeParse(value);
-    if (!parsed.success || parsed.data.workspaceId !== job.workspaceId || parsed.data.environment !== job.environment) throw new ApiError(422, 'INVALID_EVENT_JOB', 'A queued batch event is invalid or has mismatched scope.');
-    batch.push(parsed.data as PublishedEvent);
+    if (!parsed.success || parsed.data.workspaceId !== job.workspaceId) throw new ApiError(422, 'INVALID_EVENT_JOB', 'A queued batch event is invalid or has mismatched scope.');
+    batch.push({ ...parsed.data, environment: 'live' });
   }
   const unique = batch.filter((event, index) => batch.findIndex(candidate => candidate.id === event.id) === index);
   await runtime.db.transaction(async tx => {
@@ -994,8 +991,7 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     const accepted = new Set(inserted.map(row => row.id));
     const endpoints = await tx.select().from(webhooks).where(and(scoped(webhooks, unique[0]!), eq(webhooks.paused, false)));
     const queued = unique.filter(event => accepted.has(event.id)).flatMap(event => endpoints.filter(endpoint =>
-      endpoint.eventTypes.includes(event.type) && (!endpoint.regions || event.region === null || endpoint.regions.includes(event.region)) &&
-      !(event.environment === 'live' && event.data.simulated === true)
+      endpoint.eventTypes.includes(event.type) && (!endpoint.regions || event.region === null || endpoint.regions.includes(event.region))
     ).map(endpoint => ({ event, endpoint, deliveryId: id('whd') })));
     if (!queued.length) return;
     for (let offset = 0; offset < queued.length; offset += 1000) {

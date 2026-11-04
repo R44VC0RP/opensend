@@ -32,6 +32,8 @@ export function createApp() {
     const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
     c.set('requestId', requestId); c.set('serverTimings', []); c.header('x-request-id', requestId); c.header('cache-control', 'no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
+    const selected = c.req.header('X-OpenSend-Environment');
+    if (selected !== undefined && selected.trim().toLowerCase() !== 'live') throw new ApiError(400, 'ENVIRONMENT_REMOVED', 'Remove X-OpenSend-Environment. SES simulation is configured for the deployment, not the request.');
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too.
@@ -49,7 +51,7 @@ export function createApp() {
     const nudge = async (runtime: Runtime) => {
       if (wake) try { await runtime.wake?.(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, count] of targets) {
-        try { await runtime.dispatch?.(actor.environment, region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+        try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);

@@ -5,7 +5,7 @@ import { S3Client, CopyObjectCommand, CreateBucketCommand, HeadBucketCommand, Pu
 import { SNSClient, CreateTopicCommand, ListSubscriptionsByTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, SubscribeCommand } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
-import { ApiError, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { ApiError, assertSesConfigured, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { mailboxDomains, mailboxRegions,type MxReport } from './db/mailbox.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
@@ -195,6 +195,7 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
 
 /** Platform maintenance only: customer identities share one regional catch-all rule. */
 export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
+  assertSesConfigured(runtime);
   const config=awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
   const ses=new SESClient(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
   try {
@@ -217,6 +218,7 @@ export async function preparePoolReceiving(runtime:Runtime,region:string,account
  * a receipt rule with no recipients matches every address on every domain.
  */
 export async function reconcileRegion(runtime: Runtime, region: string, workspaceId:string): Promise<void> {
+  assertSesConfigured(runtime);
   const scoped={...runtime,config:{...runtime.config,workspaceId}};
   const connection=runtime.config.multiTenant ? await workspaceConnection(scoped,region) : undefined;
   if (connection?.kind==='shared') return; // Pool preparation is never a per-domain operation.

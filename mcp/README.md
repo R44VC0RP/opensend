@@ -6,7 +6,7 @@ Connect an MCP client to **`https://YOUR_OPENSEND_DOMAIN/mcp`**. The hosted endp
 
 1. Add the HTTPS URL as a remote HTTP MCP server in your client.
 2. Start OAuth authorization. OpenSend reuses your dashboard's Google session in the same browser/profile. If you are signed out, use the normal Google sign-in.
-3. Review the client, requested permissions, and test/live environment, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
+3. Review the client and requested permissions, then choose **Allow access**. The client exchanges the authorization code using PKCE and stores its own access token, not your dashboard cookie or Google token.
 
 The server exposes ordinary named tools, each with `inputSchema`, `outputSchema`, and structured results. Code-mode clients can consume those tools directly. OpenSend does not add a `search`/`execute` wrapper or run arbitrary agent code.
 
@@ -21,10 +21,9 @@ OAuth scopes map to the existing API permissions:
 | `opensend:read` | Read contacts, email, delivery, and account data where API rules permit. |
 | `opensend:send` | Send email and use operations requiring send permission. |
 | `opensend:manage` | Management permission, including read and send. MCP safety exclusions still apply. |
-| `opensend:live` | Use the live environment. Without this scope, the connection uses test mode. |
 | `offline_access` | Obtain a rotating refresh token, valid for up to 30 days. |
 
-Authorization without an explicit scope requests test-mode read access. Writable connections additionally require `opensend:send` or `opensend:manage`; every non-GET operation still requires literal `confirm: true`, including POST previews. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
+Legacy test-only approvals cannot be used or refreshed. Reconnect and approve the client again. Authorization without an explicit scope requests read access. Writable connections additionally require `opensend:send` or `opensend:manage`; every non-GET operation still requires literal `confirm: true`, including POST previews. The API enforces each operation's permission requirements. Access tokens expire after five minutes. Revoking the consent, disabling the client, or removing the user's Google approval denies further access; queued sends recheck the durable approval before dispatch. Revocation cannot recall an in-flight or delivered email.
 
 Authenticated dashboard clients can inspect their approvals with `GET /api/auth/oauth2/get-consents` and revoke one with `POST /api/auth/oauth2/delete-consent` and JSON `{ "id": "consent-id" }`. Revocation requires the dashboard session and canonical Origin. These are not MCP tools.
 
@@ -54,7 +53,7 @@ After the required audience/content/time confirmation, use `deliverCampaign` sen
 
 ### Inbound addresses and conversations
 
-Hosted inbound tools require an unrestricted **live manage** OAuth grant, even for reads. A test grant, a read/send grant, or a sender-domain restriction does not grant access to inbox content. Refresh the client's catalog after upgrading or changing grants.
+Hosted inbound tools require an unrestricted **manage** OAuth grant, even for reads. A read/send grant or a sender-domain restriction does not grant access to inbox content. Refresh the client's catalog after upgrading or changing grants.
 
 | Task | Hosted tool |
 | --- | --- |
@@ -72,7 +71,7 @@ On an API without the expected-recipient guard, MCP omits reply rather than send
 
 ### Temporary script tokens
 
-`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses test/live, 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx opensend-js upload <file> --api <origin> --token <token>` so raw bytes stream directly to OpenSend instead of passing through MCP or model context.
+`createAgentToken` returns a signed, nonrefreshable `os_agent_…` bearer token for temporary uncommitted scripts. The caller chooses a lifetime of 30 seconds to 24 hours, read, send or manage delegation, and optional sender-domain restrictions. Every delegated permission must exist on the originating MCP OAuth approval. Manage tokens can operate normal managed resources but cannot create, list or revoke API keys, and no agent token can mint another token. The secret is returned once and stops authorizing requests when it expires or its originating approval is revoked. Do not commit it or place it in logs. For local files, use the token with `npx opensend-js upload <file> --api <origin> --token <token>` so raw bytes stream directly to OpenSend instead of passing through MCP or model context.
 
 `audienceQuery` runs the restricted AudienceQL language over contacts, lists and existing segments. `query` executes bounded `SELECT` reads. Mutations use `plan` followed by confirmed `apply`, freezing at most 10,000 contact IDs for 15 minutes and rejecting stale contact updates. Supported mutations update contact names, consent and `properties.key` values, or add/remove matching contacts from a list. AudienceQL never exposes physical tables, joins, DDL, comments or multiple statements. Prior opt-outs require `confirmResubscribe`; suppression is never lifted.
 
@@ -95,7 +94,7 @@ Pagination is explicit: pass `response.nextCursor` as the next call's `cursor`. 
 - OAuth discovery is available through the root and resource-path well-known metadata URLs. Public/confidential dynamic client registration supports authorization code with S256 PKCE. Client-ID metadata document fetching is not enabled; the server does not fetch arbitrary client JWKS or logout URLs.
 - HTTP MCP is stateless, with modern and legacy stateless protocol support. Each request has its own identity and database lifetime. Tool calls use trusted in-process API dispatch; no global admin key, dashboard cookie, or incoming OAuth token is forwarded to `/v1`.
 - Long-lived API-key creation, webhook-secret reveal/rotation, SES region/provisioning administration, SNS ingress, authentication routes, and unsubscribe links remain excluded. Domain identity and custom MAIL FROM setup remain available through the two focused domain tools. Read tools can return private email/contact content; authorize only trusted clients. Sending-domain restrictions are not a general data-isolation boundary.
-- Test-mode email sending is simulated by the API. Test mode is not a universal dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
+- The deployment, not the OAuth grant, controls SES simulation. Simulation is not a dry run: other authorized actions can change stored data or have external effects. Use test data and controlled webhook targets for verification.
 - Request and response limits, safe single-segment path validation, per-principal API rate limits, output validation, and credential redaction remain enforced. API descriptions and returned data are untrusted content, not agent instructions.
 
 Build/deploy the API and apply its additive OAuth migration before connecting. Node/Docker, the Vite proxy, and Cloudflare asset routing all reserve `/mcp`, `/mcp/*`, and `/.well-known/*` for the server. No extra MCP service is required.
