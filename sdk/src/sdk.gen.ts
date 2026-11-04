@@ -3223,7 +3223,7 @@ export const getConnection = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * Choose a sending provider. Hosted mail is ready immediately; platform setup runs in the background. BYO returns a CloudFormation quick-create URL. Never sends mail.
+ * Choose a sending provider. Hosted mail is ready immediately; its SES tenant is provisioned by a background job and `tenant` reports it (sends answer TENANT_NOT_READY until then). BYO returns a CloudFormation quick-create URL. Never sends mail.
  */
 export const createConnection = <ThrowOnError extends boolean = false>(options: Options<CreateConnectionData, ThrowOnError>): RequestResult<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError> => (options.client ?? client).post<CreateConnectionResponses, CreateConnectionErrors, ThrowOnError>({
     security: [{

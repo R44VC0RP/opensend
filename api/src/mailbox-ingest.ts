@@ -9,6 +9,7 @@ import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type 
 import { pruneMailboxEvents } from './mailbox-events.js';
 import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
 import { messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
+import { claimReceives, connectionReady, poolReceives } from './states.js';
 
 const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MIME only (Worker memory).
 const BODY_LIMIT = 1_000_000;
@@ -45,17 +46,17 @@ export async function acceptInboundNotification(runtime: Runtime, input: { topic
   const receivedAt=timestamp ?? message.mail?.timestamp;
   if (hosted && (!receivedAt || !Number.isFinite(Date.parse(receivedAt)))) throw new ApiError(400,'SES_INVALID_EVENT','The receiving timestamp is missing or invalid.');
   const at=receivedAt && Number.isFinite(Date.parse(receivedAt)) ? new Date(receivedAt).toISOString() : null;
-  const binding=hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions WHERE aws_account_id=${account} AND region=${input.region} AND inbound_topic_arn=${input.topicArn} AND inbound_bucket=${action.bucketName}
+  const binding=hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions p WHERE aws_account_id=${account} AND region=${input.region} AND inbound_topic_arn=${input.topicArn} AND inbound_bucket=${action.bucketName} AND ${poolReceives()}
     UNION ALL SELECT c.workspace_id,'byo' FROM provider_connections c JOIN mailbox_regions r ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
-    WHERE c.kind='byo' AND c.status='ready' AND c.region=${input.region} AND c.aws_account_id=${account} AND r.topic_arn=${input.topicArn} AND r.bucket=${action.bucketName}` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions WHERE region=${input.region} AND topic_arn=${input.topicArn} AND bucket=${action.bucketName}`;
+    WHERE c.kind='byo' AND ${connectionReady(sql`c`)} AND c.region=${input.region} AND c.aws_account_id=${account} AND r.topic_arn=${input.topicArn} AND r.bucket=${action.bucketName}` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions WHERE region=${input.region} AND topic_arn=${input.topicArn} AND bucket=${action.bucketName}`;
   const result=await runtime.db.execute<{trusted:boolean;n:number}>(sql`WITH binding AS (${binding}), env AS (
     SELECT addr,split_part(addr,'@',2) AS host FROM jsonb_array_elements_text(${JSON.stringify(recipients)}::jsonb) e(addr)
   ), matched AS (
     SELECT m.workspace_id AS wid,e.addr FROM env e JOIN mailbox_domains m ON ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=${input.region}
-    JOIN binding b ON b.wid=m.workspace_id OR b.kind='shared' WHERE m.status IN ('provisioning','waiting_for_mx','active') AND ${hosted ? sql`m.status='active' AND EXISTS (
-      SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_name=e.host
-      JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=b.kind AND c.region=d.region AND c.status='ready' AND c.aws_account_id=${account}
-      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.created_at<=${at}::timestamptz AND m.enabled_at<=${at}::timestamptz)` : sql`(m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
+    JOIN binding b ON b.wid=m.workspace_id OR b.kind='shared' WHERE ${hosted ? sql`EXISTS (
+      SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_host=e.host AND ${claimReceives()}
+      JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=b.kind AND c.region=d.region AND ${connectionReady(sql`c`)} AND c.aws_account_id=${account}
+      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.created_at<=${at}::timestamptz)` : sql`m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
   ), receipts AS (INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
     SELECT wid,${sesMessageId},${input.region},${action.bucketName},'workspaces/'||wid||'/raw/'||${sesMessageId}||'.eml',jsonb_agg(addr ORDER BY addr),${JSON.stringify(metadata)}::jsonb FROM matched GROUP BY wid ON CONFLICT DO NOTHING RETURNING workspace_id
   ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',${sesMessageId}::text) FROM receipts RETURNING 1)

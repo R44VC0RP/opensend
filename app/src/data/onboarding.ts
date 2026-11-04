@@ -28,7 +28,7 @@ export const agentStep = (domainId: string) => `${agentPrefix}${domainId}`
 export function onboardingStage(identity: Identity | null | undefined, domainStep: string | null): OnboardingStage {
   if (!identity?.multiTenant) return null
   const admin = identity.role === 'owner' || identity.role === 'admin'
-  if (identity.connection?.status !== 'ready') return { step: admin ? 'sending' : 'setup-required' }
+  if (identity.connection?.state !== 'ready') return { step: admin ? 'sending' : 'setup-required' }
   if (!admin || domainStep === null) return null
   return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
 }

@@ -4,6 +4,7 @@ import { ApiError, isSimulatedSes, digest, id, log, type Actor, type DbExecutor,
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
 import { domains } from './db/operations.js';
 import { unverifiedSender, verifiedClaim } from './domain-claims.js';
+import { claimReceives, connectionReady } from './states.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
 import { assertMailboxKey,readableMailboxKey,workspacePrefix, mailboxS3 } from './mailbox-setup.js';
@@ -141,7 +142,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   const bucket=runtime.config.multiTenant ? sql`(SELECT CASE c.kind WHEN 'shared' THEN p.inbound_bucket ELSE r.bucket END FROM provider_connections c
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
-      WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND c.status='ready')` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
+      WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND ${connectionReady(sql`c`)})` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
   const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`,runtime) : sql`true`} AS verified
     FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
@@ -200,9 +201,10 @@ export async function trackedAttachments(runtime:Runtime,actor:Actor,mailboxId:s
 export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest, field: 'replyAddressId' | 'replyMailboxId',files:ResolvedAttachment[]) {
   if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for tracked sends.', field);
   const scope = { workspaceId: actor.workspaceId };
-  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status, region: mailboxDomains.region }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
+  const receiving = runtime.config.multiTenant ? sql<boolean>`EXISTS (SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id WHERE d.id=${mailboxDomains.domainId} AND d.workspace_id=${mailboxDomains.workspaceId} AND dc.receiving_host=${mailboxDomains.receivingHost} AND ${claimReceives()})` : sql<boolean>`${mailboxDomains.status}='active'`;
+  const [target] = await tx.select({ mailbox: mailboxes, receiving, region: mailboxDomains.region }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
   if (!target) throw new ApiError(404, 'NOT_FOUND', 'Receivable address was not found.');
-  if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The receiving domain must be active before starting a tracked conversation.', field);
+  if (!target.receiving) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The receiving domain must be active before starting a tracked conversation.', field);
   const { mailbox } = target;
   const owned = new Set((await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address));
   // Reply-To must route back into this address so the conversation keeps tracking. From can be any registered sender.

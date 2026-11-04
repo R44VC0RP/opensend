@@ -195,12 +195,14 @@ export interface OpenSendApi {
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: Pick<ProviderConnection, 'kind' | 'region' | 'status'> | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }
 export type ConnectionKind = 'shared' | 'byo'
-export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; status: 'pending' | 'ready'; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null }
+export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'failed'
+export type TenantState = 'pending' | 'ready' | 'failed'
+export interface ProviderConnection { id: string; kind: ConnectionKind; region: string; state: ConnectionState; tenant: TenantState; awsAccountId: string | null; roleArn: string | null; templateVersion: string | null; quickCreateUrl: string | null }
 export interface WorkspaceInvitation { id: string; workspaceId: string; email: string; role: WorkspaceRole; expiresAt: string; acceptUrl: string }
 export interface CampaignReview extends AudiencePreview { id: string; revision: number }
 export interface Attachment { disposition?: 'attachment' | 'inline'; contentId?: string | null; id: string; filename: string; contentType: string; size: number }

@@ -6,7 +6,7 @@ import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
-import { ensureTenant } from './provider-connections.js';
+import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -165,14 +165,14 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'opensend:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & { connection: ReadyConnection & { tenant_provisioned: boolean }; token: string; readiness: Readiness | null; receiving_name:string|null; receiving_eligible:boolean; txt_misses:number;mx_misses:number;pool_receiving:boolean };
+type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; pool_receiving:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheckDomains?: readonly string[]) {
-  const target = sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.readiness,dc.receiving_name,dc.receiving_eligible,dc.txt_misses,dc.mx_misses,
-    EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND p.inbound_bucket IS NOT NULL) AS pool_receiving
+  const target = sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
+    EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
-    JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND pc.status='ready'
+    JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
     WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``}`;
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheckDomains?.length ? sql`WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheckDomains)}::jsonb) p(parent)
@@ -191,7 +191,7 @@ async function txtProof(name: string, token: string) {
   } catch { throw dnsUnavailable(); }
 }
 const state = (verified:boolean) => verified ? 'verified' as const : 'pending' as const;
-function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; proven:boolean }, mx?:MxReport|null, note?:string): Readiness {
+function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; proven:boolean }, mx?:MxReport|null, note?:string|null): Readiness {
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
   const signed = dkim?.Status === 'SUCCESS' && dkim.SigningEnabled === true;
   const dns: z.infer<typeof domainSchema>['dns'] = [];
@@ -223,55 +223,65 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   if (stored?.status!=='active') report.receiving='pending';
   return report;
 }
-const claimProof = (row: {connection:ReadyConnection;token:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',proven });
-const cachedDomain = (row:HostedDomain) => row.readiness ?? readiness(row,{VerificationStatus:'PENDING'},claimProof(row));
+const claimProof = (row: {connection:Pick<ReadyConnection,'kind'>;token:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',proven });
+type ClaimRow = DomainRef & ClaimState & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> };
+const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
+/** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
+function derivedReadiness(row: ClaimRow): Readiness {
+  const facts=row.identity, held=sends(row);
+  const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note);
+  report.verified=held; report.ready=held; report.sending=state(held);
+  if (row.sending_state==='failed') report.verificationStatus='FAILED';
+  else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
+  report.receiving=state(row.receiving_state==='active' || row.receiving_state==='lost');
+  report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,status:state(row.receiving_host!==null)} : r);
+  return report;
+}
 const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
-const NEGATIVE_CONFIRMATIONS=3;
 type ReceivingObservation={mx:MxReport;note?:string};
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
-async function saveObservation(db:DbExecutor,row:HostedDomain,report:Readiness,wid:string,observation:ReceivingObservation|undefined,eligible:boolean,txtMisses:number) {
-  const byo=row.connection.kind==='byo',record=report.dns.find(r=>r.purpose==='receiving')!;
+async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:IdentityFacts['ses'],observation:ReceivingObservation|undefined,evidence:Pick<ClaimEvidence,'sending'|'identityVerified'|'proven'|'unavailable'|'definitive'>) {
+  const byo=row.connection.kind==='byo';
   // Mixed MX is unsuitable for new setup, but it is not evidence that an already-verified record vanished.
-  const observed=observation && (observation.mx.state==='active' || (observation.mx.state==='mixed' && observation.mx.expected.name===row.receiving_name)) ? observation.mx.expected.name : null;
-  let target=eligible && (byo || row.pool_receiving) ? observed : null;
-  const misses=row.receiving_name && eligible && observation && row.receiving_name!==observed ? row.mx_misses+1 : 0;
-  const holding=!!misses && misses<NEGATIVE_CONFIRMATIONS;
-  if (holding) target=row.receiving_name;
-  const prior=row.readiness?.dns.find(r=>r.purpose==='receiving');
-  const next=holding && prior ? prior : observation ? {...observation.mx.expected,purpose:'receiving' as const,status:state(observed!==null),...(observation.note?{note:observation.note}:{})} : record;
-  if (target && target!==row.receiving_name) {
+  let observed=observation ? (observation.mx.state==='active' || (observation.mx.state==='mixed' && observation.mx.expected.name===row.receiving_host) ? observation.mx.expected.name : null) : undefined;
+  let note=observation ? observation.note ?? null : row.identity?.note ?? null;
+  if (observed && observed!==row.receiving_host) {
     // A workspace may claim both example.com and reply.example.com. Never route one address twice.
-    const owner=(await db.execute<{name:string}>(sql`SELECT name FROM mailbox_domains WHERE workspace_id=${wid} AND receiving_host=${target} AND name<>${row.name} AND status IN ('active','provisioning') LIMIT 1`)).rows[0];
-    if (owner) { target=null;next.note=`${next.name} already receives mail through ${owner.name}.`; }
+    const owner=(await db.execute<{name:string}>(sql`SELECT name FROM domain_claims dc WHERE workspace_id=${wid} AND receiving_host=${observed} AND name<>${row.name} LIMIT 1`)).rows[0];
+    if (owner) { note=`${observed} already receives mail through ${owner.name}.`; observed=null; }
   }
-  report.dns=report.dns.map(r=>r.purpose==='receiving'?next:r);
-  report.receiving=state(!!target && (!byo || (target===row.receiving_name && row.readiness?.receiving==='verified')));
-  const status=report.receiving==='verified'?'active':target?'provisioning':'waiting_for_mx';
-  const mx=holding ? null : observation?.mx;
-  await db.execute(sql`WITH claim AS (UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb,verified=${report.verified},ready=${report.ready},
-    receiving_name=${target},receiving_eligible=${eligible},txt_misses=${txtMisses},mx_misses=${holding?misses:0} WHERE name=${row.name} AND token=${row.token} AND connection_id=${row.connection.id} RETURNING workspace_id)
-    INSERT INTO mailbox_domains AS m(id,workspace_id,domain_id,name,region,receiving_host,status,enabled_at,mx,checked_at)
-    SELECT ${id('mdom')},workspace_id,${row.id},${row.name},${row.region},${next.name},${status},CASE WHEN ${!!target} THEN now() END,${mx?JSON.stringify(mx):null}::jsonb,${mx?.checkedAt??null}::timestamptz FROM claim
-    ON CONFLICT ON CONSTRAINT mailbox_domains_name DO UPDATE SET domain_id=excluded.domain_id,parent_id=NULL,region=excluded.region,receiving_host=excluded.receiving_host,status=excluded.status,
-      enabled_at=CASE WHEN ${!!target && target===row.receiving_name} THEN m.enabled_at ELSE excluded.enabled_at END,
-      mx=coalesce(excluded.mx,m.mx),checked_at=coalesce(excluded.checked_at,m.checked_at),updated_at=now()`);
-  if (byo && (target!==row.receiving_name || status==='provisioning')) await queueReconcile(db,wid,row.region);
-  return holding;
+  const next=transitionClaim(row,{...evidence,regionReceives:byo || row.pool_receiving,observedHost:observed,byo});
+  const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
+  await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,proven:evidence.proven,mx,note},mx?.expected.name ?? expectedMx(row.name,row.region).name);
+  if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await queueReconcile(db,wid,row.region);
+  return next;
 }
 async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
   const mx=await checkMx(row.name,row.region);
   if (mx.state==='error') throw dnsUnavailable();
-  if (mx.state==='mixed' && row.receiving_name===row.name) return {mx,note:mx.message};
+  if (mx.state==='mixed' && row.receiving_host===row.name) return {mx,note:mx.message};
   const host=`reply.${row.name}`;
-  if (!['conflict','mixed','wrong_region','cname','null_mx'].includes(mx.state) && row.receiving_name!==host) return {mx};
+  if (!['conflict','mixed','wrong_region','cname','null_mx'].includes(mx.state) && row.receiving_host!==host) return {mx};
   const reply=await checkMx(host,row.region);
   if (reply.state==='error') throw dnsUnavailable();
-  if (reply.state==='mixed' && row.receiving_name===host) return {mx:reply,note:reply.message};
+  if (reply.state==='mixed' && row.receiving_host===host) return {mx:reply,note:reply.message};
   // A working reply host stays selected even if the root MX subsequently disappears or changes.
   if (mx.state==='active' || mx.state==='missing') return reply.state==='active'?{mx:reply}:{mx};
   const reason=mx.state==='cname'?'is a CNAME':mx.state==='null_mx'?'publishes a null MX':`already routes mail to ${mx.records.map(r=>r.host).filter(h=>h!==mx.expected.value).join(', ')}`;
   return {mx:reply,note:`${row.name} ${reason}. Keep its DNS and publish this MX on ${host} instead.`};
+}
+const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
+// Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
+async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string) {
+  try {
+    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token}]})));
+  } catch(e) {
+    if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
+    const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
+    if (!ownsIdentity(existing,token)) throw unavailableDomain();
+    return existing;
+  }
 }
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
 // domain deletion and by disconnecting a shared connection, so a later reconnect never meets its own ghost.
@@ -330,40 +340,44 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       defer(1000+Math.random()*1000);
     }
     const client=getSes(scoped,row.region,row.connection);
-    const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
-    if (!ownsIdentity(identity,row.token)) throw unavailableDomain();
+    let identity: GetEmailIdentityCommandOutput | undefined;
+    try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
+    catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity) throw e; }
+    // The claim exists but the creating request never reached SES: the job owns the identity from here (ensureIdentity proves ownership itself).
+    if (!identity) identity={...await ensureIdentity(client,row.name,row.token),VerificationStatus:'PENDING',$metadata:{}};
+    else if (!ownsIdentity(identity,row.token)) throw unavailableDomain();
     const shared=row.connection.kind==='shared';
     const identityVerified=identity.VerificationStatus==='SUCCESS';
     const [positive,observation]=await Promise.all([shared ? txtProof(`_opensend.${row.name}`,row.token) : identityVerified,receivingMx(row)]);
-    if (shared && readiness(row,identity,claimProof(row,positive)).ready && !row.connection.tenant_provisioned) await ensureTenant(scoped,job.workspaceId,row.connection.id);
-    const complete=await runtime.db.transaction(async db=>{
+    const report=readiness(row,identity,claimProof(row,positive));
+    // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
+    if (shared && report.ready && row.connection.tenant_state!=='ready') { log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),poll+1); }
+    const outcome=await runtime.db.transaction(async db=>{
       // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
       const current=await hostedDomain(db,job.workspaceId,row.id,true);
-      if (!current || current.token!==row.token) return true;
-      const wasProven=current.receiving_eligible || current.readiness?.dns.some(r=>r.purpose==='sending' && r.type==='TXT' && r.status==='verified');
-      const misses=shared && !positive && wasProven ? current.txt_misses+1 : 0;
-      const holdTxt=misses>0 && misses<NEGATIVE_CONFIRMATIONS,proven=positive || holdTxt;
-      const report=readiness(row,identity,claimProof(row,proven),observation.mx,observation.note);
-      if (current.receiving_name!==row.receiving_name || current.readiness?.mailFromDomain!==row.readiness?.mailFromDomain || (current.readiness?.mailFromStatus==='PENDING' &&
-        (row.readiness?.mailFromStatus!=='PENDING' || current.readiness.mailFromDomain!==report.mailFromDomain))) {
+      if (!current || current.token!==row.token) return null;
+      const mailFrom=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomainStatus ?? null;
+      if (current.receiving_host!==row.receiving_host || mailFrom(current.identity)!==mailFrom(row.identity) || (mailFromStatus(current.identity)==='PENDING' &&
+        (mailFromStatus(row.identity)!=='PENDING' || mailFrom(current.identity)!==report.mailFromDomain))) {
         defer(5000); // The newer configuration has its own poll; never replace it with a stale observation.
       }
-      if (shared && report.ready && !current.readiness?.ready) {
+      if (shared && report.ready && !sends(current)) {
         try { await sesCall(()=>client.send(new CreateTenantResourceAssociationCommand(identityBinding(current,job.workspaceId)))); }
         catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e; }
       }
-      const holdMx=await saveObservation(db,current,report,job.workspaceId,observation,identityVerified && proven,holdTxt?misses:0);
-      return report.ready && report.mailFromStatus!=='PENDING' && !holdTxt && !holdMx;
+      return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,identityVerified,proven:positive});
     });
-    if (complete) return; // MX-only upkeep owns receiving changes after sending verifies.
+    if (!outcome || (outcome.sending_state==='verified' && report.mailFromStatus!=='PENDING' && outcome.receiving_state!=='lost')) return; // MX-only upkeep owns receiving changes after sending verifies.
+    // A grace period must be observed again before it can expire.
+    if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),poll+1);
   } catch (e) {
     if (e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) {
       await runtime.db.transaction(async db=>{
         const current=await hostedDomain(db,job.workspaceId,row.id,true);
-        if (current?.token===row.token && current.readiness) {
-          const old=current.readiness;
-          await saveObservation(db,current,{...old,verified:false,ready:false,sending:'pending',receiving:'pending',dkimStatus:'NOT_STARTED',verificationStatus:e.code==='DOMAIN_UNAVAILABLE'?'FAILED':'PENDING',dns:old.dns.map(r=>({...r,status:'pending'}))},job.workspaceId,undefined,false,0);
-        }
+        if (current?.token!==row.token) return;
+        const ses=current.identity?.ses ?? {VerificationStatus:'PENDING'};
+        const reset:IdentityFacts['ses']={...ses,VerificationStatus:'PENDING',VerifiedForSendingStatus:false,DkimAttributes:ses.DkimAttributes && {...ses.DkimAttributes,Status:'NOT_STARTED',SigningEnabled:false},MailFromAttributes:ses.MailFromAttributes && {...ses.MailFromAttributes,MailFromDomainStatus:'PENDING'}};
+        await saveObservation(db,current,job.workspaceId,reset,undefined,{sending:false,identityVerified:false,proven:false,unavailable:e.code==='DOMAIN_UNAVAILABLE',definitive:true});
       });
       if (e.code==='DOMAIN_UNAVAILABLE') return;
     } else if (e instanceof ApiError && e.code==='DOMAIN_DNS_UNAVAILABLE') {
@@ -376,14 +390,16 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
 const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
-  if (!row?.readiness || row.token!==payload.token) return;
+  if (!row?.identity || row.token!==payload.token) return;
   const observation=await receivingMx(row);
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
-    if (!current?.readiness || current.token!==row.token || current.receiving_name!==row.receiving_name) return;
-    await saveObservation(db,current,current.readiness,job.workspaceId,observation,current.receiving_eligible,current.txt_misses);
+    if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
+    // Ownership evidence is whatever the last full check recorded; this job only moves routing.
+    await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:current.identity.proven});
   });
 };
+
 async function account(runtime: Runtime, wid: string, requested?: string) {
   assertSesConfigured(runtime);
   const connection=runtime.config.multiTenant ? await workspaceConnection({...runtime,config:{...runtime.config,workspaceId:wid}},requested) : undefined;
@@ -413,11 +429,11 @@ export function registerOperations(app: App) {
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
-      const rows=await c.env.db.select({row:domains,token:domainClaims.token,readiness:domainClaims.readiness,shared:sql<boolean>`pc.kind='shared'`}).from(domains)
+      const rows=await c.env.db.select({row:domains,token:domainClaims.token,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,kind:sql<'shared'|'byo'>`pc.kind`}).from(domains)
         .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
-        .innerJoin(sql`provider_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND pc.status='ready'`)
+        .innerJoin(sql`provider_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
         .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
-      return c.json({data:rows.slice(0,q.limit).map(r=>r.readiness ? domainSchema.parse(r.readiness) : readiness(r.row,{VerificationStatus:'PENDING'},{...r,proven:false})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
+      return c.json({data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
     }
     const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
     if (q.refresh === 'false') {
@@ -441,28 +457,21 @@ export function registerOperations(app: App) {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name); assertSesConfigured(c.env);
     if (c.env.config.multiTenant) {
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
-      if (claim.readiness != null) return c.json(domainSchema.parse(claim.readiness),201);
+      if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
-      const client=getSes(runtime,row.region,claim.connection);
+      // The reservation already queued the verify job, which creates the identity itself if this request dies here.
       let identity: Partial<GetEmailIdentityCommandOutput>;
-      try {
-        identity=await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:row.name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:claim.token}]})));
-      } catch(e) {
-        if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') {
-          if (claim.fresh && e instanceof ApiError && !e.retryable && e.status<500) await releaseClaim(c.env.db,a.workspaceId,claim);
-          throw e;
-        }
-        // A lost response (or racing POST) can leave our exact tagged identity in SES. Never adopt by name.
-        const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
-        if (!ownsIdentity(existing,claim.token)) { await releaseClaim(c.env.db,a.workspaceId,claim); throw unavailableDomain(); }
-        identity=existing;
+      try { identity=await ensureIdentity(getSes(runtime,row.region,claim.connection),row.name,claim.token); }
+      catch(e) {
+        if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
+        throw e;
       }
-      const report=readiness(row,{...identity,VerificationStatus:'PENDING'},claimProof(claim));
+      const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
-      const saved=sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND readiness IS NULL RETURNING ${row.id}::text AS id,token`;
+      const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL RETURNING ${row.id}::text AS id,token`;
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,true)}`);
-      return c.json(report,201);
+      return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
     }
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
@@ -492,12 +501,11 @@ export function registerOperations(app: App) {
         const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
         if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
         await sesCall(()=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
-        // Changing MAIL FROM does not re-prove ownership, activate sending, or move inbound routing.
-        const report=cachedDomain(current);
-        report.mailFromDomain=mailFromDomain;report.mailFromStatus='PENDING';
-        report.dns=report.dns.filter(r=>r.purpose!=='mail_from').concat(readiness(row,{MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}).dns.filter(r=>r.purpose==='mail_from'));
-        await db.execute(sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id}`);
-        await db.execute(recheckJob(a.workspaceId,sql`SELECT ${current.id}::text AS id,${current.token}::text AS token`,true)); return report;
+        // Changing MAIL FROM is a new fact, not a state change: ownership, sending and routing stay as they are.
+        const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
+        await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
+          ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,true)}`);
+        return derivedReadiness({...current,identity:facts});
       }); a.wakeJobs=1; return c.json(report,200);
     }
     const client = getSes(c.env, row.region);
@@ -509,7 +517,7 @@ export function registerOperations(app: App) {
     if (c.env.config.multiTenant) {
       const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,verifyRoute?a.domains:undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
       if (verifyRoute) a.wakeJobs=1;
-      return c.json(cachedDomain(row),200);
+      return c.json(derivedReadiness(row),200);
     }
     const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
   });
@@ -526,7 +534,7 @@ export function registerOperations(app: App) {
       allowedDomain(a,row.name);
       await deleteClaimIdentity(c.env,a.workspaceId,row);
       await releaseClaim(db,a.workspaceId,row);
-      if (row.connection.kind==='byo' && row.receiving_name) await queueReconcile(db,a.workspaceId,row.region);
+      if (row.connection.kind==='byo' && row.receiving_host) await queueReconcile(db,a.workspaceId,row.region);
     }); return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
@@ -648,10 +656,10 @@ function registerPublicEvents(app: App) {
     const cached = sendingTopics.get(arn);
     if (cached && cached.expires > Date.now()) return cached.binding;
     const binding = (await runtime.db.execute<TopicBinding>(sql`
-      SELECT region, aws_account_id, kind, status='ready' AS ready,false AS inbound FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${arn}
-      UNION ALL SELECT region, aws_account_id, 'shared', ready,false FROM provider_pool_regions WHERE feedback_topic_arn=${arn}
-      UNION ALL SELECT region,aws_account_id,'shared',inbound_bucket IS NOT NULL,true FROM provider_pool_regions WHERE inbound_topic_arn=${arn}
-      UNION ALL SELECT r.region,r.account_id,'byo',c.status='ready',true FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}`)).rows[0];
+      SELECT region, aws_account_id, kind, ${connectionReady()} AS ready,false AS inbound FROM provider_connections pc WHERE kind='byo' AND feedback_topic_arn=${arn}
+      UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
+      UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
+      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}`)).rows[0];
     if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
     // A pending topic may confirm its subscription but must never prime trust for notifications.
     if (!binding.ready) return confirming ? binding : undefined;

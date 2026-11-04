@@ -30,6 +30,17 @@ export type ApiError = {
 export type ConnectionSummary = {
     kind: 'shared' | 'byo';
     region: string;
+    /**
+     * awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.
+     */
+    state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
+    /**
+     * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
+     */
+    tenant: 'pending' | 'ready' | 'failed';
+    /**
+     * Deprecated: use state. ready when state is ready, otherwise pending.
+     */
     status: 'pending' | 'ready';
 } | null;
 
@@ -2006,6 +2017,17 @@ export type ProviderConnection = {
     id: string;
     kind: 'shared' | 'byo';
     region: string;
+    /**
+     * awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.
+     */
+    state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
+    /**
+     * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
+     */
+    tenant: 'pending' | 'ready' | 'failed';
+    /**
+     * Deprecated: use state. ready when state is ready, otherwise pending.
+     */
     status: 'pending' | 'ready';
     awsAccountId: string | null;
     roleArn: string | null;

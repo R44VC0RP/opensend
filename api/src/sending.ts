@@ -9,6 +9,7 @@ import { actor, ApiError, digest, errors, getSes, isSimulatedSes, id, IdParams, 
 import { enqueue, JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { getMcpGrantActor } from './mcp-auth.js';
+import { assertTenantReady, type TenantState } from './states.js';
 import { sendingConnections, unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import type { ReadyConnection } from './provider-credentials.js';
@@ -246,7 +247,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
     keySender(a, from); return selected;
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind'] }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind,
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)} AS verified
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
@@ -254,6 +255,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
   verifiedSender(a, from, state.verified);
   if (!state.aws_account_id) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+  assertTenantReady(state, isSimulatedSes(runtime));
   a.dispatchAccount = { aws_account_id: state.aws_account_id, kind: state.kind };
   return state.region;
 }
@@ -613,7 +615,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; quota: number | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
+    const state = (await db.execute<{ total: number; quota: number | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
       FROM (${pendingCounts(c.env, a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
@@ -627,6 +629,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
       if (mx) verifiedSender(a, mail.from, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
       if (mx && state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+      if (mx) assertTenantReady(state.connection, isSimulatedSes(c.env));
       if (!mx && !isSimulatedSes(c.env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!mx) keySender(a, mail.from);
       const ids = distinctAttachmentIds(mail.attachments);

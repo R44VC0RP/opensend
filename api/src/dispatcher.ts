@@ -4,7 +4,7 @@ import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor,
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
-import { ensureTenant } from './provider-connections.js';
+import type { TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import type { ReadyConnection } from './provider-credentials.js';
@@ -220,18 +220,11 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
-  const unready = new Set<string>(), checked = new Set<string>();
-  if (mx && !isSimulatedSes(runtime)) for (const {connection,workspaceId} of result.rows) {
-    const pc=connection as ReadyConnection & {tenant_provisioned:boolean};
-    if (pc.kind==='shared' && !pc.tenant_provisioned && !checked.has(pc.id)) {
-      checked.add(pc.id);
-      try { await ensureTenant(runtime,String(workspaceId),pc.id); }
-      catch (error) { unready.add(pc.id); log('warn',{operation:'dispatch-tenant-setup',workspaceId,code:error instanceof ApiError ? error.code : 'TENANT_SETUP_FAILED'}); }
-    }
-  }
   return result.rows.map(row => {
     const { review_draft, review_rendered, review_status, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, ...fields } = row;
-    const ready=regionReady && !unready.has((connection as ReadyConnection | null)?.id ?? '');
+    // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
+    const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState }) | null;
+    const ready = regionReady && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
     const mail = fields as Mail, { workspaceId } = mail;
     if (installation_id == null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     let owner = owners.get(workspaceId);

@@ -37,9 +37,9 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
     gcTime: 0,
     mutationFn: write,
     onSuccess: connection => {
-      if (connection?.status === 'ready' && workspaceId) setDomainStep(workspaceId, '')
+      if (connection?.state === 'ready' && workspaceId) setDomainStep(workspaceId, '')
       sync(connection)
-      if (connection?.status !== 'ready') return
+      if (connection?.state !== 'ready') return
       // Regions, discovery and limits now come from the new connection.
       void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] !== 'connection' }).catch(() => {})
     },
@@ -87,7 +87,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const shared = useConnectionMutation(() => connectionApi.create({ kind: 'shared' }))
   const byo = useConnectionMutation(() => connectionApi.create({ kind: 'byo' }))
   // Setup finished elsewhere (another tab or admin): lift the gate.
-  useEffect(() => { if (connection.data?.status === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (connection.data?.state === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
   function choose(kind: ConnectionKind) {
     shared.reset(); byo.reset()
     setPicked(kind)
@@ -103,7 +103,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // A bring-your-own card stays in place once it has appeared, and shows Connected when AWS is ready.
   const [awsShown, setAwsShown] = useState(false)
   const current = connection.data
-  const pendingAws = sending && current?.kind === 'byo' && current.status === 'pending' ? current : null
+  const pendingAws = sending && current?.kind === 'byo' && current.state !== 'ready' ? current : null
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
   else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} /> }

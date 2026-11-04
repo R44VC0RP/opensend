@@ -117,17 +117,39 @@
           "region": {
             "type": "string"
           },
+          "state": {
+            "type": "string",
+            "enum": [
+              "awaiting_role",
+              "provisioning",
+              "ready",
+              "failed"
+            ],
+            "description": "awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again."
+          },
+          "tenant": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "failed"
+            ],
+            "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
+          },
           "status": {
             "type": "string",
             "enum": [
               "pending",
               "ready"
-            ]
+            ],
+            "description": "Deprecated: use state. ready when state is ready, otherwise pending."
           }
         },
         "required": [
           "kind",
           "region",
+          "state",
+          "tenant",
           "status"
         ],
         "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
@@ -8096,12 +8118,32 @@
           "region": {
             "type": "string"
           },
+          "state": {
+            "type": "string",
+            "enum": [
+              "awaiting_role",
+              "provisioning",
+              "ready",
+              "failed"
+            ],
+            "description": "awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again."
+          },
+          "tenant": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "ready",
+              "failed"
+            ],
+            "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
+          },
           "status": {
             "type": "string",
             "enum": [
               "pending",
               "ready"
-            ]
+            ],
+            "description": "Deprecated: use state. ready when state is ready, otherwise pending."
           },
           "awsAccountId": {
             "type": [
@@ -8133,6 +8175,8 @@
           "id",
           "kind",
           "region",
+          "state",
+          "tenant",
           "status",
           "awsAccountId",
           "roleArn",
@@ -34805,7 +34849,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Hosted mail is ready immediately; platform setup runs in the background. BYO returns a CloudFormation quick-create URL. Never sends mail.",
+        "description": "Choose a sending provider. Hosted mail is ready immediately; its SES tenant is provisioned by a background job and `tenant` reports it (sends answer TENANT_NOT_READY until then). BYO returns a CloudFormation quick-create URL. Never sends mail.",
         "requestBody": {
           "required": true,
           "content": {

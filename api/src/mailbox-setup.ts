@@ -14,6 +14,7 @@ import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
+import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
 const OWNER_TAG = 'opensend:installation-id';
 const PURPOSE_TAG = 'opensend:purpose';
@@ -40,7 +41,7 @@ export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string
       WHERE region=${region} AND inbound_bucket=${bucket}
       UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id FROM provider_connections c JOIN mailbox_regions r
       ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
-      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.status='ready' AND r.bucket=${bucket}) matched)`;
+      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND ${connectionReady(sql`c`)} AND r.bucket=${bucket}) matched)`;
 }
 export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
   let credentials=platformCredentials(runtime);
@@ -238,7 +239,7 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
       await runtime.db.update(mailboxRegions).set({ accountId:account,bucket,topicArn:arn,updatedAt:new Date().toISOString() }).where(and(eq(mailboxRegions.workspaceId,workspaceId),eq(mailboxRegions.region,region)));
     }), ses: clients.ses };
     const names = mailboxResources(settings.installationId, region);
-    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region),connection ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE dc.connection_id=${connection.id} AND dc.receiving_name=${mailboxDomains.receivingHost} AND dc.workspace_id=${workspaceId} AND d.id=${mailboxDomains.domainId} AND d.region=${region})` : undefined));
+    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region),connection ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE dc.connection_id=${connection.id} AND dc.receiving_host=${mailboxDomains.receivingHost} AND dc.workspace_id=${workspaceId} AND d.id=${mailboxDomains.domainId} AND d.region=${region})` : undefined));
     // Self-hosted wildcard rows are covered by their parent. BYO rules list only MX-proven hostnames.
     const receiving = rows.filter(row => !row.parentId && ['provisioning', 'waiting_for_mx', 'active'].includes(row.status));
     const desired = new Set(connection ? rows.map(row=>row.receivingHost!) : receiving.flatMap(row => row.acceptSubdomains ? [row.name, `.${row.name}`] : [row.name]));
@@ -263,13 +264,7 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
     await runtime.db.update(mailboxRegions).set({ ruleSetName: resources.ruleSetName, lastReconciledAt: now, lastError: null, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, workspaceId), eq(mailboxRegions.region, region)));
     if (connection) {
       // DNS can move while AWS is working. Activate only still-claimed hosts in the rule we installed.
-      await runtime.db.execute(sql`WITH activated AS (
-        UPDATE mailbox_domains m SET status='active',last_error=NULL,updated_at=now(),enabled_at=now()
-        FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
-        WHERE dc.connection_id=${connection.id} AND dc.workspace_id=${workspaceId} AND d.region=${region}
-          AND dc.receiving_name=m.receiving_host AND m.domain_id=d.id AND m.workspace_id=d.workspace_id AND m.status<>'active'
-          AND m.receiving_host IN (SELECT jsonb_array_elements_text(${JSON.stringify([...desired])}::jsonb)) RETURNING dc.token
-      ) UPDATE domain_claims SET readiness=jsonb_set(readiness,'{receiving}','"verified"') WHERE token IN (SELECT token FROM activated)`);
+      await activateReceiving(runtime.db, workspaceId, connection.id, region, [...desired]);
       return;
     }
     for (const row of rows) {
@@ -305,7 +300,8 @@ const reconcileJob: JobHandler = async (runtime, payload, job) => {
     if (failure.code !== 'MAILBOX_RECONCILE_BUSY') {
       const now = new Date().toISOString();
       await runtime.db.update(mailboxRegions).set({ lastError: message, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, job.workspaceId), eq(mailboxRegions.region, region)));
-      await runtime.db.update(mailboxDomains).set({ lastError: message, ...(final ? { status: 'failed' as const } : {}), updatedAt: now })
+      if (runtime.config.multiTenant) await runtime.db.execute(noteReconcileFailure(job.workspaceId, region, message));
+      else await runtime.db.update(mailboxDomains).set({ lastError: message, ...(final ? { status: 'failed' as const } : {}), updatedAt: now })
         .where(and(eq(mailboxDomains.workspaceId, job.workspaceId), eq(mailboxDomains.region, region), inArray(mailboxDomains.status, ['provisioning', 'disabling'])));
     }
     throw failure;
@@ -330,9 +326,9 @@ export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
     // domains are still covered by their own verification poll and have nothing to route.
     const batch=Math.max(1,Math.min(50,limit));
     await runtime.db.execute(sql`WITH due AS (SELECT dc.token,dc.workspace_id,d.id,j.created_at FROM domain_claims dc
-      JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.status='ready'
+      JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND ${connectionReady()}
       JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region
-      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.readiness IS NOT NULL AND dc.receiving_eligible AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
+      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND ${claimReceivable()} AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
       ORDER BY j.created_at NULLS FIRST,dc.token LIMIT ${batch})
       INSERT INTO jobs(id,type,workspace_id,payload,available_at)
       SELECT 'domain.mx:'||token,'domain.mx',workspace_id,jsonb_build_object('domainId',id,'token',token),

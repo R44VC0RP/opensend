@@ -2,6 +2,7 @@ import { AssumeRoleCommand, GetCallerIdentityCommand, STSClient } from '@aws-sdk
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
 import { ApiError, type Config, type Runtime } from './core.js';
+import { connectionReady } from './states.js';
 
 type Credentials = NonNullable<Config['aws']>;
 export function platformCredentials(runtime: Runtime) {
@@ -40,8 +41,8 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
 export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string };
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
-    SELECT id, kind, region, aws_account_id, role_arn, external_id FROM provider_connections
-    WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region}` : sql``} AND status = 'ready'`);
+    SELECT id, kind, region, aws_account_id, role_arn, external_id FROM provider_connections pc
+    WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region}` : sql``} AND ${connectionReady()}`);
   const row = result.rows[0];
   if (!row) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
   return row;

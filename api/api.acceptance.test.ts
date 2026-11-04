@@ -719,7 +719,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             default:throw Error(cmd.constructor.name);
           }
         });
-        let loseCreateResponse = false;
+        let loseCreateResponse = false, failTenantOnce = false, dropCreate = false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
         identities.set(`${platform}:${foreign}`, verifiedIdentity);
@@ -731,6 +731,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           switch (name) {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
             case 'CreateEmailIdentityCommand': {
+              if (dropCreate) { dropCreate=false; throw new Error('Synthetic connection reset before SES received Create'); }
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
               assert.equal(i.Tags[0].Key,'opensend:domain-claim');
               identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
@@ -762,8 +763,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: String(ohioConfirmationPending && region === 'us-east-2' && account === platform), Owner: account, RawMessageDelivery: 'false' } };
             case 'CreateTenantCommand': {
               assert.deepEqual(i.SuppressionAttributes, { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE','COMPLAINT'] });
-              const leased = await pool.query("SELECT 1 FROM provider_connections WHERE 'opensend-' || workspace_id=$1 AND lease_until BETWEEN now() AND now() + interval '30 seconds'", [i.TenantName]);
-              assert.equal(leased.rowCount, 1, 'A disconnected request must not hold a tenant lease for minutes.');
+              const unready = await pool.query("SELECT 1 FROM provider_connections WHERE 'opensend-' || workspace_id=$1 AND tenant_state<>'ready' AND lease_until IS NULL", [i.TenantName]);
+              assert.equal(unready.rowCount, 1, 'CreateTenant is idempotent: no lease, and never for a tenant already marked ready.');
+              if (failTenantOnce) { failTenantOnce=false; throw Object.assign(new Error('Synthetic SES outage'),{name:'TooManyRequestsException',$metadata:{httpStatusCode:429}}); }
               return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
             }
             case 'UpdateReputationEntityPolicyCommand': assert.equal(i.ReputationEntityPolicy, `arn:aws:ses:${region}:aws:reputation-policy/strict`); return {};
@@ -790,9 +792,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const originalWake=runtime.wake; let wakes=0; runtime.wake=async()=>{wakes++;}; providerTest.after(()=>{runtime.wake=originalWake;});
         const pending = ok(await local('POST',path,{kind:'shared'},a.cookie), 201);
         providerTest.diagnostic(`POST shared connection: ${queries.mock.callCount()} pg round trips including dashboard auth`);
-        assert.equal(pending.status, 'ready'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
+        assert.equal(pending.state, 'ready'); assert.equal(pending.status, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
+        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending',status:'ready'});
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
@@ -804,21 +807,26 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         ohioConfirmationPending = false;
         await reconcileSharedConnections(runtime);
         const recovered = ok(await local('GET', path, undefined, a.cookie)).connection;
-        assert.deepEqual(recovered, { ...pending, status: 'ready', awsAccountId: platform });
-        assert.deepEqual((await pool.query('SELECT region FROM provider_pool_regions WHERE ready AND aws_account_id=$1 ORDER BY region', [platform])).rows.map(r => r.region), [...offered].sort(), 'Warm even regions with no customers.');
+        assert.deepEqual(recovered, { ...pending, state: 'ready', tenant: 'ready', awsAccountId: platform });
+        assert.deepEqual((await pool.query("SELECT region FROM provider_pool_regions WHERE sending_state='ready' AND receiving_state='ready' AND aws_account_id=$1 ORDER BY region", [platform])).rows.map(r => r.region), [...offered].sort(), 'Warm even regions with no customers.');
+        // Hosted is instant: a warm pool queues the tenant job in the same statement and makes no AWS call. The job
+        // owns CreateTenant; its failures are visible as `tenant`, never as a silently queued send.
         const warmStart = calls.length, warmChecks = identityChecks;
         const connected = ok(await choose('shared', b.cookie), 201);
-        assert.equal(wakes,1);
-        assert.equal(connected.status, 'ready'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
+        assert.equal(wakes,1,'The warm pool wakes the queued tenant job.');
+        assert.equal(connected.state, 'ready'); assert.equal(connected.tenant, 'pending'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
         assert.deepEqual(ok(await local('GET', path, undefined, b.cookie)).connection, connected);
         assert.equal(identityChecks - warmChecks, 0); assert.deepEqual(calls.slice(warmStart),[]);
-        const runTenant=async()=>{
+        const runTenant=async(attempts=1)=>{
           const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[b.org.id]);
-          await tenantJob(runtime,j.payload,{id:j.id,attempts:1,workspaceId:b.org.id});
+          await tenantJob(runtime,j.payload,{id:j.id,attempts,workspaceId:b.org.id});
         };
+        const {MAX_ATTEMPTS}=await import('./src/jobs.js');
+        failTenantOnce = true; await assert.rejects(runTenant(MAX_ATTEMPTS));
+        assert.equal(ok(await local('GET', path, undefined, b.cookie)).connection.tenant,'failed','The last retry surfaces the failure instead of leaving the tenant pending forever.');
         await runTenant(); await runTenant();
-        ok(await choose('shared',b.cookie),201); assert.equal(wakes,1,'A provisioned tenant needs no wake.');
-        assert.deepEqual(calls.slice(warmStart), ['CreateTenantCommand', 'UpdateReputationEntityPolicyCommand', 'CreateTenantResourceAssociationCommand', 'CreateTenantResourceAssociationCommand']);
+        const provisioned = ok(await choose('shared',b.cookie),201); assert.equal(wakes,1,'A provisioned tenant needs no wake.'); assert.equal(provisioned.tenant,'ready');
+        assert.deepEqual(calls.slice(warmStart), ['CreateTenantCommand', 'CreateTenantCommand', 'UpdateReputationEntityPolicyCommand', 'CreateTenantResourceAssociationCommand', 'CreateTenantResourceAssociationCommand']);
         const idleStart = calls.length + identityChecks;
         await reconcileSharedConnections(runtime);
         assert.equal(calls.length + identityChecks, idleStart, 'Ready pools and connections need no AWS reconciliation.');
@@ -860,6 +868,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(restored.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.equal(restored.verified,false);
           assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand']);
           ok(await local('DELETE',`/v1/domains/${restored.id}`,undefined,b.cookie));
+          // A request that died before any SES call leaves a claim with no identity. The verify job it reserved owns the identity from then on.
+          const {operationJobs:wedgeJobs}=await import('./src/operations.js'),{JobDeferred:Deferred}=await import('./src/jobs.js');
+          const wedged=`${unique('wedge')}.invalid`,wedgeStart=calls.length;
+          dropCreate=true; error(await add(b.cookie,wedged),503,'SES_UNAVAILABLE');
+          const {rows:[wedge]}=await pool.query("SELECT j.*,dc.identity FROM jobs j JOIN domain_claims dc ON j.id='domain.verify:'||dc.token WHERE dc.name=$1",[wedged]);
+          assert.ok(wedge && wedge.identity===null,'The reservation keeps the claim and its verify job even though SES was never called.');
+          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+          await assert.rejects(wedgeJobs['domain.verify']!(runtime,wedge.payload,{id:wedge.id,attempts:1,workspaceId:b.org.id}),Deferred);
+          assert.deepEqual(calls.slice(wedgeStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand','CreateEmailIdentityCommand']);
+          const unwedged=ok(await local('GET',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie));
+          assert.equal(unwedged.dns.filter((r:Json)=>r.purpose==='sending' && r.type==='CNAME').length,3); assert.ok(identities.get(`${platform}:${wedged}`));
+          ok(await local('DELETE',`/v1/domains/${wedge.payload.domainId}`,undefined,b.cookie)); lookups=0;
+          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
           const collisionStart=calls.length;
           error(await add(b.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
           assert.deepEqual(calls.slice(collisionStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand']);
@@ -881,17 +902,27 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const {operationJobs}=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const {rows:[job]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
           const check=()=>operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,attempts:1,workspaceId:b.org.id});
+          const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1);
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-          answer=proof.value; await check(); const readStart=calls.length; // Sending-only setup completes without polling SES for MX.
+          // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
+          await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
+          const waitStart=calls.length; answer=proof.value; await assert.rejects(check(),JobDeferred); assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false);
+          assert.ok(!calls.slice(waitStart).some(n=>n.startsWith('CreateTenant')),'The verifier waits for the tenant job; it never provisions or binds without the tenant.');
+          await pool.query("UPDATE provider_connections SET tenant_state='ready' WHERE workspace_id=$1",[b.org.id]); await pace();
+          await check(); const readStart=calls.length; // Sending-only setup completes without polling SES for MX.
           const readQueries=queries.mock.callCount();
           const checked=ok(await local('GET',detail,undefined,b.cookie)); assert.equal(checked.verified,true); assert.equal(checked.ready,true);
           dt.diagnostic(`GET domain detail: ${queries.mock.callCount()-readQueries} pg round trips including dashboard auth`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
-          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,2);
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,3,"Two completed checks plus the one that waited for the tenant.");
           assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
+          // A verified sender on a connection whose tenant is not ready is refused at admission, never queued silently.
+          await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
+          try { error(await send(`hi@${domain}`),409,'TENANT_NOT_READY'); assert.equal((await pool.query('SELECT 1 FROM sending_emails WHERE workspace_id=$1',[b.org.id])).rowCount,0); }
+          finally { await pool.query("UPDATE provider_connections SET tenant_state='ready' WHERE workspace_id=$1",[b.org.id]); }
           await dt.test('MX inbound routes only MX-verified customer hosts, independently of DKIM, and splits private Bcc',async it=>{
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
             const otherHost=`${unique('receiving')}.invalid`,blind=`private@${otherHost}`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
@@ -906,8 +937,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             // Proven ownership is enough to create addresses; nothing routes until the MX record is observed.
             const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-opensend-environment':'live'}),201);
             assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-opensend-environment':'live'}));
-            const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-            const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
+              const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
             assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly MX-only job must use neither SES nor TXT.');
@@ -926,6 +956,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'pending');
             identity.VerificationStatus='SUCCESS';identity.VerifiedForSendingStatus=true;await pace();await assert.rejects(verifyOther(),JobDeferred);const receiveOnly=ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie));
             assert.equal(receiveOnly.sending,'pending');assert.equal(receiveOnly.receiving,'verified');assert.equal(receiveOnly.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
+            // A receive-only claim gets the same grace when its TXT proof disappears, on its own timer.
+            const otherState=async()=>(await pool.query('SELECT sending_state,receiving_state,receiving_lost_since IS NOT NULL AS receiving_lost FROM domain_claims WHERE name=$1',[otherHost])).rows[0];
+            answer='';await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'verified');
+            assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'lost',receiving_lost:true});
+            answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'active',receiving_lost:false});
             answer=proof.value;
             const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
             const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
@@ -971,15 +1006,28 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const n=queries.mock.callCount();assert.ok(await sync.syncOutboundMessages({...runtime,db:drizzle(conn)})>=2);assert.equal(queries.mock.callCount()-n,1);
               for(const {org} of [a,b]) assert.deepEqual((await conn.query("SELECT type FROM mailbox_events WHERE workspace_id=$1 AND type IN ('message.sent','message.delivered') ORDER BY seq",[org.id])).rows.map(r=>r.type),['message.sent','message.delivered']);
             } finally {await conn.query('ROLLBACK');conn.release();}
-            // Two definite misses cannot revoke a proven TXT/MX; a positive answer resets the streak.
+            // A missing proof opens a grace period (`lost`) instead of revoking: the API and routing are unchanged,
+            // a positive answer closes it, and only an expired grace revokes.
+            const claimState=async()=>(await pool.query('SELECT sending_state,receiving_state,receiving_host,lost_since IS NOT NULL AS lost,receiving_lost_since IS NOT NULL AS receiving_lost FROM domain_claims WHERE name=$1',[domain])).rows[0];
+            const expireGrace=()=>pool.query("UPDATE domain_claims SET lost_since=lost_since-interval '3 hours',receiving_lost_since=receiving_lost_since-interval '3 hours' WHERE name=$1",[domain]);
+            const steady={sending_state:'verified',receiving_state:'active',receiving_host:mx.name,lost:false,receiving_lost:false};
+            assert.deepEqual(await claimState(),steady);
             answer='';for(let i=0;i<2;i++){await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);}
-            answer=proof.value;await pace();await check();
-            answer='';for(let i=0;i<3;i++){await pace();await assert.rejects(check(),JobDeferred);const observed=ok(await local('GET',detail,undefined,b.cookie));assert.equal(observed.sending,i===2?'pending':'verified');assert.equal(observed.receiving,observed.sending);}
+            assert.deepEqual(await claimState(),{...steady,sending_state:'lost',lost:true},'Receiving is held by the same grace as the ownership it depends on.');
+            assert.equal(await probe(custom),1,'Routing continues through the grace period.');
+            await pool.query("WITH gone AS (DELETE FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id LIKE 'probe-%' RETURNING ses_message_id) DELETE FROM jobs USING gone WHERE jobs.workspace_id=$1 AND jobs.type='mailbox.ingest' AND jobs.payload->>'sesMessageId'=gone.ses_message_id",[b.org.id]);
+            answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
+            answer='';await pace();await assert.rejects(check(),JobDeferred);assert.deepEqual(ok(await local('GET',detail,undefined,b.cookie)),stable);
+            await expireGrace();await pace();await assert.rejects(check(),JobDeferred);
+            const revoked=ok(await local('GET',detail,undefined,b.cookie));assert.equal(revoked.sending,'pending');assert.equal(revoked.receiving,'pending');
+            assert.deepEqual(await claimState(),{sending_state:'pending',receiving_state:'off',receiving_host:null,lost:false,receiving_lost:false});
             assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),0,'Hourly MX alone cannot re-authorize lost ownership.');
-            answer=proof.value;await pace();await check();
+            answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
             activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
-            activeMx.add(mx.name);await mxCheck();activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
-            await mxCheck();assert.equal(await probe(custom),0,'Three confirmed MX misses revoke routing while sending stays verified.');
+            activeMx.add(mx.name);await mxCheck();assert.deepEqual(await claimState(),steady);
+            activeMx.delete(mx.name);await mxCheck();assert.deepEqual(await claimState(),{...steady,receiving_state:'lost',receiving_lost:true},'An MX grace is tracked on its own side.');assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
+            await expireGrace();await mxCheck();assert.equal(await probe(custom),0,'An expired MX grace revokes routing while sending stays verified.');
+            assert.deepEqual(await claimState(),{...steady,receiving_state:'pending',receiving_host:null});
             assert.equal(ok(await local('GET',detail,undefined,b.cookie)).sending,'verified');
             // Exercise the hourly scheduler inside an isolated transaction: one job per claim, spread over the hour.
             const {refreshMailboxDns}=await import('./src/mailbox-setup.js'),{sql}=await import('drizzle-orm');
@@ -1014,12 +1062,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v3.yaml';
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
         externalIds = [ac,bc].map(reply => {
-          const row = ok(reply, 201); assert.equal(row.status, 'pending'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
+          const row = ok(reply, 201); assert.equal(row.state, 'awaiting_role'); assert.equal(row.tenant, 'ready'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
           assert.equal(row.templateVersion,'v3');assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
         });
         assert.notEqual(externalIds[0], externalIds[1]);
         await assert.rejects(pool.query('UPDATE provider_connections SET external_id=$1 WHERE workspace_id=$2', [externalIds[0], b.org.id]), { code: '23505' });
-        assert.equal(ok(await verify(a.cookie)).status, 'ready');
+        assert.deepEqual([ok(await verify(a.cookie))].map(r=>[r.state,r.tenant,r.status])[0], ['ready','ready','ready'], 'A verified BYO connection needs no tenant.');
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);
@@ -1078,8 +1126,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
         assert.equal(calls.length,retained,'BYO identities stay in the customer account.'); assert.ok(identities.has(`${customer}:${domain}`));
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
-        const released=async()=>(await pool.query('SELECT connection_id,verified,ready,readiness,receiving_name,receiving_eligible FROM domain_claims WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rows;
-        assert.deepEqual(await released(),[{connection_id:null,verified:false,ready:false,readiness:null,receiving_name:null,receiving_eligible:false}]);
+        const released=async()=>(await pool.query('SELECT connection_id,sending_state,receiving_state,receiving_host,lost_since,receiving_lost_since,identity FROM domain_claims WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rows;
+        assert.deepEqual(await released(),[{connection_id:null,sending_state:'pending',receiving_state:'off',receiving_host:null,lost_since:null,receiving_lost_since:null,identity:null}]);
         assert.equal((await pool.query('SELECT status FROM mailbox_domains WHERE domain_id=$1',[byoDomain.id])).rows[0].status,'disabled');
         assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type IN ('domain.verify','domain.mx') AND status='pending'",[a.org.id])).rowCount,0);
         assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
@@ -1443,7 +1491,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
       // A cold hosted connection and unverified claim are sufficient for simulated delivery, even without AWS credentials.
-      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,status) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
       await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       const deniedClient = ok(await registerClient(t, db, {}, request), 201);
@@ -3643,11 +3691,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('INSERT INTO workspaces(id,slug,name) VALUES ($1,$1,$1)',[byo]);
       await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
       await db.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $2,$2,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$1',[shared,byo]);
-      await db.query('INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,ready) VALUES ($1,$2,$3,true)',[REGION,pool,poolTopic]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id,tenant_provisioned) VALUES ($1,$1,$2,'ready','shared',$3,true)`,[shared,REGION,pool]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id,external_id,template_version,platform_principal_arn,role_arn,feedback_topic_arn)
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')",[REGION,pool,poolTopic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[shared,REGION,pool]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,platform_principal_arn,role_arn,feedback_topic_arn)
         VALUES ($1,$1,$2,'ready','byo',$3,$4,'v1',$5,$6,$7)`,[byo,REGION,account,externalId,`arn:aws:iam::${pool}:user/test`,role,byoTopic]);
-      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('pool.example',$1,$1,true),('customer.example',$2,$2,true)",[shared,byo]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('pool.example',$1,$1,'verified'),('customer.example',$2,$2,'verified')",[shared,byo]);
       const assumptions = t.mock.method(STSClient.prototype,'send', async (cmd: any) => {
         assert.ok(cmd instanceof AssumeRoleCommand); assert.equal(cmd.input.RoleArn,role); assert.equal(cmd.input.ExternalId,externalId);
         return { Credentials:{ AccessKeyId:'fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture-session',Expiration:new Date(Date.now()+3600000) } };
@@ -3699,14 +3747,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { runDispatcher } = await import('./src/dispatcher.js');
       const accounts=['111122223333','444455556666']; runtime.config.multiTenant=true; runtime.config.simulatedSes.latencyMs=15;
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,ready,feedback_topic_arn) VALUES ($1,$2,true,$3)`,[REGION,accounts[0],`arn:aws:sns:${REGION}:${accounts[0]}:opensend-mx-feedback`]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES ($1,$2,'ready',$3)`,[REGION,accounts[0],`arn:aws:sns:${REGION}:${accounts[0]}:opensend-mx-feedback`]);
       await db.query("INSERT INTO workspaces(id,name,slug) SELECT 'bench-'||n,'fixture','bench-'||n FROM generate_series(1,100)n");
       await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT id,id,$1,jsonb_build_array($1::text) FROM workspaces WHERE id LIKE 'bench-%'`,[REGION]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id) SELECT id,id,'shared','ready',$1,$2 FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id,role_arn,external_id,template_version,platform_principal_arn,feedback_topic_arn)
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) SELECT id,id,'shared','ready',$1,$2,'ready' FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,role_arn,external_id,template_version,platform_principal_arn,feedback_topic_arn)
         VALUES ('bench-100','bench-100','byo','ready',$1,$2,'fixture-role',gen_random_uuid(),'v1','fixture-platform',$3)`,[REGION,accounts[1],`arn:aws:sns:${REGION}:${accounts[1]}:fixture`]);
       await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT id,id,'fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
-      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,verified) SELECT id||'.example',id,id,true FROM workspaces WHERE id LIKE 'bench-%'`);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) SELECT id||'.example',id,id,'verified' FROM workspaces WHERE id LIKE 'bench-%'`);
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
         SELECT 'email_'||id,id,$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
           $2::jsonb || jsonb_build_object('from','sender@'||id||'.example'),true FROM workspaces WHERE id LIKE 'bench-%'`,[REGION,JSON.stringify({to:['fixture@example.net'],cc:[],bcc:[],replyTo:[],region:REGION,kind:'transactional',subject:'fixture',text:'fixture',tracking:false,attachments:[],headers:[]})]);
