@@ -5,6 +5,7 @@ import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, type SesDiscovery } from './ses-setup.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { retryDatabaseFailures } from './jobs.js';
+import { preparePoolReceiving, sharedInboundDomain } from './mailbox-setup.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const Kind = z.enum(['shared', 'byo']);
@@ -72,13 +73,14 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean) {
 // Fenced, expiring leases protect external side effects without holding a DB transaction during AWS calls.
 // A crashed isolate leaves a reclaimable pending row. Successful pool setup survives disconnects and restarts.
 async function getPool(runtime: Runtime, region: string) {
-  return (await runtime.db.execute<{ ready: boolean; aws_account_id: string }>(sql`SELECT ready, aws_account_id FROM provider_pool_regions WHERE region=${region}`)).rows[0];
+  return (await runtime.db.execute<{ ready: boolean; aws_account_id: string; inbound_domain:string|null }>(sql`SELECT ready, aws_account_id,inbound_domain FROM provider_pool_regions WHERE region=${region}`)).rows[0];
 }
-async function ensurePool(runtime: Runtime, account: string, region: string) {
+async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
+  const account=principal.account;
   const lease = new Date(Date.now() + 180_000).toISOString();
   const result = await runtime.db.execute(sql`INSERT INTO provider_pool_regions(region, aws_account_id, lease_until) VALUES (${region}, ${account}, ${lease})
-    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE NOT provider_pool_regions.ready
-      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING region`);
+    ON CONFLICT(region) DO UPDATE SET lease_until=excluded.lease_until WHERE (NOT provider_pool_regions.ready OR provider_pool_regions.inbound_domain IS DISTINCT FROM ${sharedInboundDomain(runtime)})
+      AND provider_pool_regions.aws_account_id=excluded.aws_account_id AND coalesce(provider_pool_regions.lease_until, '-infinity') <= now() RETURNING ready`);
   if (!result.rowCount) {
     const pool = await getPool(runtime, region);
     if (pool?.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The platform key no longer matches this pool.');
@@ -88,11 +90,17 @@ async function ensurePool(runtime: Runtime, account: string, region: string) {
   const owned = sql`region=${region} AND lease_until=${lease}::timestamptz`;
   try {
     const scoped = { ...runtime, config: { ...runtime.config, awsAccountId: account, sesFeedbackUrl: undefined } };
-    const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, connectionSetup: true, registerTopic: async (_account, arn) => {
-      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
-    } });
-    checkProvisioned(report, true);
-    if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET ready=true, lease_until=NULL WHERE ${owned}`)).rowCount) throw busy();
+    if (!result.rows[0]!.ready) {
+      const report = await provisionSes(scoped, { region, installationId: POOL_INSTALLATION, verifiedPoolPrincipal:principal, connectionSetup: true, registerTopic: async (_account, arn) => {
+        if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
+      } });
+      checkProvisioned(report, true);
+      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET ready=true WHERE ${owned}`)).rowCount) throw busy();
+    }
+    const records=await preparePoolReceiving(scoped,region,account,async(_account,bucket,arn)=>{
+      if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_bucket=${bucket},inbound_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
+    });
+    if (!(await runtime.db.execute(sql`UPDATE provider_pool_regions SET inbound_domain=${sharedInboundDomain(runtime)},inbound_dns=${JSON.stringify(records)}::jsonb,lease_until=NULL WHERE ${owned}`)).rowCount) throw busy();
   } catch (e) { await runtime.db.execute(sql`UPDATE provider_pool_regions SET lease_until=NULL WHERE ${owned}`); throw e; }
 }
 const busy = () => new ApiError(409, 'CONNECTION_BUSY', 'Connection setup is already in progress. Retry shortly.', undefined, true);
@@ -154,9 +162,14 @@ export async function reconcileSharedConnections(runtime: Runtime) {
   for (const region of sharedRegions(runtime)) {
     try {
       const pool = await getPool(runtime, region);
-      if (!pool?.ready) {
-        const account = (await platformIdentity(runtime, pool?.aws_account_id)).account;
-        await ensurePool(runtime, account, region);
+      if (!pool?.ready || pool.inbound_domain!==sharedInboundDomain(runtime)) {
+        const principal=await platformIdentity(runtime,pool?.aws_account_id);
+        try { await ensurePool(runtime,principal,region); }
+        catch (e) {
+          // Receiving (including its separate SNS confirmation) never blocks a healthy sending pool.
+          if (!(await getPool(runtime,region))?.ready) throw e;
+          log('warn',{operation:'shared-receiving-setup',region,code:awsError(e).code});
+        }
       }
       const pending = await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE kind='shared' AND region=${region}
         AND NOT tenant_provisioned AND coalesce(lease_until, '-infinity') <= now()`);
@@ -190,7 +203,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   }
   const principalArn = (await platformIdentity(runtime)).arn;
   const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version)
-    VALUES (${id('conn')},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v1')
+    VALUES (${id('conn')},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v3')
     ON CONFLICT(workspace_id) DO NOTHING RETURNING *`);
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');

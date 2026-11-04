@@ -35,7 +35,7 @@ export const SesDiscoverySchema = z.object({
   }).nullable().default(null).describe('Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness.'),
 }).openapi('SesDiscovery');
 export type SesDiscovery = z.infer<typeof SesDiscoverySchema>;
-export type SesSetupOptions = { region: string; installationId: string; connectionSetup?: boolean };
+export type SesSetupOptions = { region: string; installationId: string; connectionSetup?: boolean; verifiedPoolPrincipal?:{account:string;arn:string} };
 export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId: string, topicArn: string) => Promise<void> };
 
 // OPEN/CLICK destinations support tracking-enabled sends; per-message tracking overrides
@@ -222,7 +222,9 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
     try { await operation(); } catch (error) { const e = awsError(error); add(report, e.code, e.message); }
   };
   try {
-    const identity = await c.sts.send(new GetCallerIdentityCommand({}), { abortSignal: deadlineSignal });
+    // Only scheduled pool preparation supplies the STS identity it already checked for this platform key.
+    const principal=options.installationId===POOL_INSTALLATION ? options.verifiedPoolPrincipal : undefined;
+    const identity = principal ? {Account:principal.account,Arn:principal.arn} : await c.sts.send(new GetCallerIdentityCommand({}), { abortSignal: deadlineSignal });
     if (!identity.Arn?.startsWith('arn:aws:')) { add(report, 'AWS_PARTITION_UNSUPPORTED', 'Only the commercial AWS partition is supported; China and GovCloud are not supported.'); return { report, subscriptions }; }
     if (!identity.Account || !/^\d{12}$/.test(identity.Account)) { add(report, 'AWS_ACCOUNT_UNKNOWN', 'STS did not return a valid AWS account identity.'); return { report, subscriptions }; }
     if (identity.Arn === `arn:aws:iam::${identity.Account}:root`) { add(report, 'AWS_ROOT_CREDENTIALS_UNSUPPORTED', 'Use a least-privilege IAM principal, not AWS root credentials.'); return { report, subscriptions }; }

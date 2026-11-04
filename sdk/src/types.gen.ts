@@ -1084,7 +1084,7 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
-        purpose?: 'dkim' | 'ownership' | 'mail_from';
+        purpose?: 'dkim' | 'ownership' | 'mail_from' | 'inbound';
     }>;
 };
 

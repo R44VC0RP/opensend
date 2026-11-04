@@ -1,15 +1,13 @@
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { ApiError, id, type DbExecutor, type Mode } from './core.js';
-import { emails } from './db/sending.js';
-import { mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxThreads, mailboxWriteLanes, mailMessageIds, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
+import { mailboxAddresses, mailboxes, mailboxWriteLanes, mailMessages, type MailAddress, type SendLimits } from './db/mailbox.js';
 
 export type Scope = { workspaceId: string; environment: Mode };
 /** SES assigns the wire Message-ID independently of OpenSend's durable receipt. */
 export const sesMessageId = (providerId: string, region: string) => `${providerId}@${region === 'us-east-1' ? 'email' : region}.amazonses.com`;
-/** These three seeded rows replace runtime advisory locks on pooled/Hyperdrive connections. */
-export async function lockMailboxLane(tx: DbExecutor, lane: typeof mailboxWriteLanes.$inferSelect.lane) {
-  const [row] = await tx.select({ lane: mailboxWriteLanes.lane }).from(mailboxWriteLanes).where(eq(mailboxWriteLanes.lane, lane)).for('no key update');
-  if (!row) throw new ApiError(503, 'MAILBOX_SCHEMA_NOT_READY', 'Apply the mailbox schema migrations before receiving mail.');
+/** ON CONFLICT locks even when its WHERE rejects the update: one trip, no idle tuple churn. */
+export async function lockMailboxLane(tx: DbExecutor, workspaceId:string, lane: typeof mailboxWriteLanes.$inferSelect.lane) {
+  await tx.execute(sql`INSERT INTO mailbox_write_lanes(workspace_id,lane) VALUES(${workspaceId},${lane}) ON CONFLICT(workspace_id,lane) DO UPDATE SET lane=excluded.lane WHERE false`);
 }
 export const ADDRESS = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
@@ -96,95 +94,20 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   return row!;
 }
 
-/** Resolves envelope recipients to mailboxes: exact address/alias, plus-address base, wildcard rules, then the domain catch-all. */
-export async function routeRecipients(tx: DbExecutor, scope: Scope, recipients: string[], options: { allowCreate: boolean; receivedAt: string }) {
-  const mailboxIds = new Set<string>(), unrouted: string[] = [], created: string[] = [];
-  const domainNames = [...new Set(recipients.map(value => value.split('@')[1] ?? ''))].filter(Boolean);
-  if (!domainNames.length) return { mailboxIds: [], unrouted, created };
-  const domains = await tx.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, scope.workspaceId), eq(mailboxDomains.environment, scope.environment), inArray(mailboxDomains.name, domainNames), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active'])));
-  for (const recipient of recipients) {
-    const [local = '', host = ''] = recipient.split('@');
-    const domain = domains.find(row => row.name === host);
-    if (!domain) continue;
-    const candidates = [...new Set([recipient, local.includes('+') ? `${local.split('+')[0]}@${host}` : recipient])];
-    // An inactive lease or send-only address is reserved, not a miss: don't route it or auto-create another owner.
-    const routeOwnedAddress = async () => {
-      const rows = await tx.select({ address: mailboxAddresses.address, mailboxId: mailboxAddresses.mailboxId,
-        receives: sql<boolean>`${mailboxAddresses.kind} <> 'public' AND (${mailboxes.expiresAt} IS NULL OR (${mailboxes.createdAt} <= ${options.receivedAt}::timestamptz AND ${mailboxes.expiresAt} > greatest(statement_timestamp(), ${options.receivedAt}::timestamptz)))`,
-      }).from(mailboxAddresses).innerJoin(mailboxes, eq(mailboxes.id, mailboxAddresses.mailboxId)).where(and(eq(mailboxAddresses.workspaceId, scope.workspaceId), eq(mailboxAddresses.environment, scope.environment), inArray(mailboxAddresses.address, candidates)));
-      const owner = rows.find(row => row.address === recipient) ?? rows[0];
-      if (!owner) return false;
-      if (owner.receives) mailboxIds.add(owner.mailboxId);
-      else unrouted.push(recipient);
-      return true;
-    };
-    if (await routeOwnedAddress()) continue;
-    const ruled = await tx.select({ id: mailboxes.id, rules: mailboxes.rules }).from(mailboxes).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.domainId, domain.id), isNull(mailboxes.expiresAt), sql`jsonb_array_length(${mailboxes.rules}) > 0`)).orderBy(mailboxes.createdAt);
-    const matched = ruled.find(row => row.rules.some(rule => ruleMatches(rule, recipient)));
-    if (matched) { mailboxIds.add(matched.id); continue; }
-    if (domain.catchAll === 'create_mailbox' && options.allowCreate && ADDRESS.test(recipient)) {
-      // Only misses that would create an address need to coordinate with admin creation.
-      await lockMailboxLane(tx, 'address');
-      if (await routeOwnedAddress()) continue;
-      const mailboxId = (await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: recipient, origin: 'auto' })).id;
-      created.push(mailboxId);
-      mailboxIds.add(mailboxId); continue;
-    }
-    unrouted.push(recipient);
-  }
-  return { mailboxIds: [...mailboxIds], unrouted, created };
-}
-
-/** Finds the conversation for a message from In-Reply-To/References, or starts one. Caller holds the ingest lane. */
-export async function assignThread(tx: DbExecutor, scope: Scope, input: { inReplyTo: string | null; references: string[]; subject: string; at: string; messageId?: string | null }) {
-  // The message's own Message-ID comes last: it matches when one of our mailboxes sent it to another (internal delivery),
-  // so the recipient's copy joins the sender's conversation instead of starting a new one.
-  const candidates = [...new Set([input.inReplyTo, ...[...input.references].reverse(), input.messageId].filter((value): value is string => !!value))].slice(0, 101);
-  let threadId: string | undefined;
-  if (candidates.length) {
-    const rows = await tx.select({ messageId: mailMessageIds.messageId, threadId: mailMessageIds.threadId }).from(mailMessageIds).where(and(eq(mailMessageIds.workspaceId, scope.workspaceId), eq(mailMessageIds.environment, scope.environment), inArray(mailMessageIds.messageId, candidates)));
-    const matches = new Map(rows.map(row => [row.messageId, row.threadId]));
-    // A recently accepted parent must beat an older, already indexed References entry, even before outbound sync.
-    const firstKnown = candidates.findIndex(candidate => matches.has(candidate));
-    const pendingCandidates = firstKnown < 0 ? candidates : candidates.slice(0, firstKnown);
-    const providerIds = pendingCandidates.flatMap(candidate => candidate.match(/^([^@]+)@[a-z0-9-]+\.amazonses\.com$/i)?.slice(1) ?? []);
-    if (providerIds.length) {
-      const pending = await tx.select({ threadId: mailMessages.threadId, providerId: emails.providerId, region: emails.region }).from(emails).innerJoin(mailMessages, and(eq(mailMessages.sendingEmailId, emails.id), eq(mailMessages.workspaceId, emails.workspaceId), eq(mailMessages.environment, emails.environment))).where(and(eq(emails.workspaceId, scope.workspaceId), eq(emails.environment, scope.environment), inArray(emails.providerId, providerIds)));
-      for (const row of pending) if (row.providerId) matches.set(sesMessageId(row.providerId, row.region), row.threadId);
-    }
-    threadId = candidates.map(candidate => matches.get(candidate)).find(Boolean);
-  }
-  if (!threadId) {
-    threadId = id('thr');
-    await tx.insert(mailThreads).values({ id: threadId, ...scope, subject: normalizeSubject(input.subject).slice(0, 998), messageCount: 0, lastMessageAt: input.at });
-  }
-  await tx.update(mailThreads).set({ messageCount: sql`${mailThreads.messageCount} + 1`, lastMessageAt: sql`greatest(${mailThreads.lastMessageAt}, ${input.at}::timestamptz)` }).where(eq(mailThreads.id, threadId));
-  return threadId;
-}
-export async function rememberMessageIds(tx: DbExecutor, scope: Scope, messageRowId: string, threadId: string, ids: (string | null)[]) {
-  const values = [...new Set(ids.filter((value): value is string => !!value))];
-  if (values.length) await tx.insert(mailMessageIds).values(values.map(messageId => ({ ...scope, messageId, mailMessageId: messageRowId, threadId }))).onConflictDoNothing();
-}
+export const threadSummaryConflict=sql`ON CONFLICT(mailbox_id,thread_id) DO UPDATE SET message_count=t.message_count+1,unread_count=t.unread_count+excluded.unread_count,
+      participants=(SELECT coalesce(jsonb_agg(p ORDER BY n),'[]') FROM (SELECT * FROM (SELECT DISTINCT ON(lower(p->>'address')) p,n FROM jsonb_array_elements(t.participants||excluded.participants) WITH ORDINALITY v(p,n) ORDER BY lower(p->>'address'),n) first_seen ORDER BY n LIMIT 20) limited),
+      snippet=CASE WHEN excluded.last_message_at>=t.last_message_at THEN excluded.snippet ELSE t.snippet END,subject=coalesce(nullif(t.subject,''),excluded.subject),last_message_at=greatest(t.last_message_at,excluded.last_message_at),last_inbound_at=greatest(t.last_inbound_at,excluded.last_inbound_at),archived=CASE WHEN excluded.last_inbound_at IS NOT NULL THEN false ELSE t.archived END`;
 
 /** Adds a stored message to mailboxes and updates each mailbox's thread summary. Returns mailboxes that newly received it. */
 export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: typeof mailMessages.$inferSelect, mailboxIds: string[]) {
-  const added: string[] = [];
+  if (!mailboxIds.length) return [];
   const inbound = message.direction === 'inbound';
   const people = uniqueAddresses([{ name: message.fromName, address: message.fromAddress }, ...message.to, ...message.cc]);
-  for (const mailboxId of mailboxIds) {
-    const [link] = await tx.insert(mailboxMessages).values({ mailboxId, messageId: message.id, ...scope, threadId: message.threadId, direction: message.direction, read: !inbound, receivedAt: message.receivedAt }).onConflictDoNothing().returning({ mailboxId: mailboxMessages.mailboxId });
-    if (!link) continue;
-    added.push(mailboxId);
-    await tx.insert(mailboxThreads).values({ mailboxId, threadId: message.threadId, ...scope, subject: message.subject, snippet: message.snippet, participants: people, messageCount: 0, unreadCount: 0, lastMessageAt: message.receivedAt, spam: message.spam, labels: message.spam ? ['spam'] : [] }).onConflictDoNothing();
-    const [current] = await tx.select().from(mailboxThreads).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, message.threadId))).for('update');
-    const newer = Date.parse(message.receivedAt) >= Date.parse(current!.lastMessageAt) || current!.messageCount === 0;
-    await tx.update(mailboxThreads).set({
-      messageCount: current!.messageCount + 1, unreadCount: current!.unreadCount + (inbound ? 1 : 0),
-      participants: uniqueAddresses([...current!.participants, ...people]),
-      ...(newer ? { lastMessageAt: message.receivedAt, snippet: message.snippet, subject: current!.subject || message.subject } : {}),
-      ...(inbound ? { lastInboundAt: message.receivedAt, archived: false } : {}),
-      ...(inbound && message.spam && !current!.labels.includes('spam') && current!.messageCount === 0 ? { spam: true } : {}),
-    }).where(and(eq(mailboxThreads.mailboxId, mailboxId), eq(mailboxThreads.threadId, message.threadId)));
-  }
-  return added;
+  const result=await tx.execute<{mailbox_id:string}>(sql`WITH added AS (
+    INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,environment,thread_id,direction,read,received_at)
+    SELECT box,${message.id},${scope.workspaceId},${scope.environment},${message.threadId},${message.direction},${!inbound},${message.receivedAt}::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(mailboxIds)}::jsonb) b(box) ON CONFLICT DO NOTHING RETURNING *
+  ) INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,environment,subject,snippet,participants,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
+    SELECT mailbox_id,thread_id,workspace_id,environment,${message.subject},${message.snippet},${JSON.stringify(people)}::jsonb,1,${inbound?1:0},received_at,CASE WHEN ${inbound} THEN received_at END,${message.spam},CASE WHEN ${message.spam} THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM added ORDER BY mailbox_id
+    ${threadSummaryConflict} RETURNING mailbox_id`);
+  return result.rows.map(row=>row.mailbox_id);
 }

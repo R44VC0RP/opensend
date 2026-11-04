@@ -86,18 +86,6 @@
       ]
     },
     {
-      "Sid": "StoredTemplates",
-      "Effect": "Allow",
-      "Action": [
-        "ses:GetEmailTemplate",
-        "ses:TestRenderEmailTemplate"
-      ],
-      "Resource": [
-        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:template/opensend-*",
-        "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:template/opensend-*"
-      ]
-    },
-    {
       "Sid": "WorkspaceTenants",
       "Effect": "Allow",
       "Action": [
@@ -144,9 +132,7 @@
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/*",
         "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:identity/*",
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*",
-        "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*",
-        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:template/opensend-*",
-        "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:template/opensend-*"
+        "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensend-*"
       ]
     },
     {
@@ -243,8 +229,9 @@
       "Effect": "Allow",
       "Action": "s3:GetObject",
       "Resource": [
-        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/raw/*",
-        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/att/*"
+        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/staging/*",
+        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/workspaces/*/raw/*",
+        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/workspaces/*/att/*"
       ],
       "Condition": {
         "StringEquals": {
@@ -253,10 +240,13 @@
       }
     },
     {
-      "Sid": "WriteMailboxAttachments",
+      "Sid": "WriteMailboxObjects",
       "Effect": "Allow",
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/att/*",
+      "Action": ["s3:PutObject", "s3:PutObjectTagging"],
+      "Resource": [
+        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/workspaces/*/raw/*",
+        "arn:aws:s3:::opensend-*-mail-${aws:RequestedRegion}/workspaces/*/att/*"
+      ],
       "Condition": {
         "StringEquals": {
           "s3:ResourceAccount": "${aws:PrincipalAccount}"

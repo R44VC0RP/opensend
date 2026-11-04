@@ -15,7 +15,7 @@ import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, disc
 import type { ReadyConnection } from './provider-credentials.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
-import { queueTrackedMailboxSend } from './mailbox-send.js';
+import { finishMailboxArchive,trackedAttachments,queueTrackedMailboxSend } from './mailbox-send.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
@@ -58,7 +58,7 @@ const drainDelayMs = (backlog: number, rate: number, floor = 1000) => rate > 0 ?
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes both environments without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
-function lockAdmission(db: DbExecutor, a: Actor, claim?: SQL) {
+function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
   // ON CONFLICT locks the existing tuple even when its UPDATE predicate is false. No dead tuple per send.
   const lock = sql`INSERT INTO job_schedule (workspace_id) SELECT ${a.workspaceId}::text ${claim ? sql`FROM claim` : sql``}
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
@@ -298,17 +298,22 @@ export const IdempotencyHeaders = z.object({
     description: 'Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key, environment and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.',
   }),
 });
-export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>, admissionReceipt?: T): Promise<T> {
+export async function idempotent<T extends Record<string, unknown>>(c: Ctx, a: Actor, body: unknown, work: (db: DbExecutor) => Promise<T>, admissionReceipt?: T,prepareOutside?:()=>Promise<void>): Promise<T> {
   const key = c.req.header('Idempotency-Key');
-  if (key === undefined) return c.env.db.transaction(async db => { if (admissionReceipt) await lockAdmission(db, a); return work(db); });
+  if (key === undefined) { await prepareOutside?.();return c.env.db.transaction(async db => { if (admissionReceipt) await lockAdmission(db, a); return work(db); }); }
   if (key.length > 200 || !/^[\x21-\x7e]+$/.test(key)) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
   const requestHash = await digest(canonical(body));
+  const where = and(scope(sendingIdempotency, a), eq(sendingIdempotency.actorKeyId, a.keyId), eq(sendingIdempotency.path, c.req.path), eq(sendingIdempotency.requestKey, key));
+  if(prepareOutside){
+    const [existing]=await c.env.db.select().from(sendingIdempotency).where(where);
+    if(existing){if(existing.requestHash!==requestHash)throw new ApiError(409,'IDEMPOTENCY_CONFLICT','This idempotency key was already used with a different request.');if(existing.result)return existing.result as T;}
+    await prepareOutside(); // The unique insert below still arbitrates concurrent first attempts.
+  }
   return c.env.db.transaction(async db => {
     const identity = { workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, path: c.req.path, requestKey: key };
     const claim = db.insert(sendingIdempotency).values({ ...identity, requestHash, result: admissionReceipt }).onConflictDoNothing().returning({ claimed: sql`1` });
     // Direct receipts contain only preallocated IDs. Claim the final result and lock admission only for the winner.
     const inserted = admissionReceipt ? (await lockAdmission(db, a, claim.getSQL())).rows : await claim;
-    const where = and(scope(sendingIdempotency, a), eq(sendingIdempotency.actorKeyId, a.keyId), eq(sendingIdempotency.path, c.req.path), eq(sendingIdempotency.requestKey, key));
     if (!inserted.length) {
       const [previous] = await db.select().from(sendingIdempotency).where(where);
       if (!previous || previous.requestHash !== requestHash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used with a different request.');
@@ -685,12 +690,20 @@ async function storeValidatedAttachment(runtime: Runtime, db: DbExecutor, a: Act
     return row!;
   } catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }
 }
-/** Validates and stores sending attachment bytes inside the caller's transaction (mailbox sends, forwards). */
-export async function storeAttachmentBytes(runtime: Runtime, db: DbExecutor, a: Actor, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array) {
+/** Reserve quota before uploading. No database connection is held during object storage I/O.
+ * Unused uploads (including a concurrent idempotency loser) use ordinary attachment retention. */
+export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'workspaceId'|'environment'>, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array) {
   if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most 8 MiB decoded.`);
   const parsed = AttachmentMetadata.safeParse({ filename: metadata.filename, contentType: metadata.contentType, disposition: metadata.disposition ?? 'attachment', ...(metadata.contentId ? { contentId: metadata.contentId } : {}) });
   if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
-  return storeValidatedAttachment(runtime, db, a, validateAttachment(parsed.data, bytes), bytes, await bytesDigest(bytes));
+  const input=validateAttachment(parsed.data,bytes),checksum=await bytesDigest(bytes),attachmentId=id('attachment'),storageKey=`${a.workspaceId}/${a.environment}/attachments/${attachmentId}`;
+  const row=await runtime.db.transaction(async tx=>{
+    await lockAdmission(tx,a);
+    const [usage]=await tx.select({bytes:sql<string>`coalesce(sum(${attachments.size}),0)`}).from(attachments).where(and(eq(attachments.workspaceId,a.workspaceId),eq(attachments.environment,a.environment)));
+    if(Number(usage!.bytes)+bytes.length>SENDING_LIMITS[a.environment].storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED','Stored attachment quota exceeded.');
+    const [saved]=await tx.insert(attachments).values({id:attachmentId,...input,workspaceId:a.workspaceId,environment:a.environment,storageKey,checksum,size:bytes.length}).returning();return saved!;
+  });
+  try {await runtime.storage.put(storageKey,bytes,input.contentType);} catch(e){await runtime.db.delete(attachments).where(eq(attachments.id,row.id));throw e;}return row;
 }
 export type MailboxSendRequest = { from: string; fromName?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string; subject: string; html?: string; text?: string; attachments: string[]; tracking?: boolean; screen?: boolean; headers: { Name: string; Value: string }[] };
 /** Queues one transactional email through the normal pipeline (admission, region readiness, suppression, dispatch) with extra MIME headers. */
@@ -748,7 +761,9 @@ export function registerSending(app: App) {
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
       if (a.environment !== 'live' || a.domains.length || !a.permissions.includes('manage')) throw new ApiError(403, 'MAILBOX_ACCESS_REQUIRED', 'Use unrestricted live manage permission, or start a thread with a scoped inbound key.');
-      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId'));
+      let files:Awaited<ReturnType<typeof trackedAttachments>>=[];
+      const result = await idempotent(c, a, input, tx => queueTrackedMailboxSend(c.env, tx, a, replyAddressId, input, input.replyAddressId ? 'replyAddressId' : 'replyMailboxId',files),undefined,input.attachments.length ? async()=>{files=await trackedAttachments(c.env,a,replyAddressId,input);} : undefined);
+      if(input.attachments.length)await finishMailboxArchive(c.env,a.workspaceId,result.mailboxMessageId);
       return c.json(SingleReceipt.parse({ ...result, inboundMessageId: result.mailboxMessageId }), 202);
     }
     const result = await admitEmails(c, a, input);

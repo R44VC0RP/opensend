@@ -15,6 +15,7 @@ const values = z.object({
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // Comma-separated regions offered for MX shared sending.
   SHARED_SENDING_REGIONS: z.string().default('us-east-2'),
+  SHARED_INBOUND_DOMAIN: z.hostname().toLowerCase().max(189).default('in.opensend.mx'),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
   // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
@@ -67,7 +68,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
-    byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions,
+    byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, sharedInboundDomain: v.SHARED_INBOUND_DOMAIN,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,

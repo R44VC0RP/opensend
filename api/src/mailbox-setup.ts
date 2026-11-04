@@ -1,7 +1,8 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql,type SQLWrapper } from 'drizzle-orm';
 import { SESClient, CreateReceiptRuleCommand, CreateReceiptRuleSetCommand, DeleteReceiptRuleCommand, DescribeActiveReceiptRuleSetCommand, DescribeReceiptRuleSetCommand, SetActiveReceiptRuleSetCommand, UpdateReceiptRuleCommand, type ReceiptRule } from '@aws-sdk/client-ses';
-import { S3Client, CreateBucketCommand, HeadBucketCommand, PutBucketLifecycleConfigurationCommand, PutBucketPolicyCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand } from '@aws-sdk/client-s3';
+import { SESv2Client, CreateEmailIdentityCommand, GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
+import { S3Client, CopyObjectCommand, CreateBucketCommand, HeadBucketCommand, PutBucketLifecycleConfigurationCommand, PutBucketPolicyCommand, PutBucketTaggingCommand, PutPublicAccessBlockCommand } from '@aws-sdk/client-s3';
 import { SNSClient, CreateTopicCommand, ListSubscriptionsByTopicCommand, ListTagsForResourceCommand, SetTopicAttributesCommand, SubscribeCommand } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
@@ -9,29 +10,70 @@ import { ApiError, log, type DbExecutor, type JobHandler, type Runtime } from '.
 import { jobs } from './db/core.js';
 import { mailboxDomains, mailboxRegions } from './db/mailbox.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { checkMx } from './mailbox-dns.js';
+import { checkMx, expectedMx } from './mailbox-dns.js';
+import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
-import { awsError, feedbackUrl, setupResources } from './ses-setup.js';
+import { awsError, feedbackUrl, POOL_INSTALLATION, setupResources } from './ses-setup.js';
+import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 
 const OWNER_TAG = 'opensend:installation-id';
 const PURPOSE_TAG = 'opensend:purpose';
 const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
-export const RAW_PREFIX = 'raw/';
-export const ATTACHMENT_PREFIX = 'att/';
+export const STAGING_PREFIX = 'staging/';
+export const workspacePrefix = (wid:string, kind:'raw'|'att') => `workspaces/${wid}/${kind}/`;
+export const sharedInboundDomain = (runtime:Runtime) => runtime.config.sharedInboundDomain ?? 'in.opensend.mx';
+export const instantRegion=(runtime:Runtime)=>sql`(SELECT p.region FROM provider_pool_regions p JOIN jsonb_array_elements_text(${JSON.stringify(runtime.config.sharedRegions??['us-east-2'])}::jsonb) WITH ORDINALITY offered(region,n) ON p.region=offered.region WHERE p.inbound_domain=${sharedInboundDomain(runtime)} ORDER BY offered.n LIMIT 1)`;
+export function assertMailboxKey(wid:string,key:string,kind:'raw'|'att') {
+  if (!key.startsWith(workspacePrefix(wid,kind)) || key.split('/').some(s=>!s || s==='.' || s==='..')) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The object is not in this workspace.');
+}
 const RAW_RETENTION_DAYS = 90;
 
-export function mailboxResources(installationId: string, region: string) {
+export function mailboxResources(installationId: string, region: string, account?:string) {
   const prefix = setupResources(installationId).topicName.replace(/-feedback$/, '');
-  return { prefix, topicName: `${prefix}-inbound`, bucket: `${prefix}-mail-${region}`, ruleSetName: `${prefix}-inbound`, rulePrefix: `${prefix}-inbound-` };
+  return { prefix, topicName: `${prefix}-inbound`, bucket: `${prefix}${installationId===POOL_INSTALLATION?`-${account}`:''}-mail-${region}`, ruleSetName: `${prefix}-inbound`, rulePrefix: `${prefix}-inbound-` };
 }
 
-function awsConfig(runtime: Runtime, region: string) {
-  if (runtime.config.multiTenant) throw new ApiError(409, 'INBOUND_CONNECTION_REQUIRED', 'Hosted receiving requires connection-aware inbound setup.');
-  if (!runtime.config.aws) throw new ApiError(503, 'AWS_NOT_CONFIGURED', 'Configure AWS access credentials to enable mailboxes.');
-  return { region, credentials: runtime.config.aws, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) };
+function awsConfig(region:string, credentials:NonNullable<Runtime['config']['aws']>) {
+  return { region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) };
 }
-export function mailboxS3(runtime: Runtime, region: string) { return new S3Client({ ...awsConfig(runtime, region), maxAttempts: 3 }); }
+export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string|SQLWrapper) {
+  return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (
+      SELECT 'shared' AS kind,NULL AS id,aws_account_id,NULL AS role_arn,NULL::uuid AS external_id FROM provider_pool_regions
+      WHERE region=${region} AND inbound_bucket=${bucket} AND inbound_domain IS NOT NULL
+      UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id FROM provider_connections c JOIN mailbox_regions r
+      ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
+      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.status='ready' AND r.bucket=${bucket}) matched)`;
+}
+export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
+  let credentials=platformCredentials(runtime);
+  if (runtime.config.multiTenant) {
+    const binding=resolved===undefined ? (await db.execute<{binding:ReadyConnection|null}>(sql`SELECT ${storageBinding(wid,region,bucket)} AS binding`)).rows[0]!.binding : resolved;
+    if (!binding) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mailbox storage connection is unavailable.');
+    credentials=await workspaceCredentials(runtime,region,binding);
+  }
+  return new S3Client({ ...awsConfig(region, credentials), maxAttempts: 3 });
+}
+
+/** Upgrade old single-tenant objects on first read. Never sign a legacy key or touch it on MX. */
+export async function readableMailboxKey(runtime:Runtime,wid:string,region:string,bucket:string,key:string,kind:'raw'|'att',db:DbExecutor=runtime.db,client?:S3Client) {
+  if (!runtime.config.multiTenant && !key.startsWith('workspaces/')) {
+    const raw=kind==='raw';
+    if (!(raw ? /^raw\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/ : /^att\/msg_[a-f0-9]{32}\/matt_[a-f0-9]{32}$/).test(key)) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Unknown legacy object key.');
+    const dest=workspacePrefix(wid,kind)+key.slice(4)+(raw?'.eml':'');
+    const binding=raw ? sql`SELECT envelope_to FROM mail_messages WHERE workspace_id=${wid} AND region=${region} AND raw_bucket=${bucket} AND raw_key=${key} AND raw_key='raw/'||ses_message_id` : sql`SELECT 1 FROM mail_attachments WHERE workspace_id=${wid} AND bucket=${bucket} AND storage_key=${key} AND storage_key='att/'||message_id||'/'||id`;
+    const row=(await db.execute<{envelope_to:string[]}>(binding)).rows[0];
+    if (!row) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Unknown legacy mailbox object.');
+    const s3=client ?? await mailboxS3(runtime,wid,region,bucket,db);
+    try { if(raw) await copyWorkspaceRaw(s3,region,bucket,key,dest,row.envelope_to,'legacy-raw');else await s3.send(new CopyObjectCommand({Bucket:bucket,Key:dest,CopySource:`${bucket}/${key}`})); }
+    finally {if(!client)s3.destroy();}
+    // A raw download must continue to expire with its original, not 90 days from its last download.
+    if(!raw) await db.execute(sql`UPDATE mail_attachments SET storage_key=${dest} WHERE workspace_id=${wid} AND bucket=${bucket} AND storage_key=${key}`);
+    key=dest;
+  }
+  assertMailboxKey(wid,key,kind);
+  return key;
+}
 
 // SES control-plane actions (including receipt rules) are limited to one request per second.
 function pacedSes(client: SESClient, signal: AbortSignal) {
@@ -70,7 +112,7 @@ const httpStatus = (error: unknown) => (error as { $metadata?: { httpStatusCode?
 function ruleSourceArn(region: string, account: string, rulePrefix: string) { return `arn:aws:ses:${region}:${account}:receipt-rule-set/*:receipt-rule/${rulePrefix}*`; }
 function bucketPolicy(bucket: string, region: string, account: string, rulePrefix: string) {
   return { Version: '2012-10-17', Statement: [
-    { Sid: 'OpenSendSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 's3:PutObject', Resource: `arn:aws:s3:::${bucket}/${RAW_PREFIX}*`, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
+    { Sid: 'OpenSendSesInbound', Effect: 'Allow', Principal: { Service: 'ses.amazonaws.com' }, Action: 's3:PutObject', Resource: `arn:aws:s3:::${bucket}/${STAGING_PREFIX}*`, Condition: { StringEquals: { 'AWS:SourceAccount': account }, ArnLike: { 'AWS:SourceArn': ruleSourceArn(region, account, rulePrefix) } } },
     { Sid: 'OpenSendTlsOnly', Effect: 'Deny', Principal: '*', Action: 's3:*', Resource: [`arn:aws:s3:::${bucket}`, `arn:aws:s3:::${bucket}/*`], Condition: { Bool: { 'aws:SecureTransport': 'false' } } },
   ] };
 }
@@ -85,18 +127,17 @@ export type RegionResources = { account: string; bucket: string; topicArn: strin
 
 /** Idempotently creates the OpenSend-owned bucket, SNS topic + HTTPS subscription and ensures an active receipt rule set. */
 type Clients = { sts: STSClient; s3: S3Client; sns: SNSClient; ses: ReturnType<typeof pacedSes> };
-async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses }: Clients): Promise<RegionResources & { rules: ReceiptRule[] }> {
-  const names = mailboxResources(installationId, region);
+async function ensureRegion(runtime: Runtime, region: string, installationId: string, signal: AbortSignal, { sts, s3, sns, ses }: Clients, register:(account:string,bucket:string,arn:string)=>Promise<void>, knownAccount?:string): Promise<RegionResources & { rules: ReceiptRule[] }> {
   const endpoint = feedbackUrl(runtime.config);
   {
-    const identity = await aws('sts:GetCallerIdentity', () => sts.send(new GetCallerIdentityCommand({}), { abortSignal: signal }));
-    const account = identity.Account;
+    const account = knownAccount ?? (await aws('sts:GetCallerIdentity', () => sts.send(new GetCallerIdentityCommand({}), { abortSignal: signal }))).Account;
     if (!account || !/^\d{12}$/.test(account)) throw new ApiError(503, 'AWS_ACCOUNT_UNKNOWN', 'STS did not return a valid AWS account identity.');
     if (runtime.config.awsAccountId && runtime.config.awsAccountId !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'Mailboxes must use the same AWS account as the provisioned SES region.');
+    const names = mailboxResources(installationId, region,account);
 
     // Bucket: a 403 on HeadBucket means another AWS account owns the name.
     let exists = true;
-    try { await s3.send(new HeadBucketCommand({ Bucket: names.bucket }), { abortSignal: signal }); }
+    try { await s3.send(new HeadBucketCommand({ Bucket: names.bucket,ExpectedBucketOwner:account }), { abortSignal: signal }); }
     catch (error) {
       if (httpStatus(error) === 404 || errorName(error) === 'NotFound') exists = false;
       else if (httpStatus(error) === 403) throw new ApiError(409, 'MAILBOX_BUCKET_CONFLICT', `The S3 bucket name ${names.bucket} is owned by another AWS account.`);
@@ -110,7 +151,10 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     await aws('s3:PutPublicAccessBlock', () => s3.send(new PutPublicAccessBlockCommand({ Bucket: names.bucket, PublicAccessBlockConfiguration: { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true } }), { abortSignal: signal }));
     await aws('s3:PutBucketPolicy', () => s3.send(new PutBucketPolicyCommand({ Bucket: names.bucket, Policy: JSON.stringify(bucketPolicy(names.bucket, region, account, names.rulePrefix)) }), { abortSignal: signal }));
     await aws('s3:PutLifecycleConfiguration', () => s3.send(new PutBucketLifecycleConfigurationCommand({ Bucket: names.bucket, LifecycleConfiguration: { Rules: [
-      { ID: 'opensend-raw-retention', Status: 'Enabled', Filter: { Prefix: RAW_PREFIX }, Expiration: { Days: RAW_RETENTION_DAYS } },
+      { ID:'opensend-staging',Status:'Enabled',Filter:{Prefix:STAGING_PREFIX},Expiration:{Days:3} },
+      { ID: 'opensend-raw-retention', Status: 'Enabled', Filter: { Tag:{Key:'opensend-kind',Value:'raw'} }, Expiration: { Days: RAW_RETENTION_DAYS } },
+      { ID:'opensend-legacy-raw',Status:'Enabled',Filter:{Prefix:'raw/'},Expiration:{Days:RAW_RETENTION_DAYS} },
+      ...(installationId!==POOL_INSTALLATION ? [{ID:'opensend-legacy-downloads',Status:'Enabled' as const,Filter:{Tag:{Key:'opensend-kind',Value:'legacy-raw'}},Expiration:{Days:1}}] : []),
       { ID: 'opensend-abort-uploads', Status: 'Enabled', Filter: { Prefix: '' }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } },
     ] } }), { abortSignal: signal }));
 
@@ -123,11 +167,11 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     await aws('sns:SetTopicAttributes', () => sns.send(new SetTopicAttributesCommand({ TopicArn: expectedTopic, AttributeName: 'Policy', AttributeValue: JSON.stringify(topicPolicy(expectedTopic, region, account, names.rulePrefix)) }), { abortSignal: signal }));
 
     // Trust the topic before subscribing so the signed confirmation passes the ingress allowlist.
-    await runtime.db.update(mailboxRegions).set({ accountId: account, bucket: names.bucket, topicArn: expectedTopic, updatedAt: new Date().toISOString() }).where(and(eq(mailboxRegions.workspaceId, runtime.config.workspaceId), eq(mailboxRegions.region, region)));
+    await register(account,names.bucket,expectedTopic);
     const subscriptions = await aws('sns:ListSubscriptionsByTopic', () => sns.send(new ListSubscriptionsByTopicCommand({ TopicArn: expectedTopic }), { abortSignal: signal }));
-    if (!subscriptions.Subscriptions?.some(sub => sub.Protocol === 'https' && sub.Endpoint === endpoint)) {
-      await aws('sns:Subscribe', () => sns.send(new SubscribeCommand({ TopicArn: expectedTopic, Protocol: 'https', Endpoint: endpoint, ReturnSubscriptionArn: true, Attributes: { RawMessageDelivery: 'false' } }), { abortSignal: signal }));
-    }
+    const subscription=subscriptions.Subscriptions?.find(sub => sub.Protocol === 'https' && sub.Endpoint === endpoint);
+    const subscribed=subscription ?? await aws('sns:Subscribe', () => sns.send(new SubscribeCommand({ TopicArn: expectedTopic, Protocol: 'https', Endpoint: endpoint, ReturnSubscriptionArn: false, Attributes: { RawMessageDelivery: 'false' } }), { abortSignal: signal }));
+    if (installationId===POOL_INSTALLATION && !subscribed.SubscriptionArn?.startsWith(expectedTopic+':')) throw new ApiError(503,'INBOUND_CONFIRMATION_PENDING','Waiting for confirmation of the inbound SNS subscription.',undefined,true);
 
     // One receipt rule set is active per account and region. Join an existing one; never replace it.
     let active = await ses<{ Metadata?: { Name?: string }; Rules?: ReceiptRule[] }>('ses:DescribeActiveReceiptRuleSet', new DescribeActiveReceiptRuleSetCommand({}));
@@ -143,7 +187,7 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
 }
 
 function ruleFor(name: string, recipients: string[], resources: RegionResources): ReceiptRule {
-  return { Name: name, Enabled: true, TlsPolicy: 'Optional', ScanEnabled: true, Recipients: [...recipients].sort(), Actions: [{ S3Action: { BucketName: resources.bucket, ObjectKeyPrefix: RAW_PREFIX, TopicArn: resources.topicArn } }] };
+  return { Name: name, Enabled: true, TlsPolicy: 'Optional', ScanEnabled: true, Recipients: [...recipients].sort(), Actions: [{ S3Action: { BucketName: resources.bucket, ObjectKeyPrefix: STAGING_PREFIX, TopicArn: resources.topicArn } }] };
 }
 function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
   const action = rule.Actions?.length === 1 ? rule.Actions[0]!.S3Action : undefined;
@@ -152,14 +196,46 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
     && action?.BucketName === want.BucketName && action?.ObjectKeyPrefix === want.ObjectKeyPrefix && action?.TopicArn === want.TopicArn && !action?.KmsKeyArn;
 }
 
+/** Platform maintenance only. Easy DKIM tokens and signing zones are regional AWS output, not constants. */
+export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
+  const config=awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
+  const ses=new SESClient(config),v2=new SESv2Client(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
+  const domain=sharedInboundDomain(runtime);
+  try {
+    const resources=await ensureRegion(runtime,region,POOL_INSTALLATION,signal,clients,register,account);
+    const rule=ruleFor(mailboxResources(POOL_INSTALLATION,region,account).rulePrefix+'all',[],resources);
+    const existing=resources.rules.find(r=>r.Name===rule.Name);
+    if (!existing) {
+      const after=resources.rules.at(-1)?.Name;
+      if(resources.rules.length && !after)throw new ApiError(503,'RECEIPT_RULE_ORDER_UNKNOWN','SES did not identify the last active rule; refusing to insert ahead of it.',undefined,true);
+      await clients.ses('ses:CreateReceiptRule',new CreateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule,After:after}));
+    }
+    else if (!ruleMatches(existing,rule)) await clients.ses('ses:UpdateReceiptRule',new UpdateReceiptRuleCommand({RuleSetName:resources.ruleSetName,Rule:rule}));
+    const get=()=>v2.send(new GetEmailIdentityCommand({EmailIdentity:domain}),{abortSignal:signal});
+    let dkim;
+    try {
+      const identity=await get();
+      if (!tags(POOL_INSTALLATION).every(t=>identity.Tags?.some(a=>a.Key===t.Key && a.Value===t.Value))) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The platform inbound identity belongs to another installation.');
+      dkim=identity.DkimAttributes;
+    } catch(e) {
+      if (errorName(e)!=='NotFoundException') throw e;
+      dkim=(await v2.send(new CreateEmailIdentityCommand({EmailIdentity:domain,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:tags(POOL_INSTALLATION)}),{abortSignal:signal})).DkimAttributes;
+    }
+    if (!dkim?.SigningHostedZone || dkim.Tokens?.length!==3) throw new ApiError(503,'INBOUND_DKIM_UNAVAILABLE','SES did not return the three Easy DKIM DNS records.',undefined,true);
+    return [expectedMx(`*.${domain}`,region),...dkim.Tokens.map(t=>({type:'CNAME',name:`${t}._domainkey.${domain}`,value:`${t}.${dkim.SigningHostedZone}`}))];
+  } finally { ses.destroy(); v2.destroy(); clients.s3.destroy(); clients.sns.destroy(); clients.sts.destroy(); }
+}
+
 /**
  * Makes the OpenSend receipt rules accept exactly the domains whose mailbox state wants mail.
  * Rules are packed up to the SES recipient quota. A rule is deleted instead of emptied:
  * a receipt rule with no recipients matches every address on every domain.
  */
-export async function reconcileRegion(runtime: Runtime, region: string): Promise<void> {
-  const config = awsConfig(runtime, region);
-  const workspaceId = runtime.config.workspaceId;
+export async function reconcileRegion(runtime: Runtime, region: string, workspaceId:string): Promise<void> {
+  const scoped={...runtime,config:{...runtime.config,workspaceId}};
+  const connection=runtime.config.multiTenant ? await workspaceConnection(scoped,region) : undefined;
+  if (connection?.kind==='shared') return; // Pool preparation is never a per-domain operation.
+  const config = awsConfig(region,connection ? await workspaceCredentials(scoped,region,connection) : platformCredentials(runtime));
   await runtime.db.insert(mailboxRegions).values({ workspaceId, region }).onConflictDoNothing();
   // The lease must expire before the job's own lease (3 minutes), so a retry of a run that died can take over
   // instead of failing as busy. A normal run takes seconds; the abort below keeps a live run inside the lease.
@@ -171,9 +247,11 @@ export async function reconcileRegion(runtime: Runtime, region: string): Promise
   const clients = { sts: new STSClient(config), s3: new S3Client(config), sns: new SNSClient(config), ses: pacedSes(sesClient, signal) };
   try {
     const settings = await getRegionSettings(runtime.db, workspaceId);
-    const resources = { ...await ensureRegion(runtime, region, settings.installationId, signal, clients), ses: clients.ses };
+    const resources = { ...await ensureRegion({...runtime,config:{...runtime.config,awsAccountId:connection?.aws_account_id ?? runtime.config.awsAccountId}}, region, settings.installationId, signal, clients,async(account,bucket,arn)=>{
+      await runtime.db.update(mailboxRegions).set({ accountId:account,bucket,topicArn:arn,updatedAt:new Date().toISOString() }).where(and(eq(mailboxRegions.workspaceId,workspaceId),eq(mailboxRegions.region,region)));
+    }), ses: clients.ses };
     const names = mailboxResources(settings.installationId, region);
-    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region)));
+    const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, workspaceId), eq(mailboxDomains.region, region),connection ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE dc.connection_id=${connection.id} AND dc.verified AND dc.workspace_id=${workspaceId} AND d.id=${mailboxDomains.domainId} AND d.region=${region} AND d.environment='live')` : undefined));
     // Subdomain rows are covered by their parent's wildcard recipient (.example.com), not listed themselves.
     const receiving = rows.filter(row => !row.parentId && ['provisioning', 'waiting_for_mx', 'active'].includes(row.status));
     const desired = new Set(receiving.flatMap(row => row.acceptSubdomains ? [row.name, `.${row.name}`] : [row.name]));
@@ -221,16 +299,16 @@ export async function queueReconcile(db: DbExecutor, workspaceId: string, region
 const reconcileJob: JobHandler = async (runtime, payload, job) => {
   const region = typeof payload.region === 'string' ? payload.region : '';
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)) throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid mailbox reconcile job.');
-  try { await reconcileRegion(runtime, region); }
+  try { await reconcileRegion(runtime, region,job.workspaceId); }
   catch (error) {
     const failure = error instanceof ApiError ? error : new ApiError(503, 'MAILBOX_SETUP_FAILED', 'Mailbox setup could not complete; it will be retried.', undefined, true);
     const final = !failure.retryable || job.attempts >= MAX_ATTEMPTS;
     const message = `${failure.code}: ${failure.message}`.slice(0, 500);
     if (failure.code !== 'MAILBOX_RECONCILE_BUSY') {
       const now = new Date().toISOString();
-      await runtime.db.update(mailboxRegions).set({ lastError: message, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, runtime.config.workspaceId), eq(mailboxRegions.region, region)));
+      await runtime.db.update(mailboxRegions).set({ lastError: message, updatedAt: now }).where(and(eq(mailboxRegions.workspaceId, job.workspaceId), eq(mailboxRegions.region, region)));
       await runtime.db.update(mailboxDomains).set({ lastError: message, ...(final ? { status: 'failed' as const } : {}), updatedAt: now })
-        .where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), eq(mailboxDomains.region, region), inArray(mailboxDomains.status, ['provisioning', 'disabling'])));
+        .where(and(eq(mailboxDomains.workspaceId, job.workspaceId), eq(mailboxDomains.region, region), inArray(mailboxDomains.status, ['provisioning', 'disabling'])));
     }
     throw failure;
   }
@@ -238,7 +316,7 @@ const reconcileJob: JobHandler = async (runtime, payload, job) => {
 
 /** Hourly: refresh MX state for receiving domains so status follows DNS changes. */
 export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
-  const rows = await runtime.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, runtime.config.workspaceId), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
+  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), sql`${mailboxDomains.domainId} NOT LIKE 'instant:%'`,runtime.config.multiTenant ? sql`EXISTS(SELECT 1 FROM provider_connections c WHERE c.workspace_id=${mailboxDomains.workspaceId} AND c.kind='byo' AND c.region=${mailboxDomains.region} AND c.status='ready')` : undefined, inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
   for (const row of rows) {
     const mx = await checkMx(row.name, row.region);
     if (mx.state === 'error') continue;

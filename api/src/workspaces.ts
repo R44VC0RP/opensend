@@ -40,7 +40,7 @@ export async function onboardNewUser(db: DbExecutor, user: { id: string; name: s
   if (await claimInvitation(db, user.id, user.email)) return true;
   if (!allowSignup) return false;
   const workspaceId = id('ws'), name = `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`;
-  const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
+  const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   await db.execute(sql`WITH created AS (
     INSERT INTO workspaces(id, name, slug) VALUES (${workspaceId}, ${name}, ${slug}) RETURNING id
   ), region_settings AS (

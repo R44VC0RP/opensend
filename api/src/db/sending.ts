@@ -46,7 +46,7 @@ export const attachments = pgTable('sending_attachments', {
   createdAt: time('created_at').notNull().defaultNow(),
 }, t => [index('sending_attachments_page').on(t.workspaceId, t.environment, t.id)]);
 export const attachmentLinks = pgTable('sending_attachment_links', {
-  ...scope(), attachmentId: text('attachment_id').notNull().references(() => attachments.id), ownerType: text('owner_type').$type<'email' | 'campaign' | 'review'>().notNull(), ownerId: text('owner_id').notNull(),
+  ...scope(), attachmentId: text('attachment_id').notNull().references(() => attachments.id), ownerType: text('owner_type').$type<'email' | 'campaign' | 'review'|'mailbox'>().notNull(), ownerId: text('owner_id').notNull(),
 }, t => [primaryKey({ columns: [t.workspaceId, t.environment, t.attachmentId, t.ownerType, t.ownerId] }), index('sending_attachment_owner').on(t.workspaceId, t.environment, t.ownerType, t.ownerId)]);
 export const campaigns = pgTable('sending_campaigns', {
   id: text('id').primaryKey(), ...scope(), revision: integer('revision').notNull().default(1), draft: jsonb('draft').$type<CampaignDraft>().notNull(),

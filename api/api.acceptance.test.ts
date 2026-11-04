@@ -689,6 +689,25 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
         const identities = new Map<string, Json>(), associations = new Set<string>();
+        const {S3Client}=await import('@aws-sdk/client-s3'),{SESClient}=await import('@aws-sdk/client-ses');
+        const objects=new Map<string,Buffer>(),rules=new Map<string,Json>();let failNextArchive=false;
+        providerTest.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
+          const region=await this.config.region(),i=cmd.input;
+          if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand') return {Metadata:{Name:'existing-rules'},Rules:[{Name:'customer-rule'},...(rules.has(region)?[rules.get(region)]:[])]};
+          assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(i.RuleSetName,'existing-rules');assert.equal(i.After,'customer-rule');assert.deepEqual(i.Rule.Recipients,[]);assert.equal(i.Rule.ScanEnabled,true);assert.equal(i.Rule.Actions[0].S3Action.ObjectKeyPrefix,'staging/');rules.set(region,i.Rule);return {};
+        });
+        providerTest.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
+          assert.equal((await this.config.credentials()).accessKeyId,platformKey.accessKeyId);
+          const i=cmd.input,k=i.Bucket+'/'+i.Key;
+          switch(cmd.constructor.name){
+            case 'HeadBucketCommand': throw Object.assign(new Error('missing fixture bucket'),{name:'NotFound'});
+            case 'CreateBucketCommand': case 'PutBucketTaggingCommand': case 'PutPublicAccessBlockCommand':case 'PutBucketPolicyCommand':case 'PutBucketLifecycleConfigurationCommand':return {};
+            case 'GetObjectCommand': assert.ok(objects.has(k));return {Body:{transformToByteArray:async()=>objects.get(k)}};
+            case 'CopyObjectCommand':assert.ok(objects.has(i.CopySource));objects.set(k,objects.get(i.CopySource)!);return {};
+            case 'PutObjectCommand':if(failNextArchive){failNextArchive=false;throw Error('synthetic archive interruption');}objects.set(k,Buffer.from(i.Body));return {};
+            default:throw Error(cmd.constructor.name);
+          }
+        });
         let loseCreateResponse = false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
@@ -702,7 +721,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
             case 'CreateEmailIdentityCommand': {
               if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
-              assert.equal(i.Tags[0].Key,'opensend:domain-claim');
+              assert.equal(i.Tags[0].Key,i.EmailIdentity==='in.opensend.mx'?'opensend:installation-id':'opensend:domain-claim');
               identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
               if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
               return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
@@ -726,8 +745,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'ListSubscriptionsByTopicCommand': return { Subscriptions: topic!.subs };
             case 'SubscribeCommand': {
               assert.equal(i.Endpoint, `${origin}/v1/events/ses`);
-              const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1', [i.TopicArn]);
-              assert.equal(allowed.rowCount, 1); topic!.subs.push({ ...i, SubscriptionArn: `${i.TopicArn}:fixture` }); return {};
+              const allowed = await pool.query('SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=$1 OR inbound_topic_arn=$1 UNION SELECT 1 FROM provider_connections WHERE feedback_topic_arn=$1 UNION SELECT 1 FROM mailbox_regions WHERE topic_arn=$1', [i.TopicArn]);
+              assert.equal(allowed.rowCount, 1); topic!.subs.push({ ...i, SubscriptionArn: `${i.TopicArn}:fixture` }); return {SubscriptionArn:`${i.TopicArn}:fixture`};
             }
             case 'GetSubscriptionAttributesCommand': return { Attributes: { ...topic!.subs[0], PendingConfirmation: String(ohioConfirmationPending && region === 'us-east-2' && account === platform), Owner: account, RawMessageDelivery: 'false' } };
             case 'CreateTenantCommand': {
@@ -792,7 +811,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const idleStart = calls.length + identityChecks;
         await reconcileSharedConnections(runtime);
         assert.equal(calls.length + identityChecks, idleStart, 'Ready pools and connections need no AWS reconciliation.');
-        assert.equal(sets.size, 4); assert.equal(topics.size, 2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 2);
+        assert.equal(sets.size, 4); assert.equal(topics.size, 4); assert.equal(rules.size,2); assert.equal(calls.filter(n => n === 'SubscribeCommand').length, 4);
+        assert.equal(identityChecks,1,'Sending and receiving pool preparation reuse the verified platform principal across regions.');
         assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
@@ -802,7 +822,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
           let answer = '', lookups = 0;
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
-            const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query'); assert.equal(url.searchParams.get('type'),'TXT');
+            const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
+            if(url.searchParams.get('type')==='MX') return Response.json({Status:0,Answer:[{name:url.searchParams.get('name'),type:15,data:'10 existing.invalid.'}]});
+            assert.equal(url.searchParams.get('type'),'TXT');
             lookups++; return Response.json({ Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] });
           });
           const before = calls.length;
@@ -852,6 +874,55 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
           assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,2);
           assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
+          await dt.test('MX inbound: instant and verified custom addresses split an envelope with private Bcc, without enable',async it=>{
+            const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+            const blind=`private@${a.org.slug}.in.opensend.mx`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
+            const hook=unique('hook'); // Non-routable fixture: inspect the durable snapshot, never POST externally.
+            await pool.query(`INSERT INTO mailbox_webhooks(id,workspace_id,environment,url,event_types,encrypted_secret) VALUES ($1,$2,'live','https://fixture.invalid/','["message.received"]','fixture')`,[hook,b.org.id]);
+            it.after(async()=>{await pool.query('DELETE FROM mailbox_webhooks WHERE id=$1',[hook]);});
+            assert.ok(checked.dns.some((r:Json)=>r.purpose==='inbound' && r.name===`reply.${domain}` && r.priority===10));
+            const {BucketName:bucket,TopicArn:topicArn}=rules.get(region)!.Actions[0].S3Action;
+            const sesMessageId=unique('incoming'),trace=`Received: from sender.invalid by inbound-smtp.${region}.amazonaws.com with SMTP id ${sesMessageId}\r\n for <${blind}>; Tue, 3 Nov 2026 00:00:00 +0000\r\n`;
+            const body=Buffer.from(`Received: from original.invalid by sender.invalid; Tue, 3 Nov 2026 00:00:00 +0000\r\nFrom: sender@example.org\r\nTo: ${custom}\r\nMessage-ID: <${sesMessageId}@example.org>\r\nSubject: Incoming\r\nContent-Type: multipart/mixed; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nMessage\r\n--part\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Transfer-Encoding: base64\r\n\r\n/wA=\r\n--part--\r\n`);
+            const raw=Buffer.concat([Buffer.from(trace),body]);objects.set(`${bucket}/staging/${sesMessageId}`,Buffer.concat([Buffer.from(`Bcc: ${blind},\r\n ${dropped}\r\nResent-Bcc: ${blind}\r\n`),raw]));
+            const message={notificationType:'Received',mail:{messageId:sesMessageId,source:'sender@example.org',destination:[blind,custom,dropped],commonHeaders:{bcc:[blind]}},receipt:{timestamp:new Date().toISOString(),recipients:[blind,custom,dropped],action:{type:'S3',bucketName:bucket,topicArn,objectKey:`staging/${sesMessageId}`}}};
+            const accept=()=>acceptInboundNotification(runtime,{topicArn,region,message});
+            const count=queries.mock.callCount(); assert.equal(await accept(),2);it.diagnostic(`MX inbound notification: ${queries.mock.callCount()-count} pg statement(s) for 2 workspaces`);assert.equal(await accept(),0);
+            const receipts=await pool.query('SELECT * FROM mail_receipts WHERE ses_message_id=$1',[sesMessageId]);assert.equal(receipts.rowCount,2);
+            for(const [user,recipient,expected] of [[a,blind,raw],[b,custom,body]] as const){
+              const wid=user.org.id,r=receipts.rows.find(r=>r.workspace_id===wid);assert.deepEqual(r.recipients,[recipient]);assert.ok(!JSON.stringify(r.notification).includes(blind));assert.ok(!JSON.stringify(r.notification).includes(dropped));
+              const n=queries.mock.callCount();await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),workspaceId:wid,environment:'live',attempts:1});it.diagnostic(`MX inbound ingest: ${queries.mock.callCount()-n} pg statements including transaction for new address, 1 attachment`);assert.equal(queries.mock.callCount()-n,5);
+              const {rows:[stored]}=await pool.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);assert.deepEqual(stored.envelope_to,[recipient]);assert.deepEqual(stored.bcc,[]);assert.equal(stored.to[0].address,custom);assert.deepEqual(objects.get(`${bucket}/${stored.raw_key}`),expected);
+              assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
+              const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
+              if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
+              const detailed=ok(await local('GET',`/mailbox/v1/messages/${stored.id}`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
+            }
+            message.receipt.recipients=[dropped];message.mail.messageId=unique('unmatched');message.receipt.action.objectKey='staging/'+message.mail.messageId;
+            assert.equal(await accept(),0);assert.equal((await pool.query('SELECT 1 FROM mail_receipts WHERE ses_message_id=$1',[message.mail.messageId])).rowCount,0);
+            message.receipt.recipients=[custom];message.receipt.timestamp='2020-01-01T00:00:00Z';assert.equal(await accept(),0,'A delayed notification predating this domain claim does not transfer old mail.');
+            const deliveries=await pool.query('SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1',[hook]);assert.equal(deliveries.rowCount,1);assert.ok(!JSON.stringify(deliveries.rows).includes(blind));
+            const live={'x-opensend-environment':'live'},awsCount=calls.length;
+            error(await local('POST','/v1/inbound/addresses',{address:`escape@${b.org.slug}.in.opensend.mx`,publicAddress:'escape@in.opensend.mx'},b.cookie,live),409,'PUBLIC_DOMAIN_NOT_VERIFIED');
+            error(await local('POST','/v1/inbound/addresses',{address:`escape@${a.org.slug}.in.opensend.mx`,publicAddress:`escape@${a.org.slug}.in.opensend.mx`},b.cookie,live),409,'MAILBOX_DOMAIN_NOT_ENABLED');
+            const box=ok(await local('POST','/v1/inbound/addresses',{address:`archive@reply.${domain}`,publicAddress:`archive@${domain}`},b.cookie,live),201);
+            assert.equal(calls.length,awsCount);assert.equal((await pool.query("SELECT region FROM mailbox_domains WHERE id='instant:'||$1",[b.org.id])).rows[0].region,region);
+            const sourceBytes=new Map<string,Uint8Array>();it.mock.method(runtime.storage,'put',async(key:string,bytes:Uint8Array)=>{assert.equal((await pool.query('SELECT 1 FROM sending_attachments WHERE storage_key=$1',[key])).rowCount,1,'Reservation commits before storage upload');sourceBytes.set(key,bytes);});
+            it.mock.method(runtime.storage,'get',async(key:string)=>({body:sourceBytes.get(key)!,contentType:'text/plain'}));
+            failNextArchive=true;const out=ok(await local('POST','/v1/inbound/threads',{addressId:box.id,to:['outside@example.org'],subject:'archive',text:'attached',attachments:[{filename:'file.txt',contentType:'text/plain',content:Buffer.from('archive bytes').toString('base64')}]},b.cookie,live),202);
+            const archive=async()=>(await pool.query('SELECT id,source_attachment_id,storage_key,bucket FROM mail_attachments WHERE message_id=$1',[out.id])).rows[0];const pending=await archive();assert.ok(pending.source_attachment_id);assert.equal((await pool.query("SELECT 1 FROM sending_attachment_links WHERE owner_type='mailbox' AND owner_id=$1",[pending.id])).rowCount,1);
+            ok(await local('GET',`/v1/inbound/messages/${out.id}/attachments/${pending.id}`,undefined,b.cookie,live));const archived=await archive();assert.equal(archived.source_attachment_id,null);assert.equal(objects.get(archived.bucket+'/'+archived.storage_key)?.toString(),'archive bytes');
+            await pool.query('DELETE FROM sending_emails WHERE id=$1',[out.emailId]);
+            const sync=await import('./src/mailbox-send.js'),conn=await pool.connect();
+            try { await conn.query('BEGIN');
+              for(const {org} of [a,b]) {
+                const email=unique('outbound');await conn.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated) VALUES($1,$2,'live',$3,'fixture','sender@example.org','[]','[]','[]','Fixture','delivered',$1,'{}',false)`,[email,org.id,region]);
+                await conn.query(`INSERT INTO mail_messages(id,workspace_id,environment,direction,thread_id,sender_mailbox_id,sending_email_id,status) SELECT $1,workspace_id,environment,'outbound',thread_id,mailbox_id,$2,'queued' FROM mailbox_threads WHERE workspace_id=$3 LIMIT 1`,[unique('out'),email,org.id]);
+              }
+              const n=queries.mock.callCount();assert.ok(await sync.syncOutboundMessages({...runtime,db:drizzle(conn)})>=2);assert.equal(queries.mock.callCount()-n,1);
+              for(const {org} of [a,b]) assert.deepEqual((await conn.query("SELECT type FROM mailbox_events WHERE workspace_id=$1 AND type IN ('message.sent','message.delivered') ORDER BY seq",[org.id])).rows.map(r=>r.type),['message.sent','message.delivered']);
+            } finally {await conn.query('ROLLBACK');conn.release();}
+          });
           error(await send(`hi@not${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
           await pool.query("UPDATE jobs SET status='running',lease_until=now()+interval '3 minutes' WHERE id=$1",[job.id]);
           const configured = ok(await local('POST',`${detail}/mail-from`,{ mailFromDomain:`bounce.${domain}` },b.cookie));
@@ -872,11 +943,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const i=raced.findIndex(r=>r.status===201); ok(await local('DELETE',`/v1/domains/${ok(raced[i]!,201).id}`,undefined,[a,b][i]!.cookie));
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
-        runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v1.yaml';
+        runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v3.yaml';
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
         externalIds = [ac,bc].map(reply => {
           const row = ok(reply, 201); assert.equal(row.status, 'pending'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
-          assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
+          assert.equal(row.templateVersion,'v3');assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
         });
         assert.notEqual(externalIds[0], externalIds[1]);
         await assert.rejects(pool.query('UPDATE provider_connections SET external_id=$1 WHERE workspace_id=$2', [externalIds[0], b.org.id]), { code: '23505' });
@@ -890,6 +961,33 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['dkim','dkim','dkim']);
         const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
         await (await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,j.payload,{id:j.id,attempts:1,workspaceId:a.org.id,environment:'live'});
+        await providerTest.test('BYO inbound uses its assumed role and per-domain rule, never the platform catch-all',async bt=>{
+          const headers={'x-opensend-environment':'live'},wid=a.org.id;
+          bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{assert.equal(new URL(String(input)).searchParams.get('type'),'MX');return Response.json({Status:0,Answer:[]});});
+          bt.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){
+            assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'customer-set'},Rules:[]};
+            assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.RuleSetName,'customer-set');assert.deepEqual(cmd.input.Rule.Recipients,[domain]);return {};
+          });
+          let copied='';bt.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
+            assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');
+            if(cmd.constructor.name==='GetObjectCommand')return {Body:{transformToByteArray:async()=>Buffer.from('From: sender@example.org\r\nSubject: BYO\r\n\r\nBody')}};
+            if(cmd.constructor.name==='CopyObjectCommand')copied=cmd.input.Key;return {};
+          });
+          // The separate harness runner has no AWS mocks. Reserve its pending reconcile before the HTTP enable.
+          const scheduled=unique('reconcile');await pool.query(`INSERT INTO jobs(id,type,workspace_id,environment,payload,available_at) VALUES ($1,'mailbox.reconcile',$2,'live',jsonb_build_object('region',$3::text),now()+interval '1 day')`,[scheduled,wid,region]);
+          bt.after(async()=>{await pool.query('DELETE FROM jobs WHERE id=$1',[scheduled]);});
+          ok(await local('POST',`/v1/inbound/domains/${byoDomain.id}/enable`,{},a.cookie,headers),202);
+          await (await import('./src/mailbox-setup.js')).reconcileRegion(runtime,region,wid);
+          const {rows:[r]}=await pool.query('SELECT bucket,topic_arn AS arn FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,region]);
+          const sesMessageId=unique('byo'),recipient=`byo@${domain}`,other=`hidden@${b.org.slug}.in.opensend.mx`;
+          const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
+          const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
+          assert.equal(await acceptInboundNotification(runtime,{topicArn:r.arn,region,message}),1);
+          await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid,environment:'live'});
+          assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
+          const {rows:[stored]}=await pool.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);
+          const detail=ok(await local('GET',`/mailbox/v1/messages/${stored.id}`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
+        });
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
         const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
@@ -1390,7 +1488,7 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await get(`/messages/${unassigned}`,h),404); error(await get(`/messages/${unassigned}?addressId=${a.id}`),404);
       error(await post(`${path}/reply`,{replyToMessageId:unassigned,text:'not routed'}),404);
       const fileId = unique('att');
-      await runtime.db.insert(mailAttachments).values({id:fileId,...scope,messageId:hidden,filename:'invoice.txt',contentType:'text/plain',sizeBytes:42,disposition:'attachment',sha256:'0'.repeat(64),bucket:'inbound-fixture',storageKey:'invoice.txt'});
+      await runtime.db.insert(mailAttachments).values({id:fileId,...scope,messageId:hidden,filename:'invoice.txt',contentType:'text/plain',sizeBytes:42,disposition:'attachment',sha256:'0'.repeat(64),bucket:'inbound-fixture',storageKey:`workspaces/${scope.workspaceId}/att/${hidden}/${fileId}`});
       await db.query('UPDATE mail_messages SET text=$1, html=$2, attachment_count=1 WHERE id=$3',['a'.repeat(9000),'<p>Invoice</p>',hidden]);
       const preview = ok(await get(path)).messages.find((m:Json)=>m.id===hidden);
       assert.equal(preview.text.length,8192); assert.equal(preview.bodyTruncated,true);
@@ -3429,6 +3527,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { Credentials:{ AccessKeyId:'fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture-session',Expiration:new Date(Date.now()+3600000) } };
       });
       const quotaReads: string[] = [], sends: string[] = []; let exhausted = true;
+      const gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+      runtime.storage={put:async()=>{},get:async()=>({body:gif,contentType:'image/gif'}),delete:async()=>{}};
       t.mock.method(SESv2Client.prototype,'send', async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
         const key=(await this.config.credentials()).accessKeyId, customer=key==='fixture-customer';
         if (cmd instanceof GetAccountCommand) { quotaReads.push(key); if (!customer) await new Promise(r=>setTimeout(r,35)); return { ProductionAccessEnabled:!customer, SendingEnabled:true, SendQuota:{MaxSendRate:customer?1:1000,Max24HourSend:customer?200:10000,SentLast24Hours:customer&&exhausted?200:0} }; }
@@ -3438,6 +3538,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.ok(cmd instanceof SendEmailCommand); const input=cmd.input, wid=input.EmailTags!.find(t=>t.Name==='opensend_workspace_id')!.Value!;
         assert.equal(wid,customer?byo:shared); assert.equal(input.TenantName,customer?undefined:`opensend-${shared}`);
         assert.equal(input.ConfigurationSetName,customer?setupResources(byo).transactional:'opensend-mx-transactional');
+        if(!customer){assert.ok(input.Content?.Simple);assert.equal(input.Content?.Raw,undefined);if(input.Content.Simple.Subject?.Data==='ordinary'){const [file]=input.Content.Simple.Attachments!;assert.equal(file!.ContentDisposition,'INLINE');assert.equal(file!.ContentId,'logo');assert.deepEqual(Buffer.from(file!.RawContent!),gif);}}
         sends.push(wid);
         if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
         return {MessageId:'same-provider-id-in-both-accounts'};
@@ -3445,7 +3546,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wakes: string[]=[]; runtime.dispatch=async (mode, region, accountId)=>{ wakes.push(`${mode}:${region}:${accountId}`); };
       const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-opensend-workspace':wid});
       const template={template:{name:'fixture',data:{}}}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
-      const a=ok(await send(shared,{subject:'ordinary',text:'fixture'}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
+      const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-opensend-workspace':shared}),201);
+      const a=ok(await send(shared,{subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id]}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
       assert.deepEqual(wakes,[pool,account,pool].map(id=>`live:${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
       const drain=(accountId:string)=>runDispatcher(runtime,{environment:'live',region:REGION,accountId,lanes:1});
@@ -3561,7 +3663,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(followup.inReplyTo, wire); assert.equal(followup.threadId, sent.threadId);
 
       let mime = '';
-      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => { assert.ok(cmd instanceof GetObjectCommand); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};assert.ok(cmd instanceof GetObjectCommand); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string, timestamp = new Date().toISOString()) {
         const receiptId = unique('fixture'), inboundId = `${receiptId}@example.net`;
         mime = `From: Customer <customer@example.net>\r\nTo: ${to}\r\nSubject: Re: Case 42\r\nMessage-ID: <${inboundId}>\r\nIn-Reply-To: <${wire}>\r\nReferences: <${wire}>\r\n\r\nThank you.`;
@@ -3631,7 +3733,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'] }), 201);
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', mailboxIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
-      t.mock.method(S3Client.prototype,'send', async (cmd: any) => { assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string, mime: string) {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
         const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };

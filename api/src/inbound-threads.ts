@@ -3,7 +3,7 @@ import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
 import { ApiError, errors, json, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
-import { sendFromMailbox, type OutgoingMessage } from './mailbox-send.js';
+import { sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
 
 const base = '/v1/inbound/threads';
@@ -113,7 +113,7 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
   return { messages: rows.slice(0, limit).reverse().map(item => messageView(item.row, item.addressIds,item.read)), nextCursor: rows.length > limit && last ? encodeCursor(last.at, last.row.id) : null };
 }
 
-export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess, sign: (runtime:Runtime, region:string, bucket:string, key:string, filename:string)=>Promise<{url:string;expiresAt:string}>) {
+export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess, sign: (runtime:Runtime,wid:string,kind:'att', region:string, bucket:string, key:string, filename:string,pendingArchive?:string)=>Promise<{url:string;expiresAt:string}>) {
   app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundThreads', tags, security, summary: 'List visible conversations',
     description: 'Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.',
     request: { query: ListQuery }, responses: { 200: response(page(Thread).openapi('InboundThreadPage')), ...errors } }), async c => {
@@ -155,9 +155,9 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
     request:{params:z.object({messageId:Id,attachmentId:Id}),query:AddressFilter},responses:{200:response(z.object({url:z.string(),expiresAt:z.string()}).openapi('InboundAttachmentDownload')),...errors}}),async c=>{
     const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');
-    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),accessible(v,q)));
+    const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),accessible(v,q)));
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
-    return c.json(await sign(c.env,file.region,file.bucket,file.key,file.filename),200);
+    return c.json(await sign(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
   });
 }
 
@@ -195,14 +195,16 @@ export async function wakeMailboxSend(c: Ctx, actor: Actor, runnable: number) {
   if (runnable) try { await c.env.wake?.(runnable); } catch { /* durable */ }
 }
 export async function queueInboundThreadMessage(c: Ctx, actor: Actor, prepare: (db: DbExecutor) => Promise<Omit<OutgoingMessage, 'actor'>>) {
-  let runnable = 0;
+  let runnable = 0,prepared:Omit<OutgoingMessage,'actor'>|undefined;
+  const body=await c.req.json<{attachments?:unknown[]}>();
   // Never resolve the parent, recipients, or attachments on replay. The path already binds the thread.
-  const result = await idempotent(c, actor, await c.req.json<unknown>(), async db => {
-    const outgoing = await prepare(db);
+  const result = await idempotent(c, actor, body, async db => {
+    const outgoing = prepared ?? await prepare(db);
     const queued = await sendFromMailbox(c.env, db, { ...outgoing, actor });
     runnable = queued.runnable;
     return messageView(queued.message, [outgoing.mailbox.id]);
-  });
+  },undefined,body.attachments?.length ? async()=>{prepared=await prepare(c.env.db);} : undefined);
+  if(result.attachmentCount) await finishMailboxArchive(c.env,actor.workspaceId,result.id);
   await wakeMailboxSend(c, actor, runnable);
   return result;
 }

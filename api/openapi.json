@@ -4422,7 +4422,8 @@
                   "enum": [
                     "dkim",
                     "ownership",
-                    "mail_from"
+                    "mail_from",
+                    "inbound"
                   ]
                 }
               },

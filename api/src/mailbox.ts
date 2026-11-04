@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, or, sql, type SQL } from 'drizzle-orm';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand,type S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
 import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
@@ -9,7 +9,9 @@ import { domains } from './db/operations.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { configuredEventType, eventView, inboundEventType, inboundEventTypes, latestCursor, mailboxEventTypes, readEvents, recordEvents, storedEventType, webhookSecretBinding } from './mailbox-events.js';
-import { mailboxS3, queueReconcile } from './mailbox-setup.js';
+import { readableMailboxKey,mailboxS3, queueReconcile,sharedInboundDomain,instantRegion } from './mailbox-setup.js';
+import {workspaceConnection} from './provider-credentials.js';
+import { archiveMailboxFiles,finishMailboxArchive } from './mailbox-send.js';
 import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, replyText, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
@@ -212,8 +214,8 @@ const storedSummaryColumns = { ...summaryColumns, region: mailMessages.region, e
 const summaryView = (row: Pick<MessageRow, keyof typeof summaryColumns>, mailboxId: string, read: boolean, labels: string[] = []) => ({ id: row.id, threadId: row.threadId, mailboxId, direction: row.direction, status: row.status, errorCode: row.errorCode, read, labels,
   from: { name: row.fromName, address: row.fromAddress }, to: row.to, cc: row.cc, subject: row.subject, snippet: row.snippet, sentAt: iso(row.sentAt), receivedAt: iso(row.receivedAt)!,
   attachmentCount: row.attachmentCount, spam: row.spam, automated: row.automated });
-async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolean; labels?: string[] }[], mailboxId: string, options: { html: boolean; headers: boolean }, db: Pick<Runtime['db'], 'select'> = runtime.db) {
-  const files = rows.length ? await db.select().from(mailAttachments).where(inArray(mailAttachments.messageId, rows.map(item => item.row.id))).orderBy(asc(mailAttachments.id)) : [];
+async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolean; labels?: string[] }[], mailboxId: string, options: { html: boolean; headers: boolean }, db: Pick<Runtime['db'], 'select'> = runtime.db, loaded?: (typeof mailAttachments.$inferSelect)[]) {
+  const files = loaded ?? (rows.length ? await db.select().from(mailAttachments).where(inArray(mailAttachments.messageId, rows.map(item => item.row.id))).orderBy(asc(mailAttachments.id)) : []);
   return rows.map(({ row, read, labels }) => {
     const text = row.text ?? (row.html ? htmlToPlain(row.html) : '');
     return { ...summaryView(row, mailboxId, read, labels), bcc: row.bcc, replyTo: row.replyTo, emailId: row.sendingEmailId, messageId: row.messageId, inReplyTo: row.inReplyTo, references: row.references,
@@ -223,12 +225,14 @@ async function fullViews(runtime: Runtime, rows: { row: MessageRow; read: boolea
 }
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, mailboxIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
 const webhookView = (row: typeof mailboxWebhooks.$inferSelect) => ({ id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes.map(storedEventType) as (typeof mailboxEventTypes[number])[], mailboxIds: row.mailboxIds, paused: row.paused, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
-async function signedUrl(runtime: Runtime, region: string, bucket: string, key: string, filename?: string) {
-  const s3 = mailboxS3(runtime, region);
+async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
+  const s3 = client ?? await mailboxS3(runtime,wid,region,bucket);
   try {
+    if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive,s3);
+    key=await readableMailboxKey(runtime,wid,region,bucket,key,kind,runtime.db,s3);
     const disposition = filename ? `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` : undefined;
     return { url: await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key, ResponseContentDisposition: disposition }), { expiresIn: 300 }), expiresAt: new Date(Date.now() + 300_000).toISOString() };
-  } finally { s3.destroy(); }
+  } finally { if(!client)s3.destroy(); }
 }
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
   await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
@@ -337,6 +341,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
     request: { params: IdParam, body: json(z.object({ catchAll: catchAll.optional(), force: z.boolean().default(false) }).strict().openapi(`Enable${prefix}Domain`)) }, responses: { 202: response(domain), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id); const input = c.req.valid('json');
     c.env = await withRegionSettings(c.env, value.workspaceId);
+    if (c.env.config.multiTenant && (await workspaceConnection({...c.env,config:{...c.env.config,workspaceId:value.workspaceId}},row.region)).kind==='shared') return c.json((await domainViews(c,[row],inbound))[0]!,202);
     if (!c.env.config.regions.includes(row.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable the domain’s SES region first.');
     const identity = await getSes(c.env, row.region).send(new GetEmailIdentityCommand({ EmailIdentity: row.name })).catch(() => { throw new ApiError(503, 'SES_UNAVAILABLE', 'Could not read the domain’s SES verification status.', undefined, true); });
     if (identity.VerificationStatus !== 'SUCCESS') throw new ApiError(409, 'DOMAIN_NOT_VERIFIED', 'Verify the domain in SES before enabling mailboxes.');
@@ -355,6 +360,7 @@ function registerReceivingDomainSet(app: App, inbound: boolean) {
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/disable`, operationId: inbound ? 'disableInboundDomain' : 'mailboxDisableDomain', summary: 'Stop receiving for a domain', description: `Removes the domain from the OpenSend receipt rule. ${inbound ? 'Receiving addresses' : 'Mailboxes'} and stored messages are kept.`, request: { params: IdParam }, responses: { 202: response(domain), ...errors } }), async c => {
     const value = admin(c); const row = await operationDomain(c, c.req.valid('param').id);
+    if (c.env.config.multiTenant && (await workspaceConnection({...c.env,config:{...c.env.config,workspaceId:value.workspaceId}},row.region)).kind==='shared') throw new ApiError(409,'HOSTED_RECEIVING_MANAGED','Hosted mail receives automatically. Remove the MX record to stop delivery.');
     await c.env.db.transaction(async tx => {
       const updated = await tx.update(mailboxDomains).set({ status: 'disabling', updatedAt: new Date().toISOString() }).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.domainId, row.id), isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['provisioning', 'waiting_for_mx', 'active', 'failed']))).returning({ id: mailboxDomains.id });
       if (updated.length) await queueReconcile(tx, value.workspaceId, row.region);
@@ -462,6 +468,11 @@ function registerAddressSet(app: App, legacy: boolean) {
   app.openapi(createRoute({ ...meta, method: 'post', path: collection, operationId: legacy ? 'mailboxCreate' : 'createInboundAddress', summary: 'Create a receivable address', description: 'Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(schema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     const host = input.address.split('@')[1]!;
+    if (c.env.config.multiTenant && host.endsWith(`.${sharedInboundDomain(c.env)}`)) {
+      await c.env.db.execute(sql`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status,enabled_at)
+        SELECT 'instant:'||w.id,w.id,'live','instant:'||w.id,${host},p.region,'active',now() FROM workspaces w CROSS JOIN (SELECT ${instantRegion(c.env)} AS region) p
+        WHERE w.id=${value.workspaceId} AND w.slug||'.'||${sharedInboundDomain(c.env)}=${host} AND p.region IS NOT NULL ON CONFLICT(id) DO UPDATE SET name=excluded.name,region=excluded.region WHERE (mailbox_domains.name,mailbox_domains.region)<>(excluded.name,excluded.region)`);
+    }
     const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(mailboxDomains.environment, LIVE), eq(mailboxDomains.name, host)));
     if (!domain || ['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Enable receiving for ${host} before creating mailboxes on it.`, 'address');
     const publicAddress = input.publicAddress;
@@ -469,6 +480,7 @@ function registerAddressSet(app: App, legacy: boolean) {
       if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
       const [local, publicHost] = publicAddress.split('@') as [string, string];
       if (local !== input.address.split('@')[0] || !host.endsWith(`.${publicHost}`)) throw new ApiError(422, 'PUBLIC_ADDRESS_MISMATCH', 'Use the same local part on a parent domain of the receiving address.', 'publicAddress');
+      if (!c.env.config.multiTenant) {
       c.env = await withRegionSettings(c.env, value.workspaceId);
       const identity = await getSes(c.env, domain.region).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
         if (error instanceof Error && error.name === 'NotFoundException') throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `Verify the exact SES domain identity ${publicHost} in ${domain.region}.`, 'publicAddress');
@@ -476,9 +488,15 @@ function registerAddressSet(app: App, legacy: boolean) {
       });
       if (identity.VerifiedForSendingStatus !== true) throw new ApiError(409, 'PUBLIC_DOMAIN_NOT_VERIFIED', `${publicHost} is not verified for sending in ${domain.region}.`, 'publicAddress');
       if (identity.DkimAttributes?.SigningEnabled !== true || identity.DkimAttributes.Status !== 'SUCCESS') throw new ApiError(409, 'PUBLIC_DOMAIN_DKIM_NOT_READY', `Enable and verify DKIM signing for ${publicHost} in ${domain.region}.`, 'publicAddress');
+      }
     }
     const { row, runnable } = await c.env.db.transaction(async tx => {
-      await lockMailboxLane(tx, 'address');
+      await lockMailboxLane(tx,scope.workspaceId, 'address');
+      if (publicAddress && c.env.config.multiTenant) {
+        const host=publicAddress.split('@')[1]!,reserved=sharedInboundDomain(c.env);
+        if (host===reserved || host.endsWith(`.${reserved}`) || reserved.endsWith(`.${host}`) || !(await tx.execute(sql`SELECT 1 FROM domain_claims d JOIN provider_connections p ON p.id=d.connection_id AND p.workspace_id=d.workspace_id
+          WHERE d.workspace_id=${scope.workspaceId} AND d.name=${host} AND d.verified AND d.ready AND p.region=${domain.region} AND p.status='ready' FOR SHARE OF d,p`)).rowCount) throw new ApiError(409,'PUBLIC_DOMAIN_NOT_VERIFIED','The public sender domain must be verified and ready in this workspace and region.','publicAddress');
+      }
       const created = await createMailbox(tx, scope, { domainId: domain.id, domainName: domain.name, address: input.address, displayName: input.displayName ?? null, aliases: input.aliases, rules: input.rules, metadata: input.metadata, origin: 'api', sendLimits: input.sendLimits, ttlSeconds: input.ttlSeconds });
       if (publicAddress) {
         const [claimed] = await tx.insert(mailboxAddresses).values({ ...scope, address: publicAddress, mailboxId: created.id, kind: 'public' }).onConflictDoNothing().returning({ address: mailboxAddresses.address });
@@ -671,13 +689,13 @@ export function registerMailbox(app: App) {
   app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/messages/{messageId}/raw', operationId: 'mailboxGetRawMessage', tags: [TAG.messages], summary: 'Download the original MIME', description: 'Returns a short-lived S3 link to the original .eml. Raw messages are kept for 90 days.', request: { params: MessageParams }, responses: { 200: response(z.object({ url: z.string(), expiresAt: z.string() }).openapi('MailboxDownload')), ...errors } }), async c => {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId);
     if (!item.row.rawBucket || !item.row.rawKey || !item.row.region) throw new ApiError(404, 'RAW_NOT_AVAILABLE', 'This message has no stored original.');
-    return c.json(await signedUrl(c.env, item.row.region, item.row.rawBucket, item.row.rawKey, `${item.row.id}.eml`), 200);
+    return c.json(await signedUrl(c.env,item.mailbox.workspaceId,'raw', item.row.region, item.row.rawBucket, item.row.rawKey, `${item.row.id}.eml`), 200);
   });
   app.openapi(route({ method: 'get', path: '/mailboxes/{mailboxId}/attachments/{attachmentId}', operationId: 'mailboxGetAttachment', tags: [TAG.messages], summary: 'Download an attachment', description: 'Attachment metadata with a short-lived S3 download link.', request: { params: MailboxParams.extend({ attachmentId: z.string().min(1).max(120) }) }, responses: { 200: response(AttachmentSchema.extend({ messageId: z.string(), url: z.string(), expiresAt: z.string() }).openapi('MailboxAttachmentDownload')), ...errors } }), async c => {
     const p = c.req.valid('param'); const { mailbox } = await mailboxFor(c, p.mailboxId);
     const [file] = await c.env.db.select({ file: mailAttachments, region: mailMessages.region }).from(mailAttachments).innerJoin(mailMessages, eq(mailMessages.id, mailAttachments.messageId)).innerJoin(mailboxMessages, and(eq(mailboxMessages.messageId, mailAttachments.messageId), eq(mailboxMessages.mailboxId, mailbox.id))).where(eq(mailAttachments.id, p.attachmentId));
     if (!file?.region) throw new ApiError(404, 'NOT_FOUND', 'Attachment was not found in this mailbox.');
-    const link = await signedUrl(c.env, file.region, file.file.bucket, file.file.storageKey, file.file.filename);
+    const link = await signedUrl(c.env,mailbox.workspaceId,'att', file.region, file.file.bucket, file.file.storageKey, file.file.filename,file.file.sourceId?file.file.messageId:undefined);
     return c.json({ id: file.file.id, messageId: file.file.messageId, filename: file.file.filename, contentType: file.file.contentType, size: file.file.sizeBytes, contentId: file.file.contentId, disposition: file.file.disposition, ...link }, 200);
   });
 
@@ -731,13 +749,14 @@ export function registerMailbox(app: App) {
   }
   async function dispatch(c: Ctx, mailbox: typeof mailboxes.$inferSelect, scope: Scope, access: MailboxAccess, body: unknown, build: () => Promise<Omit<OutgoingMessage, 'mailbox' | 'actor' | 'scope'>>) {
     const actor = sendActor(c, access);
-    const outgoing = await build();
+    let outgoing:Awaited<ReturnType<typeof build>>;
     const result = await idempotent(c, actor, body, async tx => {
       const { message, runnable } = await sendFromMailbox(c.env, tx, { ...outgoing, mailbox, actor, scope });
       const view = (await fullViews(c.env, [{ row: message, read: true, labels: [] }], mailbox.id, { html: true, headers: true }, tx))[0]!;
       return { ...view, runnable };
-    });
+    },undefined,async()=>{outgoing=await build();});
     const { runnable, ...view } = result as typeof result & { runnable: number };
+    if(view.attachmentCount) await finishMailboxArchive(c.env,scope.workspaceId,view.id);
     await wakeMailboxSend(c, actor, runnable);
     return view;
   }
@@ -748,8 +767,9 @@ export function registerMailbox(app: App) {
     return { text: `\n\n${intro}\n${text.split('\n').map(line => `> ${line}`).join('\n')}`, html: `<br><br><div>${intro.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</div><blockquote style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">${original.html ? safeForwardHtml(original.html) : `<pre>${text.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</pre>`}</blockquote>` };
   };
   async function prepareSend(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, body: z.infer<typeof SendBody>) {
-    return { from: await senderAddress(c, mailbox, body.from, db), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
-      attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers };
+    const from=await senderAddress(c,mailbox,body.from,db);
+    return { from, to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers };
   }
   async function prepareReply(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, original: MessageRow, body: z.infer<typeof ReplyBody> & { expectedRecipients?: Pick<OutgoingMessage, 'to' | 'cc' | 'bcc'> }) {
     const from = await senderAddress(c, mailbox, body.from, db);
@@ -764,7 +784,7 @@ export function registerMailbox(app: App) {
     return {
       from, to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
-      attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), threadId: original.threadId,
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), threadId: original.threadId,
       inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
     };
   }
@@ -809,7 +829,7 @@ export function registerMailbox(app: App) {
     const { access: value } = await mailboxFor(c, c.req.valid('param').mailboxId, 'send'); const input = c.req.valid('json');
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(input.content) || input.content.length % 4) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', 'content must be standard padded base64.', 'content');
     const actor = sendActor(c, value);
-    const row = await c.env.db.transaction(tx => storeAttachmentBytes(c.env, tx, actor, { filename: input.filename, contentType: input.contentType, disposition: input.disposition, ...(input.contentId ? { contentId: input.contentId } : {}) }, new Uint8Array(Buffer.from(input.content, 'base64'))));
+    const row = await storeAttachmentBytes(c.env, actor, { filename: input.filename, contentType: input.contentType, disposition: input.disposition, ...(input.contentId ? { contentId: input.contentId } : {}) }, new Uint8Array(Buffer.from(input.content, 'base64')));
     return c.json({ id: row.id, filename: row.filename, contentType: row.contentType, size: row.size, disposition: row.disposition as 'attachment' | 'inline', contentId: row.contentId }, 201);
   });
   app.openapi(route({ method: 'post', path: '/mailboxes/{mailboxId}/messages', operationId: 'mailboxSendMessage', tags: [TAG.messages], summary: 'Send a new message', description: 'Starts a new conversation. Sent through OpenSend’s transactional pipeline (suppression, SES configuration set, delivery tracking) with open/click tracking off. Supports the Idempotency-Key header. Per-mailbox limits apply (see sendLimits).',
@@ -841,11 +861,11 @@ export function registerMailbox(app: App) {
     const p = c.req.valid('param'); const item = await messageFor(c, p.mailboxId, p.messageId, 'send'); const body = c.req.valid('json');
     const content = forwardBody(item.row, { text: body.text, html: body.html });
     const originals = body.includeAttachments ? (await c.env.db.select({ id: mailAttachments.id }).from(mailAttachments).where(eq(mailAttachments.messageId, item.row.id))).map(row => ({ id: row.id })) : [];
-    const view = await dispatch(c, item.mailbox, item.scope, access(c, 'send'), { ...body, target: item.row.id }, async () => ({
-      from: await senderAddress(c, item.mailbox, body.from), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(item.row.subject, 'Fwd'), text: content.text, html: content.html,
-      attachments: await resolveAttachments(c.env, item.mailbox, [...originals, ...body.attachments]), threadId: item.row.threadId, inReplyTo: null,
+    const view = await dispatch(c, item.mailbox, item.scope, access(c, 'send'), { ...body, target: item.row.id }, async () => { const from=await senderAddress(c,item.mailbox,body.from);return {
+      from, to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(item.row.subject, 'Fwd'), text: content.text, html: content.html,
+      attachments: await resolveAttachments(c.env, item.mailbox, [...originals, ...body.attachments],from), threadId: item.row.threadId, inReplyTo: null,
       references: [...item.row.references, ...(item.row.messageId ? [item.row.messageId] : [])], autoSubmitted: body.autoSubmitted, headers: body.headers,
-    }));
+    };});
     return c.json(view, 202);
   });
 
@@ -1032,12 +1052,17 @@ export function registerMailbox(app: App) {
     const value = readWorkspaceMail(c);
     const [row] = await c.env.db.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, value.workspaceId), eq(mailMessages.environment, LIVE), eq(mailMessages.id, c.req.valid('param').id)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
-    const [[full], [summary], files] = await Promise.all([fullViews(c.env, [{ row, read: false }], '', { html: true, headers: true }), storedSummaries(c.env, [row]), c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId, row.id)).orderBy(asc(mailAttachments.id))]);
-    const link = async (bucket: string | null, key: string | null, filename?: string) => bucket && key && row.region ? (await signedUrl(c.env, row.region, bucket, key, filename)).url : null;
+    const [[summary],files]=await Promise.all([storedSummaries(c.env,[row]),c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,row.id)).orderBy(asc(mailAttachments.id))]);
+    const [full]=await fullViews(c.env,[{row,read:false}],'',{html:true,headers:true},c.env.db,files);
+    const bucket=row.rawBucket ?? files[0]?.bucket;
+    if(files.some(f=>f.bucket!==bucket))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','Message objects must use the same workspace storage connection.');
+    const client=bucket && row.region ? await mailboxS3(c.env,row.workspaceId,row.region,bucket) : undefined;
+    const link = async (kind:'att'|'raw', key:string|null, filename:string) => client && key && bucket && row.region ? (await signedUrl(c.env,row.workspaceId,kind,row.region,bucket,key,filename,undefined,client)).url : null;
     const { mailboxId: _m, read: _r, labels: _l, ...message } = full!;
+    try { if(files.some(f=>f.sourceId))await archiveMailboxFiles(c.env,row.workspaceId,row.id,client);
     return c.json({ ...message, region: row.region, envelopeTo: row.envelopeTo, sesMessageId: row.sesMessageId, sizeBytes: row.sizeBytes, mailboxes: summary!.mailboxes, unrouted: summary!.unrouted,
-      attachments: await Promise.all(files.map(async file => ({ id: file.id, filename: file.filename, contentType: file.contentType, size: file.sizeBytes, contentId: file.contentId, disposition: file.disposition, url: await link(file.bucket, file.storageKey, file.filename) }))),
-      rawUrl: await link(row.rawBucket, row.rawKey, `${row.id}.eml`), linksExpireAt: new Date(Date.now() + 300_000).toISOString() }, 200);
+      attachments: await Promise.all(files.map(async file => ({ id: file.id, filename: file.filename, contentType: file.contentType, size: file.sizeBytes, contentId: file.contentId, disposition: file.disposition, url: await link('att',file.storageKey,file.filename) }))),
+      rawUrl: await link('raw',row.rawKey, `${row.id}.eml`), linksExpireAt: new Date(Date.now() + 300_000).toISOString() }, 200); } finally {client?.destroy();}
   });
 
   // ---------- unrouted ----------

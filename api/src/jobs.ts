@@ -77,7 +77,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     try {
       const handler = handlers[job.type];
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
-      const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type.startsWith('mailbox.') || job.type === 'operation.ses'
+      const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
       await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, environment: job.environment });
       await runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence);

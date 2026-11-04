@@ -297,6 +297,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     mail = materialized.mail; rows = materialized.rows; unsubscribe = materialized.unsubscribe; stored = materialized.stored;
   }
   const s = mail.snapshot;
+  if(leased.owner.tenantName && s.raw) throw new ApiError(422,'SHARED_RAW_UNSUPPORTED','Hosted sending requires structured SES content.');
   if (s.screen && a.environment === 'live' && s.kind === 'transactional') await screenMail(runtime, mail, s);
   const parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
@@ -304,7 +305,7 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   sizeCheck(s, rows);
   const content: SendEmailCommandInput['Content'] = s.raw
     ? { Raw: { Data: new TextEncoder().encode(s.raw) } }
-    : s.html && parts.some(part => part.ContentDisposition === 'INLINE')
+    : !leased.owner.tenantName && s.html && parts.some(part => part.ContentDisposition === 'INLINE')
       ? { Raw: { Data: inlineMessage(s, parts) } }
       : { Simple: { Subject: { Data: s.subject, Charset: 'UTF-8' }, Body: { ...(s.html ? { Html: { Data: s.html, Charset: 'UTF-8' } } : {}), ...(s.text ? { Text: { Data: s.text, Charset: 'UTF-8' } } : {}) }, Headers: s.headers, Attachments: parts } };
   return { ...leased, mail, snapshot: s, content, unsubscribe, stored };

@@ -21,7 +21,7 @@ export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: str
 const scope = () => ({ workspaceId: text('workspace_id').notNull(), environment: text('environment').$type<Mode>().notNull() });
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: 'string' });
 
-export const mailboxWriteLanes = pgTable('mailbox_write_lanes', { lane: text('lane').$type<'address' | 'ingest' | 'events'>().primaryKey() });
+export const mailboxWriteLanes = pgTable('mailbox_write_lanes', { workspaceId:text('workspace_id').notNull(), lane: text('lane').$type<'address' | 'ingest' | 'events'>().notNull() }, t=>[primaryKey({columns:[t.workspaceId,t.lane]})]);
 
 export const mailboxRegions = pgTable('mailbox_regions', {
   workspaceId: text('workspace_id').notNull(), region: text('region').notNull(),
@@ -101,6 +101,7 @@ export const mailboxThreads = pgTable('mailbox_threads', {
 }, t => [primaryKey({ columns: [t.mailboxId, t.threadId] })]);
 
 export const mailAttachments = pgTable('mail_attachments', {
+  sourceId:text('source_attachment_id'),
   id: text('id').primaryKey(), ...scope(), messageId: text('message_id').notNull(), filename: text('filename').notNull(), contentType: text('content_type').notNull(),
   sizeBytes: integer('size_bytes').notNull(), contentId: text('content_id'), disposition: text('disposition').$type<'attachment' | 'inline'>().notNull(),
   sha256: text('sha256').notNull(), bucket: text('bucket').notNull(), storageKey: text('storage_key').notNull(), createdAt: ts('created_at').notNull().defaultNow(),

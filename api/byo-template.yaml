@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: OpenSend MX customer connection v1. Creates one revocable, regional SES role; receiving is optional.
+Description: OpenSend MX customer connection v3. Creates one revocable, regional SES role; receiving is optional.
 Parameters:
   PlatformPrincipalArn:
     Type: String
@@ -93,12 +93,17 @@ Resources:
                   Condition: { StringEqualsIfExists: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
                 - Effect: Allow
                   Action: s3:GetObject
+                  Condition: { StringEquals: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
                   Resource:
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/raw/*'
-                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/att/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/staging/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
                 - Effect: Allow
-                  Action: s3:PutObject
-                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/att/*'
+                  Action: ['s3:PutObject','s3:PutObjectTagging']
+                  Condition: { StringEquals: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
           - !Ref AWS::NoValue
 Outputs:
   AccountId:

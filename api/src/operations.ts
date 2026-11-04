@@ -19,6 +19,8 @@ import { workspaceConnection, type ReadyConnection } from './provider-credential
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
+import { sharedInboundDomain } from './mailbox-setup.js';
+import { checkMx,expectedMx } from './mailbox-dns.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
 
@@ -31,7 +33,7 @@ const webhookPatch = webhookInput.partial().extend({ description: z.string().max
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
 const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
-const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional(), purpose: z.enum(['dkim','ownership','mail_from']).optional() })) }).openapi('DomainReadiness');
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional(), purpose: z.enum(['dkim','ownership','mail_from','inbound']).optional() })) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const settingsSchema = z.object({ name: z.string(), environment: z.enum(['live', 'test']) }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
@@ -209,7 +211,20 @@ const claimProof = (row: {connection:ReadyConnection;token:string}, proven=false
 const cachedDomain = (row:HostedDomain) => row.readiness ?? readiness(row,{VerificationStatus:'PENDING'},claimProof(row));
 const identityBinding = (row:HostedDomain,wid:string) => ({TenantName:`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
 async function saveReadiness(db:DbExecutor,row:{token:string;connection:ReadyConnection},report:Readiness) {
-  await db.execute(sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb,verified=${report.verified},ready=${report.ready} WHERE name=${report.name} AND token=${row.token} AND connection_id=${row.connection.id}`);
+  const saved=sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb,verified=${report.verified},ready=${report.ready} WHERE name=${report.name} AND token=${row.token} AND connection_id=${row.connection.id}`;
+  if (row.connection.kind!=='shared' || !report.ready) { await db.execute(saved); return; }
+  await db.execute(sql`WITH claim AS (${saved} RETURNING workspace_id), root AS (
+    INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status,enabled_at)
+    SELECT ${id('mdom')},workspace_id,'live',${report.id},${report.name},${report.region},'active',now() FROM claim
+    ON CONFLICT(workspace_id,environment,name) DO UPDATE SET domain_id=excluded.domain_id,region=excluded.region,status='active',parent_id=NULL RETURNING id,workspace_id,domain_id,name,region
+  ) INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,parent_id,name,region,status,enabled_at)
+    SELECT ${id('mdom')},workspace_id,'live',domain_id,id,'reply.'||name,region,'active',now() FROM root WHERE ${report.dns.some(r=>r.purpose==='inbound' && r.name===`reply.${report.name}`)}
+    ON CONFLICT(workspace_id,environment,name) DO UPDATE SET domain_id=excluded.domain_id,parent_id=excluded.parent_id,region=excluded.region,status='active'`);
+}
+async function addInboundDns(report:Readiness) {
+  const mx=await checkMx(report.name,report.region);
+  // Never suggest taking another provider's MX, including when lookup failed or a null MX is present.
+  report.dns.push({...expectedMx(['missing','active'].includes(mx.state)?report.name:`reply.${report.name}`,report.region),purpose:'inbound'});
 }
 async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string}) {
   await db.execute(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND token=${row.token} RETURNING name,token),
@@ -244,6 +259,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     const shared=row.connection.kind==='shared', signed=identity.DkimAttributes?.Status==='SUCCESS' && identity.DkimAttributes.SigningEnabled;
     const proven=!shared || !!(signed && await txtProof(`_opensend.${row.name}`,row.token));
     const report=readiness(row,identity,claimProof(row,proven));
+    if (shared) await addInboundDns(report);
     if (shared && report.ready && !row.connection.tenant_provisioned) await ensureTenant(scoped,job.workspaceId,row.connection.id);
     await runtime.db.transaction(async db=>{
       // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
@@ -320,6 +336,8 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
     if (c.env.config.multiTenant) {
+      const reserved=sharedInboundDomain(c.env);
+      if (body.name===reserved || body.name.endsWith(`.${reserved}`) || reserved.endsWith(`.${body.name}`)) throw unavailableDomain();
       const claim=await reserveClaim(c.env,a.workspaceId,body.name,body.region), row={...body,id:claim.id};
       if (claim.readiness != null) return c.json(domainSchema.parse(claim.readiness),201);
       a.wakeJobs=1;
@@ -370,6 +388,7 @@ export function registerOperations(app: App) {
         if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
         await sesCall(()=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
         const report=readiness(row,{...identity,MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}},claimProof(current,!!current.readiness?.verified));
+        report.dns.push(...(current.readiness?.dns.filter(r=>r.purpose==='inbound') ?? []));
         await saveReadiness(db,current,report);
         await db.execute(recheckJob(a.workspaceId,sql`SELECT ${current.id}::text AS id,${current.token}::text AS token`,true)); return report;
       }); a.wakeJobs=1; return c.json(report,200);
@@ -526,14 +545,16 @@ function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) 
   if ((runtime.config.multiTenant && !/^\d{12}$/.test(expected ?? '')) || (expected && accountId !== expected)) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this topic.');
 }
 function registerPublicEvents(app: App) {
-  type TopicBinding = { region: string; aws_account_id: string; kind: 'byo' | 'shared'; ready: boolean };
+  type TopicBinding = { region: string; aws_account_id: string; kind: 'byo' | 'shared'; ready: boolean; inbound:boolean };
   const sendingTopics = new Map<string, { binding: TopicBinding; expires: number }>();
   async function sendingTopic(runtime: Runtime, arn: string, confirming: boolean) {
     const cached = sendingTopics.get(arn);
     if (cached && cached.expires > Date.now()) return cached.binding;
     const binding = (await runtime.db.execute<TopicBinding>(sql`
-      SELECT region, aws_account_id, kind, status='ready' AS ready FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${arn}
-      UNION ALL SELECT region, aws_account_id, 'shared', ready FROM provider_pool_regions WHERE feedback_topic_arn=${arn}`)).rows[0];
+      SELECT region, aws_account_id, kind, status='ready' AS ready,false AS inbound FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${arn}
+      UNION ALL SELECT region, aws_account_id, 'shared', ready,false FROM provider_pool_regions WHERE feedback_topic_arn=${arn}
+      UNION ALL SELECT region,aws_account_id,'shared',inbound_domain IS NOT NULL,true FROM provider_pool_regions WHERE inbound_topic_arn=${arn}
+      UNION ALL SELECT r.region,r.account_id,'byo',c.status='ready',true FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}`)).rows[0];
     if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
     // A pending topic may confirm its subscription but must never prime trust for notifications.
     if (!binding.ready) return confirming ? binding : undefined;
@@ -557,14 +578,9 @@ function registerPublicEvents(app: App) {
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     if (c.env.config.multiTenant) {
-      if (await sendingTopic(c.env, envelope.TopicArn, envelope.Type === 'SubscriptionConfirmation')) {
-        c.env = { ...c.env, config: { ...c.env.config, snsTopicArns: [envelope.TopicArn], inboundTopicArns: [] } };
-      } else {
-        // Inbound has its own, pre-existing trust path; never fall back to legacy sending topics on MX.
-        const inbound = envelope.TopicArn.endsWith('-inbound') ? await resolveRegionRuntime(c.env) : undefined;
-        if (!inbound?.config.inboundTopicArns?.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'This SNS topic is not registered for the sending account and region.');
-        c.env = inbound;
-      }
+      const binding=await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
+      if (!binding) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','This SNS topic is not registered for the account and region.');
+      c.env={...c.env,config:{...c.env.config,snsTopicArns:[envelope.TopicArn],inboundTopicArns:binding.inbound?[envelope.TopicArn]:[]}};
     } else if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
     const trusted = await verifySns(c.env, envelope);
     if (envelope.Type !== 'Notification') {
