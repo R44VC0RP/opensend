@@ -1,0 +1,50 @@
+.home-page { display: flex; flex-direction: column; min-height: 100dvh; width: min(100%, 1080px); margin-inline: auto; padding-inline: var(--space-24); }
+.home-header { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+.home-header .wordmark, .home-header .theme-toggle { position: static; }
+.home-nav { display: flex; align-items: center; gap: var(--space-12); }
+.home-nav > a { color: var(--color-muted); text-decoration: none; transition: color var(--motion-duration); }
+.home-nav > a:hover { color: var(--color-text); }
+.home-main { display: flex; flex: 1; flex-direction: column; gap: var(--space-32); padding-block: var(--space-40) var(--space-32); }
+.home-hero { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-16); }
+.home-hero h1 { max-width: 30ch; font-family: var(--font-mono); font-size: 44px; line-height: 1.1; letter-spacing: -.02em; text-wrap: balance; }
+.home-hero > p { max-width: 52ch; color: var(--color-muted); font-size: var(--text-lg); line-height: var(--leading-lg); text-wrap: pretty; }
+.home-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-8); }
+.home-board { padding: var(--space-24) var(--space-32) var(--space-8); background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: var(--shadow-raised); }
+.home-counter { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-32); padding-bottom: var(--space-24); }
+.home-counter-label { display: flex; align-items: center; gap: var(--space-8); }
+.home-live { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success-marker); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success-marker) 22%, transparent); }
+.home-counter-value { margin-top: var(--space-8); font-family: var(--font-mono); font-size: 64px; line-height: 1; letter-spacing: -.03em; white-space: nowrap; }
+.home-counter-chart { display: flex; flex-direction: column; align-items: flex-end; width: min(320px, 40%); }
+.home-volume { display: block; width: 100%; height: 56px; }
+.home-capabilities { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--color-border); }
+.home-capability { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; padding: var(--space-20) var(--space-20) 0; border-left: 1px solid var(--color-border); }
+.home-capability:first-child { padding-left: 0; border-left: 0; }
+.home-capability h2 { font-family: var(--font-mono); font-size: var(--text-md); font-weight: 700; }
+.home-capability p { flex: 1; text-wrap: pretty; }
+.home-capability code { color: var(--color-accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.home-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding-block: var(--space-20); border-top: 1px solid var(--color-border); font-size: var(--text-xs); }
+.home-footer span { font-family: var(--font-mono); }
+.home-footer nav { display: flex; gap: var(--space-16); }
+.home-footer a { color: inherit; text-decoration: none; }
+.home-footer a:hover { color: var(--color-text); }
+@media (max-width: 850px) {
+  .home-page { padding-inline: var(--space-16); }
+  .home-main { padding-top: var(--space-24); gap: var(--space-24); }
+  .home-hero h1 { font-size: 32px; }
+  .home-hero > p { font-size: var(--text-md); line-height: var(--leading-sm); }
+  .home-board { padding: var(--space-20) var(--space-16) var(--space-4); }
+  .home-counter { flex-direction: column; align-items: stretch; gap: var(--space-16); }
+  .home-counter-value { font-size: 44px; }
+  .home-counter-chart { width: 100%; align-items: flex-start; }
+  .home-capabilities { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: var(--space-24); }
+  .home-capability:nth-child(3) { padding-left: 0; border-left: 0; }
+}
+@media (max-width: 480px) {
+  .home-nav > a { display: none; }
+  .home-hero h1 { font-size: 28px; }
+  .home-counter-value { font-size: 36px; }
+  .home-capabilities { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+  .home-capability { padding: var(--space-16) 0; border-left: 0; }
+  .home-capability + .home-capability { border-top: 1px solid var(--color-border); }
+  .home-footer nav { gap: var(--space-12); }
+}

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, lazy, Suspense, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
@@ -7,6 +7,7 @@ import { regionCatalogKey } from './regions'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 
 type Session = { identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
+const HomePage = lazy(() => import('../features/home').then(m => ({ default: m.HomePage })))
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
@@ -123,11 +124,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
+  // Multi-tenant installations greet signed-out visitors at "/" with the public homepage; /health says which this is.
+  const home = useQuery({ queryKey: ['public-home'], enabled: signedOut && window.location.pathname === '/', staleTime: Infinity, retry: false, queryFn: ({signal}) => request<{multiTenant?: boolean} | null>('/health', {signal}).then(health => health?.multiTenant === true) })
+  const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
   return <ApiContext.Provider key={`${environment}:${generation}`} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? null : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
+    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? null : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
-        {authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>}
+        {authNotice}
         <Button variant="primary" loading={busy} onClick={login}>Continue with Google</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
