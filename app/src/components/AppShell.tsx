@@ -34,7 +34,7 @@ export function AppShell() {
   const hostedSetup = access.multiTenant && api.mode !== 'demo'
   const needsConnection = hostedSetup && session?.identity?.connection?.status !== 'ready'
   // After choosing how to send, the add-domain step stays up until the user continues.
-  const domainStep = useDomainStep(hostedSetup && access.canAdminister && api.environment === 'live' ? session?.identity?.workspaceId : undefined)
+  const domainStep = useDomainStep(hostedSetup && access.canAdminister ? session?.identity?.workspaceId : undefined)
   const onboarding = needsConnection || domainStep !== null
   const discovery = useRegionDiscovery(access.multiTenant ? undefined : current)
   const quota = discovery.data?.account?.quota
@@ -42,8 +42,6 @@ export function AppShell() {
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const navigate = useNavigate()
   const content = useRef<HTMLElement>(null)
-  const testEnvironment = api.environment === 'test' || new URLSearchParams(location.search).get('environment') === 'test'
-  const environmentSearch = testEnvironment ? '?environment=test' : ''
   useEffect(() => {
     window.scrollTo(0, 0)
     content.current?.scrollTo(0, 0)
@@ -53,17 +51,12 @@ export function AppShell() {
     if (regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
-  useEffect(() => {
-    if (api.environment !== 'test' || new URLSearchParams(location.search).get('environment') === 'test') return
-    const search = new URLSearchParams(location.search); search.set('environment', 'test')
-    navigate({ pathname: location.pathname, search: search.toString() }, { replace: true })
-  }, [api.environment, location.pathname, location.search, navigate])
   async function changeWorkspace(id: string) {
     // Detail routes belong to the previous workspace; keep only the section.
     const [section, child] = location.pathname.split('/').filter(Boolean)
     const path = section === 'settings' && child === 'workspace' ? '/settings/workspace' : section ? `/${section}` : '/'
     setSwitching(true)
-    try { await session?.switchWorkspace(id, `${path}${environmentSearch}`) }
+    try { await session?.switchWorkspace(id, path) }
     catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false) }
   }
   function changeRegion(id: string) {
@@ -92,7 +85,7 @@ export function AppShell() {
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
-      <NavLink className="wordmark" to={`/${environmentSearch}`} aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
+      <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
         {workspaceSelect}
@@ -100,10 +93,10 @@ export function AppShell() {
         {access.canAdminister && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
-      <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={`${path}${environmentSearch}`} end={path === '/'}>{title}</NavLink>)}</nav>
+      <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'}>{title}</NavLink>)}</nav>
       <div className="sidebar-footer">
         {access.canAdminister && !access.multiTenant && needsProvisioning && <Link className="sidebar-setup" to={`/settings?region=${encodeURIComponent(regionId)}`}><span>Region needs provisioning</span><span className="sidebar-setup-action">Set up {regionId} →</span></Link>}
-      <div className="sidebar-quota">{api.environment === 'test' || !access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
+      <div className="sidebar-quota">{!access.canAdminister || access.multiTenant ? null : quota?.sentLast24Hours != null && quota.max24HourSend != null ? <>
         <div className="quota-label"><span>SES · 24h</span><span>{percent(quota.sentLast24Hours / Math.max(1, quota.max24HourSend), 0)}</span></div>
         {quota.max24HourSend > 0 && <meter className="quota-meter" min={0} max={quota.max24HourSend} value={quota.sentLast24Hours} aria-label="Daily sending quota used" />}
         <span>{number(quota.sentLast24Hours)} / {number(quota.max24HourSend)} sent</span>

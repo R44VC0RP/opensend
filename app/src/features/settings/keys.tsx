@@ -23,13 +23,12 @@ export function ApiKeysPage() {
   const revokeMcpConnection = useApiMutation((api, id: string) => api.credentials.revokeMcpConnection(id), 'MCP connection revoked')
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
-  const [keyEnvironment, setKeyEnvironment] = useState<'live' | 'test'>('test')
   const [permission, setPermission] = useState<ApiKeyInput['permission']>('send')
   const [allDomains, setAllDomains] = useState(true)
   const [selectedDomains, setSelectedDomains] = useState<string[]>([])
   const [domainError, setDomainError] = useState('')
   const domainOptions = useInfiniteQuery({
-    queryKey: ['opensend', api.mode, api.environment, 'domains', 'key-options'],
+    queryKey: ['opensend', api.mode, 'domains', 'key-options'],
     enabled: open,
     initialPageParam: {page: 1} as Pick<PageRequest, 'page' | 'cursor'>,
     queryFn: ({pageParam, signal}) => api.domains.list({...pageParam, pageSize: 10}, signal),
@@ -48,7 +47,7 @@ export function ApiKeysPage() {
   const [revokeKey, setRevokeKey] = useState<ApiKey | null>(null)
   const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
   const [revokeConnection, setRevokeConnection] = useState<McpConnection | null>(null)
-  function openCreate() { create.reset(); setName(''); setKeyEnvironment('test'); setNameError(''); setPermission('send'); setAllDomains(true); setSelectedDomains([]); setDomainError(''); setOpen(true) }
+  function openCreate() { create.reset(); setName(''); setNameError(''); setPermission('send'); setAllDomains(true); setSelectedDomains([]); setDomainError(''); setOpen(true) }
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!name.trim()) { setNameError('Enter a name for this key.'); return }
@@ -57,7 +56,7 @@ export function ApiKeysPage() {
     if (!allDomains && selectedDomains.length > 50) { setDomainError('Select up to 50 domains.'); return }
     setDomainError('')
     try {
-      const result = await create.mutateAsync({ name: name.trim(), environment: keyEnvironment, permission, domains: allDomains ? [] : selectedDomains })
+      const result = await create.mutateAsync({ name: name.trim(), permission, domains: allDomains ? [] : selectedDomains })
       setOpen(false)
       setSecret(result.secret)
       create.reset()
@@ -67,7 +66,7 @@ export function ApiKeysPage() {
     <PageHeader title="Credentials" actions={<Button variant="primary" onClick={openCreate}>Create API key</Button>} />
     <section className="section stack"><SectionHeader title="API keys" actions={<Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); pagination.reset()}} />} />
     {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
-      { ...settingsColumns.keys[0], render: row => <>{row.name}<div className="muted">{row.environment ?? 'Demo'}</div></> },
+      { ...settingsColumns.keys[0], render: row => row.name },
       { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
       { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</> },
       { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
@@ -75,10 +74,10 @@ export function ApiKeysPage() {
     ]} />}
     {keys.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
     </section>
-    {api.environment !== 'test' && <MailboxKeysSection showRevoked={showRevoked} />}
+    <MailboxKeysSection showRevoked={showRevoked} />
     <section className="section stack"><SectionHeader title="Agent tokens" />
       {agentTokens.error ? <ErrorState error={agentTokens.error} onRetry={() => void agentTokens.refetch()} /> : <DataTable loading={agentTokens.isPending} skeletonRows={1} rows={agentTokens.data ?? []} rowKey={row => row.id} empty={<EmptyState title={showRevoked ? 'No agent tokens' : 'No active agent tokens'} />} columns={[
-        {key: 'purpose', label: 'Purpose', width: '28%', render: row => <>{row.purpose}<div className="muted">{row.environment}</div></>},
+        {key: 'purpose', label: 'Purpose', width: '28%', render: row => row.purpose},
         {key: 'permissions', label: 'Permissions', width: '25%', render: row => <>{row.permissions.join(', ')} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</>},
         {key: 'expires', label: 'Expires', width: '17%', render: row => row.revokedAt ? 'Revoked' : Date.parse(row.expiresAt) <= Date.now() ? 'Expired' : date(row.expiresAt)},
         {key: 'used', label: 'Last used', width: '15%', render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never'},
@@ -97,7 +96,6 @@ export function ApiKeysPage() {
       <form id="create-api-key" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
         <Field label="Name" htmlFor="key-name" error={nameError || fieldError(create.error, 'name')}><Input id="key-name" value={name} onChange={event => setName(event.target.value)} autoFocus required disabled={create.isPending} placeholder="Order notifications" /></Field>
-        <Field label="Key environment" htmlFor="key-environment"><Select id="key-environment" value={keyEnvironment} onValueChange={value => setKeyEnvironment(value as 'live' | 'test')} options={[{value: 'test', label: 'Test · simulated'}, {value: 'live', label: 'Live · real delivery'}]} /></Field>
         <Field label="Permission" htmlFor="key-permission" hint={permission === 'manage' ? 'Includes reading, sending, and management.' : undefined}><Select id="key-permission" value={permission} onValueChange={value => setPermission(value as ApiKeyInput['permission'])} disabled={create.isPending} options={[{ value: 'send', label: 'Sending access' }, { value: 'read', label: 'Read only' }, { value: 'manage', label: 'Management access' }]} /></Field>
         <fieldset className="settings-key-domains" disabled={create.isPending} aria-describedby={domainError || fieldError(create.error, 'domains') ? 'key-domain-error' : undefined}>
           <legend className="ui-field__label">Domains</legend>

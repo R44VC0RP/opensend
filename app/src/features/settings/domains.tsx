@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
-import { useApiMutation, useApiQuery, useRegion, useApi, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { receivingStatus } from '../inbound/status'
@@ -26,7 +26,7 @@ function setupSummary(domain: Domain) {
   return parts.length ? parts.join(' · ') : 'Waiting for DNS'
 }
 
-function LiveDomainsPage() {
+export function DomainsPage() {
   const { regionId } = useRegion()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
@@ -68,7 +68,7 @@ function LiveDomainsPage() {
   </div>
 }
 
-function LiveDomainDetailPage() {
+export function DomainDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const { regionId, setRegionId } = useRegion()
@@ -177,6 +177,3 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
   </section>
 }
 
-function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domains are managed in live mode only.</Alert></> }
-export function DomainsPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainsPage /> }
-export function DomainDetailPage() { return useApi().environment === 'test' ? <TestDomainsNotice /> : <LiveDomainDetailPage /> }

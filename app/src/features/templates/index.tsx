@@ -17,7 +17,6 @@ const EmailComposer = lazy(loadEmailComposer)
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 
 export function TemplatesPage() {
-  const api = useApi()
   const navigate = useNavigate()
   const { regionId } = useRegion()
   const toast = useToast()
@@ -37,7 +36,7 @@ export function TemplatesPage() {
     catch (error) { toast(errorMessage(error), 'error') }
   }
   async function createCampaign(template: {id: string; name: string}) {
-    try { const campaign = await instantiate.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit${api.environment ? `?environment=${api.environment}` : ''}`) }
+    try { const campaign = await instantiate.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`) }
     catch (error) { toast(errorMessage(error), 'error') }
   }
   return <>
@@ -86,8 +85,8 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
   const version = useRef(0)
   const savingRef = useRef(false)
   const archived = Boolean(template.archivedAt)
-  const refreshLists = () => cache.invalidateQueries({queryKey: ['opensend', api.mode, api.environment, 'templates'], refetchType: 'none'})
-  const remember = (value: CampaignTemplate) => cache.setQueryData(['opensend', api.mode, api.environment, 'template', value.id], value)
+  const refreshLists = () => cache.invalidateQueries({queryKey: ['opensend', api.mode, 'templates'], refetchType: 'none'})
+  const remember = (value: CampaignTemplate) => cache.setQueryData(['opensend', api.mode, 'template', value.id], value)
   const changed = useCallback(() => { version.current++; setDirty(true); setError('') }, [])
   function change<K extends keyof CampaignTemplateDraft>(key: K, value: CampaignTemplateDraft[K]) { const next = {...draftRef.current, [key]: value}; draftRef.current = next; setDraft(next); changed() }
   useEffect(() => {
@@ -144,7 +143,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['opensend', api.mode, api.environment, 'template', template.id], exact: true}); await refreshLists(); navigate('/templates') }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['opensend', api.mode, 'template', template.id], exact: true}); await refreshLists(); navigate('/templates') }} />
   </div>
 }
 

@@ -80,7 +80,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
   const install = 'npm install opensend-js'
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>OpenSend API</h1><p>{document.info.description}</p></header>
-    <section className="docs-section"><h2>Start with the TypeScript SDK</h2><div className="docs-install"><code>{install}</code><CopyButton value={install} label="Copy install command" /></div><p className="muted">Use an API key from your OpenSend installation on a trusted server. Test keys simulate delivery; live keys use configured SES regions.</p></section>
+    <section className="docs-section"><h2>Start with the TypeScript SDK</h2><div className="docs-install"><code>{install}</code><CopyButton value={install} label="Copy install command" /></div><p className="muted">Use an API key from your OpenSend installation on a trusted server.</p></section>
     <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>

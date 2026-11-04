@@ -1,4 +1,3 @@
-import { Alert, PageHeader } from '../../components/ui'
 import type { InboundAddress, MailAddress } from '../../data/types'
 
 export const nameOf = (value: MailAddress) => value.name || value.address.split('@')[0]!
@@ -9,7 +8,6 @@ export function when(value: string) {
   if (at.toDateString() === now.toDateString()) return at.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
   return at.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(at.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }) })
 }
-export const LiveOnly = ({ title, backTo }: { title: string; backTo?: string }) => <><PageHeader title={title} backTo={backTo} /><Alert tone="info">Inbound receives real mail, so it is managed in live mode only.</Alert></>
 
 /** Reuse one Idempotency-Key while the operator retries the same payload; a changed payload gets a new key. */
 export function idempotencyFor(state: { key: string; body: string }, body: unknown) {

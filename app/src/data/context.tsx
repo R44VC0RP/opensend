@@ -6,7 +6,7 @@ import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './li
 import { regionCatalogKey } from './regions'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 
-type Session = { identity: Identity | null; environment: 'live' | 'test'; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
+type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const HomePage = lazy(() => import('../features/home').then(m => ({ default: m.HomePage })))
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
@@ -24,11 +24,10 @@ function invitationError(error: unknown) {
 }
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
   const publicRoute = window.location.pathname === '/docs'
-  const [environment] = useState<'live' | 'test'>(() => new URLSearchParams(window.location.search).get('environment') === 'test' ? 'test' : 'live')
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
-  const client = useMemo(() => provided ?? createLiveApi(environment), [provided, environment, generation])
+  const client = useMemo(() => provided ?? createLiveApi(), [provided, generation])
   const cache = useQueryClient()
   const toast = useToast()
   const [authError, setAuthError] = useState<unknown>(null)
@@ -55,18 +54,18 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     },
   })
   const identity = useQuery({
-    queryKey: ['identity', environment], enabled: client.mode !== 'demo' && !publicRoute && (!invitation || accept.isFetched),
+    queryKey: ['identity'], enabled: client.mode !== 'demo' && !publicRoute && (!invitation || accept.isFetched),
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
       const started = performance.now()
       let result: Identity
-      try { result = await request<Identity>('/v1/me', {signal, environment}) }
+      try { result = await request<Identity>('/v1/me', {signal}) }
       catch (error) {
         // A remembered workspace the user no longer belongs to: fall back to the server's choice.
         if (!(error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && selectedWorkspace())) throw error
         selectWorkspace(null)
-        result = await request<Identity>('/v1/me', {signal, environment})
+        result = await request<Identity>('/v1/me', {signal})
       }
       selectWorkspace(result.multiTenant ? result.workspaceId : null)
       console.info('[OpenSend timing] Google session ready', { durationMs: Number((performance.now() - started).toFixed(1)) })
@@ -79,11 +78,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     await cache.cancelQueries()
     selectWorkspace(id)
     let next: Identity
-    try { next = await request<Identity>('/v1/me', {environment}) }
+    try { next = await request<Identity>('/v1/me') }
     catch (error) { selectWorkspace(previous); throw error }
     // Nothing from the previous workspace may remain visible or cached.
     cache.clear()
-    cache.setQueryData(['identity', environment], next)
+    cache.setQueryData(['identity'], next)
     if (path) window.history.pushState(null, '', path)
     setGeneration(value => value + 1)
   }
@@ -99,10 +98,10 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     if (!match) return
     let id: string
     try { id = decodeURIComponent(match[1]) } catch { return }
-    void cache.prefetchQuery({ queryKey: ['opensend', client.mode, client.environment, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
+    void cache.prefetchQuery({ queryKey: ['opensend', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity', environment]) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache, environment])
+  useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
@@ -127,7 +126,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   // Multi-tenant installations greet signed-out visitors at "/" with the public homepage; /health says which this is.
   const home = useQuery({ queryKey: ['public-home'], enabled: signedOut && window.location.pathname === '/', staleTime: Infinity, retry: false, queryFn: ({signal}) => request<{multiTenant?: boolean} | null>('/health', {signal}).then(health => health?.multiTenant === true) })
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
-  return <ApiContext.Provider key={`${environment}:${generation}`} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, environment, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
     {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? null : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
@@ -150,7 +149,7 @@ export function useApi() {
 export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean }) {
   const api = useApi()
   const interval = poll?.interval
-  return useQuery({ queryKey: ['opensend', api.mode, api.environment, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
+  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
 }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()

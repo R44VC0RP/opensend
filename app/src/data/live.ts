@@ -10,12 +10,12 @@ export function selectWorkspace(id: string | null) {
   workspaceSelection = id
   try { if (id) localStorage.setItem(workspaceStorageKey, id); else localStorage.removeItem(workspaceStorageKey) } catch { /* Selection can remain session-only. */ }
 }
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; environment?: 'live' | 'test'; idempotencyKey?: string } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string } = {}): Promise<T> {
   const started = performance.now()
   let response: Response
   try {
     response = await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
-      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.environment ? { 'X-OpenSend-Environment': options.environment } : {}), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-OpenSend-Workspace': workspaceSelection } : {}) },
+      headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-OpenSend-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
@@ -70,12 +70,10 @@ function regionCatalog(value: unknown): RegionCatalog {
   return value as RegionCatalog
 }
 
-export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
-  const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal, environment })
-  // Inbound receives real mail, so it always runs against live data.
-  const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1/inbound${path}`, { method, body, signal, environment: 'live' })
+export function createLiveApi(): OpenSendApi {
+  const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal })
+  const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => call<T>(`/inbound${path}`, method, body, signal)
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
-  const keyCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, {method, body, signal, environment: 'live'})
   const cursors = new Map<string, Map<number, string | undefined>>()
   const uploadFile = async (path: string, file: File, inline?: {contentId: string}) => {
     if (file.size > 8 * 1024 * 1024) throw new ApiError('Assets must total at most 8 MiB.', 'ATTACHMENT_TOO_LARGE')
@@ -107,15 +105,15 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
   }
   const deliveries = async (id: string, cursor?: string) => { const result = await page(`/webhooks/${idPath(id)}/deliveries`, { cursor, pageSize: 20 }, mapDelivery); return { items: result.items, nextCursor: result.nextCursor ?? null } }
   return {
-    mode: 'live', environment,
+    mode: 'live',
     consentHistory: async (id, cursor) => {const result = await call(`/contacts/${idPath(id)}/consent?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); return {items: result.data, nextCursor: result.nextCursor}},
     emailEvents: async (id, cursor) => {const result = await call(`/emails/${idPath(id)}/events?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); return {items: result.data.map(mapEmailEvent), nextCursor: result.nextCursor}},
     regions: {
       list: async signal => regionCatalog(await call('/regions', 'GET', undefined, signal)),
-      configure: async (region, input, signal) => regionCatalog(await keyCall(`/regions/${idPath(region)}`, 'PUT', input, signal)),
-      discover: (region, options, signal) => keyCall<SesDiscovery>(`/regions/${idPath(region)}/discovery${options?.refresh === true ? '?refresh=true' : ''}`, 'GET', undefined, signal),
-      provision: (region, signal) => keyCall<RegionProvisionReceipt>(`/regions/${idPath(region)}/provision`, 'POST', { confirm: true }, signal),
-      updateAutoValidation: (region, stream, mode, signal) => keyCall(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
+      configure: async (region, input, signal) => regionCatalog(await call(`/regions/${idPath(region)}`, 'PUT', input, signal)),
+      discover: (region, options, signal) => call<SesDiscovery>(`/regions/${idPath(region)}/discovery${options?.refresh === true ? '?refresh=true' : ''}`, 'GET', undefined, signal),
+      provision: (region, signal) => call<RegionProvisionReceipt>(`/regions/${idPath(region)}/provision`, 'POST', { confirm: true }, signal),
+      updateAutoValidation: (region, stream, mode, signal) => call(`/regions/${idPath(region)}/auto-validation`, 'PUT', { stream, mode, confirm: true }, signal),
     },
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
     overview: { get: async (input, signal) => {
@@ -153,12 +151,12 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       preview: (id, signal) => call(`/campaigns/${idPath(id)}/preview`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),
       save: async (input, signal) => {
-        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region: input.regionId}, signal, environment, idempotencyKey: input.idempotencyKey}))
+        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region: input.regionId}, signal, idempotencyKey: input.idempotencyKey}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
         const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
-        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, environment, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
+        return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
       audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
       send: async (input, signal) => {
@@ -223,15 +221,15 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       preview: async (input, signal) => { if (!input.id) throw new ApiError('Save this segment before previewing.', 'SEGMENT_REQUIRED'); return {...await call(`/segments/${idPath(input.id)}/preview`, 'POST', {}, signal), contacts: []} as any }
     },
     keys: {
-      list: async (signal, cursor, includeRevoked = true) => { const result = await keyCall(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
-      create: async (input, signal) => { const result = await keyCall('/api-keys', 'POST', {name: input.name, environment: input.environment ?? 'test', permissions: input.permission === 'manage' ? ['read', 'send', 'manage'] : [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key: {...key, permission: input.permission}, secret} as any },
-      revoke: async (id, signal) => { await keyCall(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
+      list: async (signal, cursor, includeRevoked = true) => { const result = await call(`/api-keys?limit=20&includeRevoked=${includeRevoked}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map((r: Json) => ({...r, permission: r.permissions.includes('manage') ? 'manage' : r.permissions.join(', '), domains: r.domains})), {nextCursor: result.nextCursor}) },
+      create: async (input, signal) => { const result = await call('/api-keys', 'POST', {name: input.name, permissions: input.permission === 'manage' ? ['read', 'send', 'manage'] : [input.permission], domains: input.domains}, signal); const {secret, ...key} = result; return {key: {...key, permission: input.permission}, secret} as any },
+      revoke: async (id, signal) => { await call(`/api-keys/${idPath(id)}/revoke`, 'POST', undefined, signal) }
     },
     credentials: {
-      agentTokens: async (includeInactive = false, signal) => (await keyCall(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
-      revokeAgentToken: async (id, signal) => { await keyCall(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
-      mcpConnections: async signal => (await keyCall('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
-      revokeMcpConnection: async (id, signal) => { await keyCall(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
+      agentTokens: async (includeInactive = false, signal) => (await call(`/agent-tokens?limit=100&includeInactive=${includeInactive}`, 'GET', undefined, signal)).data,
+      revokeAgentToken: async (id, signal) => { await call(`/agent-tokens/${idPath(id)}/revoke`, 'POST', undefined, signal) },
+      mcpConnections: async signal => (await call('/mcp-connections?limit=100', 'GET', undefined, signal)).data,
+      revokeMcpConnection: async (id, signal) => { await call(`/mcp-connections/${idPath(id)}/revoke`, 'POST', undefined, signal) },
     },
     templates: {
       list: (input = {}, signal) => page('/templates', input, row => row as import('./types').CampaignTemplateSummary, {search: input.search, archived: input.archived === true ? 'true' : 'false', publishedOnly: input.publishedOnly === true ? 'true' : 'false'}, signal),
@@ -267,8 +265,8 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
       updateThread: (threadId, patch, signal) => inboundCall<InboundAddressState>(`/threads/${idPath(threadId)}`, 'PATCH', patch, signal),
       message: (id, input, signal) => inboundCall<InboundMessageDetail>(`/messages/${idPath(id)}?${new URLSearchParams({ includeHtml: 'true', ...(input.addressId ? { addressId: input.addressId } : {}) })}`, 'GET', undefined, signal),
       attachmentUrl: (messageId, attachmentId, input, signal) => inboundCall<{ url: string; expiresAt: string }>(`/messages/${idPath(messageId)}/attachments/${idPath(attachmentId)}${input.addressId ? `?addressId=${encodeURIComponent(input.addressId)}` : ''}`, 'GET', undefined, signal),
-      reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, environment: 'live', idempotencyKey }),
-      startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, environment: 'live', idempotencyKey }),
+      reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey }),
+      startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey }),
       webhooks: async signal => (await inboundCall<{ data: InboundWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
       webhook: (id, signal) => inboundCall<InboundWebhook>(`/webhooks/${idPath(id)}`, 'GET', undefined, signal),
       createWebhook: async (input, signal) => { const { secret, ...webhook } = await inboundCall<InboundWebhook & { secret: string }>('/webhooks', 'POST', input, signal); return { webhook, secret } },

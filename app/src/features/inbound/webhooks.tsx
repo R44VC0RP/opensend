@@ -1,12 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
-import { useApi, useApiMutation, useApiQuery } from '../../data/context'
+import { useApiMutation, useApiQuery } from '../../data/context'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
 import { date, time } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from '../settings/shared'
 import '../settings/settings.css'
-import { LiveOnly } from './shared'
 import './inbound.css'
 
 const eventInfo: Record<MailboxEventType, string> = {
@@ -43,7 +42,7 @@ function WebhookFields({ input, onChange, addresses, errors, apiError, disabled 
   </div>
 }
 
-function LiveInboundWebhooksPage() {
+export function InboundWebhooksPage() {
   const navigate = useNavigate()
   const webhooks = useApiQuery(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal))
   const addresses = useApiQuery(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal))
@@ -80,7 +79,7 @@ function LiveInboundWebhooksPage() {
   </div>
 }
 
-function LiveInboundWebhookDetailPage() {
+export function InboundWebhookDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const webhook = useApiQuery(['inbound-webhook', id], (api, signal) => api.inbound.webhook(id, signal))
@@ -141,5 +140,3 @@ function LiveInboundWebhookDetailPage() {
   </div>
 }
 
-export function InboundWebhooksPage() { return useApi().environment === 'test' ? <LiveOnly title="Inbound webhooks" backTo="/inbound" /> : <LiveInboundWebhooksPage /> }
-export function InboundWebhookDetailPage() { return useApi().environment === 'test' ? <LiveOnly title="Inbound webhook" backTo="/inbound/webhooks" /> : <LiveInboundWebhookDetailPage /> }

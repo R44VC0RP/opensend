@@ -9,7 +9,7 @@ import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { ownAddressesOf, replyRecipients, senderOf } from '../../lib/reply-recipients'
 import { fieldError, MutationError } from '../settings/shared'
-import { addressName, full, idempotencyFor, LiveOnly, nameOf, when } from './shared'
+import { addressName, full, idempotencyFor, nameOf, when } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
 
@@ -273,7 +273,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   </Dialog>
 }
 
-function LiveInboundPage() {
+export function InboundPage() {
   const { canAdminister } = useWorkspaceAccess()
   const [params, setParams] = useSearchParams()
   const addressId = params.get('address') || undefined
@@ -323,8 +323,4 @@ function LiveInboundPage() {
     </div>
     <NewThreadDialog open={composing} onOpenChange={setComposing} addresses={[...addresses.values()]} defaultAddress={addressId} onSent={id => change({ thread: id, message: null })} />
   </div>
-}
-
-export function InboundPage() {
-  return useApi().environment === 'test' ? <LiveOnly title="Inbound" /> : <LiveInboundPage />
 }

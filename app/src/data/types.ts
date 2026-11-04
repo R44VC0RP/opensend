@@ -55,10 +55,10 @@ export interface CampaignPacingInput { perDay: number | null; autoPause?: boolea
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; reviewId: string | null; scheduledAt: ISODate | null; archivedAt: ISODate | null }
 export interface SendCampaignInput { reviewId?: string; revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; timezone: string; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number } }
-export interface ApiKey { environment?: 'live' | 'test'; revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
-export interface ApiKeyInput { environment?: 'live' | 'test'; name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
+export interface ApiKey { revokedAt?: string | null; id: string; name: string; prefix: string; permission: 'send' | 'read' | 'manage'; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null }
+export interface ApiKeyInput { name: string; permission: 'send' | 'read' | 'manage'; domains: string[] }
 export interface CreatedApiKey { key: ApiKey; secret: string }
-export interface AgentTokenSummary { id: string; grantId: string; environment: 'live' | 'test'; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
+export interface AgentTokenSummary { id: string; grantId: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; purpose: string; expiresAt: ISODate; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null }
 export interface McpConnection { id: string; clientId: string; name: string | null; userEmail: string; scopes: string[]; createdAt: ISODate; updatedAt: ISODate }
 export interface CampaignTemplateDraft { name: string; description: string; subject: string; previewText?: string; fromName?: string; replyTo: string[]; html?: string; attachments: string[] }
 export interface CampaignTemplate { id: string; url: string; revision: number; draft: CampaignTemplateDraft; published: CampaignTemplateDraft | null; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
@@ -147,7 +147,6 @@ export type CursorItems<T> = T[] & { nextCursor?: string | null }
 export interface OpenSendApi {
   consentHistory?: (id: string, cursor?: string) => Promise<{items: ConsentEvent[]; nextCursor: string | null}>
   emailEvents?: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
-  readonly environment?: 'live' | 'test'
   review?: (id: string, revision: number, options?: { signal?: AbortSignal; onProgress?: (progress: { processed: number; eligible: number }) => void }) => Promise<CampaignReview>
   attachments: AttachmentApi
   templateAssets: AttachmentApi
@@ -196,7 +195,7 @@ export interface OpenSendApi {
   webhooks: { list(signal?: AbortSignal, cursor?: string): Promise<CursorItems<Webhook>>; get(id: string, signal?: AbortSignal): Promise<Webhook>; save(input: WebhookInput, signal?: AbortSignal): Promise<Webhook>; setStatus(id: string, status: 'active' | 'paused', signal?: AbortSignal): Promise<Webhook>; test(id: string, signal?: AbortSignal): Promise<WebhookDelivery>; retry(id: string, deliveryId: string, signal?: AbortSignal): Promise<WebhookDelivery>; rotate(id: string, signal?: AbortSignal): Promise<{ secret: string }>; remove(id: string, signal?: AbortSignal): Promise<void> }
 }
 
-export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: Pick<ProviderConnection, 'kind' | 'region' | 'status'> | null; name: string | null; email: string | null; environment: "live" | "test"; permissions: string[]; domains: string[]; origin: string; host: string }
+export interface Identity { id: string; workspaceId: string; role?: WorkspaceRole | null; multiTenant?: boolean; connection?: Pick<ProviderConnection, 'kind' | 'region' | 'status'> | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }

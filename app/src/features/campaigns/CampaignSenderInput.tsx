@@ -5,7 +5,6 @@ import './sender-input.css'
 type Sender = { name: string; email: string }
 export type CampaignSenderInputProps = Sender & {
   domains: string[]
-  allowUnverified?: boolean
   disabled?: boolean
   onChange: (sender: Sender) => void
 }
@@ -40,7 +39,7 @@ function suggestSenders(text: string, domains: string[]): Sender[] {
   return domains.filter(domain => domain.startsWith(prefix.toLowerCase())).map(domain => ({ name, email: `${local}@${domain}` })).filter(sender => validEmail(sender.email))
 }
 
-export function CampaignSenderInput({ name, email, domains, allowUnverified = false, disabled = false, onChange }: CampaignSenderInputProps) {
+export function CampaignSenderInput({ name, email, domains, disabled = false, onChange }: CampaignSenderInputProps) {
   // The editor remounts for another campaign/region. Parent echoes must not replace
   // an unfinished draft (or move the caret) when its published email is empty.
   const [draft, setDraft] = useState(() => formatSender({ name, email }))
@@ -53,9 +52,9 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
   const errorId = `${listId}-error`
   // Preserve only exact saved/accepted addresses, not arbitrary new addresses on
   // a saved domain that is absent from the current verified-domain page.
-  const retained = useRef(new Set(!allowUnverified && validEmail(email) ? [email.toLowerCase()] : []))
+  const retained = useRef(new Set(validEmail(email) ? [email.toLowerCase()] : []))
   const verified = [...new Set(domains.map(domain => domain.trim().toLowerCase()))]
-  const allowed = (sender: Sender) => allowUnverified || verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
+  const allowed = (sender: Sender) => verifiedDomain(sender.email.split('@')[1].toLowerCase(), verified) || retained.current.has(sender.email.toLowerCase())
   const parsed = parseSender(draft)
   const candidates = parsed ? (allowed(parsed) ? [parsed] : []) : suggestSenders(draft, verified)
   const expanded = open && !disabled && candidates.length > 0
@@ -73,7 +72,7 @@ export function CampaignSenderInput({ name, email, domains, allowUnverified = fa
   function publish(text: string) {
     const sender = parseSender(text)
     if (sender && allowed(sender)) {
-      if (!allowUnverified) retained.current.add(sender.email.toLowerCase())
+      retained.current.add(sender.email.toLowerCase())
       onChange(sender)
     } else {
       onChange({ name: draftName(text).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 200), email: '' })

@@ -66,14 +66,12 @@ function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?:
 const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'from', label: 'Sender', width: '20%' }, { key: 'to', label: 'Recipient', width: '18%' }, { key: 'mailbox', label: 'Address', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'open', label: '', width: 28 }]
 const mailboxLabel = (row: ReceivedEmail) => row.addresses.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
 function ReceivedLogs({ regionId }: { regionId: string }) {
-  const api = useApi()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const pagination = useCursorPagination()
   const { pageSize, tableRef, measured } = useAdaptivePageSize(5, 100)
   const cursor = pagination.cursor
   const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000, enabled: measured })
-  if (api.environment === 'test') return <div className="logs-page"><LogsHeader regionId={regionId} view="received" /><Alert tone="info">Received mail is live-only. Switch to live mode to see it.</Alert></div>
   return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>
       <Button disabled={!query.data?.length} onClick={() => downloadCsv('opensend-received-page.csv', [['Received at', 'From', 'To', 'Address', 'Subject', 'Spam', 'Region'], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', row.region ?? ''])])}><Download size={16} />Export page</Button>
@@ -160,7 +158,7 @@ function EmailDetail({ email }: { email: Email }) {
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
   return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
     <dl className="email-metadata"><div><dt>To</dt><dd>{email.to}</dd></div><div><dt>From</dt><dd>{email.fromName ? `${email.fromName} <${email.from}>` : email.from}</dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
-    {email.simulated && <Alert tone="info">Simulated in test mode; not sent to SES.</Alert>}
+    {email.simulated && <Alert tone="info">Simulated; not sent to SES.</Alert>}
     {email.status === 'bounced' && <Alert tone="warning">Delivery failed.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
     {['complaint', 'complained'].includes(email.status) && <Alert tone="danger">The recipient reported this message as spam.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
     {['deferred', 'delayed'].includes(email.status) && <Alert tone="warning">Delivery delayed.</Alert>}

@@ -12,7 +12,7 @@ export function useDomain(id: string) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   return useQuery({
-    queryKey: ['opensend', api.mode, api.environment, 'domain', id],
+    queryKey: ['opensend', api.mode, 'domain', id],
     queryFn: ({ signal }) => api.domains.get(id, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,

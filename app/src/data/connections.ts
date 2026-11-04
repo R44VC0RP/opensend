@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { request } from './live'
-import { useApi, useSession } from './context'
+import { useApi } from './context'
 import type { ConnectionKind, Identity, ProviderConnection } from './types'
 
 // Multi-tenant sending connection. Owner/admin dashboard sessions only.
@@ -20,10 +20,9 @@ export const retryableConnectionErrors = new Set(['CONNECTION_BUSY', 'SNS_CONFIR
 export function useConnectionCache() {
   const api = useApi()
   const client = useQueryClient()
-  const environment = useSession()?.environment ?? 'live'
   return (connection: ProviderConnection | null) => {
-    client.setQueryData(['opensend', api.mode, api.environment, 'connection'], connection)
-    client.setQueryData<Identity>(['identity', environment], old => old && { ...old, connection: connection && { kind: connection.kind, region: connection.region, status: connection.status } })
+    client.setQueryData(['opensend', api.mode, 'connection'], connection)
+    client.setQueryData<Identity>(['identity'], old => old && { ...old, connection: connection && { kind: connection.kind, region: connection.region, status: connection.status } })
   }
 }
 

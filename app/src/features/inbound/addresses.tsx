@@ -1,12 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, Textarea } from '../../components/ui'
-import { useApi, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import type { InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
-import { LiveOnly } from './shared'
 import { receivingStatus } from './status'
 import '../settings/settings.css'
 import './inbound.css'
@@ -66,7 +65,7 @@ function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; o
   </Dialog>
 }
 
-function LiveAddressesPage() {
+export function InboundAddressesPage() {
   const { canAdminister } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
@@ -101,7 +100,7 @@ function LiveAddressesPage() {
 
 const aliasList = (value: string) => value.split(/[\s,;]+/).map(item => item.trim().toLowerCase()).filter(Boolean)
 
-function LiveAddressDetailPage() {
+export function InboundAddressDetailPage() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
@@ -155,5 +154,3 @@ function LiveAddressDetailPage() {
   </div>
 }
 
-export function InboundAddressesPage() { return useApi().environment === 'test' ? <LiveOnly title="Addresses" backTo="/inbound" /> : <LiveAddressesPage /> }
-export function InboundAddressDetailPage() { return useApi().environment === 'test' ? <LiveOnly title="Address" backTo="/inbound/addresses" /> : <LiveAddressDetailPage /> }

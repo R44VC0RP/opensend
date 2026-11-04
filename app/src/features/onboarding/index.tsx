@@ -66,9 +66,8 @@ export function SendingOnboarding() {
 
 export function AdminSetupRequired() {
   const client = useQueryClient()
-  const environment = useSession()?.environment ?? 'live'
   const [checking, setChecking] = useState(false)
-  async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity', environment], exact: true }) } finally { setChecking(false) } }
+  async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity'], exact: true }) } finally { setChecking(false) } }
   return <div className="stack onboarding onboarding--narrow">
     <PageHeader title="Sending isn’t set up yet" />
     <p className="muted onboarding-lead">An admin needs to finish setup for this workspace before you can use it.</p>
@@ -185,7 +184,7 @@ function AddDomain({ region, onAdded, onFinish }: { region: string; onAdded: (id
     setInvalid('')
     try {
       const domain = await create.mutateAsync(value)
-      client.setQueryData(['opensend', api.mode, api.environment, 'domain', domain.id], domain)
+      client.setQueryData(['opensend', api.mode, 'domain', domain.id], domain)
       onAdded(domain.id)
     } catch { /* Shown inline. */ }
   }

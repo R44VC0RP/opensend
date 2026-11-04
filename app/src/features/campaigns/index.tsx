@@ -28,7 +28,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : 'So
 const emailIsValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
 const replyToAddresses = (value: string) => value.split(',').map(address => address.trim()).filter(Boolean)
 const replyToError = (value: string) => { const addresses = replyToAddresses(value); return addresses.length > 10 ? 'Use at most 10 Reply-To addresses.' : addresses.some(address => !emailIsValid(address)) ? 'Enter valid Reply-To addresses separated by commas.' : '' }
-const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review', environment?: 'live' | 'test') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}${environment ? `?environment=${environment}` : ''}`
+const campaignRoute = (campaign: Pick<Campaign, 'id'>, view: 'edit' | 'review') => `/campaigns/${encodeURIComponent(campaign.id)}/${view}`
 function campaignReadinessError(campaign: Campaign) {
   const missing = [!campaign.name.trim() && 'a campaign name', !campaign.subject.trim() && 'a subject', !emailIsValid(campaign.fromEmail.trim()) && 'a valid sender email address', !campaign.listId && 'a recipient list', !campaign.html.trim() && 'email content'].filter(Boolean)
   return missing.length ? `Complete the draft before reviewing or sending: add ${missing.join(', ')}.` : ''
@@ -55,7 +55,6 @@ export function CampaignEditorPage() {
 }
 
 function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: string; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
-  const api = useApi()
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
   const opened = useRef<Campaign | null | undefined>(undefined)
   useEffect(() => { void loadEmailComposer() }, [])
@@ -70,12 +69,12 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   if (query.data?.archivedAt) return <>
     <PageHeader title={query.data.name} backTo="/campaigns?archived=true" actions={<CampaignArchiveButton campaign={query.data} />} />
     <Alert tone="info">This campaign is archived. Restore it to edit or send it.</Alert>
-    <Link to={campaignRoute(query.data, 'review', api.environment)}>View campaign</Link>
+    <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
   </>
   if (query.data && !['draft', 'reviewed'].includes(query.data.status)) return <>
     <PageHeader title={query.data.name} backTo="/campaigns" />
     <Alert tone="info">This campaign is {query.data.status} and cannot be edited.</Alert>
-    <Link to={campaignRoute(query.data, 'review', api.environment)}>View campaign</Link>
+    <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
   </>
   return null
 }
@@ -83,7 +82,6 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
 function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: Campaign | null; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const toast = useToast()
   const api = useApi()
-  const testEnvironment = api.environment === 'test'
   const navigate = useNavigate()
   const [accepted, setAccepted] = useState(initial)
   const acceptedRef = useRef(initial)
@@ -128,7 +126,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const [optionCursors, setOptionCursors] = useState<{lists?: string; domains?: string}>({})
   const options = useApiQuery(['campaign-options', { pageSize: 100, ...optionCursors }], async (api, signal) => {
     const [listPage, domainPage] = await Promise.all([
-      api.lists.list({ pageSize: 100, cursor: optionCursors.lists, counts: false }, signal), api.environment === 'test' ? Promise.resolve({items: [], nextCursor: null}) : api.domains.list({pageSize: 100, cursor: optionCursors.domains, refresh: false}, signal),
+      api.lists.list({ pageSize: 100, cursor: optionCursors.lists, counts: false }, signal), api.domains.list({pageSize: 100, cursor: optionCursors.domains, refresh: false}, signal),
     ])
     const lists = listPage.items, domains = domainPage.items
     return { lists, domains: domains.filter(domain => domain.status === 'verified'), next: {lists: listPage.nextCursor, domains: domainPage.nextCursor} }
@@ -238,8 +236,8 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         }
       }
       const saved = await saveMutation.mutateAsync(submitted)
-      cache.setQueryData(['opensend', api.mode, api.environment, 'campaign', saved.id], saved)
-      void cache.invalidateQueries({queryKey: ['opensend', api.mode, api.environment, 'campaigns'], refetchType: 'none'})
+      cache.setQueryData(['opensend', api.mode, 'campaign', saved.id], saved)
+      void cache.invalidateQueries({queryKey: ['opensend', api.mode, 'campaigns'], refetchType: 'none'})
       if (!mounted.current) return
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
@@ -252,10 +250,10 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
       const reviewing = next === 'review' && !changedWhileSaving
       if (!submitted.id && !reviewing) {
         preserveEditor(saved)
-        navigate(campaignRoute(saved, 'edit', api.environment), { replace: true })
+        navigate(campaignRoute(saved, 'edit'), { replace: true })
       }
       if (next === 'test' && !changedWhileSaving) setTestOpen(true)
-      else if (reviewing) navigate(campaignRoute(saved, 'review', api.environment))
+      else if (reviewing) navigate(campaignRoute(saved, 'review'))
       if (!automatic && !changedWhileSaving) toast('Draft saved', 'success')
     } catch (cause) {
       if (!mounted.current) return
@@ -290,11 +288,11 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
             <div className="campaign-compose-row"><label htmlFor="campaign-name">Name</label><Input id="campaign-name" placeholder="Campaign name" value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} /></div>
-            <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} allowUnverified={testEnvironment} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /></div>
+            <div className="campaign-compose-row"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /></div>
             <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="Optional reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} disabled={controlsDisabled} /></div>
             {replyToValidation && <div id="campaign-reply-to-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
-            {!testEnvironment && (optionCursors.domains || choices.next.domains) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
-            {!testEnvironment && !options.isPending && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
+            {(optionCursors.domains || choices.next.domains) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, domains: undefined})}>First domains</Button><Button disabled={!choices.next.domains} onClick={() => setOptionCursors({...optionCursors, domains: choices.next.domains ?? undefined})}>More domains</Button></div>}
+            {!options.isPending && choices.domains.length === 0 && <Alert tone="warning">No verified domains on this page. <Link to="/domains">Add a domain</Link></Alert>}
             <div className="campaign-compose-row"><label htmlFor="campaign-list">To</label><Select id="campaign-list" aria-label="Include list" disabled={controlsDisabled || options.isPending} value={form.listId} onValueChange={value => change('listId', value)} options={options.isPending ? [{value: form.listId, label: 'Loading recipient lists…', disabled: true}] : choices.lists.length ? [{ value: '', label: 'Select a recipient list' }, ...(form.listId && !choices.lists.some(l => l.id === form.listId) ? [{value: form.listId, label: form.listId}] : []), ...choices.lists.map(list => ({ value: list.id, label: list.total === undefined ? list.name : `${list.name} · ${number(list.total)} contacts` }))] : [{value: '', label: 'No recipient lists created', disabled: true}]} /></div>
             {(optionCursors.lists || choices.next.lists) && <div className="campaign-compose-feedback cluster"><Button onClick={() => setOptionCursors({...optionCursors, lists: undefined})}>First lists</Button><Button disabled={!choices.next.lists} onClick={() => setOptionCursors({...optionCursors, lists: choices.next.lists ?? undefined})}>More lists</Button></div>}
             <div id="campaign-preview-row" className="campaign-compose-preview" data-open={previewOpen || undefined} aria-hidden={!previewOpen} inert={!previewOpen}>
@@ -316,7 +314,6 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
   const [to, setTo] = useState('')
   const [error, setError] = useState('')
   const guard = useRef(false)
-  const api = useApi()
   const [receipt, setReceipt] = useState<{id?: string; status?: string; simulated?: boolean} | null>(null)
   const mutation = useApiMutation((api, input: { id: string; to: string }) => api.campaigns.test(input))
   async function submit(event: FormEvent) {
@@ -332,7 +329,7 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
     } catch (cause) { setError(message(cause)) }
     finally { guard.current = false }
   }
-  return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email" description={`Sends the saved draft to one recipient in ${api.environment ?? 'demo'} mode.`}>
+  return <Dialog open={open} onOpenChange={value => { if (!mutation.isPending) { setError(''); onOpenChange(value) } }} title="Send test email" description="Sends the saved draft to one recipient.">
     <form className="stack" onSubmit={submit}>
       {receipt && <Alert tone="success">{receipt.simulated ? 'Simulated test queued' : 'Test queued'} · {receipt.id ?? 'Demo'}</Alert>}
       <Field label="Recipient email" htmlFor="campaign-test-recipient"><Input id="campaign-test-recipient" type="email" autoComplete="email" value={to} onChange={event => { setTo(event.target.value); setError(''); setReceipt(null) }} required disabled={mutation.isPending} /></Field>
@@ -369,7 +366,6 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const [testOpen, setTestOpen] = useState(false)
   const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '50' })
   const guard = useRef(false)
-  const api = useApi()
   const { canAdminister } = useWorkspaceAccess()
 
   const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
@@ -416,18 +412,18 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} recipient intents accepted` : ''} · ${api.environment ?? 'demo'} mode${'simulated' in result && result.simulated ? ' (simulated)' : ''}`); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} recipient intents accepted` : ''}${'simulated' in result && result.simulated ? ' · simulated' : ''}`); setConfirmation(null) }
     catch (cause) { setError(message(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
   return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!['draft', 'reviewed'].includes(campaign.status) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}${api.environment ? `&environment=${api.environment}` : ''}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!['draft', 'reviewed'].includes(campaign.status) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
-    {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit', api.environment)}>Edit draft</Link></Alert>}
+    {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
-        <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
+        <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
         {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">{reviewProgress ? `Validating recipients: ${number(reviewProgress.processed)} / ${number(reviewProgress.eligible)}` : 'Preparing recipient count…'}</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
@@ -447,7 +443,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
         </>}
       </section>
       <section className="campaign-fields">
-        <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
+        <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
         <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd>{campaign.replyTo.join(', ')}</dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} />
       </section>
@@ -466,9 +462,9 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
       </div>
       {error && <Alert tone="danger">{error}</Alert>}
       {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
-      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit', api.environment))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
+      <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `In ${api.environment ?? 'demo'} mode, send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </>
 }

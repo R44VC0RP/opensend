@@ -87,10 +87,10 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const [share, setShare] = useState(() => String(ratePercent(pacing?.rateShare)))
   const [error, setError] = useState('')
   // Each action returns the full campaign; write it into the cache instead of refetching everything.
-  const campaignKey = ['opensend', api.mode, api.environment, 'campaign', campaign.id]
+  const campaignKey = ['opensend', api.mode, 'campaign', campaign.id]
   function accept(next: Campaign) {
     cache.setQueryData(campaignKey, next)
-    void cache.invalidateQueries({ queryKey: ['opensend', api.mode, api.environment, 'campaigns'], refetchType: 'none' })
+    void cache.invalidateQueries({ queryKey: ['opensend', api.mode, 'campaigns'], refetchType: 'none' })
   }
   const pause = useApiMutation((api, id: string) => api.campaigns.pause(id), 'Sending paused', false, false)
   const resume = useApiMutation((api, id: string) => api.campaigns.resume(id), 'Sending resumed', false, false)
