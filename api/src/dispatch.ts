@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { ApiError, log, type Runtime, type JobHandler } from './core.js';
+import { ApiError, log, type Runtime, type JobHandler, type Mode } from './core.js';
 import { processJobs } from './jobs.js';
 import { jobHandlers } from './sending.js';
 import { operationJobs } from './operations.js';
@@ -18,23 +18,32 @@ const deleteAttachment: JobHandler = async (runtime, payload, job) => {
 };
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
 export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
-export async function dispatchRegions(runtime: Runtime) {
-  return (await runtime.db.execute<{ region: string }>(sql`SELECT DISTINCT jsonb_array_elements_text(enabled_regions) AS region FROM ses_installation_settings`)).rows;
+type Partition = { region: string; environment: Mode; accountId?: string };
+export async function dispatchPartitions(runtime: Runtime): Promise<Partition[]> {
+  if (runtime.config.multiTenant) return (await runtime.db.execute<Partition>(sql`
+    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, m.environment FROM provider_sending_connections c CROSS JOIN (VALUES ('test'),('live')) m(environment)
+    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.environment=m.environment AND e.status IN ('queued','attempting'))`)).rows;
+  const regions = await runtime.db.execute<{ region: string }>(sql`SELECT DISTINCT jsonb_array_elements_text(enabled_regions) AS region FROM ses_installation_settings`);
+  return regions.rows.flatMap(({ region }) => (['live','test'] as const).map(environment => ({ region, environment })));
 }
 /** Jobs plus due mail for every environment/region, in this process. Node runners and tests use this. */
 export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>()) {
   let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs);
-  for (const { region } of await dispatchRegions(runtime)) {
-    for (const environment of ['live', 'test'] as const) {
-      if (environment === 'live' && !runtime.config.liveEnabled) continue;
-      const key = `${environment}:${region}`;
-      const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
-      try { processed += (await runDispatcher(runtime, { environment, region, gate, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
-      catch (error) {
-        // An unprovisioned live region must not block other regions or the job loop.
-        log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', environment, region, message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying next cycle.' });
-      }
+  const dispatch = async ({ accountId, region, environment }: Partition) => {
+    if (environment === 'live' && !runtime.config.liveEnabled) return 0;
+    const key = `${environment}:${accountId ? `${accountId}:` : ''}${region}`;
+    const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
+    try { return (await runDispatcher(runtime, { environment, accountId, region, gate, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
+    catch (error) {
+      log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', environment, accountId, region, message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying next cycle.' });
+      return 0;
     }
+  };
+  const partitions = await dispatchPartitions(runtime);
+  const width = runtime.config.multiTenant ? Math.max(2, concurrency) : 1;
+  for (let i = 0; i < partitions.length; i += width) {
+    const counts = await Promise.all(partitions.slice(i, i + width).map(dispatch));
+    processed += counts.reduce((sum, count) => sum + count, 0);
   }
   return processed;
 }

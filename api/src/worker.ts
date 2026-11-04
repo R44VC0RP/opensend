@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 import { app } from './app.js';
 import { loadConfig } from './config.js';
 import { r2Storage } from './adapters/storage.js';
-import { dispatchRegions, drainJobs } from './dispatch.js';
+import { dispatchPartitions, drainJobs } from './dispatch.js';
 import { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY } from './jobs.js';
 import { cleanup } from './maintenance.js';
 import { checkReputationAlerts } from './reputation-alerts.js';
@@ -23,12 +23,12 @@ import { feedbackSink } from './adapters/feedback-queue.js';
 export { DispatcherShard } from './dispatcher-do.js';
 
 // Nudges every shard for one environment/region. Objects are created near the database on first use.
-async function wakeDispatchers(env: Env, environment: Mode, region: string) {
+async function wakeDispatchers(env: Env, environment: Mode, region: string, accountId?: string) {
   const count = shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   await Promise.all(Array.from({ length: count }, (_, index) => {
-    const identity = { environment, region, shard: { index, count } };
+    const identity = { environment, accountId, region, shard: { index, count } };
     const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
-    return stub.fetch(`https://dispatcher/wake?environment=${environment}&region=${encodeURIComponent(region)}&shard=${index}&count=${count}`);
+    return stub.fetch(`https://dispatcher/wake?environment=${environment}&region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}`);
   }));
 }
 
@@ -77,7 +77,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, dispatch: (environment, region) => wakeDispatchers(env, environment, region), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (environment, region, accountId) => wakeDispatchers(env, environment, region, accountId), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     // A post-commit queue reservation still needs this request's Hyperdrive pool.
     if (ctx && nudges.length) ctx.waitUntil(Promise.allSettled(nudges).then(() => client.end()));
@@ -165,7 +165,7 @@ export default {
       const resolved = await resolveRegionRuntime(runtime);
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       try { await syncOutboundMessages(resolved); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
-      await Promise.allSettled((await dispatchRegions(runtime)).flatMap(({ region }) => (['live', 'test'] as const).map(environment => wakeDispatchers(env, environment, region))));
+      await Promise.allSettled((await dispatchPartitions(runtime)).map(({ region, environment, accountId }) => wakeDispatchers(env, environment, region, accountId)));
       const concurrency = workerConcurrency(env);
       // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));

@@ -1185,6 +1185,7 @@ describe('Hosted MCP OAuth and tools', () => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
+      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,ready,feedback_topic_arn) VALUES ($1,'111122223333',true,$2)",[REGION,`arn:aws:sns:${REGION}:111122223333:opensend-mx-feedback`]);
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,status,aws_account_id) VALUES ($1,$2,'shared',$3,'ready','111122223333')",[connection,wid,REGION]);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('example.com',$1,$2,true)",[wid,connection]);
       await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
@@ -3321,7 +3322,10 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       const jobs = async (type: string): Promise<Json[]> => (await db.query('SELECT * FROM jobs WHERE workspace_id = $1 AND type = $2 ORDER BY available_at, id', [runtime.config.workspaceId, type])).rows;
       async function run(type: string) {
         // Mail is no longer a job: the dispatcher claims due rows for one environment/region directly.
-        if (type === 'email.dispatch') { await dispatchDue(runtime, 'test', REGION); return; }
+        if (type === 'email.dispatch') {
+          const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
+          await dispatchDue(runtime, 'test', REGION, {accountId}); return;
+        }
         assert.ok(handlers[type], `No handler for ${type}`);
         const pending = (await jobs(type)).filter(job => job.status === 'pending');
         assert.ok(pending.length, `Expected a pending ${type} job.`);
@@ -3346,6 +3350,93 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('MX: account shards isolate sends, stored templates, quota and feedback', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { SESv2Client, GetAccountCommand, SendEmailCommand, GetEmailTemplateCommand, TestRenderEmailTemplateCommand } = await import('@aws-sdk/client-sesv2');
+      const { STSClient, AssumeRoleCommand } = await import('@aws-sdk/client-sts');
+      const { runDispatcher } = await import('./src/dispatcher.js'), { dispatchPartitions } = await import('./src/dispatch.js');
+      const { ingestFeedbackBatch } = await import('./src/operations.js'), { setupResources } = await import('./src/ses-setup.js');
+      const shared = runtime.config.workspaceId, byo = unique('customer'), pool = '111122223333', account = '444455556666', externalId = randomUUID();
+      const poolTopic = `arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`, byoTopic = `arn:aws:sns:${REGION}:${account}:${setupResources(byo).topicName}`;
+      const role = `arn:aws:iam::${account}:role/OpenSendMX-fixture`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      await db.query('INSERT INTO workspaces(id,slug,name) VALUES ($1,$1,$1)',[byo]);
+      await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
+      await db.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $2,$2,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$1',[shared,byo]);
+      await db.query('INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,ready) VALUES ($1,$2,$3,true)',[REGION,pool,poolTopic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id) VALUES ($1,$1,$2,'ready','shared',$3)`,[shared,REGION,pool]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id,external_id,template_version,platform_principal_arn,role_arn,feedback_topic_arn)
+        VALUES ($1,$1,$2,'ready','byo',$3,$4,'v1',$5,$6,$7)`,[byo,REGION,account,externalId,`arn:aws:iam::${pool}:user/test`,role,byoTopic]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('pool.example',$1,$1,true),('customer.example',$2,$2,true)",[shared,byo]);
+      const assumptions = t.mock.method(STSClient.prototype,'send', async (cmd: any) => {
+        assert.ok(cmd instanceof AssumeRoleCommand); assert.equal(cmd.input.RoleArn,role); assert.equal(cmd.input.ExternalId,externalId);
+        return { Credentials:{ AccessKeyId:'fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture-session',Expiration:new Date(Date.now()+3600000) } };
+      });
+      const quotaReads: string[] = [], sends: string[] = []; let exhausted = true;
+      t.mock.method(SESv2Client.prototype,'send', async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        const key=(await this.config.credentials()).accessKeyId, customer=key==='fixture-customer';
+        if (cmd instanceof GetAccountCommand) { quotaReads.push(key); if (!customer) await new Promise(r=>setTimeout(r,35)); return { ProductionAccessEnabled:!customer, SendingEnabled:true, SendQuota:{MaxSendRate:customer?1:1000,Max24HourSend:customer?200:10000,SentLast24Hours:customer&&exhausted?200:0} }; }
+        if (cmd instanceof GetEmailTemplateCommand || cmd instanceof TestRenderEmailTemplateCommand) {
+          assert.ok(customer); return { TemplateContent:{Subject:'fixture'},RenderedTemplate:'Subject: fixture\r\n\r\nFixture.' };
+        }
+        assert.ok(cmd instanceof SendEmailCommand); const input=cmd.input, wid=input.EmailTags!.find(t=>t.Name==='opensend_workspace_id')!.Value!;
+        assert.equal(wid,customer?byo:shared); assert.equal(input.TenantName,customer?undefined:`opensend-${shared}`);
+        assert.equal(input.ConfigurationSetName,customer?setupResources(byo).transactional:'opensend-mx-transactional');
+        sends.push(wid);
+        if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
+        return {MessageId:'same-provider-id-in-both-accounts'};
+      });
+      const wakes: string[]=[]; runtime.dispatch=async (mode, region, accountId)=>{ wakes.push(`${mode}:${region}:${accountId}`); };
+      const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-opensend-workspace':wid});
+      const template={template:{name:'fixture',data:{}}}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
+      const a=ok(await send(shared,{subject:'ordinary',text:'fixture'}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
+      assert.deepEqual(wakes,[pool,account,pool].map(id=>`live:${REGION}:${id}`));
+      assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
+      const drain=(accountId:string)=>runDispatcher(runtime,{environment:'live',region:REGION,accountId,lanes:1});
+      assert.equal((await drain(account)).sent,0); assert.deepEqual(sends,[]);
+      // Two independent cold shard gates race the same pool refresh, but cannot repeat GetAccount.
+      const shards=await Promise.all([0,1].map(index=>runDispatcher(runtime,{environment:'live',region:REGION,accountId:pool,lanes:1,batchSize:1,shard:{index,count:2}})));
+      assert.equal(shards.reduce((n,r)=>n+r.sent,0),1); assert.deepEqual(sends,[shared,shared]);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[paused.id])).rows,[{status:'rejected',error_code:'SES_TENANT_SENDING_PAUSED'}]);
+      assert.equal((await drain(account)).sent,0); assert.deepEqual(quotaReads,['fixture-customer','fixture-platform']);
+      exhausted=false; await db.query("UPDATE provider_account_limits SET refresh_after='-infinity', checked_at='-infinity' WHERE aws_account_id=$1",[account]);
+      assert.equal((await drain(account)).sent,1); assert.equal(assumptions.mock.callCount(),1);
+      const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`};
+      for(const topic of [poolTopic,byoTopic]) error(await local('POST','/v1/events/ses',{...envelope,TopicArn:topic}),403,'SNS_INVALID_SIGNATURE');
+      error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_TOPIC_NOT_ALLOWED');
+      const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,environment:'live' as const,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{opensend_email_id:[tag]}}:{})}}});
+      const results=await ingestFeedbackBatch(runtime,[delivery(byoTopic,account),delivery(byoTopic,pool),delivery(byoTopic,account,a.id)]);
+      assert.deepEqual(results.map(r=>r.ok),[true,false,false]);
+      assert.deepEqual((await db.query('SELECT workspace_id FROM operation_sns_receipts WHERE topic_arn=$1',[byoTopic])).rows,[{workspace_id:byo}]);
+      assert.deepEqual((await db.query('SELECT id FROM sending_emails WHERE workspace_id IN ($1,$2) AND status=\'delivered\'',[shared,byo])).rows,[{id:b.id}]);
+    });
+  });
+  test('MX: 100 emails across 100 workspaces share account-scoped quota and bounded dispatcher statements', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      const accounts=['111122223333','444455556666']; runtime.config.multiTenant=true; runtime.config.simulatedSes.latencyMs=15;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,ready,feedback_topic_arn) VALUES ($1,$2,true,$3)`,[REGION,accounts[0],`arn:aws:sns:${REGION}:${accounts[0]}:opensend-mx-feedback`]);
+      await db.query("INSERT INTO workspaces(id,name,slug) SELECT 'bench-'||n,'fixture','bench-'||n FROM generate_series(1,100)n");
+      await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT id,id,$1,jsonb_build_array($1::text) FROM workspaces WHERE id LIKE 'bench-%'`,[REGION]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id) SELECT id,id,'shared','ready',$1,$2 FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id,role_arn,external_id,template_version,platform_principal_arn,feedback_topic_arn)
+        VALUES ('bench-100','bench-100','byo','ready',$1,$2,'fixture-role',gen_random_uuid(),'v1','fixture-platform',$3)`,[REGION,accounts[1],`arn:aws:sns:${REGION}:${accounts[1]}:fixture`]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) SELECT id,id,'test','fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,verified) SELECT id||'.example',id,id,true FROM workspaces WHERE id LIKE 'bench-%'`);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||id,id,'test',$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
+          $2::jsonb || jsonb_build_object('from','sender@'||id||'.example'),true FROM workspaces WHERE id LIKE 'bench-%'`,[REGION,JSON.stringify({to:['fixture@example.net'],cc:[],bcc:[],replyTo:[],region:REGION,kind:'transactional',subject:'fixture',text:'fixture',tracking:false,attachments:[],headers:[]})]);
+      // Count actual pg round trips (including cache reads/writes), not timed dispatcher phases.
+      const queries=t.mock.method(db,'query'); const counts:number[]=[];
+      for (const [i,accountId] of accounts.entries()) {
+        const start=queries.mock.callCount(), report=await runDispatcher(runtime,{environment:'test',region:REGION,accountId});
+        counts.push(queries.mock.callCount()-start); assert.equal(report.sent,i===0?99:1);
+      }
+      queries.mock.restore(); t.diagnostic(`100 MX dispatches (99 shared workspaces + 1 BYO): ${counts[0]} + ${counts[1]} = ${counts[0]+counts[1]} pg statements (two lanes, cold quotas)`);
+      assert.ok(counts[0]+counts[1]<=60,'Connection and readiness resolution must not add per-email statements.');
+    });
+  });
+
   test('mailbox event cursors do not skip concurrent writers committing in different transactions', async t => {
     const { drizzle } = await import('drizzle-orm/node-postgres');
     const { recordEvents, readEvents } = await import('./src/mailbox-events.js');
@@ -3920,6 +4011,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const beforeEvents = page(await local('GET', `/v1/emails/${email.id}/events`));
       // DDL and this workspace-only trigger are rollback-only. PostgreSQL itself
       // rejects the final webhook job insert after the statement's upstream work.
+      await db.query('SAVEPOINT acceptance_fault_injection');
       await db.query(`CREATE FUNCTION pg_temp.reject_acceptance_fanout() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN IF NEW.workspace_id = TG_ARGV[0] AND NEW.type = 'operation.webhook' THEN
           RAISE EXCEPTION 'SYNTHETIC_FANOUT_FAILURE' USING ERRCODE = '23514';
@@ -3952,7 +4044,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await db.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id = $1`, [runtime.config.workspaceId])).rows[0].count, 0, `${table} must roll back with failed fanout.`);
       }
       assert.equal((await jobs('operation.webhook')).length, 0);
-      await db.query('DROP TRIGGER acceptance_fanout_failure ON jobs');
+      // Assertions above inspected the failure before removing the fault. Undo the fixture DDL
+      // without upgrading to ACCESS EXCLUSIVE on jobs while the real runner is polling it.
+      await db.query('ROLLBACK TO SAVEPOINT acceptance_fault_injection');
       await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
       await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
       assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered');

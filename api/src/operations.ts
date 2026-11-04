@@ -401,10 +401,11 @@ async function verifySns(runtime: Runtime, envelope: SnsEnvelope) {
   if (!verify(envelope.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1', Buffer.from(canonical), cert.publicKey, signature)) throw new ApiError(403, 'SNS_INVALID_SIGNATURE', 'SNS signature verification failed.');
   return trusted;
 }
-function verifySesAccount(runtime: Runtime, message: unknown) {
+function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) {
   const accountId = (message as { mail?: { sendingAccountId?: unknown } } | null)?.mail?.sendingAccountId;
   // SNS topics can receive cross-account SES events; only an explicit SES account binding is authoritative.
-  if (runtime.config.awsAccountId && accountId !== runtime.config.awsAccountId) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this deployment.');
+  const expected = runtime.config.multiTenant ? topicArn.split(':')[4] : runtime.config.awsAccountId;
+  if ((runtime.config.multiTenant && !/^\d{12}$/.test(expected ?? '')) || (expected && accountId !== expected)) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this topic.');
 }
 function registerPublicEvents(app: App) {
   app.use('/v1/events/ses', async (c, next) => {
@@ -422,14 +423,21 @@ function registerPublicEvents(app: App) {
     const parsed = snsSchema.safeParse(raw); if (!parsed.success) throw new ApiError(400, 'SNS_INVALID_ENVELOPE', 'Expected a complete signed SNS envelope.');
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
-    if (c.env.config.multiTenant && envelope.Type === 'SubscriptionConfirmation') {
-      // Onboarding authorizes only confirmation of the exact topic registered before Subscribe.
-      // Do not grant a topic access to message ingestion before connection-aware routing exists.
-      const registered = await c.env.db.execute(sql`SELECT 1 FROM provider_connections WHERE feedback_topic_arn=${envelope.TopicArn}
-        UNION ALL SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=${envelope.TopicArn} LIMIT 1`);
-      if (registered.rowCount) c.env = { ...c.env, config: { ...c.env.config, snsTopicArns: [envelope.TopicArn] } };
-    }
-    if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
+    if (c.env.config.multiTenant) {
+      const confirming = envelope.Type === 'SubscriptionConfirmation';
+      const registered = await c.env.db.execute<{ region: string; aws_account_id: string }>(sql`
+        SELECT region, aws_account_id FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${envelope.TopicArn} AND (${confirming} OR status='ready')
+        UNION ALL SELECT region, aws_account_id FROM provider_pool_regions WHERE feedback_topic_arn=${envelope.TopicArn} AND (${confirming} OR ready)`);
+      const binding = registered.rows[0];
+      if (binding && envelope.TopicArn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) {
+        c.env = { ...c.env, config: { ...c.env.config, snsTopicArns: [envelope.TopicArn], inboundTopicArns: [] } };
+      } else {
+        // Inbound has its own, pre-existing trust path; never fall back to legacy sending topics on MX.
+        const inbound = envelope.TopicArn.endsWith('-inbound') ? await resolveRegionRuntime(c.env) : undefined;
+        if (!inbound?.config.inboundTopicArns?.includes(envelope.TopicArn)) throw new ApiError(403, 'SNS_TOPIC_NOT_ALLOWED', 'This SNS topic is not registered for the sending account and region.');
+        c.env = inbound;
+      }
+    } else if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
     const trusted = await verifySns(c.env, envelope);
     if (envelope.Type !== 'Notification') {
       if (envelope.Type === 'SubscriptionConfirmation') {
@@ -447,7 +455,7 @@ function registerPublicEvents(app: App) {
       if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
-    verifySesAccount(c.env, message);
+    verifySesAccount(c.env, message, envelope.TopicArn);
     const payload = { message, topicArn: envelope.TopicArn, messageId: envelope.MessageId, region: trusted.region };
     const item = { ...payload, environment: 'live' as const, message: message as Record<string, unknown> };
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
@@ -632,7 +640,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   for (const [index, item] of items.entries()) {
     try {
       if (item.environment === 'test') assertSimulatedFeedback({ topicArn: item.topicArn, region: item.region, message: item.message }, { environment: 'test' });
-      else verifySesAccount(runtime, item.message);
+      else verifySesAccount(runtime, item.message, item.topicArn);
       const input = routineInput(item), key = input.type === 'receipt' ? 'receipt' : item.environment;
       const group = groups.get(key) ?? []; group.push({ index, input }); groups.set(key, group);
     } catch (error) { outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_INVALID' }; }
@@ -732,7 +740,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
 };
 const sesJob: JobHandler = async (runtime, payload, job) => {
   if (job.environment !== 'live') throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'SES events must be live.');
-  verifySesAccount(runtime, payload.message);
+  verifySesAccount(runtime, payload.message, String(payload.topicArn));
   await processSesReceipt(runtime, payload, job);
 };
 function assertSimulatedFeedback(payload: Record<string, unknown>, job: { environment: Mode }) {

@@ -12,6 +12,7 @@ import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
+import type { ReadyConnection } from './provider-credentials.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { queueTrackedMailboxSend } from './mailbox-send.js';
@@ -261,12 +262,16 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
     sender(runtime, a, from, selected, false); return selected;
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean }>(sql`SELECT ${selected} AS region, s.enabled_regions,
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
-    FROM ses_installation_settings s WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+    FROM ses_installation_settings s LEFT JOIN provider_sending_connections pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
+    WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
-  sender(runtime, a, from, state.region, state.verified); return state.region;
+  sender(runtime, a, from, state.region, state.verified);
+  if (!state.aws_account_id) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+  a.dispatchAccountId = state.aws_account_id;
+  return state.region;
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   region(runtime, draft.region);
@@ -541,23 +546,24 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
   snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
-async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string): Promise<EmailSnapshot> {
+async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string, connection?: ReadyConnection): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : runtime.config.multiTenant ? await sendingRegion(runtime, db, a, request.from, request.region) : await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (!sharedValidated) {
-    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
+    if (a.environment === 'live' && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
     if (!runtime.config.multiTenant) keySender(runtime, a, input.from, input.region);
   }
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
   if (!htmlValidated) validateHtmlUrls(snapshot.html);
   if (input.template) {
+    if (runtime.config.multiTenant && connection?.kind !== 'byo') throw new ApiError(422, 'SHARED_STORED_TEMPLATE_UNSUPPORTED', 'AWS-stored templates require a bring-your-own AWS connection. Use explicit content on shared sending.', 'template');
     // Preserve native SES semantics in both HTML and plaintext; callers own context-specific escaping.
     const templateData = JSON.stringify(input.template.data);
     if (templateData.length > 262144) throw new ApiError(413, 'TEMPLATE_DATA_TOO_LARGE', 'Serialized template data exceeds 262,144 characters.');
     if (a.environment === 'test') {
       throw new ApiError(422, 'SIMULATED_TEMPLATE_UNSUPPORTED', 'Test sending supports explicit content and campaigns, not AWS-stored templates.');
     } else {
-      const ses = getSes(runtime, input.region);
+      const ses = getSes(runtime, input.region, connection);
       const before = await ses.send(new GetEmailTemplateCommand({ TemplateName: input.template.name }));
       const rendered = await ses.send(new TestRenderEmailTemplateCommand({ TemplateName: input.template.name, TemplateData: templateData }));
       const after = await ses.send(new GetEmailTemplateCommand({ TemplateName: input.template.name }));
@@ -597,7 +603,8 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const attachmentIds = [...new Set(mails.flatMap(mail => mail.attachments))].filter(id => !id.includes('\0'));
     // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
     // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
-    const ready = a.environment === 'live' ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
+    const mx = c.env.config.multiTenant;
+    const ready = !mx && a.environment === 'live' ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
     ) wanted JOIN ses_region_discovery d ON d.workspace_id = ${a.workspaceId} AND d.region = wanted.region
@@ -613,10 +620,10 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null }>(sql`
+    const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
-      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified
-      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true`)).rows[0]!;
+      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
+      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN provider_sending_connections pc ON pc.workspace_id=settings.workspace_id` : sql``}`)).rows[0]!;
     assertPending(a, mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     const locked = new Map(state.assets?.map(row => [row.id, row]));
@@ -625,14 +632,15 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       const region = mail.region ?? state.default_region;
       if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
       if (c.env.config.multiTenant) sender(c.env, a, mail.from, region, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
-      if (a.environment === 'live' && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
+      if (mx && state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+      if (!mx && a.environment === 'live' && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!c.env.config.multiTenant) keySender(c.env, a, mail.from, region);
       const ids = distinctAttachmentIds(mail.attachments);
       // PostgreSQL cannot bind NUL as text. Defer that invalid lookup to its own message, after domain/duplicate checks.
       const attached = ids.some(id => id.includes('\0')) ? await attachmentRows(db, a, ids, true) : ids.flatMap(id => locked.get(id) ?? []);
       validateAttachmentRows(mail.attachments, attached);
       const link = mail.kind === 'marketing' ? await createUnsubscribeLink(c.env, a.workspaceId, a.environment, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
-      const snapshot = await prepare(c.env, db, a, { ...mail, region }, false, attached, true, false, link?.url);
+      const snapshot = await prepare(c.env, db, a, { ...mail, region }, false, attached, true, false, link?.url, state.connection ?? undefined);
       if (batch) {
         expandedBytes += Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
         if (expandedBytes > SENDING_LIMITS[a.environment].expandedCampaignBytes) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS[a.environment].expandedCampaignBytes / 1024 / 1024} MiB ${a.environment} limit. Submit smaller batches.`);
@@ -647,6 +655,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       INSERT INTO sending_emails (id, workspace_id, environment, actor_key_id, region, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated)
         SELECT id, ${a.workspaceId}, ${a.environment}, ${a.keyId}, snapshot->>'region', snapshot->>'from', snapshot->'to', snapshot->'cc', snapshot->'bcc',
           snapshot->>'subject', snapshot, ${a.environment === 'test'} FROM submitted`);
+    a.dispatchAccountId = state.connection?.aws_account_id;
     for (const row of rows) (a.dispatchTargets ??= new Set()).add(`${a.environment}:${row.snapshot.region}`);
     return receipt;
   }, receipt);
@@ -965,7 +974,7 @@ export function registerSending(app: App) {
         const [active] = await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId)));
         if (active && active.revision === row.revision && ['pending', 'processing'].includes(active.status)) return asyncReviewView(active);
       }
-      if (a.environment === 'live') await assertLiveRegionReady(c.env, db, draft.region, 'marketing', false, a.workspaceId);
+      if (a.environment === 'live' && !c.env.config.multiTenant) await assertLiveRegionReady(c.env, db, draft.region, 'marketing', false, a.workspaceId);
       const lockedAttachments = await attachmentRows(db, a, draft.attachments, true);
       const rendered = renderCampaignContent(c.env, draft);
       const reviewId = id('review');
@@ -1093,7 +1102,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   let reviewId = input.reviewId;
   if (!reviewId) {
     const draft = readyCampaign(row.draft); await sendingRegion(runtime, db, a, draft.from, draft.region);
-    if (a.environment === 'live') await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
+    if (a.environment === 'live' && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
     let active = row.preparingReviewId ? (await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId), eq(campaignReviews.campaignId, campaignId), eq(campaignReviews.revision, row.revision))))[0] : undefined;
     let captured = false;
     if (!active || !['pending', 'processing'].includes(active.status)) {
@@ -1127,7 +1136,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (review.storageVersion !== 2) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'Prepare a new review for the current campaign revision.');
   if (review.status !== 'ready' || review.processed !== review.eligible) throw new ApiError(409, 'CAMPAIGN_REVIEW_NOT_READY', 'Wait for every reviewed recipient to finish preparation.');
   await sendingRegion(runtime, db, a, review.draft.from, review.draft.region);
-  if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', false, a.workspaceId);
+  if (a.environment === 'live' && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', false, a.workspaceId);
   await checkCampaignCapacity(db, a, review.eligible);
   await attachmentRows(db, a, review.draft.attachments, true);
   await db.insert(campaignExpansions).values({ campaignId, reviewId: review.id, workspaceId: a.workspaceId, environment: a.environment, actorKeyId: a.keyId, total: review.eligible, requestId, ...pacing });
@@ -1201,6 +1210,8 @@ export function taggedEmailId(message: unknown): string | undefined {
 // Early callbacks with a known owner keep a recovery job; unresolved owners return an error for redelivery.
 export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIngress[]) {
   if (!inputs.length) return [];
+  const mx = runtime.config.multiTenant;
+  const topicMatch = mx ? sql`AND (x.environment='test' OR e.feedback_topic_arn=x.topic_arn)` : sql``;
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, environment: input.environment, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
@@ -1212,11 +1223,11 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
-      WHERE x.tagged_email_id IS NULL AND e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
+      WHERE x.tagged_email_id IS NULL AND e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test') ${topicMatch}
         AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
       UNION ALL
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.id = x.tagged_email_id
-      WHERE e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test')
+      WHERE e.environment = x.environment AND e.region = x.region AND e.simulated = (x.environment = 'test') ${topicMatch}
         AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
     ), locked AS MATERIALIZED (
       SELECT x.ordinal, e.id, e.workspace_id, e.environment, e.status, e.provider_id FROM raw x
@@ -1224,20 +1235,21 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       JOIN sending_emails e ON e.id = c.id
       WHERE e.provider_id = x.provider_id OR (e.id = x.tagged_email_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown'))
       ORDER BY e.id FOR UPDATE OF e
-    ), accounts AS (
+    ) ${mx ? sql`` : sql`, accounts AS (
       -- Same single-account binding as resolveRegionRuntime: only the installation's own registered topics count.
       SELECT s.workspace_id, CASE WHEN count(DISTINCT r.trusted_account_id) = 1 THEN min(r.trusted_account_id) END AS account
       FROM (SELECT DISTINCT workspace_id FROM locked WHERE environment = 'live') l JOIN ses_installation_settings s USING (workspace_id)
       LEFT JOIN ses_region_discovery r ON r.workspace_id = s.workspace_id AND r.trusted_account_id ~ '^[0-9]{12}$'
         AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':opensend-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
       GROUP BY s.workspace_id
-    ), input AS (
+    )`}, input AS (
       SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status,
         CASE WHEN x.type <> 'receipt' AND (l.provider_id IS NOT NULL OR l.status = 'acceptance_unknown') THEN l.id END AS email_id,
         CASE WHEN l.id IS NULL AND x.job_workspace IS NULL THEN 'SES_EMAIL_NOT_FOUND'
+             ${mx ? sql`WHEN x.environment='live' AND (l.id IS NULL OR to_jsonb(split_part(x.topic_arn,':',5)) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}') THEN 'SES_ACCOUNT_MISMATCH'` : sql`
              WHEN x.environment = 'live' AND a.workspace_id IS NULL THEN 'REGION_SETTINGS_NOT_INITIALIZED'
-             WHEN a.account IS NOT NULL AND to_jsonb(a.account) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}' THEN 'SES_ACCOUNT_MISMATCH' END AS error
-      FROM raw x LEFT JOIN locked l USING (ordinal) LEFT JOIN accounts a ON a.workspace_id = l.workspace_id AND x.environment = 'live'
+             WHEN a.account IS NOT NULL AND to_jsonb(a.account) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}' THEN 'SES_ACCOUNT_MISMATCH'`} END AS error
+      FROM raw x LEFT JOIN locked l USING (ordinal) ${mx ? sql`` : sql`LEFT JOIN accounts a ON a.workspace_id = l.workspace_id AND x.environment = 'live'`}
     ), incoming AS (
       INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, environment, processed_at)
        SELECT x.topic_arn, x.message_id, x.workspace_id, x.environment, CASE WHEN x.email_id IS NOT NULL THEN clock_timestamp() END
@@ -1477,7 +1489,7 @@ const prepareCampaign: JobHandler = async (runtime, payload, job) => {
         return;
       }
       await assertRegionEnabled(db, a.workspaceId, review.draft.region);
-      if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', true);
+      if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', true, a.workspaceId);
       const lockedAttachments = await attachmentRows(db, a, review.draft.attachments, true);
       if (!review.rendered) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen message source is missing.');
       const recipients = await recipientChunk(db, review.id, review.processed);
@@ -1555,11 +1567,13 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   const campaignId = payload.campaignId;
   const a: Actor = { workspaceId: job.workspaceId, environment: job.environment, keyId: 'worker', permissions: ['manage'], domains: [] };
   let sesAllowance = Number.POSITIVE_INFINITY, rateAllowance = Number.POSITIVE_INFINITY, shareRate = 0;
+  const limitsTable = sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
-      rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
-      max24: sql<number>`coalesce((SELECT max_24_hour_send FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
-      sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+      accountId: runtime.config.multiTenant ? sql<string>`(SELECT aws_account_id FROM provider_sending_connections WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
+      rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+      max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
+      sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
     }).from(campaignExpansions).leftJoin(campaignReviews, eq(campaignReviews.id, campaignExpansions.reviewId)).leftJoin(campaigns, eq(campaigns.id, campaignExpansions.campaignId))
       .where(and(eq(campaignExpansions.campaignId, campaignId), scope(campaignExpansions, a)));
     if (!initial || !['pending', 'expanding'].includes(initial.status) || initial.jobId !== job.id) return;
@@ -1625,7 +1639,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
       const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
-        rate: sql<number>`coalesce((SELECT max_send_rate FROM sending_region_limits WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${review!.draft.region}),0)`,
+        rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${review!.draft.region}),0)`,
       }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release).
       const windowStart = expansion.pacePerDay !== null && (!expansion.windowStartedAt || Date.now() - Date.parse(expansion.windowStartedAt) >= DAY_MS) ? now() : expansion.windowStartedAt;
@@ -1659,7 +1673,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
     });
     if (readyJobs) {
       // Expanded rows are claimed directly by the region dispatcher; the follow-up expansion job still needs the scheduler.
-      try { await runtime.dispatch?.(a.environment, review!.draft.region); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId, message: 'Expanded mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+      try { await runtime.dispatch?.(a.environment, review!.draft.region, initial.accountId ?? undefined); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId, message: 'Expanded mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       await wake(runtime, 1);
     }
   } catch (error) {
@@ -1683,7 +1697,7 @@ const finishExpandedCampaign: JobHandler = async (runtime, payload, job) => {
       (SELECT status FROM sending_campaigns WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND id=${payload.campaignId}) AS status,
       (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND campaign_id=${payload.campaignId} AND status IN ('queued','attempting') LIMIT 20000) p) AS pending,
       coalesce((SELECT l.max_send_rate FROM sending_campaign_expansions x JOIN sending_campaign_reviews r ON r.id = x.review_id
-        JOIN sending_region_limits l ON l.workspace_id = x.workspace_id AND l.environment = x.environment AND l.region = r.draft->>'region'
+        JOIN ${sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits')} l ON l.workspace_id = x.workspace_id AND l.environment = x.environment AND l.region = r.draft->>'region'
         WHERE x.workspace_id=${a.workspaceId} AND x.environment=${a.environment} AND x.campaign_id=${payload.campaignId}),0) AS rate`)).rows;
     if (progress!.pending > 0 && ['scheduled', 'sending'].includes(progress!.status ?? '')) throw new JobDeferred(new Date(Date.now() + drainDelayMs(progress!.pending, progress!.rate, 2000)).toISOString());
     await runtime.db.transaction(async db => {

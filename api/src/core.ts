@@ -16,6 +16,7 @@ export interface Actor {
   role?: string;
   // "environment:region" pairs whose queued mail this request committed; the response path nudges their dispatcher.
   dispatchTargets?: Set<string>;
+  dispatchAccountId?: string;
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
   wakeJobs?: number;
 }
@@ -70,7 +71,7 @@ export interface Runtime {
   deferNudge?: (pending: Promise<void>) => void;
   // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
-  dispatch?: (environment: Mode, region: string) => Promise<void>;
+  dispatch?: (environment: Mode, region: string, accountId?: string) => Promise<void>;
   // Verified provider feedback (and test-mode simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };

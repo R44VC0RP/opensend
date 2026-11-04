@@ -50,7 +50,7 @@ export function createApp() {
       if (wake) try { await wake(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const target of targets) {
         const [environment, region] = target.split(':') as [Mode, string];
-        try { await dispatch(environment, region); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+        try { await dispatch(environment, region, c.get('actor').dispatchAccountId); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge()); else await nudge();

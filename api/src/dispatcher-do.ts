@@ -13,11 +13,11 @@ import { feedbackSink } from './adapters/feedback-queue.js';
 // per-invocation setup the queue consumer did, and an evicted object resumes from storage
 // without bursting past its quota share. PostgreSQL rows remain the only queue.
 
-type Identity = { environment: Mode; region: string; shard: { index: number; count: number } };
+type Identity = { environment: Mode; region: string; accountId?: string; shard: { index: number; count: number } };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
 
-export function dispatcherName(identity: Identity) { return `dispatcher:${identity.environment}:${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
+export function dispatcherName(identity: Identity) { return `dispatcher:${identity.environment}:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
 
 export class DispatcherShard extends DurableObject<Env> {
@@ -50,6 +50,7 @@ export class DispatcherShard extends DurableObject<Env> {
     const identity: Identity = {
       environment: url.searchParams.get('environment') === 'live' ? 'live' : 'test',
       region: url.searchParams.get('region') ?? '',
+      accountId: url.searchParams.get('account') ?? undefined,
       shard: { index: Number(url.searchParams.get('shard') ?? 0), count: Math.max(1, Number(url.searchParams.get('count') ?? 1)) },
     };
     if (!identity.region) return new Response('region required', { status: 400 });
@@ -71,9 +72,11 @@ export class DispatcherShard extends DurableObject<Env> {
     try {
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
       const runtime = await this.runtime();
+      // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
+      if (runtime.config.multiTenant && !identity.accountId) return;
       if (!this.placementLogged) { this.placementLogged = true; await this.logPlacement(identity, runtime); }
       const report = await runDispatcher(runtime, {
-        environment: identity.environment, region: identity.region, shard: identity.shard, gate: this.gate,
+        ...identity, gate: this.gate,
         until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
