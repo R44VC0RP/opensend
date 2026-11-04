@@ -1,13 +1,15 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight } from 'lucide-react'
-import { useNavigate } from 'react-router'
-import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, PageHeader, Select, StatusBadge } from '../../components/ui'
-import { RouteSkeleton } from '../../components/RouteSkeleton'
+import { ArrowRight, ArrowUpRight } from 'lucide-react'
+import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, PageHeader, StatusBadge } from '../../components/ui'
+import { BootLoader } from '../../components/BootLoader'
+import { ThemeToggle } from '../../components/ThemeToggle'
+import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
 import { useApi, useApiMutation, useApiQuery, useSession } from '../../data/context'
-import { connectionApi, retryableConnectionErrors, setDomainStep, useConnectionCache } from '../../data/connections'
+import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
+import { setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DomainRecords, domainState, useDomain } from '../settings/domain-records'
-import { ApiError, type ProviderConnection } from '../../data/types'
+import { ApiError, type ConnectionKind, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -42,29 +44,80 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
   })
 }
 
-function StartOver() {
+// Full-page shell for /onboarding: no dashboard navigation or dashboard data.
+export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> }) {
+  const session = useSession()
+  useEffect(() => { document.title = 'Get started · opensend' }, [])
+  return <div className="onboarding-shell">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <header className="onboarding-header">
+      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />opensend</span>
+      <div className="onboarding-header-actions">
+        <div className="onboarding-workspace"><WorkspaceSwitcher /></div>
+        <ThemeToggle />
+        <Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button>
+      </div>
+    </header>
+    <main id="main-content" className="page-surface onboarding-surface" tabIndex={-1}>
+      {session?.notice && <div className="page-notice onboarding-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
+      <OnboardingSteps stage={stage} />
+    </main>
+  </div>
+}
+
+// One component owns every step, so the domain form keeps its input from the choice through a ready connection.
+function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
+  const identity = useSession()?.identity
+  const workspaceId = identity?.workspaceId ?? ''
+  const sending = stage.step === 'sending'
+  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal), { enabled: sending })
+  const sync = useConnectionCache()
+  // The chosen option shows the domain form at once, while the connection request finishes.
+  const [picked, setPicked] = useState<ConnectionKind | null>(null)
+  const [draft, setDraft] = useState('')
+  const [queued, setQueued] = useState(false)
+  const shared = useConnectionMutation(() => connectionApi.create({ kind: 'shared' }))
+  const byo = useConnectionMutation(() => connectionApi.create({ kind: 'byo' }))
+  // Setup finished elsewhere (another tab or admin): lift the gate.
+  useEffect(() => { if (connection.data?.status === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
+  function choose(kind: ConnectionKind) {
+    shared.reset(); byo.reset()
+    setPicked(kind)
+    if (kind === 'shared') { shared.mutate(undefined, { onError: () => setPicked(null) }); return }
+    // Open the tab inside the click so it isn't blocked; it gets the CloudFormation link once the setup exists.
+    const tab = window.open('about:blank', '_blank')
+    byo.mutate(undefined, {
+      onSuccess: created => { if (tab && created?.quickCreateUrl) { tab.opener = null; tab.location.href = created.quickCreateUrl } else tab?.close() },
+      onError: () => { tab?.close(); setPicked(null) },
+    })
+  }
+  const reset = () => { setPicked(null); setQueued(false) }
+  if (stage.step === 'setup-required') return <AdminSetupRequired />
+  if (stage.step === 'domain' && stage.domainId) return <DomainSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} onMissing={() => setDomainStep(workspaceId, '')} />
+  const current = connection.data
+  const pendingAws = sending && current?.kind === 'byo' && current.status === 'pending' ? current : null
+  if (sending && !pendingAws && !picked) {
+    if (connection.error) return <ErrorState error={connection.error} onRetry={() => void connection.refetch()} />
+    if (connection.isPending) return <BootLoader inline />
+    return <ChooseSending onChoose={choose} error={shared.error ?? byo.error} />
+  }
+  const aws = pendingAws || (sending && picked === 'byo')
+  return <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
+    ready={stage.step === 'domain'} region={identity?.connection?.region ?? ''}
+    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)}
+    aws={aws ? <ConnectAws connection={pendingAws} onReset={reset} /> : null} />
+}
+
+function StartOver({ onReset }: { onReset: () => void }) {
   const [open, setOpen] = useState(false)
   const remove = useConnectionMutation(async () => { await connectionApi.remove(); return null })
   return <>
-    <Button variant="ghost" onClick={() => setOpen(true)}>Start over</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} title="Start over?" description="The current CloudFormation link stops working. If you already created the stack, delete it in AWS." confirmLabel="Start over" pending={remove.isPending} onConfirm={() => remove.mutateAsync(undefined)} />
+    <Button variant="ghost" size="sm" onClick={() => setOpen(true)}>Start over</Button>
+    <ConfirmDialog open={open} onOpenChange={setOpen} title="Start over?" description="The current CloudFormation link stops working. If you already created the stack, delete it in AWS." confirmLabel="Start over" pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(undefined); onReset() }} />
   </>
 }
 
-export function SendingOnboarding() {
-  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal))
-  const regions = useApiQuery(['connection-regions'], (_api, signal) => connectionApi.regions(signal))
-  const sync = useConnectionCache()
-  // Setup finished elsewhere (another tab or admin): lift the gate.
-  useEffect(() => { if (connection.data?.status === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
-  if (connection.error || regions.error) return <ErrorState error={connection.error ?? regions.error} onRetry={() => { void connection.refetch(); void regions.refetch() }} />
-  if (connection.isPending || regions.isPending) return <RouteSkeleton />
-  const current = connection.data
-  if (current?.kind === 'byo' && current.status === 'pending' && current.quickCreateUrl) return <ConnectAws connection={current} />
-  return <ChooseSending regions={regions.data} />
-}
-
-export function AdminSetupRequired() {
+function AdminSetupRequired() {
   const client = useQueryClient()
   const [checking, setChecking] = useState(false)
   async function check() { setChecking(true); try { await client.refetchQueries({ queryKey: ['identity'], exact: true }) } finally { setChecking(false) } }
@@ -77,51 +130,42 @@ export function AdminSetupRequired() {
 
 function connectionError(error: unknown) {
   if (code(error) === 'AWS_NOT_CONFIGURED') return 'Hosted mail isn’t available on this installation.'
+  if (code(error) === 'BYO_NOT_CONFIGURED') return 'Bring your own AWS isn’t available on this installation.'
   if (code(error) === 'CONNECTION_EXISTS') return 'Another setup is already started. Reload to continue it.'
   return message(error)
 }
 
-function ChooseSending({ regions }: { regions: { shared: string[]; byo: string[] } }) {
-  const [sharedRegion, setSharedRegion] = useState(regions.shared[0] ?? '')
-  const [byoRegion, setByoRegion] = useState(regions.byo[0] ?? '')
-  const shared = useConnectionMutation((region: string) => connectionApi.create({ kind: 'shared', region }))
-  const byo = useConnectionMutation((region: string) => connectionApi.create({ kind: 'byo', region }))
-  const busy = shared.isPending || byo.isPending
-  return <div className="stack onboarding">
-    <PageHeader title="How do you want to send?" />
-    <p className="muted onboarding-lead">Choose where your email is sent from. You can change this later in Settings.</p>
-    <div className="onboarding-options">
-      <section className="onboarding-option" aria-labelledby="onboarding-shared">
-        <h2 id="onboarding-shared">Hosted mail</h2>
-        <p className="muted">Send through OpenSend. Nothing to set up in AWS.</p>
-        <p className="onboarding-price">$0.11 per 1,000 emails</p>
-        {regions.shared.length > 1 && <Field label="Region" htmlFor="onboarding-shared-region"><Select id="onboarding-shared-region" value={sharedRegion} onValueChange={setSharedRegion} options={regions.shared.map(region => ({ value: region, label: region }))} disabled={busy} /></Field>}
-        {shared.error ? <Alert tone="danger">{connectionError(shared.error)}</Alert> : null}
-        <Button variant="primary" loading={shared.isPending} disabled={busy} onClick={() => shared.mutate(sharedRegion)}>Use Hosted mail</Button>
-      </section>
-      <section className="onboarding-option" aria-labelledby="onboarding-byo">
-        <h2 id="onboarding-byo">Bring your own AWS</h2>
-        <p className="muted">Send through your own AWS account. Takes a few minutes in the AWS console.</p>
-        <p className="onboarding-price">You pay AWS directly</p>
-        {regions.byo.length > 1 && <Field label="Region" htmlFor="onboarding-byo-region"><Select id="onboarding-byo-region" value={byoRegion} onValueChange={setByoRegion} options={regions.byo.map(region => ({ value: region, label: region }))} disabled={busy} /></Field>}
-        {byo.error ? <Alert tone="danger">{connectionError(byo.error)}</Alert> : null}
-        <Button loading={byo.isPending} disabled={busy} onClick={() => byo.mutate(byoRegion)}>Connect AWS</Button>
-      </section>
+function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) => void; error: unknown }) {
+  return <div className="onboarding-choice">
+    <h1 className="onboarding-choice-title">How do you want to send?</h1>
+    <div className="onboarding-split">
+      <button type="button" className="onboarding-half" onClick={() => onChoose('shared')}>
+        <span className="onboarding-half-title">Hosted mail<ArrowRight size={16} aria-hidden /></span>
+        <span className="onboarding-half-price">$0.11 per 1,000 emails</span>
+        <span className="muted">Send through OpenSend. Nothing to set up.</span>
+      </button>
+      <button type="button" className="onboarding-half" onClick={() => onChoose('byo')}>
+        <span className="onboarding-half-title">Bring your own AWS<ArrowRight size={16} aria-hidden /></span>
+        <span className="onboarding-half-price">You pay AWS directly</span>
+        <span className="muted">Send from your own AWS account.</span>
+      </button>
     </div>
+    {error ? <Alert tone="danger">{connectionError(error)}</Alert> : null}
   </div>
 }
 
 function verifyError(error: unknown, region: string) {
   switch (code(error)) {
     case 'AWS_ACCESS_DENIED': return `OpenSend couldn’t use the role in that account yet. Check the stack shows CREATE_COMPLETE in ${region}, in this account, then try again.`
-    case 'EXTERNAL_ID_REQUIRED': return 'The role doesn’t require this setup’s external ID. Delete the stack in AWS and create it again from the link above.'
+    case 'EXTERNAL_ID_REQUIRED': return 'The role doesn’t require this setup’s external ID. Delete the stack in AWS and open it again.'
     case 'AWS_ACCOUNT_IN_USE': return 'This AWS account is already connected to another workspace.'
     case 'AWS_ACCOUNT_MISMATCH': return 'This setup is tied to a different AWS account. Start over to use this one.'
     default: return message(error)
   }
 }
 
-function ConnectAws({ connection }: { connection: ProviderConnection }) {
+// Compact status above the domain form while a bring-your-own setup waits for its CloudFormation stack.
+function ConnectAws({ connection, onReset }: { connection: ProviderConnection | null; onReset: () => void }) {
   const [account, setAccount] = useState('')
   const [accountError, setAccountError] = useState('')
   const verify = useConnectionMutation((id: string) => retrying(() => connectionApi.verify(id)))
@@ -132,68 +176,52 @@ function ConnectAws({ connection }: { connection: ProviderConnection }) {
     setAccountError('')
     try { await verify.mutateAsync(id) } catch { /* Shown inline. */ }
   }
-  return <div className="stack onboarding onboarding--narrow">
-    <PageHeader title="Connect your AWS account" actions={!verify.isPending && <StartOver />} />
-    <p className="muted onboarding-lead">OpenSend sends through a role in your account, in {connection.region}. AWS bills you directly.</p>
-    <ol className="onboarding-steps">
-      <li>
-        <h2>1. Open CloudFormation</h2>
-        <p className="muted">Sign in to the AWS account you want to send from. The stack opens with everything filled in.</p>
-        <div><a className="ui-button ui-button--secondary" href={connection.quickCreateUrl!} target="_blank" rel="noopener noreferrer">Open AWS CloudFormation <ArrowUpRight size={16} aria-hidden /></a></div>
-      </li>
-      <li>
-        <h2>2. Create the stack</h2>
-        <p className="muted">Review the stack, tick the IAM acknowledgement at the bottom, then choose Create stack. Wait for CREATE_COMPLETE, usually under a minute.</p>
-      </li>
-      <li>
-        <h2>3. Verify</h2>
-        <form className="stack" onSubmit={submit} noValidate>
-          <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError} hint="12 digits, in the account menu at the top right of the AWS console.">
-            <Input id="onboarding-aws-account" className="onboarding-account" inputMode="numeric" autoComplete="off" value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
-          </Field>
-          {verify.error ? <Alert tone="danger">{verifyError(verify.error, connection.region)}</Alert> : null}
-          {verify.isPending && <p className="muted" role="status">Checking the role and setting up feedback in your account. This can take a minute.</p>}
-          <div><Button type="submit" variant="primary" loading={verify.isPending}>Verify connection</Button></div>
-        </form>
-      </li>
-    </ol>
-  </div>
+  const link = connection?.quickCreateUrl
+  return <section className="onboarding-aws" aria-labelledby="onboarding-aws-title">
+    <div className="onboarding-aws-status">
+      <p id="onboarding-aws-title" role="status"><span className="onboarding-aws-dot" aria-hidden="true" /><strong>Connect your AWS account</strong><span className="muted"> — {verify.isPending ? 'checking the role' : 'waiting for the stack'}</span></p>
+      <div className="cluster">
+        {link ? <a className="ui-button ui-button--ghost ui-button--sm" href={link} target="_blank" rel="noopener noreferrer">Open AWS again <ArrowUpRight size={16} aria-hidden /></a> : <Button variant="ghost" size="sm" disabled>Open AWS again <ArrowUpRight size={16} aria-hidden /></Button>}
+        {connection && !verify.isPending && <StartOver onReset={onReset} />}
+      </div>
+    </div>
+    <form className="onboarding-inline-form" onSubmit={submit} noValidate>
+      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint={accountError || verify.error ? undefined : 'After the stack shows CREATE_COMPLETE. 12 digits, in the AWS console’s account menu.'}>
+        <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
+      </Field>
+      <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
+    </form>
+  </section>
 }
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
-// The step after choosing how to send: add one domain, then records verify in the background.
-export function DomainOnboarding({ domainId }: { domainId: string }) {
-  const identity = useSession()?.identity
-  const navigate = useNavigate()
-  const workspaceId = identity?.workspaceId ?? ''
-  const finish = () => { setDomainStep(workspaceId, null); navigate('/', { replace: true }) }
-  return domainId ? <DomainSetup domainId={domainId} onFinish={finish} onMissing={() => setDomainStep(workspaceId, '')} /> : <AddDomain region={identity?.connection?.region ?? ''} onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
-}
-
-function AddDomain({ region, onAdded, onFinish }: { region: string; onAdded: (id: string) => void; onFinish: () => void }) {
+type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; region: string; onAdded: (id: string) => void; onFinish: () => void; aws: ReactNode }
+// Before the connection is ready, a valid domain waits and is added as soon as it is.
+function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region, onAdded, onFinish, aws }: AddDomainProps) {
   const api = useApi()
   const client = useQueryClient()
   const create = useApiMutation((api, name: string) => api.domains.create({ regionId: region, name }), undefined, true)
-  const [name, setName] = useState('')
   const [invalid, setInvalid] = useState('')
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    const value = name.trim().toLowerCase()
+  const value = draft.trim().toLowerCase()
+  async function add() {
     if (!domainPattern.test(value)) { setInvalid('Enter a domain like acme.com, without https:// or a path.'); return }
     setInvalid('')
+    if (!ready) { onQueuedChange(true); return }
     try {
       const domain = await create.mutateAsync(value)
       client.setQueryData(['opensend', api.mode, 'domain', domain.id], domain)
       onAdded(domain.id)
     } catch { /* Shown inline. */ }
   }
+  useEffect(() => { if (ready && queued) { onQueuedChange(false); void add() } }, [ready, queued]) // eslint-disable-line react-hooks/exhaustive-deps
   return <div className="stack onboarding onboarding--narrow">
-    <PageHeader title="Add your domain" actions={<Button variant="ghost" disabled={create.isPending} onClick={onFinish}>Continue to dashboard</Button>} />
+    <PageHeader title="Add your domain" actions={ready && <Button variant="ghost" disabled={create.isPending} onClick={onFinish}>Continue to dashboard</Button>} />
+    {aws}
     <p className="muted onboarding-lead">Send from your own domain. Next you’ll add a few DNS records, and OpenSend verifies them on its own.</p>
-    <form className="onboarding-domain-form" onSubmit={submit} noValidate>
-      <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)}>
-        <Input id="onboarding-domain" autoFocus autoComplete="off" spellCheck={false} value={name} onChange={event => setName(event.target.value)} placeholder="acme.com" disabled={create.isPending} />
+    <form className="onboarding-inline-form" onSubmit={event => { event.preventDefault(); void add() }} noValidate>
+      <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued && !invalid ? `${value} is added as soon as your AWS account is connected.` : undefined}>
+        <Input id="onboarding-domain" autoFocus={!aws} autoComplete="off" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
       </Field>
       <Button type="submit" variant="primary" loading={create.isPending}>Add domain</Button>
     </form>
@@ -207,7 +235,7 @@ function DomainSetup({ domainId, onFinish, onMissing }: { domainId: string; onFi
   useEffect(() => { if (missing) onMissing() }, [missing]) // eslint-disable-line react-hooks/exhaustive-deps
   // Verified: show it, then carry on to the dashboard.
   useEffect(() => { if (!verified) return; const timer = setTimeout(onFinish, 2500); return () => clearTimeout(timer) }, [verified]) // eslint-disable-line react-hooks/exhaustive-deps
-  if (domain.isPending || missing) return <RouteSkeleton />
+  if (domain.isPending || missing) return <BootLoader inline />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   const state = domainState(current)

@@ -4,7 +4,9 @@ import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
 import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
 import { regionCatalogKey } from './regions'
+import { dashboardLikelyReady, identityOnboardingStage, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
+import { BootLoader } from '../components/BootLoader'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const HomePage = lazy(() => import('../features/home').then(m => ({ default: m.HomePage })))
@@ -17,6 +19,11 @@ export function useWorkspaceAccess() {
   const multiTenant = identity?.multiTenant === true
   const role = multiTenant ? identity?.role ?? null : null
   return { multiTenant, role, canAdminister: !multiTenant || role === 'owner' || role === 'admin' }
+}
+// What the current workspace still needs before the dashboard opens; null when it can open.
+export function useOnboardingStage() {
+  const identity = useContext(SessionContext)?.identity
+  return onboardingStage(identity, useDomainStep(identity?.workspaceId))
 }
 function invitationError(error: unknown) {
   if (error instanceof ApiError && error.status === 404) return 'This invitation is invalid, expired or for a different email address. Ask for a new invitation.'
@@ -87,13 +94,14 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     setGeneration(value => value + 1)
   }
   // Load the region catalog alongside /v1/me rather than after it; the shell reuses this cache entry.
-  // An invitation link selects its workspace first, so wait until it is accepted.
+  // An invitation link selects its workspace first, so wait until it is accepted. Workspaces that may
+  // still need onboarding wait for /v1/me, so onboarding never starts dashboard requests.
   useEffect(() => {
-    if (client.mode === 'demo' || publicRoute || invitation) return
+    if (client.mode === 'demo' || publicRoute || invitation || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
   useEffect(() => {
-    if (!identity.data || client.mode === 'demo') return
+    if (!identity.data || client.mode === 'demo' || identityOnboardingStage(identity.data)) return
     const match = window.location.pathname.match(/^\/campaigns\/([^/]+)\/(?:edit|review)$/)
     if (!match) return
     let id: string
@@ -127,7 +135,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   const home = useQuery({ queryKey: ['public-home'], enabled: signedOut && window.location.pathname === '/', staleTime: Infinity, retry: false, queryFn: ({signal}) => request<{multiTenant?: boolean} | null>('/health', {signal}).then(health => health?.multiTenant === true) })
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? null : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
+    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
         {authNotice}

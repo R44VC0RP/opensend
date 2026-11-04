@@ -1,17 +1,12 @@
-import { Suspense, lazy, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
-import { useApi, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../data/context'
-import { workspaceApi } from '../data/workspaces'
-import { useDomainStep } from '../data/connections'
+import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
-import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText, useToast } from './ui'
+import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText } from './ui'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
-
-const SendingOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.SendingOnboarding })))
-const AdminSetupRequired = lazy(() => import('../features/onboarding').then(m => ({ default: m.AdminSetupRequired })))
-const DomainOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.DomainOnboarding })))
+import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -21,21 +16,13 @@ export function AppShell() {
   const { regionId, setRegionId } = useRegion()
   const session = useSession()
   const access = useWorkspaceAccess()
-  const toast = useToast()
-  const workspaces = useApiQuery(['workspaces'], (_api, signal) => workspaceApi.list(signal), { enabled: access.multiTenant })
-  const [switching, setSwitching] = useState(false)
   const location = useLocation()
   const needsRegion = location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path))
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
-  // Hosted workspaces need a ready sending connection; /v1/me carries its summary. Their regions are
-  // managed by that connection, so SES discovery and its sidebar status don't apply.
-  const hostedSetup = access.multiTenant && api.mode !== 'demo'
-  const needsConnection = hostedSetup && session?.identity?.connection?.status !== 'ready'
-  // After choosing how to send, the add-domain step stays up until the user continues.
-  const domainStep = useDomainStep(hostedSetup && access.canAdminister ? session?.identity?.workspaceId : undefined)
-  const onboarding = needsConnection || domainStep !== null
+  // Hosted workspaces reach the shell only once onboarding is done (see App). Their regions are
+  // managed by the sending connection, so SES discovery and its sidebar status don't apply.
   const discovery = useRegionDiscovery(access.multiTenant ? undefined : current)
   const quota = discovery.data?.account?.quota
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
@@ -51,14 +38,6 @@ export function AppShell() {
     if (regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
-  async function changeWorkspace(id: string) {
-    // Detail routes belong to the previous workspace; keep only the section.
-    const [section, child] = location.pathname.split('/').filter(Boolean)
-    const path = section === 'settings' && child === 'workspace' ? '/settings/workspace' : section ? `/${section}` : '/'
-    setSwitching(true)
-    try { await session?.switchWorkspace(id, path) }
-    catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false) }
-  }
   function changeRegion(id: string) {
     setRegionId(id)
     const parts = location.pathname.split('/').filter(Boolean)
@@ -71,24 +50,13 @@ export function AppShell() {
       }
     }
   }
-  const workspaceSelect = access.multiTenant && <Select id="sidebar-workspace" aria-label="Workspace" value={session?.identity?.workspaceId ?? ''} onValueChange={id => void changeWorkspace(id)} options={(workspaces.data ?? []).map(workspace => ({ value: workspace.id, label: workspace.name }))} disabled={switching || workspaces.isPending} placeholder={workspaces.isPending ? 'Loading workspaces…' : 'Workspace'} />
-  if (onboarding) return <div className="app-shell">
-    <a className="skip-link" href="#main-content">Skip to content</a>
-    <aside className="sidebar">
-      <span className="wordmark"><span className="wordmark-square" aria-hidden="true" />opensend</span>
-      <ThemeToggle />
-      <div className="sidebar-context">{workspaceSelect}</div>
-      <div className="sidebar-footer"><Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button></div>
-    </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{!needsConnection && domainStep !== null ? <DomainOnboarding domainId={domainStep} /> : access.canAdminister ? <SendingOnboarding /> : <AdminSetupRequired />}</Suspense></main>
-  </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <aside className="sidebar">
       <NavLink className="wordmark" to="/" aria-label="opensend overview"><span className="wordmark-square" aria-hidden="true" />opensend</NavLink>
       <ThemeToggle />
       <div className="sidebar-context">
-        {workspaceSelect}
+        {access.multiTenant && <WorkspaceSwitcher />}
         {access.canAdminister && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
         {access.canAdminister && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}

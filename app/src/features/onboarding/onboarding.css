@@ -1,21 +1,54 @@
 .onboarding { max-width: 880px; }
 .onboarding--narrow { max-width: 640px; }
-.onboarding-lead { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.onboarding-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
-.onboarding-option { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding: var(--space-16); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
-.onboarding-option h2, .onboarding-steps h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
-.onboarding-option p, .onboarding-steps p { margin: 0; }
-.onboarding-option > p:not(.onboarding-price) { margin-top: calc(-1 * var(--space-8)); }
-.onboarding-price { font-weight: var(--font-weight-bold); }
-.onboarding-option > .ui-button { align-self: flex-start; margin-top: auto; }
-.onboarding-steps { list-style: none; margin: 0; padding: 0; }
-.onboarding-steps > li { display: flex; flex-direction: column; gap: var(--space-12); padding-block: var(--space-20); border-top: 1px solid var(--color-border); }
-.onboarding-account { max-width: 240px; }
-@media (max-width: 900px) { .onboarding-options { grid-template-columns: 1fr; } }
 .onboarding--wide { max-width: 1040px; }
-.onboarding-domain-form { display: flex; align-items: flex-start; gap: var(--space-12); max-width: 520px; }
-.onboarding-domain-form > .ui-field { flex: 1; min-width: 0; }
-/* Line up with the input, below its label, whether or not an error shows. */
-.onboarding-domain-form > .ui-button { margin-top: calc(var(--leading-xs) + var(--space-8)); }
+.onboarding-lead { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+
+/* The sending choice: one surface split into two equal, fully clickable halves. */
+.onboarding-choice { display: flex; flex-direction: column; gap: var(--space-24); width: 100%; max-width: 760px; margin: auto; }
+.onboarding-choice-title { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; text-align: center; }
+.onboarding-split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow: hidden; }
+.onboarding-half { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); min-width: 0; padding: var(--space-32); border: 0; background: none; color: var(--color-text); font: inherit; font-size: var(--text-sm); line-height: var(--leading-sm); text-align: left; cursor: pointer; transition: background var(--motion-duration); }
+.onboarding-half + .onboarding-half { border-left: 1px solid var(--color-border); }
+.onboarding-half:hover { background: var(--color-hover); }
+.onboarding-half:active { background: var(--color-layer-2); }
+.onboarding-half:focus-visible { outline-offset: -2px; }
+/* Title row carries a quiet arrow so each half reads as one action. */
+.onboarding-half-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); align-self: stretch; font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); letter-spacing: -.18px; }
+.onboarding-half-title svg { color: var(--color-muted); transition: color var(--motion-duration), transform var(--motion-duration); }
+.onboarding-half:hover .onboarding-half-title svg { color: var(--color-text); transform: translateX(2px); }
+.onboarding-half-price { margin-top: var(--space-16); font-weight: var(--font-weight-bold); }
+
+/* Domain form and the account ID form share one inline layout. */
+.onboarding-inline-form { display: flex; align-items: flex-start; gap: var(--space-12); max-width: 520px; }
+.onboarding-inline-form > .ui-field { flex: 1; min-width: 0; }
+/* Line up with the input, below its label, whether or not a hint or error shows. */
+.onboarding-inline-form > .ui-button { margin-top: calc(var(--leading-xs) + var(--space-8)); }
+.onboarding-aws { display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
+.onboarding-aws-status { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); }
+.onboarding-aws-status .cluster { margin-right: calc(-1 * var(--space-8)); }
+.onboarding-aws-status p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.onboarding-aws-status strong { font-weight: var(--font-weight-bold); }
+.onboarding-aws-dot { display: inline-block; width: 6px; height: 6px; margin-right: var(--space-8); border-radius: 50%; background: var(--color-warning-marker); vertical-align: middle; }
+.onboarding-aws .onboarding-inline-form { max-width: 400px; }
+
 .onboarding-domain-title { display: inline-flex; align-items: center; gap: var(--space-12); }
 .onboarding-domain-title .ui-status { font-size: var(--text-sm); }
+
+.onboarding-shell { display: flex; flex-direction: column; height: 100dvh; background: var(--color-deep); }
+.onboarding-header { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: 48px; padding: var(--space-8) var(--space-12) var(--space-8) var(--space-16); }
+.onboarding-header .wordmark, .onboarding-header .theme-toggle { position: static; }
+.onboarding-header-actions { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.onboarding-workspace { width: 200px; min-width: 0; }
+.page-surface.onboarding-surface { flex: 1; height: auto; margin: 0 var(--page-inset) var(--page-inset); padding-block: var(--space-40); }
+.onboarding-surface > .onboarding, .onboarding-notice { width: 100%; margin-inline: auto; }
+.onboarding-notice { max-width: 880px; }
+@media (max-width: 850px) {
+  .page-surface.onboarding-surface { padding: var(--space-24) var(--space-16); }
+  .onboarding-workspace { width: 160px; }
+}
+@media (max-width: 640px) {
+  .onboarding-split { grid-template-columns: 1fr; }
+  .onboarding-half { padding: var(--space-24); }
+  .onboarding-half + .onboarding-half { border-left: 0; border-top: 1px solid var(--color-border); }
+  .onboarding-workspace { width: 140px; }
+}

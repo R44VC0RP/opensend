@@ -1,7 +1,12 @@
-import { Component, lazy, type ErrorInfo, type ReactNode } from 'react'
-import { Route, Routes, Link } from 'react-router'
+import { Component, lazy, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Navigate, Route, Routes, Link } from 'react-router'
 import { AppShell } from './components/AppShell'
+import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
+import { useOnboardingStage, useSession } from './data/context'
+import { selectedWorkspace } from './data/live'
+import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
+const loadOnboarding = () => import('./features/onboarding')
 const loadOverview = () => import('./features/overview')
 const loadLogs = () => import('./features/logs')
 const loadCampaigns = () => import('./features/campaigns')
@@ -44,9 +49,13 @@ const LegacyMailboxesRedirect = lazy(() => loadInbound().then(m => ({ default: m
 const LegacyMailboxRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxRedirect })))
 const LegacyMailboxWebhooksRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhooksRedirect })))
 const LegacyMailboxWebhookRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhookRedirect })))
+const OnboardingPage = lazy(() => loadOnboarding().then(m => ({ default: m.OnboardingPage })))
 
+// Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
 const initialPath = window.location.pathname
-if (initialPath === '/') void loadOverview()
+if (initialPath === '/onboarding') void loadOnboarding()
+else if (!dashboardLikelyReady(selectedWorkspace())) { /* /v1/me decides between onboarding and the dashboard. */ }
+else if (initialPath === '/') void loadOverview()
 else if (initialPath.startsWith('/logs')) void loadLogs()
 else if (initialPath.startsWith('/campaigns')) void loadCampaigns()
 else if (initialPath.startsWith('/templates')) void loadTemplates()
@@ -62,8 +71,23 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
   componentDidCatch(_error: Error, _info: ErrorInfo) { /* A production reporter can be injected here; never log message bodies. */ }
   render() { return this.state.failed ? <div className="fatal-error"><h1>Something went wrong</h1><p>Unsaved changes may be lost.</p><Button onClick={() => window.location.reload()}>Reload application</Button></div> : this.props.children }
 }
+// /v1/me alone decides whether the workspace still needs onboarding, before any dashboard chrome or data.
+function DashboardGate() {
+  const stage = useOnboardingStage()
+  return stage ? <Navigate to="/onboarding" replace /> : <AppShell />
+}
+function OnboardingRoute() {
+  const stage = useOnboardingStage()
+  return stage ? <Suspense fallback={<BootLoader />}><OnboardingPage stage={stage} /></Suspense> : <Navigate to="/" replace />
+}
+function useRememberDashboardReady() {
+  const identity = useSession()?.identity
+  const stage = useOnboardingStage()
+  useEffect(() => { if (identity) rememberDashboardReady(identity.multiTenant ? identity.workspaceId : null, !stage) }, [identity, stage])
+}
 export function App() {
-  return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route element={<AppShell />}>
+  useRememberDashboardReady()
+  return <AppErrorBoundary><Routes><Route path="docs" element={<DocsPage />} /><Route path="onboarding" element={<OnboardingRoute />} /><Route element={<DashboardGate />}>
     <Route index element={<OverviewPage />} />
     <Route path="logs" element={<LogsPage />} /><Route path="logs/received/:id" element={<ReceivedEmailDetailPage />} /><Route path="logs/:id" element={<EmailDetailPage />} />
     <Route path="inbound" element={<InboundPage />} /><Route path="inbound/addresses" element={<InboundAddressesPage />} /><Route path="inbound/addresses/:id" element={<InboundAddressDetailPage />} /><Route path="inbound/webhooks" element={<InboundWebhooksPage />} /><Route path="inbound/webhooks/:id" element={<InboundWebhookDetailPage />} />
