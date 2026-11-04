@@ -68,6 +68,23 @@ variable "origin_connection_limit" {
   default = 30
 }
 
+variable "zone_id" {
+  type        = string
+  default     = null
+  description = "Cloudflare zone for the installation's own DNS records (dns_records)."
+}
+
+variable "dns_records" {
+  description = "Records the installation publishes on its own zone, e.g. the shared inbound domain's MX and DKIM (from provider_pool_regions.inbound_dns)."
+  type = list(object({
+    type     = string
+    name     = string
+    content  = string
+    priority = optional(number)
+  }))
+  default = []
+}
+
 variable "bucket_location" {
   type    = string
   default = "enam"
@@ -124,6 +141,18 @@ resource "cloudflare_hyperdrive_config" "db" {
   # Leave database connections free for migrations and operators: PlanetScale PS-20 has far fewer
   # than Hyperdrive's default 60, and the first deploy that filled them failed with 53300.
   origin_connection_limit = var.origin_connection_limit
+}
+
+resource "cloudflare_dns_record" "installation" {
+  for_each = { for r in var.dns_records : "${r.type} ${r.name}" => r }
+  zone_id  = var.zone_id
+  type     = each.value.type
+  name     = each.value.name
+  content  = each.value.content
+  priority = each.value.priority
+  ttl      = 1
+  # DKIM CNAMEs must resolve to amazonses.com, so never proxy.
+  proxied = false
 }
 
 output "work_queue" {
