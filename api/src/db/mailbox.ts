@@ -1,4 +1,4 @@
-import { bigint, bigserial, boolean, index, integer, smallint,jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, customType, index, integer, smallint,jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import type { Mode } from '../core.js';
 
@@ -13,7 +13,10 @@ export type MxReport = {
   checkedAt: string;
 };
 export type MailboxDomainStatus = 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
-export type CatchAll = 'create_mailbox' | 'store';
+// Keep the existing CHECK constraint and default. Only the DB uses the old enum spelling.
+const catchAll = customType<{data:'create_address'|'store';driverData:'create_mailbox'|'store'}>({
+  dataType: () => 'text', toDriver: v => v === 'store' ? v : 'create_mailbox', fromDriver: v => v === 'store' ? v : 'create_address',
+});
 export type MailboxPermission = 'read' | 'send' | 'modify';
 export type SendLimits = { perHour: number; perDay: number; perRecipientPerHour: number; perThreadPer10Minutes: number };
 export type Verdicts = { spf?: string; dkim?: string; dmarc?: string; spam?: string; virus?: string };
@@ -32,7 +35,7 @@ export const mailboxRegions = pgTable('mailbox_regions', {
 
 export const mailboxDomains = pgTable('mailbox_domains', {
   id: text('id').primaryKey(), ...scope(), domainId: text('domain_id').notNull(), name: text('name').notNull(), receivingHost:text('receiving_host'), region: text('region').notNull(),
-  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: text('catch_all').$type<CatchAll>().notNull().default('create_mailbox'),
+  status: text('status').$type<MailboxDomainStatus>().notNull(), catchAll: catchAll('catch_all').notNull().default(sql`'create_mailbox'`),
   mx: jsonb('mx').$type<MxReport | null>(), mxMisses:smallint('mx_misses').notNull().default(0),lastError: text('last_error'), enabledAt: ts('enabled_at'), checkedAt: ts('checked_at'),
   // Subdomains (acme.example.com) point at their receiving parent and share its SES domain.
   parentId: text('parent_id'), acceptSubdomains: boolean('accept_subdomains').notNull().default(false),

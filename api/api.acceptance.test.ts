@@ -927,7 +927,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
               if(user===b){assert.ok(!JSON.stringify(stored.headers).includes(blind));const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.ok(!JSON.stringify(detail).includes(blind));}
-              const detailed=ok(await local('GET',`/mailbox/v1/messages/${stored.id}`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
+              const detailed=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,user.cookie,{'x-opensend-environment':'live'}));assert.deepEqual(detailed.envelopeTo,[recipient]);assert.ok(new URL(detailed.rawUrl).pathname.includes(`/workspaces/${wid}/raw/`));
             }
             message.receipt.recipients=[dropped];message.mail.messageId=unique('unmatched');message.receipt.action.objectKey='staging/'+message.mail.messageId;
             assert.equal(await accept(),0);assert.equal((await pool.query('SELECT 1 FROM mail_receipts WHERE ses_message_id=$1',[message.mail.messageId])).rowCount,0);
@@ -1045,7 +1045,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid,environment:'live'});
           assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
           const {rows:[stored]}=await pool.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);
-          const detail=ok(await local('GET',`/mailbox/v1/messages/${stored.id}`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
+          const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
         });
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
@@ -1497,11 +1497,20 @@ describe('Hosted MCP OAuth and tools', () => {
       const mcp = async (method:string, params:Json) => ok(await local('POST','/mcp',{jsonrpc:'2.0',id:unique('rpc'),method,params},'live',{ ...rpcHeaders,authorization:`Bearer ${token}` })).result;
       const tool = (name:string, args:Json) => mcp('tools/call',{name,arguments:args});
       const success = async (name:string,args:Json) => { const x=await tool(name,args);assert.equal(x.isError,false,redact(x));return x.structuredContent.response; };
-      const tools = (await mcp('tools/list',{})).tools.map((x:Json)=>x.name);
+      const catalog = (await mcp('tools/list',{})).tools;
+      const tools = catalog.map((x:Json)=>x.name);
+      const { dispatchAsActor } = await import('./src/auth.js'), { app } = await import('./src/app.js');
+      for (const name of ['listInboundMessages','getInboundMessage']) {
+        assert.ok(!Object.hasOwn(catalog.find((x:Json)=>x.name===name).inputSchema.properties,'includeDelivery'));
+        const args = name === 'getInboundMessage' ? { messageId:'msg_probe' } : {};
+        assert.equal((await tool(name,{...args,includeDelivery:'true'})).structuredContent.error.code,'INVALID_ARGUMENTS');
+        const url=`${PUBLIC_ORIGIN}${base}/messages${args.messageId ? '/'+args.messageId : ''}?includeDelivery=true`;
+        const denied=await dispatchAsActor(app,new Request(url),runtime,{...scope,keyId:'mcp_probe',credential:'mcp',permissions:['manage'],domains:[]});
+        assert.equal(denied.status,403);assert.equal((await denied.json() as Json).error.code,'ADMIN_REQUIRED');
+      }
       for (const name of ['saveInboundAddress','listInboundAddresses','getInboundAddress','listInboundThreads','getInboundThread','listInboundMessages','getInboundMessage','sendInboundThread','deleteInboundAddress']) assert.ok(tools.includes(name),name);
       for (const admin of ['createInboundKey','rotateInboundWebhookSecret','disableInboundDomain','provisionRegion']) assert.ok(!tools.includes(admin));
       const canonicalHook = ok(await post('/webhooks',{url:'https://example.com/addresses',eventTypes:['address.created','address.deleted']}),201);
-      const legacyHook = ok(await local('POST','/mailbox/v1/webhooks',{url:'https://example.com/mailboxes',eventTypes:['mailbox.created','mailbox.deleted']},'live'),201);
       const a=await success('saveInboundAddress',{action:'create',body:{address:'support@example.com',aliases:['help@example.com'],metadata:{purpose:'support'}},confirm:true});
       const b=ok(await post('/addresses',{address:'billing@example.com'}),201);
       const updated=await success('saveInboundAddress',{action:'update',addressId:a.id,body:{displayName:'Customer support'},confirm:true});assert.deepEqual(updated.aliases,['help@example.com']);assert.deepEqual(updated.metadata,{purpose:'support'});
@@ -1510,7 +1519,6 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal(domain.addressCount,2); assert.equal(domain.catchAll,'create_address'); assert.ok(!('mailboxCount' in domain));
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'store'},'live')).catchAll,'store');
       assert.equal(ok(await local('PATCH',`${base}/domains/${domainId}`,{catchAll:'create_address'},'live')).catchAll,'create_address');
-      assert.equal(ok(await local('GET',`/mailbox/v1/domains/${domainId}`,undefined,'live')).catchAll,'create_mailbox');
       const key=ok(await post('/keys',{name:'support only',addressIds:[a.id],permissions:['read','send']}),201);const h={authorization:`Bearer ${key.secret}`};
       assert.deepEqual(ok(await get('/addresses',h)).data.map((x:Json)=>x.id),[a.id]);error(await get(`/addresses/${b.id}`,h),404);error(await post('/addresses',{address:'denied@example.com'},h),403);
       error(await local('GET',`${base}/addresses`,undefined,'test'),403);
@@ -1576,14 +1584,11 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.ok(ok(await get(`/events?after=0&addressId=${a.id}`,h)).data.every((x:Json)=>x.addressId===a.id && !('mailboxId' in x)));
       assert.equal((await success('deleteInboundAddress',{addressId:b.id,confirm:true})).ok,true);error(await get(`/addresses/${b.id}`),404);
       const lifecycle = ok(await get('/events?after=0&types=address.created,address.deleted')).data;
-      const legacy = ok(await local('GET','/mailbox/v1/events?after=0&types=mailbox.created,mailbox.deleted',undefined,'live')).data;
-      assert.deepEqual(lifecycle.map((e:Json)=>e.id),legacy.map((e:Json)=>e.id));
       assert.deepEqual(lifecycle.map((e:Json)=>e.type),['address.created','address.created','address.deleted']);
       const deliveries = (await db.query('SELECT webhook_id,payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1 ORDER BY event_seq',[scope.workspaceId])).rows;
-      for (const [hookId,prefix] of [[canonicalHook.id,'address'],[legacyHook.id,'mailbox']]) {
-        const bodies=deliveries.filter(d=>d.webhook_id===hookId).map(d=>d.payload);
-        assert.deepEqual(bodies.map(e=>e.type),[`${prefix}.created`,`${prefix}.created`,`${prefix}.deleted`]); assert.equal(bodies.at(-1).addressId,b.id);
-      }
+      const bodies=deliveries.filter(d=>d.webhook_id===canonicalHook.id).map(d=>d.payload);
+      assert.deepEqual(bodies.map(e=>e.type), lifecycle.map((e:Json)=>e.type));
+      assert.equal(bodies.at(-1).addressId,b.id);
       runtime.config.multiTenant = true;
       // Neither a registered parent domain nor the mailbox's own address is sufficient on MX.
       for (const from of ['team@mail.example.com','support@example.com']) {
@@ -3692,15 +3697,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 10000, SentLast24Hours: 0 } };
         assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; sends.set(id, cmd.input); return { MessageId: `fixture-${id}` };
       });
-      const create = async (body: Json) => ok(await local('POST', '/mailbox/v1/mailboxes', body, 'live'), 201);
+      const create = async (body: Json) => ok(await local('POST', '/v1/inbound/addresses', body, 'live'), 201);
       const support = await create({ address: 'support@example.com' }), temporary = await create({ address: 'case-42@example.com', ttlSeconds: 3600 });
       assert.equal(support.expiresAt, null); assert.ok(Date.parse(temporary.expiresAt) > Date.now());
-      const root = '/mailbox/v1/mailboxes', path = (box: string, id: string) => `${root}/${box}/messages/${id}/reply`;
+      const root = '/v1/inbound/addresses';
       error(await local('POST', root, { address: 'short@example.com', ttlSeconds: 1 }, 'live'), 422);
       error(await local('PATCH', `${root}/${temporary.id}`, { rules: ['case-*@example.com'] }, 'live'), 422);
-      const scoped = ok(await local('POST', '/mailbox/v1/keys', { name: 'support fixture', mailboxIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
+      const scoped = ok(await local('POST', '/v1/inbound/keys', { name: 'support fixture', addressIds: [support.id], permissions: ['read', 'send'] }, 'live'), 201);
       const agent = { authorization: `Bearer ${scoped.secret}` };
-      const webhook = ok(await local('POST', '/mailbox/v1/webhooks', { url: 'https://example.com/support-hook', mailboxIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
+      const webhook = ok(await local('POST', '/v1/inbound/webhooks', { url: 'https://example.com/support-hook', addressIds: [support.id], eventTypes: ['message.received'] }, 'live'), 201);
       const payload = { from: support.address, to: 'customer@example.net', subject: 'Case 42', text: 'An update', replyMailboxId: support.id }, idem = { 'Idempotency-Key': 'fixture-case-42' };
       error(await local('POST', '/v1/emails/send', payload, 'test'), 403);
       error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address }, 'live'), 422);
@@ -3710,15 +3715,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE mailbox_domains SET status='active' WHERE workspace_id=$1`, [scope]);
       const sent = ok(await local('POST', '/v1/emails/send', payload, 'live', idem), 202);
       assert.deepEqual(ok(await local('POST', '/v1/emails/send', payload, 'live', idem), 202), sent);
+      const replyPath = `/v1/inbound/threads/${sent.threadId}/reply`;
       assert.match(sent.id, /^email_/); assert.match(sent.mailboxMessageId, /^msg_/); assert.match(sent.threadId, /^thr_/);
-      error(await local('POST', path(temporary.id, sent.id), { text: 'other mailbox' }, 'live'), 404);
-      error(await local('POST', path(temporary.id, sent.id), { text: 'other mailbox' }, 'live', agent), 404);
+      error(await local('POST', replyPath, { addressId: temporary.id, replyToMessageId: sent.inboundMessageId, text: 'other mailbox' }, 'live'), 404);
+      error(await local('POST', replyPath, { addressId: temporary.id, replyToMessageId: sent.inboundMessageId, text: 'other mailbox' }, 'live', agent), 404);
       const ordinary = ok(await local('POST', '/v1/emails/send', { from: support.address, to: 'customer@example.net', subject: 'Private', text: 'Not part of the inbox' }, 'live'), 202);
-      assert.equal(ordinary.threadId, undefined); error(await local('POST', path(support.id, ordinary.id), { text: 'not linked' }, 'live', agent), 404);
-      error(await local('POST', path(support.id, sent.id), { text: 'too soon' }, 'live', agent), 409, 'REPLY_TARGET_NOT_ACCEPTED');
+      assert.equal(ordinary.threadId, undefined); error(await local('POST', replyPath, { addressId: support.id, replyToMessageId: ordinary.id, text: 'not linked' }, 'live', agent), 404);
+      error(await local('POST', replyPath, { addressId: support.id, replyToMessageId: sent.inboundMessageId, text: 'too soon' }, 'live', agent), 409, 'REPLY_TARGET_NOT_ACCEPTED');
       await dispatchDue(runtime, 'live', REGION);
       const wire = `fixture-${sent.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com`;
-      const followup = ok(await local('POST', path(support.id, sent.id), { text: 'Follow up' }, 'live', agent), 202);
+      const followup = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: sent.inboundMessageId, text: 'Follow up' }, 'live', agent), 202);
       assert.equal(followup.inReplyTo, wire); assert.equal(followup.threadId, sent.threadId);
 
       let mime = '';
@@ -3739,21 +3745,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(headers.get('webhook-signature'), `v1,${signature}`); event = JSON.parse(body); return new Response(null, { status: 204 });
       });
       try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, environment: 'live', attempts: 1 }); } finally { hook.mock.restore(); }
-      assert.equal(event?.threadId, sent.threadId); assert.equal(event?.mailboxId, support.id); assert.equal(event?.type, 'message.received');
-      const reply = ok(await local('POST', path(support.id, event!.messageId), { text: 'You are welcome' }, 'live', agent), 202);
+      assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
+      const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
       await dispatchDue(runtime, 'live', REGION);
       assert.equal(reply.threadId, sent.threadId); assert.deepEqual(sends.get(reply.emailId).Destination.ToAddresses, ['customer@example.net']);
       assert.deepEqual(sends.get(reply.emailId).Content.Simple.Headers, [{ Name: 'In-Reply-To', Value: `<${inboundId}>` }, { Name: 'References', Value: `<${wire}> <${inboundId}>` }]);
 
       await receive(temporary.address, new Date(Date.parse(temporary.createdAt) - 60_000).toISOString());
-      assert.equal(ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data.length, 0, 'Delayed receipts from before creation are not claimed.');
+      assert.equal(ok(await local('GET', `/v1/inbound/messages?addressId=${temporary.id}`, undefined, 'live')).data.length, 0, 'Delayed receipts from before creation are not claimed.');
       await receive(temporary.address);
       await db.query(`UPDATE mailboxes SET expires_at=now()-interval '1 second' WHERE id=$1`, [temporary.id]);
-      const prior = ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data;
+      const prior = ok(await local('GET', `/v1/inbound/messages?addressId=${temporary.id}`, undefined, 'live')).data;
       await receive(temporary.address); await receive('case-42+late@example.com');
-      assert.equal(prior.length, 1); assert.deepEqual(ok(await local('GET', `${root}/${temporary.id}/messages`, undefined, 'live')).data, prior);
+      assert.equal(prior.length, 1); assert.deepEqual(ok(await local('GET', `/v1/inbound/messages?addressId=${temporary.id}`, undefined, 'live')).data, prior);
       assert.equal((await jobs('mailbox.webhook')).length, 1, 'Late replies addressed to a retired mailbox must not trigger the support webhook through their forged or forwarded References.');
-      error(await local('POST', `${root}/${temporary.id}/messages`, { to: ['user@example.net'], subject: 'late', text: 'late' }, 'live'), 409);
+      error(await local('POST', '/v1/inbound/threads', { addressId:temporary.id, to: ['user@example.net'], subject: 'late', text: 'late' }, 'live'), 409);
       error(await local('POST', '/v1/emails/send', { ...payload, from: temporary.address, replyMailboxId: temporary.id }, 'live'), 409);
       error(await local('POST', root, { address: temporary.address }, 'live'), 409);
     });
@@ -3779,18 +3785,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
         assert.ok(cmd instanceof SendEmailCommand); const id = cmd.input.EmailTags!.find(x => x.Name === 'opensend_email_id')!.Value!; outgoing.set(id, cmd.input); return { MessageId: `synthetic-${id}` };
       });
-      const base = '/mailbox/v1', mailboxes = `${base}/mailboxes`;
+      const base = '/v1/inbound', addresses = `${base}/addresses`;
       const post = (path: string, body: Json, headers?: Record<string, string>) => local('POST', path, body, 'live', headers);
       const get = (path: string, headers?: Record<string, string>) => local('GET', path, undefined, 'live', headers);
-      error(await post(mailboxes, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_NOT_VERIFIED');
-      verified = true; error(await post(mailboxes, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_DKIM_NOT_READY');
-      dkim = true; error(await post(mailboxes, { address, publicAddress:'billing@example.com' }),422,'PUBLIC_ADDRESS_MISMATCH');
-      const box = ok(await post(mailboxes, { address, publicAddress }), 201); assert.equal(box.publicAddress, publicAddress);
-      const inbox = `${mailboxes}/${box.id}/messages`;
-      const agent = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'support agent', mailboxIds: [box.id], permissions: ['read','send'] }), 201).secret}` };
+      error(await post(addresses, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_NOT_VERIFIED');
+      verified = true; error(await post(addresses, { address, publicAddress }), 409, 'PUBLIC_DOMAIN_DKIM_NOT_READY');
+      dkim = true; error(await post(addresses, { address, publicAddress:'billing@example.com' }),422,'PUBLIC_ADDRESS_MISMATCH');
+      const box = ok(await post(addresses, { address, publicAddress }), 201); assert.equal(box.publicAddress, publicAddress);
+      const inbox = `${base}/messages?addressId=${box.id}`;
+      const agent = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'support agent', addressIds: [box.id], permissions: ['read','send'] }), 201).secret}` };
       const reader = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'all mailbox reader', permissions: ['read'] }), 201).secret}` };
       const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'] }), 201);
-      const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', mailboxIds: [box.id], eventTypes: ['message.received'] }), 201);
+      const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string, mime: string) {
@@ -3807,18 +3813,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await receive('unassigned@inbox.example.com',mime('unrouted','unrouted zebra',['In-Reply-To: <selected@example.net>']));
       await receive(address,firstMime); // Separate SMTP receipt, identical logical message.
       const all = ok(await get(`${base}/messages?q=zebra`)).data; assert.equal(all.length,4);
-      const byMailbox = ok(await get(`${inbox}?direction=inbound&q=zebra&limit=2`,agent)); assert.equal(byMailbox.data.length,2); assert.ok(byMailbox.nextCursor);
-      const page2 = ok(await get(`${inbox}?direction=inbound&q=zebra&limit=2&cursor=${encodeURIComponent(byMailbox.nextCursor)}`,agent));
+      const byMailbox = ok(await get(`${inbox}&direction=inbound&q=zebra&limit=2`,agent)); assert.equal(byMailbox.data.length,2); assert.ok(byMailbox.nextCursor);
+      const page2 = ok(await get(`${inbox}&direction=inbound&q=zebra&limit=2&cursor=${encodeURIComponent(byMailbox.nextCursor)}`,agent));
       const ids = [...byMailbox.data,...page2.data].map(m=>m.id); assert.equal(new Set(ids).size,3); assert.equal(page2.nextCursor,null);
       const selected = all.find((m: Json)=>m.snippet==='second zebra')!, unrouted = all.find((m: Json)=>m.snippet==='unrouted zebra')!;
-      const detail = ok(await get(`${inbox}/${selected.id}`,agent)); assert.equal(detail.text.trim(),'second zebra'); assert.equal(detail.messageId,'selected@example.net');
-      assert.equal(ok(await get(`${inbox}?threadId=${detail.threadId}&direction=inbound`,agent)).data.length,3);
-      error(await get(`${inbox}/${unrouted.id}`,agent),404); error(await get(`${base}/messages/${unrouted.id}`,reader),403);
+      const detail = ok(await get(`${base}/messages/${selected.id}?addressId=${box.id}`,agent)); assert.equal(detail.text.trim(),'second zebra'); assert.equal(detail.messageId,'selected@example.net');
+      assert.equal(ok(await get(`${inbox}&threadId=${detail.threadId}&direction=inbound`,agent)).data.length,3);
+      error(await get(`${base}/messages/${unrouted.id}?addressId=${box.id}`,agent),404); error(await get(`${base}/messages/${unrouted.id}`,reader),404);
       assert.equal(ok(await get(`${base}/messages/${unrouted.id}`)).text.trim(),'unrouted zebra');
+      error(await get(`${base}/messages?includeDelivery=true`,agent),403);
+      error(await get(`${base}/messages/${selected.id}?includeDelivery=true`,reader),403);
+      const logs = ok(await get(`${base}/messages?includeDelivery=true&region=${REGION}`)).data;
+      assert.deepEqual(logs.find((m:Json)=>m.id===selected.id).addresses,[{id:box.id,address}]);
+      assert.deepEqual(logs.find((m:Json)=>m.id===unrouted.id).addresses,[]);
       const globalEvents = ok(await get(`${base}/events?types=message.stored&after=0`)).data;
       assert.deepEqual(new Set(globalEvents.map((e: Json)=>e.messageId)),new Set(all.map((m: Json)=>m.id))); assert.equal(globalEvents.length,4);
       for (const key of [agent,reader]) assert.equal(ok(await get(`${base}/events?types=message.stored&after=0`,key)).data.length,0);
-      error(await post(`${base}/webhooks`,{ url:'https://example.com/invalid-scope', eventTypes:['message.stored'], mailboxIds:[box.id] }),422,'INVALID_EVENT_SCOPE');
+      error(await post(`${base}/webhooks`,{ url:'https://example.com/invalid-scope', eventTypes:['message.stored'], addressIds:[box.id] }),422,'INVALID_EVENT_SCOPE');
       const deliveries = (await db.query(`SELECT id, webhook_id, payload FROM mailbox_webhook_deliveries WHERE workspace_id=$1`,[scope])).rows;
       assert.equal(deliveries.filter(d=>d.webhook_id===allHook.id).length,4); assert.equal(deliveries.filter(d=>d.webhook_id===boxHook.id).length,3);
       assert.equal((await jobs('mailbox.webhook')).length,7);
@@ -3827,17 +3838,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       let attempts = 0;
       const receiver = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
         const h = new Headers(init.headers), body = String(init.body), event = JSON.parse(body);
-        assert.equal(url, 'https://example.com/all'); assert.equal(event.type, 'message.stored'); assert.equal(event.mailboxId, null); assert.equal(event.id, delivery.payload.id);
+        assert.equal(url, 'https://example.com/all'); assert.equal(event.type, 'message.stored'); assert.equal(event.addressId, null); assert.equal(event.id, delivery.payload.id);
         assert.equal(h.get('webhook-id'), event.id); assert.equal(h.get('webhook-signature'), 'v1,' + createHmac('sha256', Buffer.from(allHook.secret.slice(6),'base64')).update(`${event.id}.${h.get('webhook-timestamp')}.${body}`).digest('base64'));
         return new Response(null, { status: ++attempts === 1 ? 503 : 204 });
       });
       const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,environment:'live',attempts:attempt });
       try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { receiver.mock.restore(); }
-      const replyPath = `${inbox}/${selected.id}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
-      error(await post(replyPath,{ text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
-      error(await post(replyPath,{ text:'no provider overrides',headers:[{name:'X-SeS-CONFIGURATION-SET',value:'override'}] },agent),422);
-      const reply = ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202);
-      assert.equal(ok(await post(replyPath,{ text:'Answering the second one',replyAll:true },idem),202).id,reply.id);
+      const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
+      error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
+      error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name:'X-SeS-CONFIGURATION-SET',value:'override'}] },agent),422);
+      const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202);
+      assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime,'live',REGION);
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
@@ -3847,10 +3858,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(wire.Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<selected@example.net>'},{Name:'References',Value:'<initial@example.net> <selected@example.net>'}]);
       // Some clients return only the direct parent. No mailbox sync or subject match should be required.
       await receive(address,mime('answered','fourth zebra',[`In-Reply-To: <synthetic-${reply.emailId}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`]).replace('Subject: Widget issue','Subject: A different subject'));
-      const continued = ok(await get(`${inbox}?direction=inbound&q=fourth`,agent)).data;
+      const continued = ok(await get(`${inbox}&direction=inbound&q=fourth`,agent)).data;
       assert.equal(continued.length,1); assert.equal(continued[0].threadId,detail.threadId);
       await receive(address,mime('separate','separate case',[`In-Reply-To: <synthetic-${tracked.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`,'References: <selected@example.net>']));
-      const separate = ok(await get(`${inbox}?direction=inbound&q=separate`,agent)).data;
+      const separate = ok(await get(`${inbox}&direction=inbound&q=separate`,agent)).data;
       assert.equal(separate.length,1); assert.equal(separate[0].threadId,tracked.threadId,'A direct, not-yet-synced SES parent takes priority over a known older reference.');
     });
   });

@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type Mailbox, type MailboxDomain, type MailboxKey, type MailboxWebhook, type MailboxWebhookDelivery, type MailboxMessage, type MailboxThread, type MailboxThreadDetail, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -40,8 +40,6 @@ export async function request<T = Json>(path: string, options: { method?: string
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
   return data as T
 }
-type InboundKey = Omit<MailboxKey, 'mailboxIds'> & { addressIds: string[] | null }
-const fromInboundKey = ({ addressIds, ...key }: InboundKey): MailboxKey => ({ ...key, mailboxIds: addressIds })
 const unsupported = (message: string): never => { throw new ApiError(message, 'UNSUPPORTED_OPERATION') }
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, consent: { source: '', at: null }, suppressionReason: r.suppressionReason ?? undefined } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
@@ -74,8 +72,6 @@ function regionCatalog(value: unknown): RegionCatalog {
 
 export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
   const call = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1${path}`, { method, body, signal, environment })
-  // The mailbox service is live-only and has its own path prefix.
-  const mailboxCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/mailbox/v1${path}`, { method, body, signal })
   // Inbound receives real mail, so it always runs against live data.
   const inboundCall = <T = Json>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal) => request<T>(`/v1/inbound${path}`, { method, body, signal, environment: 'live' })
   // Page numbers are local navigation only. The API owns cursors and never supplies fictional totals.
@@ -249,31 +245,16 @@ export function createLiveApi(environment: 'live' | 'test'): OpenSendApi {
     },
     domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)), remove: async (id, signal) => { await call(`/domains/${idPath(id)}`, 'DELETE', undefined, signal) } },
     mailboxes: {
-      list: async (input, signal) => { const query = new URLSearchParams({ limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: Mailbox[]; nextCursor: string | null }>(`/mailboxes?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       domains: async signal => (await inboundCall<{ data: MailboxDomain[] }>('/domains', 'GET', undefined, signal)).data,
       domain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}`, 'GET', undefined, signal),
       enableDomain: (id, input, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/enable`, 'POST', { force: input.force ?? false }, signal),
       disableDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/disable`, 'POST', undefined, signal),
       checkDomain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}/check`, 'POST', undefined, signal),
-      received: async (input, signal) => { const query = new URLSearchParams({ direction: 'inbound', limit: String(Math.min(100, input.pageSize ?? 50)), ...(input.regionId ? { region: input.regionId } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: ReceivedEmail[]; nextCursor: string | null }>(`/messages?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
-      receivedEmail: (id, signal) => mailboxCall<ReceivedEmailDetail>(`/messages/${idPath(id)}`, 'GET', undefined, signal),
-      get: (id, signal) => mailboxCall<Mailbox>(`/mailboxes/${idPath(id)}`, 'GET', undefined, signal),
-      threads: async (id, input, signal) => { const query = new URLSearchParams({ view: input.view, limit: '50', ...(input.search ? { q: input.search } : {}), ...(input.unread ? { unread: 'true' } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await mailboxCall<{ data: MailboxThread[]; nextCursor: string | null }>(`/mailboxes/${idPath(id)}/threads?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
-      thread: (id, threadId, signal) => mailboxCall<MailboxThreadDetail>(`/mailboxes/${idPath(id)}/threads/${idPath(threadId)}?includeHtml=true`, 'GET', undefined, signal),
-      updateThread: (id, threadId, patch, signal) => mailboxCall<MailboxThread>(`/mailboxes/${idPath(id)}/threads/${idPath(threadId)}`, 'PATCH', patch, signal),
-      reply: (id, messageId, input, signal) => request<MailboxMessage>(`/mailbox/v1/mailboxes/${idPath(id)}/messages/${idPath(messageId)}/reply`, { method: 'POST', body: { text: input.text, replyAll: input.replyAll ?? false, allowAutomated: input.allowAutomated ?? false }, signal, idempotencyKey: input.idempotencyKey ?? crypto.randomUUID() }),
-      attachmentUrl: (id, attachmentId, signal) => mailboxCall<{ url: string }>(`/mailboxes/${idPath(id)}/attachments/${idPath(attachmentId)}`, 'GET', undefined, signal),
-      // Inbound keys are scoped by addressIds on the wire; the dashboard keeps its mailboxIds naming internally.
-      keys: async (includeRevoked, signal) => (await inboundCall<{ data: InboundKey[] }>(`/keys?limit=100&includeRevoked=${includeRevoked}`, 'GET', undefined, signal)).data.map(fromInboundKey),
-      createKey: async (input, signal) => { const { secret, ...key } = await inboundCall<InboundKey & { secret: string }>('/keys', 'POST', { name: input.name, permissions: input.permissions, ...(input.mailboxIds ? { addressIds: input.mailboxIds } : {}) }, signal); return { key: fromInboundKey(key), secret } },
+      received: async (input, signal) => { const query = new URLSearchParams({ includeDelivery: 'true', direction: 'inbound', limit: String(Math.min(100, input.pageSize ?? 50)), ...(input.regionId ? { region: input.regionId } : {}), ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: ReceivedEmail[]; nextCursor: string | null }>(`/messages?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
+      receivedEmail: (id, signal) => inboundCall<ReceivedEmailDetail>(`/messages/${idPath(id)}?includeDelivery=true&includeHtml=true`, 'GET', undefined, signal),
+      keys: async (includeRevoked, signal) => (await inboundCall<{ data: MailboxKey[] }>(`/keys?limit=100&includeRevoked=${includeRevoked}`, 'GET', undefined, signal)).data,
+      createKey: async (input, signal) => { const { secret, ...key } = await inboundCall<MailboxKey & { secret: string }>('/keys', 'POST', { name: input.name, permissions: input.permissions, ...(input.addressIds ? { addressIds: input.addressIds } : {}) }, signal); return { key, secret } },
       revokeKey: async (id, signal) => { await inboundCall(`/keys/${idPath(id)}/revoke`, 'POST', undefined, signal) },
-      webhooks: async signal => (await mailboxCall<{ data: MailboxWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
-      webhook: (id, signal) => mailboxCall<MailboxWebhook>(`/webhooks/${idPath(id)}`, 'GET', undefined, signal),
-      createWebhook: async (input, signal) => { const { secret, ...webhook } = await mailboxCall<MailboxWebhook & { secret: string }>('/webhooks', 'POST', input, signal); return { webhook, secret } },
-      updateWebhook: (id, patch, signal) => mailboxCall<MailboxWebhook>(`/webhooks/${idPath(id)}`, 'PATCH', patch, signal),
-      deleteWebhook: async (id, signal) => { await mailboxCall(`/webhooks/${idPath(id)}`, 'DELETE', undefined, signal) },
-      rotateWebhookSecret: (id, signal) => mailboxCall<{ secret: string }>(`/webhooks/${idPath(id)}/rotate-secret`, 'POST', undefined, signal),
-      webhookDeliveries: async (id, cursor, signal) => { const result = await mailboxCall<{ data: MailboxWebhookDelivery[]; nextCursor: string | null }>(`/webhooks/${idPath(id)}/deliveries?limit=25${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
     },
     inbound: {
       addresses: async (input, signal) => { const query = new URLSearchParams({ limit: '100', ...(input.search ? { q: input.search } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }); const result = await inboundCall<{ data: InboundAddress[]; nextCursor: string | null }>(`/addresses?${query}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },

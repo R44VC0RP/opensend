@@ -100,9 +100,7 @@ export function DocsPage() {
   const [selected, setSelected] = useState(() => window.location.hash.slice(1))
   useEffect(() => { const change = () => setSelected(window.location.hash.slice(1)); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
   useEffect(() => { if (selected && all.length && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
-  // Keep old operation links and explicit searches working, without teaching new clients two inbound APIs.
-  const canonical = all.filter(operation => !operation.path.startsWith('/mailbox/v1/'))
-  const filtered = search.trim() ? all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(search.trim().toLowerCase())) : canonical
+  const filtered = search.trim() ? all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(search.trim().toLowerCase())) : all
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
   return <div className="docs-page">
@@ -111,7 +109,7 @@ export function DocsPage() {
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
         <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
-      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : current ? <OperationPage document={query.data!} operation={current} /> : <DocsOverview document={query.data!} all={canonical} />}</main>
+      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : current ? <OperationPage document={query.data!} operation={current} /> : <DocsOverview document={query.data!} all={all} />}</main>
     </div>
   </div>
 }

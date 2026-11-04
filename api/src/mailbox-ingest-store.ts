@@ -60,7 +60,7 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
     SELECT a.mailbox_id,x.thread_id,x.workspace_id,x.environment,x.subject,x.snippet,(SELECT coalesce(jsonb_agg(p ORDER BY n),'[]') FROM (SELECT * FROM (SELECT DISTINCT ON(lower(p->>'address')) p,n FROM jsonb_array_elements(jsonb_build_array(jsonb_build_object('name',x.from_name,'address',x.from_address))||x."to"||x.cc) WITH ORDINALITY v(p,n) WHERE p->>'address'<>'' ORDER BY lower(p->>'address'),n) first_seen ORDER BY n LIMIT 20) limited),1,1,x.received_at,x.received_at,x.spam,CASE WHEN x.spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM target x JOIN added a ON a.message_id=x.id ORDER BY a.mailbox_id ${threadSummaryConflict} RETURNING mailbox_id),
   done AS (UPDATE mail_receipts SET status='processed',processed_at=now(),error=NULL WHERE workspace_id=${m.workspaceId} AND ses_message_id=${m.sesMessageId} AND status='pending'),
   ${mailboxEventCtes(sql`SELECT workspace_id,environment,'message.stored' AS type,NULL::text AS mailbox_id,thread_id,id AS message_id,'{}'::jsonb AS data,1 AS ord FROM stored
-    UNION ALL SELECT workspace_id,environment,'mailbox.created',id,NULL,NULL,'{"origin":"auto"}'::jsonb,2 FROM boxes
+    UNION ALL SELECT workspace_id,environment,'address.created',id,NULL,NULL,'{"origin":"auto"}'::jsonb,2 FROM boxes
     UNION ALL SELECT x.workspace_id,x.environment,'message.received',s.mailbox_id,x.thread_id,x.id,jsonb_build_object('from',jsonb_build_object('name',x.from_name,'address',x.from_address),'subject',x.subject,'snippet',x.snippet,'attachmentCount',x.attachment_count,'spam',x.spam,'automated',x.automated),3 FROM target x,summaries s`)} SELECT count(*)::int AS n FROM queued`);
   return result.rows[0]!.n;
 }

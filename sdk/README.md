@@ -93,7 +93,7 @@ The customer sees only `support@example.com`. When they reply, their client refe
 
 **Temporary addresses:** set `ttlSeconds` when creating a fresh address. Expiry stops routing and new sends without purging history. Temporary addresses cannot claim a permanent public sender identity.
 
-**Existing integrations:** `/mailbox/v1`, `replyMailboxId`, issued keys, opaque `mbx_…` IDs, and old dashboard links remain compatible. No data migration or address recreation is required.
+**Existing integrations:** `replyMailboxId`, issued keys, opaque `mbx_…` IDs, and old dashboard links remain compatible. No address recreation is required.
 
 ## Upload local and generated attachments
 

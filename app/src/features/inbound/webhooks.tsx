@@ -12,7 +12,7 @@ import './inbound.css'
 const eventInfo: Record<MailboxEventType, string> = {
   'message.received': 'New mail arrived at an address', 'message.stored': 'Every new inbound message, including unrouted mail. Requires Every address.', 'message.queued': 'An address queued an outgoing message', 'message.sent': 'SES accepted an outgoing message',
   'message.delivered': 'The recipient server accepted it', 'message.delayed': 'Delivery is being retried', 'message.bounced': 'The message bounced',
-  'message.complained': 'The recipient reported spam', 'message.failed': 'The message was rejected, suppressed or canceled', 'message.updated': 'Read state or message labels changed',
+  'message.complained': 'The recipient reported spam', 'message.failed': 'The message was rejected, suppressed or canceled',
   'thread.updated': 'A conversation was archived, starred, trashed or relabeled', 'address.created': 'An address was created (including automatically)', 'address.deleted': 'An address was deleted',
 }
 const blank: InboundWebhookInput = { url: '', description: '', eventTypes: ['message.received'], addressIds: null }

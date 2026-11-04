@@ -1,5 +1,5 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, MailboxWebhook, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
@@ -132,7 +132,7 @@ function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: s
   if (!last) return null
   return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
 }
-const inboundWebhook = ({ mailboxIds, deliveries: _d, ...webhook }: MailboxWebhook & { deliveries?: unknown }): InboundWebhook => ({ ...webhook, addressIds: mailboxIds })
+const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => webhook
 // Demo idempotency mirrors the API: the same key and body returns the first result; a different body is rejected.
 function inboundOnce<T>(state: DemoState, key: string, body: unknown, create: () => T): T {
   const seen = (state.inboundIdempotency ??= {})[key]
@@ -414,6 +414,14 @@ function validSnapshot(value: unknown): value is DemoState {
 function parseSnapshot(stored: string): DemoState | undefined {
   try {
     const parsed: unknown = JSON.parse(stored)
+    // Keep address restrictions in already-saved demo snapshots.
+    if (isRecord(parsed)) for (const rows of [parsed.mailboxKeys, parsed.mailboxWebhooks]) {
+      if (Array.isArray(rows)) for (const row of rows.filter(isRecord)) {
+        if (!Object.hasOwn(row, 'addressIds') && Object.hasOwn(row, 'mailboxIds')) {
+          row.addressIds = row.mailboxIds; delete row.mailboxIds
+        }
+      }
+    }
     // Preserve legacy restrictions by resolving IDs, never by defaulting missing domains to all.
     if (isRecord(parsed) && Array.isArray(parsed.keys) && Array.isArray(parsed.domains)) {
       const domains = parsed.domains.filter(isRecord)
@@ -839,11 +847,6 @@ export function createMockApi(): OpenSendApi {
       }),
     },
     mailboxes: {
-      list: (input, signal) => run(signal, false, s => {
-        const search = input.search?.trim().toLowerCase()
-        const rows = (s.mailboxes ??= demoMailboxes().mailboxes).filter(row => !search || row.address.includes(search) || row.displayName?.toLowerCase().includes(search))
-        return Object.assign(rows, { nextCursor: null })
-      }),
       domains: signal => run(signal, false, s => mailboxDomains(s)),
       domain: (domainId, signal) => run(signal, false, s => mailboxDomains(s).find(row => row.id === domainId) ?? find(mailboxDomains(s), domainId, 'Domain')),
       enableDomain: (domainId, _input, signal) => run(signal, true, s => {
@@ -862,68 +865,18 @@ export function createMockApi(): OpenSendApi {
       received: (input, signal) => run(signal, false, () => {
         const search = input.search?.trim().toLowerCase()
         const rows = demoReceived().filter(row => (!input.regionId || row.region === input.regionId) && (!search || `${row.subject} ${row.from.address} ${row.from.name} ${row.text}`.toLowerCase().includes(search)))
-        return Object.assign(rows.map(({ text: _t, replyText: _r, html: _h, headers: _hd, attachments: _a, verdicts: _v, bcc: _b, replyTo: _rt, messageId: _m, inReplyTo: _i, references: _rf, bodyTruncated: _bt, sesMessageId: _s, sizeBytes: _sz, rawUrl: _raw, linksExpireAt: _l, ...summary }) => summary), { nextCursor: null })
+        return Object.assign(rows.map(({ text: _t, replyText: _r, html: _h, headers: _hd, attachments: _a, verdicts: _v, cc: _c, replyTo: _rt, sentAt: _sent, messageId: _m, inReplyTo: _i, references: _rf, bodyTruncated: _bt, sizeBytes: _sz, rawUrl: _raw, ...summary }) => summary), { nextCursor: null })
       }),
       receivedEmail: (messageId, signal) => run(signal, false, () => find(demoReceived(), messageId, 'Message')),
-      get: (mailboxId, signal) => run(signal, false, s => find(s.mailboxes ??= demoMailboxes().mailboxes, mailboxId, 'Mailbox')),
-      threads: (mailboxId, input, signal) => run(signal, false, s => {
-        const search = input.search?.trim().toLowerCase()
-        const rows = (s.mailboxThreads ??= demoMailboxThreads()).filter(row => row.mailboxId === mailboxId && (input.view === 'trash' ? row.trashed : !row.trashed)
-          && (input.view === 'inbox' ? !row.archived && !row.spam : input.view === 'archive' ? row.archived : input.view === 'starred' ? row.starred : input.view === 'spam' ? row.spam : true)
-          && (!input.unread || row.unreadCount > 0) && (!search || `${row.subject} ${row.messages.map(m => `${m.from.address} ${m.from.name} ${m.text}`).join(' ')}`.toLowerCase().includes(search)))
-          .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)).map(({ messages: _m, ...summary }) => summary)
-        return Object.assign(rows, { nextCursor: null })
-      }),
-      thread: (mailboxId, threadId, signal) => run(signal, false, s => { const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread'); if (row.mailboxId !== mailboxId) throw new ApiError('Thread was not found in this mailbox.', 'NOT_FOUND'); return row }),
-      updateThread: (mailboxId, threadId, patch, signal) => run(signal, true, s => {
-        const row = find(s.mailboxThreads ??= demoMailboxThreads(), threadId, 'Thread')
-        if (patch.read === true) row.messages.forEach(m => { m.read = true })
-        if (patch.read === false) { const latest = [...row.messages].reverse().find(m => m.direction === 'inbound'); if (latest) latest.read = false }
-        row.unreadCount = row.messages.filter(m => !m.read && m.direction === 'inbound').length
-        if (patch.archived !== undefined) row.archived = patch.archived
-        if (patch.starred !== undefined) row.starred = patch.starred
-        if (patch.spam !== undefined) row.spam = patch.spam
-        if (patch.trashed !== undefined) row.trashed = patch.trashed
-        row.labels = [...new Set([...row.labels.filter(label => !patch.removeLabels?.includes(label)), ...(patch.addLabels ?? [])])]
-        void mailboxId
-        const { messages: _m, ...summary } = row
-        return summary
-      }),
-      reply: (mailboxId, messageId, input, signal) => run(signal, true, s => {
-        const row = (s.mailboxThreads ??= demoMailboxThreads()).find(item => item.messages.some(m => m.id === messageId))
-        const original = row?.messages.find(m => m.id === messageId)
-        if (!row || !original) throw new ApiError('Message was not found in this mailbox.', 'NOT_FOUND')
-        const mailbox = find(s.mailboxes ??= demoMailboxes().mailboxes, mailboxId, 'Mailbox')
-        // Deterministic simulation only: no email is sent.
-        const reply = { ...original, id: id('msg'), direction: 'outbound' as const, status: 'delivered', read: true, labels: [], from: { name: mailbox.displayName, address: mailbox.address }, to: original.direction === 'inbound' ? [original.from] : original.to,
-          cc: input.replyAll ? original.cc : [], subject: original.subject.startsWith('Re:') ? original.subject : `Re: ${original.subject}`, text: input.text, replyText: input.text, snippet: input.text.slice(0, 200), html: null, attachments: [], attachmentCount: 0,
-          sentAt: now(), receivedAt: now(), inReplyTo: original.messageId, references: [...original.references, ...(original.messageId ? [original.messageId] : [])], messageId: `${id('demo')}@mail.example.net`, verdicts: {} }
-        row.messages.push(reply); row.messageCount++; row.lastMessageAt = reply.receivedAt; row.snippet = reply.snippet
-        return reply
-      }),
-      attachmentUrl: (_mailboxId, attachmentId, signal) => run(signal, false, () => { throw new ApiError(`Attachment downloads are unavailable in demo mode (${attachmentId}).`, 'UNSUPPORTED_OPERATION') }),
       keys: (includeRevoked, signal) => run(signal, false, s => (s.mailboxKeys ??= demoMailboxAccess().keys).filter(key => includeRevoked || !key.revokedAt)),
       createKey: (input, signal) => run(signal, true, s => {
         if (!input.name.trim()) invalid('name', 'Enter a name for this key.')
         const secret = `os_mbx_demo_${id('secret').slice(-12)}`
-        const key = { id: id('mbk'), name: input.name.trim(), prefix: secret.slice(0, 14), mailboxIds: input.mailboxIds, permissions: input.permissions, createdAt: now(), lastUsedAt: null, revokedAt: null }
+        const key = { id: id('mbk'), name: input.name.trim(), prefix: secret.slice(0, 14), addressIds: input.addressIds, permissions: input.permissions, createdAt: now(), lastUsedAt: null, revokedAt: null }
         ;(s.mailboxKeys ??= demoMailboxAccess().keys).unshift(key)
         return { key, secret }
       }),
       revokeKey: (keyId, signal) => run(signal, true, s => { find(s.mailboxKeys ??= demoMailboxAccess().keys, keyId, 'Key').revokedAt = now() }),
-      webhooks: signal => run(signal, false, s => (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(({ deliveries: _d, ...webhook }) => webhook)),
-      webhook: (webhookId, signal) => run(signal, false, s => { const { deliveries: _d, ...webhook } = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return webhook }),
-      createWebhook: (input, signal) => run(signal, true, s => {
-        try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
-        const webhook = { id: id('mwh'), ...input, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
-        ;(s.mailboxWebhooks ??= demoMailboxAccess().webhooks).unshift(webhook)
-        const { deliveries: _d, ...view } = webhook
-        return { webhook: view, secret: `whsec_demo${id('s').slice(-16)}` }
-      }),
-      updateWebhook: (webhookId, patch, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, { updatedAt: now() }); const { deliveries: _d, ...view } = row; return view }),
-      deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
-      rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
-      webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
     },
     inbound: {
       addresses: (input, signal) => run(signal, false, s => {
@@ -1031,11 +984,11 @@ export function createMockApi(): OpenSendApi {
       webhook: (webhookId, signal) => run(signal, false, s => inboundWebhook(find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'))),
       createWebhook: ({ addressIds, ...input }, signal) => run(signal, true, s => {
         try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
-        const webhook = { id: id('mwh'), ...input, mailboxIds: addressIds, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
+        const webhook = { id: id('mwh'), ...input, addressIds, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
         ;(s.mailboxWebhooks ??= demoMailboxAccess().webhooks).unshift(webhook)
         return { webhook: inboundWebhook(webhook), secret: `whsec_demo${id('s').slice(-16)}` }
       }),
-      updateWebhook: (webhookId, { addressIds, ...patch }, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, addressIds === undefined ? {} : { mailboxIds: addressIds }, { updatedAt: now() }); return inboundWebhook(row) }),
+      updateWebhook: (webhookId, patch, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, { updatedAt: now() }); return inboundWebhook(row) }),
       deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
       rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
       webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),

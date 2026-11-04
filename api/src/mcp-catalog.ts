@@ -38,10 +38,13 @@ function reference(spec: ObjectValue, value: ObjectValue): ObjectValue {
   }
   return value;
 }
+function toolParameters(spec: ObjectValue, item: ObjectValue, operation: ObjectValue) {
+  return [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p)).filter(p => !(p.in === 'query' && p.name === 'includeDelivery'));
+}
 function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValue, write: boolean): Tool['inputSchema'] | undefined {
   const properties: ObjectValue = Object.create(null);
   const required: string[] = [];
-  const parameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p));
+  const parameters = toolParameters(spec, item, operation);
   for (const p of parameters.filter(p => p.in === 'path' || p.in === 'query')) {
     if (typeof p.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(p.name) || !object(p.schema)) invalid('Unsupported OpenAPI parameter.');
     if (Object.hasOwn(properties, p.name) || ['body', 'confirm', 'idempotencyKey'].includes(p.name)) invalid('Conflicting OpenAPI parameter name.');
@@ -431,7 +434,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       if (!operation.security?.some((entry: unknown) => object(entry) && Array.isArray(entry.bearerAuth))) continue;
       const write = method !== 'get';
       if (operations.has(name) || operations.size >= 256) invalid('Duplicate operationId or too many tools.');
-      const queryParameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p)).filter(p => p.in === 'query').map(p => p.name as string);
+      const queryParameters = toolParameters(spec, item as ObjectValue, operation).filter(p => p.in === 'query').map(p => p.name as string);
       const input = inputSchema(spec, item as ObjectValue, operation, write);
       if (!input) continue;
       const tool: Tool = {

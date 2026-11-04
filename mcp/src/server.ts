@@ -104,7 +104,7 @@ function inputSchema(spec: ObjectValue, item: ObjectValue, operation: ObjectValu
   const required: string[] = [];
   const parameters = [...(item.parameters ?? []), ...(operation.parameters ?? [])].map(p => reference(spec, p));
   for (const location of ['path', 'query']) {
-    const selected = parameters.filter(p => p.in === location);
+    const selected = parameters.filter(p => p.in === location && !(location === 'query' && p.name === 'includeDelivery'));
     if (!selected.length) continue;
     const fields: ObjectValue = Object.create(null);
     const needed: string[] = [];

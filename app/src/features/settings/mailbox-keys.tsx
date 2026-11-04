@@ -33,12 +33,12 @@ export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
     event.preventDefault()
     const next: Record<string, string> = {}
     if (!name.trim()) next.name = 'Enter a name for this key.'
-    if (scope === 'selected' && !selected.length) next.mailboxIds = 'Choose at least one address, or allow every address.'
+    if (scope === 'selected' && !selected.length) next.addressIds = 'Choose at least one address, or allow every address.'
     if (!granted.length) next.permissions = 'Choose at least one permission.'
     setErrors(next)
     if (Object.keys(next).length) return
     try {
-      const result = await create.mutateAsync({ name: name.trim(), mailboxIds: scope === 'all' ? null : selected, permissions: granted })
+      const result = await create.mutateAsync({ name: name.trim(), addressIds: scope === 'all' ? null : selected, permissions: granted })
       setOpen(false); setSecret(result.secret); create.reset()
     } catch { /* Shown in the form. */ }
   }
@@ -50,7 +50,7 @@ export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
       columns={[
         { key: 'name', label: 'Name', width: '23%', render: row => <>{row.name}<div className="muted">Created {date(row.createdAt)}</div></> },
         { key: 'prefix', label: 'Key prefix', width: '20%', render: row => <code>{row.prefix}</code> },
-        { key: 'access', label: 'Access', width: '30%', render: row => <div className="settings-cell-stack"><span>{row.permissions.join(', ')}</span><span className="muted settings-break">{row.mailboxIds ? row.mailboxIds.map(address).join(', ') : 'All addresses'}</span></div> },
+        { key: 'access', label: 'Access', width: '30%', render: row => <div className="settings-cell-stack"><span>{row.permissions.join(', ')}</span><span className="muted settings-break">{row.addressIds ? row.addressIds.map(address).join(', ') : 'All addresses'}</span></div> },
         { key: 'last', label: 'Last used', render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
         { key: 'actions', label: '', align: 'right', width: 100, render: row => row.revokedAt ? 'Revoked' : <Button variant="danger" onClick={() => setRevoking(row)}>Revoke</Button> },
       ]} />}
@@ -58,7 +58,7 @@ export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
       <form id="create-mailbox-key" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
         <Field label="Name" htmlFor="mailbox-key-name" error={errors.name || fieldError(create.error, 'name')}><Input id="mailbox-key-name" value={name} onChange={event => setName(event.target.value)} autoFocus disabled={create.isPending} placeholder="Support agent" /></Field>
-        <Field label="Addresses" htmlFor="mailbox-key-scope" error={errors.mailboxIds || fieldError(create.error, 'mailboxIds')} hint={scope === 'all' ? 'Includes addresses created later.' : undefined}>
+        <Field label="Addresses" htmlFor="mailbox-key-scope" error={errors.addressIds || fieldError(create.error, 'addressIds')} hint={scope === 'all' ? 'Includes addresses created later.' : undefined}>
           <Select id="mailbox-key-scope" value={scope} onValueChange={value => setScope(value as 'all' | 'selected')} disabled={create.isPending} options={[{ value: 'selected', label: 'Selected addresses' }, { value: 'all', label: 'Every address' }]} />
         </Field>
         {scope === 'selected' && <div className="settings-choices" role="group" aria-label="Addresses">

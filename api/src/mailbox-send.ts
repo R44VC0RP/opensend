@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
@@ -230,7 +230,7 @@ export function assertReplyable(original: MessageRow, to: string[], allowAutomat
   const blocked = to.find(address => NO_REPLY.test(address));
   if (blocked) throw new ApiError(409, 'REPLY_TO_NO_REPLY', `${blocked} does not accept replies. Set allowAutomated=true to send anyway.`, 'to');
 }
-export const replySubject = (subject: string, prefix: 'Re' | 'Fwd') => `${prefix}: ${normalizeSubject(subject) || '(no subject)'}`.slice(0, 998);
+export const replySubject = (subject: string) => `Re: ${normalizeSubject(subject) || '(no subject)'}`.slice(0, 998);
 
 /** Mailbox sync can lag provider acceptance. Never put an OpenSend ID on the wire or silently send an unthreaded follow-up. */
 export async function replyParentId(db: DbExecutor, original: MessageRow) {
@@ -244,16 +244,6 @@ export async function replyParentId(db: DbExecutor, original: MessageRow) {
   throw new ApiError(409, 'REPLY_TARGET_NOT_ACCEPTED', 'The original outbound email has no provider Message-ID. Wait for acceptance or reply to an earlier received message.');
 }
 
-/** Forward body: optional note, a header summary and the original content. */
-export function forwardBody(original: MessageRow, note: { text?: string; html?: string }) {
-  const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-  const who = (value: MailAddress) => value.name ? `${value.name} <${value.address}>` : value.address;
-  const lines = [`From: ${who({ name: original.fromName, address: original.fromAddress })}`, `Date: ${new Date(original.sentAt ?? original.receivedAt).toUTCString()}`, `Subject: ${original.subject}`, `To: ${original.to.map(who).join(', ')}`, ...(original.cc.length ? [`Cc: ${original.cc.map(who).join(', ')}`] : [])];
-  const originalText = original.text ?? (original.html ? htmlToPlain(original.html) : '');
-  const text = `${note.text ?? (note.html ? htmlToPlain(note.html) : '')}\n\n---------- Forwarded message ---------\n${lines.join('\n')}\n\n${originalText}`.trim();
-  const html = original.html || note.html ? `${note.html ?? (note.text ? `<p>${escape(note.text).replace(/\n/g, '<br>')}</p>` : '')}<br><div>---------- Forwarded message ---------<br>${lines.map(escape).join('<br>')}</div><br>${original.html ? safeForwardHtml(original.html) : `<pre>${escape(originalText)}</pre>`}` : undefined;
-  return { text, html };
-}
 // Received HTML can contain URL schemes the sending pipeline rejects (data:, javascript:). Neutralize them instead of failing the forward.
 export function safeForwardHtml(html: string) {
   return html.replace(/<(script|style|iframe|object|embed)[\s\S]*?<\/\1>/gi, '')
@@ -280,10 +270,4 @@ export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
   const {n,queued}=result.rows[0]!;
   if (queued) try { await runtime.wake?.(queued); } catch { /* Webhook jobs are durable. */ }
   return n;
-}
-
-/** Latest message in a thread the mailbox can reply to: newest inbound, else newest of any direction. */
-export async function latestReplyTarget(db: DbExecutor, mailboxId: string, threadId: string) {
-  const rows = await db.select({ row: mailMessages }).from(mailboxMessages).innerJoin(mailMessages, eq(mailMessages.id, mailboxMessages.messageId)).where(and(eq(mailboxMessages.mailboxId, mailboxId), eq(mailboxMessages.threadId, threadId))).orderBy(desc(mailboxMessages.receivedAt)).limit(50);
-  return rows.find(item => item.row.direction === 'inbound')?.row ?? rows[0]?.row;
 }

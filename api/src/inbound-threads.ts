@@ -1,9 +1,12 @@
+import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
 import { ApiError, errors, json, page, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { mailboxMessages as links, mailboxThreads, mailAttachments, mailMessages as messages } from './db/mailbox.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
-import { sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
+import { archiveMailboxFiles, sendFromMailbox, finishMailboxArchive, type OutgoingMessage } from './mailbox-send.js';
 import { IdempotencyHeaders, idempotent } from './sending.js';
 
 const base = '/v1/inbound/threads';
@@ -113,7 +116,28 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
   return { messages: rows.slice(0, limit).reverse().map(item => messageView(item.row, item.addressIds,item.read)), nextCursor: rows.length > limit && last ? encodeCursor(last.at, last.row.id) : null };
 }
 
-export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess, sign: (runtime:Runtime,wid:string,kind:'att', region:string, bucket:string, key:string, filename:string,pendingArchive?:string)=>Promise<{url:string;expiresAt:string}>) {
+async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client) {
+  const s3 = client ?? await mailboxS3(runtime,wid,region,bucket);
+  try {
+    if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive,s3);
+    key=await readableMailboxKey(runtime,wid,region,bucket,key,kind,runtime.db,s3);
+    const disposition = filename ? `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` : undefined;
+    return { url: await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key, ResponseContentDisposition: disposition }), { expiresIn: 300 }), expiresAt: new Date(Date.now() + 300_000).toISOString() };
+  } finally { if(!client)s3.destroy(); }
+}
+async function deliveryLinks(runtime: Runtime, row: typeof messages.$inferSelect, files: (typeof mailAttachments.$inferSelect)[]) {
+  const bucket = row.rawBucket ?? files[0]?.bucket, region = row.region;
+  if (files.some(f => f.bucket !== bucket)) throw new ApiError(404, 'MAILBOX_OBJECT_NOT_FOUND', 'Message objects must use the same workspace storage connection.');
+  if (!region || !bucket) return { rawUrl: null, urls: files.map(() => null) };
+  const client = await mailboxS3(runtime, row.workspaceId, region, bucket);
+  try {
+    if (files.some(f => f.sourceId)) await archiveMailboxFiles(runtime, row.workspaceId, row.id, client);
+    const link = async (kind:'att'|'raw', key:string, filename:string) => (await signedUrl(runtime, row.workspaceId, kind, region, bucket, key, filename, undefined, client)).url;
+    return { rawUrl: row.rawKey ? await link('raw', row.rawKey, `${row.id}.eml`) : null, urls: await Promise.all(files.map(f => link('att', f.storageKey, f.filename))) };
+  } finally { client.destroy(); }
+}
+
+export function registerInboundThreadReads(app: App, access: (c: Ctx, permission: 'read') => MailboxAccess) {
   app.openapi(createRoute({ method: 'get', path: base, operationId: 'listInboundThreads', tags, security, summary: 'List visible conversations',
     description: 'Newest visible activity first, then descending thread ID. addressId narrows all projected messages and IDs. q searches visible messages; view matches state on any visible address. all (default) includes trash. Pass nextCursor to continue.',
     request: { query: ListQuery }, responses: { 200: response(page(Thread).openapi('InboundThreadPage')), ...errors } }), async c => {
@@ -135,18 +159,42 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND ${links.messageId}=${messages.id} ORDER BY ${links.mailboxId})`;
   const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),eq(messages.environment,v.environment),
     v.admin && !f.addressId ? undefined : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
-  const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true });
+  // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
+  // Never grant this projection to an address key, even a key that can read every address.
+  const includeDelivery = z.enum(['true','false']).optional().describe('Include delivery details for workspace logs (dashboard or unrestricted live manage access only).');
+  function messageScope(c: Ctx, delivery?: string) {
+    const v=access(c,'read');
+    if (delivery!=='true') return v;
+    const credential=c.get('actor')?.credential;
+    if (credential!=='dashboard' && !(credential==='apiKey' && v.admin)) throw new ApiError(403,'ADMIN_REQUIRED','Delivery details require a dashboard session or an unrestricted live manage API key.');
+    return {...v,admin:true};
+  }
+  const deliverySchema = z.object({addresses:z.array(z.object({id:Id,address:z.string()})),envelopeTo:z.array(z.string()),region:z.string().nullable(),spam:z.boolean(),to:z.array(Address)});
+  const deliveryAddresses = (v:MailboxAccess,q:Filter) => sql<{id:string;address:string}[]>`coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id,'address',a.address) ORDER BY a.id)
+      FROM mailbox_messages JOIN mailboxes a ON a.id=mailbox_messages.mailbox_id
+      WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id), '[]'::jsonb)`;
+  const MessageListItem = Message.pick({ id:true, threadId:true, addressIds:true, direction:true, status:true, subject:true, snippet:true, receivedAt:true, attachmentCount:true, from:true }).extend(deliverySchema.partial().shape);
   app.openapi(createRoute({ method:'get', path:'/v1/inbound/messages', operationId:'listInboundMessages', tags, security, summary:'Search received and sent messages', description:'Newest first; default inbound. Unassigned stored mail is visible only to a workspace administrator without an address filter.',
-    request:{query:PageQuery.extend({ threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
-    const v=access(c,'read'),q=c.req.valid('query'),after=decodeCursor(q.cursor);
-    const rows=await c.env.db.select({ ...metadataFields,fromAddress:messages.fromAddress,fromName:messages.fromName,addressIds:addressLinks(v,q),at:preciseTime(messages.receivedAt) }).from(messages).where(and(accessible(v,q),eq(messages.direction,q.direction),q.threadId?eq(messages.threadId,q.threadId):undefined,
+    request:{query:PageQuery.extend({ includeDelivery,region:z.string().max(40).optional(),threadId:Id.optional(),direction:z.enum(['inbound','outbound']).default('inbound'),q:z.string().trim().min(1).max(200).optional() })},responses:{200:response(page(MessageListItem).openapi('InboundMessagePage')),...errors} }), async c=>{
+    const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),after=decodeCursor(q.cursor);
+    const rows=await c.env.db.select({ ...metadataFields,...(q.includeDelivery==='true' ? {region:messages.region,spam:messages.spam,to:messages.to,envelopeTo:messages.envelopeTo,addresses:deliveryAddresses(v,q)} : {}),fromAddress:messages.fromAddress,fromName:messages.fromName,addressIds:addressLinks(v,q),at:preciseTime(messages.receivedAt) }).from(messages).where(and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
       q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined)).orderBy(desc(messages.receivedAt),desc(messages.id)).limit(q.limit+1);
     const last=rows[q.limit-1];return c.json({data:rows.slice(0,q.limit).map(({at,fromName,fromAddress,...row})=>({...row,receivedAt:timestamp(at),from:{name:fromName,address:fromAddress}})),nextCursor:rows.length>q.limit&&last?encodeCursor(last.at,last.id):null},200);
   });
-  const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable()});
+  const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
+  const DeliveryDetail = deliverySchema.omit({to:true}).extend({rawUrl:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.string())}).partial();
   app.openapi(createRoute({ method: 'get', path: '/v1/inbound/messages/{messageId}', operationId: 'getInboundMessage', tags, security, summary: 'Read a visible message',
-    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
-    const v=access(c,'read'),q=c.req.valid('query'),id=c.req.valid('param').messageId;
+    request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
+    const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
+    if (q.includeDelivery==='true') {
+      const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND ${links.messageId}=${messages.id}),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+      if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
+      const {row,addresses,addressIds,isRead}=result;
+      const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
+      const {rawUrl,urls}=await deliveryLinks(c.env,row,files);
+      return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,html:q.includeHtml==='true'?row.html:null,
+        attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
+    }
     const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND ${links.messageId}=${messages.id}),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
@@ -157,7 +205,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     const v=access(c,'read'),p=c.req.valid('param'),q=c.req.valid('query');
     const [file]=await c.env.db.select({region:messages.region,bucket:mailAttachments.bucket,key:mailAttachments.storageKey,filename:mailAttachments.filename,sourceId:mailAttachments.sourceId}).from(messages).innerJoin(mailAttachments,eq(mailAttachments.messageId,messages.id)).where(and(eq(messages.id,p.messageId),eq(mailAttachments.id,p.attachmentId),accessible(v,q)));
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
-    return c.json(await sign(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
+    return c.json(await signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined),200);
   });
 }
 

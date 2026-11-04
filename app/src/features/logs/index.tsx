@@ -64,7 +64,7 @@ function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?:
   </div>
 }
 const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, { key: 'status', label: 'Status', width: 112 }, { key: 'from', label: 'Sender', width: '20%' }, { key: 'to', label: 'Recipient', width: '18%' }, { key: 'mailbox', label: 'Address', width: '18%' }, { key: 'subject', label: 'Subject' }, { key: 'open', label: '', width: 28 }]
-const mailboxLabel = (row: ReceivedEmail) => row.mailboxes.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
+const mailboxLabel = (row: ReceivedEmail) => row.addresses.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
 function ReceivedLogs({ regionId }: { regionId: string }) {
   const api = useApi()
   const navigate = useNavigate()
@@ -84,7 +84,7 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
         { ...receivedColumns[1]!, render: row => row.spam ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
         { ...receivedColumns[2]!, render: row => <span title={row.from.name ? `${row.from.name} <${row.from.address}>` : row.from.address}>{row.from.address}</span> },
         { ...receivedColumns[3]!, render: row => <RecipientEmail email={row.envelopeTo[0] ?? row.to[0]?.address ?? ''} /> },
-        { ...receivedColumns[4]!, render: row => row.mailboxes.length ? <span title={mailboxLabel(row)}>{mailboxLabel(row)}</span> : <span className="muted">Unrouted</span> },
+        { ...receivedColumns[4]!, render: row => row.addresses.length ? <span title={mailboxLabel(row)}>{mailboxLabel(row)}</span> : <span className="muted">Unrouted</span> },
         { ...receivedColumns[5]!, render: row => <span className="received-subject" title={row.subject}>{row.attachmentCount > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}{row.subject || <span className="muted">(no subject)</span>}</span> },
         { ...receivedColumns[6]!, render: () => <ChevronRight size={14} aria-hidden /> },
       ]} empty={<EmptyState title={search ? 'No received mail matches' : 'No received mail yet'} description={search ? undefined : 'Enable receiving on a domain to start.'} action={search ? <Button onClick={() => { setSearch(''); pagination.reset() }}>Clear search</Button> : <Link to="/inbound">Open Inbound</Link>} />} />
@@ -110,7 +110,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const hasHtml = html.trim().length > 0
   const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => email.verdicts[key])
   return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.spam ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" />} />
-    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Address</dt><dd>{email.mailboxes.length ? email.mailboxes.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/inbound?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div></dl>
+    <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/inbound?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div></dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} />

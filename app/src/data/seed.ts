@@ -1,4 +1,4 @@
-import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, MailboxKey, MailboxWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
+import type { AgentTokenSummary, ApiKey, AudienceList, Campaign, CampaignTemplate, Contact, DnsRecord, Domain, Email, Mailbox, MailboxDomain, MailboxKey, InboundWebhook, MailboxWebhookDelivery, MailboxMessage, MailboxThreadDetail, ReceivedEmailDetail, McpConnection, RegionCatalog, SesDiscovery, Segment, Webhook, Workspace } from './types'
 
 // Legacy profiles stay internal to demo persistence and campaign quota simulation.
 export interface DemoRegionProfile { id: string; name: string; access: 'production' | 'sandbox'; health: 'healthy' | 'probation' | 'shutdown'; sendingEnabled: boolean; sent24h: number; dailyQuota: number; maxSendRate: number; bounceRate: number; complaintRate: number; suppression: string[]; ipPool: string; vdmEnabled: boolean }
@@ -27,7 +27,7 @@ export interface DemoState {
   mailboxDomains?: MailboxDomain[]
   mailboxThreads?: MailboxThreadDetail[]
   mailboxKeys?: MailboxKey[]
-  mailboxWebhooks?: (MailboxWebhook & { deliveries: MailboxWebhookDelivery[] })[]
+  mailboxWebhooks?: (InboundWebhook & { deliveries: MailboxWebhookDelivery[] })[]
   /** Inbound message ID → every receiving address it is visible through. Unlisted messages belong to their own mailboxId. */
   inboundLinks?: Record<string, string[]>
   inboundIdempotency?: Record<string, { body: string; result: unknown }>
@@ -56,13 +56,13 @@ export function demoMailboxes(now = Date.now()): { mailboxes: Mailbox[]; mailbox
 export function demoMailboxAccess(now = Date.now()) {
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
   const keys: MailboxKey[] = [
-    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'os_mbx_4f2a91', mailboxIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
-    { id: 'mbk_triage', name: 'Triage reader', prefix: 'os_mbx_8c1d07', mailboxIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
+    { id: 'mbk_support_agent', name: 'Support agent', prefix: 'os_mbx_4f2a91', addressIds: ['mbx_support'], permissions: ['read', 'send', 'modify'], createdAt: ago(20 * 24), lastUsedAt: ago(0.1), revokedAt: null },
+    { id: 'mbk_triage', name: 'Triage reader', prefix: 'os_mbx_8c1d07', addressIds: null, permissions: ['read'], createdAt: ago(9 * 24), lastUsedAt: ago(30), revokedAt: null },
   ]
   const delivery = (id: string, hours: number, status: MailboxWebhookDelivery['status'], code: number | null, attempts = 1): MailboxWebhookDelivery => ({ id, webhookId: 'mwh_agent', eventId: `mev_${id}`, status, attemptCount: attempts, lastStatusCode: code, lastError: status === 'failed' ? 'WEBHOOK_HTTP_ERROR' : null, createdAt: ago(hours), updatedAt: ago(hours) })
   const webhooks = [
-    { id: 'mwh_agent', url: 'https://agents.acme.com/hooks/mail', description: 'Support agent runtime', eventTypes: ['message.received', 'message.bounced'] as MailboxWebhook['eventTypes'], mailboxIds: ['mbx_support'], paused: false, createdAt: ago(20 * 24), updatedAt: ago(48), deliveries: [delivery('d1', 0.2, 'delivered', 200), delivery('d2', 1.5, 'delivered', 200), delivery('d3', 5, 'failed', 503, 6), delivery('d4', 27, 'delivered', 204)] },
-    { id: 'mwh_audit', url: 'https://audit.acme.com/mail-events', description: 'Audit log', eventTypes: ['message.received', 'message.sent', 'message.delivered', 'thread.updated'] as MailboxWebhook['eventTypes'], mailboxIds: null, paused: true, createdAt: ago(9 * 24), updatedAt: ago(9 * 24), deliveries: [] },
+    { id: 'mwh_agent', url: 'https://agents.acme.com/hooks/mail', description: 'Support agent runtime', eventTypes: ['message.received', 'message.bounced'] as InboundWebhook['eventTypes'], addressIds: ['mbx_support'], paused: false, createdAt: ago(20 * 24), updatedAt: ago(48), deliveries: [delivery('d1', 0.2, 'delivered', 200), delivery('d2', 1.5, 'delivered', 200), delivery('d3', 5, 'failed', 503, 6), delivery('d4', 27, 'delivered', 204)] },
+    { id: 'mwh_audit', url: 'https://audit.acme.com/mail-events', description: 'Audit log', eventTypes: ['message.received', 'message.sent', 'message.delivered', 'thread.updated'] as InboundWebhook['eventTypes'], addressIds: null, paused: true, createdAt: ago(9 * 24), updatedAt: ago(9 * 24), deliveries: [] },
   ]
   return { keys, webhooks }
 }
@@ -104,10 +104,10 @@ export function demoReceived(now = Date.now()): ReceivedEmailDetail[] {
   const at = (hours: number) => new Date(now - hours * 3_600_000).toISOString()
   const pass = { spf: 'PASS', dkim: 'PASS', dmarc: 'PASS', spam: 'PASS', virus: 'PASS' }
   const item = (id: string, hours: number, from: { name: string; address: string }, to: string, mailbox: { id: string; address: string } | null, subject: string, text: string, extra: Partial<ReceivedEmailDetail> = {}): ReceivedEmailDetail => ({
-    id, threadId: `thr_${id}`, status: 'received', from, to: [{ name: null, address: to }], cc: [], bcc: [], replyTo: [], subject, snippet: text.split('\n')[0]!.slice(0, 200), sentAt: at(hours + 0.01), receivedAt: at(hours),
-    attachmentCount: 0, spam: false, automated: false, region: 'us-east-1', envelopeTo: [to], mailboxes: mailbox ? [mailbox] : [], unrouted: mailbox ? [] : [to],
+    id, threadId: `thr_${id}`, status: 'received', from, to: [{ name: null, address: to }], cc: [], replyTo: [], subject, snippet: text.split('\n')[0]!.slice(0, 200), sentAt: at(hours + 0.01), receivedAt: at(hours),
+    attachmentCount: 0, spam: false, region: 'us-east-1', envelopeTo: [to], addresses: mailbox ? [mailbox] : [],
     messageId: `${id}@mail.example.net`, inReplyTo: null, references: [], text, replyText: text, html: null, bodyTruncated: false, headers: [{ name: 'From', value: `${from.name} <${from.address}>` }, { name: 'To', value: to }, { name: 'Subject', value: subject }],
-    attachments: [], verdicts: pass, sesMessageId: `demo${id}`, sizeBytes: 4_200, rawUrl: null, linksExpireAt: at(-0.08), ...extra,
+    attachments: [], verdicts: pass, sizeBytes: 4_200, rawUrl: null, ...extra,
   })
   const support = { id: 'mbx_support', address: 'support@mail.acme.com' }, billing = { id: 'mbx_billing', address: 'billing@mail.acme.com' }
   return [
