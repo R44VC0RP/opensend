@@ -1,12 +1,21 @@
 import { DurableObject } from 'cloudflare:workers';
-import { Pool } from 'pg';
-import { drizzle } from 'drizzle-orm/node-postgres';
-import { sql } from 'drizzle-orm';
-import { loadConfig } from './config.js';
-import { r2Storage } from './adapters/storage.js';
-import { initialGate, runDispatcher, type GateState } from './dispatcher.js';
-import { ApiError, log, type Runtime } from './core.js';
-import { feedbackSink } from './adapters/feedback-queue.js';
+import type { Pool } from 'pg';
+import type { GateState } from './dispatcher.js';
+import type { Runtime } from './core.js';
+
+function initDeps() {
+  return Promise.all([
+    import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
+    import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
+    import('./core.js'), import('./adapters/feedback-queue.js'),
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher }, { ApiError, log }, { feedbackSink }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, ApiError, log, feedbackSink,
+  }));
+}
+let depsPromise: ReturnType<typeof initDeps> | undefined;
+function loadDeps() {
+  return depsPromise ??= initDeps().catch(error => { depsPromise = undefined; throw error; });
+}
 
 // One Durable Object per account/region/shard hosts the dispatcher loop. The object
 // keeps its database pool and pacing state across alarms, so a busy region never pays the
@@ -31,6 +40,7 @@ export class DispatcherShard extends DurableObject<Env> {
   // The location hint is only honored at creation, so this is the record of where the object actually landed.
   private async logPlacement(identity: Identity, runtime: Runtime) {
     try {
+      const { sql, log } = await loadDeps();
       const trace = await (await fetch('https://cloudflare.com/cdn-cgi/trace')).text();
       const colo = trace.match(/^colo=(\w+)/m)?.[1] ?? 'unknown';
       const timed = async (work: () => Promise<unknown>) => { const at = Date.now(); await work(); return Date.now() - at; };
@@ -68,7 +78,10 @@ export class DispatcherShard extends DurableObject<Env> {
     if (this.running) { await this.ctx.storage.setAlarm(Date.now() + 1000); return; }
     this.running = true;
     const started = Date.now();
+    let deps: Awaited<ReturnType<typeof loadDeps>> | undefined;
     try {
+      deps = await loadDeps();
+      const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
       const runtime = await this.runtime();
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
@@ -83,7 +96,10 @@ export class DispatcherShard extends DurableObject<Env> {
       // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
       if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
     } catch (error) {
-      log('error', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying.', stack: error instanceof Error && !(error instanceof ApiError) ? error.stack?.split('\n').slice(1, 4).join('\n') : undefined });
+      // Module loading itself can fail; still log, close and retry so the shard never wedges.
+      if (!deps) console.error('DISPATCHER_DEPS_FAILED', error);
+      else { const { ApiError, log } = deps;
+      log('error', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', shard: dispatcherName(identity), message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying.', stack: error instanceof Error && !(error instanceof ApiError) ? error.stack?.split('\n').slice(1, 4).join('\n') : undefined }); }
       await this.closePool();
       await this.ctx.storage.setAlarm(Date.now() + RETRY_MS);
     } finally {
@@ -92,6 +108,7 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   private async runtime(): Promise<Runtime> {
+    const { Pool, drizzle, loadConfig, r2Storage, feedbackSink } = await loadDeps();
     const config = loadConfig({ ...this.env });
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.
     if (!this.pool) {

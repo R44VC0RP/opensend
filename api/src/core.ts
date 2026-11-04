@@ -147,11 +147,16 @@ export function applySecurityHeaders(headers: Headers): Headers {
 export function secureResponse(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: applySecurityHeaders(new Headers(response.headers)) });
 }
-export function publicFailureBucket(path: string, status: number): 'auth' | 'unsubscribe' | 'ses' | null {
+export function hasSessionCookie(headers: Headers): boolean {
+  const cookie = headers.get('cookie');
+  return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?opensend\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
+}
+export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | 'ses' | null {
   if (status < 400 || status >= 500) return null;
   if (path === '/v1/events/ses') return 'ses';
   if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
-  return status === 401 && /^\/v1(?:\/|$)/.test(path) ? 'auth' : null;
+  if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
+  return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }
 export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe' | 'ses', peer: string): Promise<boolean> {
   const keyId = `public:${bucket}:${peer}`;

@@ -4,12 +4,13 @@ import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
 import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
 import { regionCatalogKey } from './regions'
-import { dashboardLikelyReady, identityOnboardingStage, useDomainStep, onboardingStage } from './onboarding'
+import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
-const HomePage = lazy(() => import('../features/home').then(m => ({ default: m.HomePage })))
+const loadHome = () => import('../features/home')
+const HomePage = lazy(() => loadHome().then(m => ({ default: m.HomePage })))
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
@@ -110,7 +111,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
-  async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
+  async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)
     try {
@@ -132,7 +133,13 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
   // Multi-tenant installations greet signed-out visitors at "/" with the public homepage; /health says which this is.
-  const home = useQuery({ queryKey: ['public-home'], enabled: signedOut && window.location.pathname === '/', staleTime: Infinity, retry: false, queryFn: ({signal}) => request<{multiTenant?: boolean} | null>('/health', {signal}).then(health => health?.multiTenant === true) })
+  // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
+  const checkHome = client.mode !== 'demo' && window.location.pathname === '/' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
+  const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
+    const multiTenant = (await request<{multiTenant?: boolean} | null>('/health', {signal}))?.multiTenant === true
+    if (multiTenant) await loadHome()
+    return multiTenant
+  } })
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
     {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>

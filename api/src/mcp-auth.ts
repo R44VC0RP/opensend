@@ -125,7 +125,7 @@ export async function withMcpAuthorization(runtime: Runtime, request: Request, h
   if (!authorization?.token || authorization.scheme === 'Unknown' || authorization.token.length > 16 * 1024) return deniedToken(runtime);
   let actor: Actor;
   try {
-    const auth = createAuth(runtime);
+    const auth = createAuth(runtime, { mcp: true });
     // The MCP convenience wrapper fetches its own public JWKS URL. Avoid a
     // Worker self-fetch (and an unnecessary network hop) using the same exported
     // verifier with request-local keys. Never cache a Workers adapter globally.
@@ -206,7 +206,7 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
   try {
     if (url.search.length > 16 * 1024) return oauthError(400, 'invalid_request', 'OAuth request is too large.');
     if (sessionWrites.has(path)) requireDashboardOrigin(runtime, request.headers);
-    const auth = createAuth(runtime);
+    const auth = createAuth(runtime, { mcp: true });
     // Init starts immediately (including resource seeding). Observe its failure
     // before any validation branch can return and leave a rejected promise.
     await auth.$context;
@@ -328,7 +328,7 @@ async function consentPage(runtime: Runtime, request: Request) {
     const params = new URLSearchParams(query); const clientId = params.get('client_id');
     if (!clientId) return page('Connection expired', '<p>Restart the connection from your MCP client.</p>');
     const consentWorkspace = runtime.config.multiTenant ? form?.get('workspace') ?? undefined : undefined;
-    const auth = createAuth(runtime, consentWorkspace);
+    const auth = createAuth(runtime, { mcp: true, consentWorkspace });
     // This server-only call verifies Better Auth's signed/expiring OAuth query
     // before any client name, scope, redirect, or approval is displayed or used.
     await auth.api.getOAuthClientPublicPrelogin({ body: { client_id: clientId, oauth_query: query } });
@@ -415,7 +415,7 @@ export function registerMcpAuth(app: App): void {
       try {
         const url = new URL(c.req.raw.url);
         if (path === '/.well-known/oauth-authorization-server') url.pathname = '/.well-known/oauth-authorization-server/api/auth';
-        return publicCors(await createAuth(c.env).handler(new Request(url, c.req.raw)));
+        return publicCors(await createAuth(c.env, { mcp: true }).handler(new Request(url, c.req.raw)));
       } catch {
         log('warn', { operation: 'mcp-discovery', code: 'AUTH_UNAVAILABLE' });
         return publicCors(oauthError(503, 'temporarily_unavailable', 'OpenSend authorization is temporarily unavailable.'));

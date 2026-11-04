@@ -30,7 +30,7 @@ try {
     const headers = new Headers(request.headers);
     headers.set('x-opensend-client-ip', address);
     const response = await app.fetch(new Request(request, { headers }), runtime);
-    const bucket = publicFailureBucket(new URL(request.url).pathname, response.status);
+    const bucket = publicFailureBucket(new URL(request.url).pathname, response.status, request.headers);
     if (bucket && !await publicFailureAllowed(runtime, bucket, await digest(key))) return publicFailureDenied();
     return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {

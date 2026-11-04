@@ -7,7 +7,7 @@ import { jwt } from 'better-auth/plugins';
 import { createMcpPlugin, isMcpAuthPath } from './mcp-auth.js';
 import { mcpAuthSchema } from './db/mcp-auth.js';
 import { and, eq, exists, gt, inArray, ne, sql } from 'drizzle-orm';
-import { isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
+import { hasSessionCookie, isSimulatedSes, ApiError, errors, log, response, security, timed } from './core.js';
 import type { Actor, App, DbExecutor, Runtime } from './core.js';
 import { authAccount, authSession, authUser, googleAuthSchema } from './db/google-auth.js';
 import { workspaceMembers } from './db/workspaces.js';
@@ -74,8 +74,10 @@ export async function membershipForApprovedUser(db: DbExecutor, userId: string, 
 }
 
 // Called per runtime/request: never retain a Workers connection in a module-global auth instance.
-export function createAuth(runtime: Runtime, consentWorkspace?: string) {
+export function createAuth(runtime: Runtime, options?: string | { consentWorkspace?: string; mcp?: boolean }) {
   requireConfigured(runtime);
+  const consentWorkspace = typeof options === 'string' ? options : options?.consentWorkspace;
+  const includeMcp = typeof options === 'object' && options?.mcp === true;
   const origin = new URL(runtime.config.publicUrl).origin;
   const secure = origin.startsWith('https:');
   const googleProvider = google({ clientId: runtime.config.googleClientId!, clientSecret: runtime.config.googleClientSecret! });
@@ -88,7 +90,7 @@ export function createAuth(runtime: Runtime, consentWorkspace?: string) {
     return profile;
   };
   const noTokens = { accessToken: null, refreshToken: null, idToken: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null, scope: null, password: null };
-  const adapterConfig = { provider: 'pg' as const, schema: { ...googleAuthSchema, ...mcpAuthSchema } };
+  const adapterConfig = { provider: 'pg' as const, schema: includeMcp ? { ...googleAuthSchema, ...mcpAuthSchema } : googleAuthSchema };
   const database: ReturnType<typeof drizzleAdapter> = options => {
     const adapter = drizzleAdapter(runtime.db, { ...adapterConfig, transaction: true })(options);
     if (runtime.config.multiTenant) {
@@ -111,7 +113,7 @@ export function createAuth(runtime: Runtime, consentWorkspace?: string) {
   return betterAuth({
     appName: 'OpenSend', baseURL: origin, basePath: '/api/auth', secret: runtime.config.authSecret,
     database,
-    plugins: [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace)],
+    plugins: includeMcp ? [jwt({ disableSettingJwtHeader: true, jwt: { issuer: `${origin}/api/auth` }, jwks: { keyPairConfig: { alg: 'ES256' } } }), createMcpPlugin(runtime, consentWorkspace)] : [],
     trustedOrigins: [origin],
     emailAndPassword: { enabled: false, disableSignUp: true },
     socialProviders: {
@@ -211,6 +213,8 @@ export function requireDashboardOrigin(runtime: Runtime, headers: Headers) {
 export async function invitationRecipient(runtime: Runtime, headers: Headers) {
   requireDashboardOrigin(runtime, headers);
   if (headers.has('authorization')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Accept invitations from a signed-in Google session.');
+  requireConfigured(runtime);
+  if (!hasSessionCookie(headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with the invited Google account.');
   const session = await createAuth(runtime).api.getSession({ headers, query: { disableRefresh: true } });
   const user = session && await approvedUser(runtime, session.user.id, runtime.db, session.session, false);
   if (!user || !session) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with the invited Google account.');
@@ -218,6 +222,7 @@ export async function invitationRecipient(runtime: Runtime, headers: Headers) {
 }
 export async function getDashboardActor(runtime: Runtime, headers: Headers, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {
   requireConfigured(runtime);
+  if (!hasSessionCookie(headers)) return null;
   try {
     // A check-only preflight must not consume a renewal without delivering its cookies to the browser.
     const result = await measure('session-db', () => createAuth(runtime).api.getSession({ headers, query: { disableRefresh: !applyHeaders }, returnHeaders: true }));

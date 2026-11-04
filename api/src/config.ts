@@ -42,6 +42,7 @@ const values = z.object({
   JEV_SCREEN_MODE: z.preprocess(v => v === '' ? undefined : v, z.enum(['reject', 'flag']).default('reject')),
   JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
 });
+export const CONFIG_KEYS = Object.keys(values.shape);
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
 export function deriveEncryptionKey(secret: string): string {
