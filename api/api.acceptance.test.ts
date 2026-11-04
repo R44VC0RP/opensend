@@ -792,10 +792,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const originalWake=runtime.wake; let wakes=0; runtime.wake=async()=>{wakes++;}; providerTest.after(()=>{runtime.wake=originalWake;});
         const pending = ok(await local('POST',path,{kind:'shared'},a.cookie), 201);
         providerTest.diagnostic(`POST shared connection: ${queries.mock.callCount()} pg round trips including dashboard auth`);
-        assert.equal(pending.state, 'ready'); assert.equal(pending.status, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
+        assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending',status:'ready'});
+        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending'});
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
@@ -1067,7 +1067,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         assert.notEqual(externalIds[0], externalIds[1]);
         await assert.rejects(pool.query('UPDATE provider_connections SET external_id=$1 WHERE workspace_id=$2', [externalIds[0], b.org.id]), { code: '23505' });
-        assert.deepEqual([ok(await verify(a.cookie))].map(r=>[r.state,r.tenant,r.status])[0], ['ready','ready','ready'], 'A verified BYO connection needs no tenant.');
+        assert.deepEqual([ok(await verify(a.cookie))].map(r=>[r.state,r.tenant])[0], ['ready','ready'], 'A verified BYO connection needs no tenant.');
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);

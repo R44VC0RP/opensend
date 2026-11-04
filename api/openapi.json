@@ -135,22 +135,13 @@
               "failed"
             ],
             "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "ready"
-            ],
-            "description": "Deprecated: use state. ready when state is ready, otherwise pending."
           }
         },
         "required": [
           "kind",
           "region",
           "state",
-          "tenant",
-          "status"
+          "tenant"
         ],
         "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
       },
@@ -8137,14 +8128,6 @@
             ],
             "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
           },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "ready"
-            ],
-            "description": "Deprecated: use state. ready when state is ready, otherwise pending."
-          },
           "awsAccountId": {
             "type": [
               "string",
@@ -8177,7 +8160,6 @@
           "region",
           "state",
           "tenant",
-          "status",
           "awsAccountId",
           "roleArn",
           "templateVersion",

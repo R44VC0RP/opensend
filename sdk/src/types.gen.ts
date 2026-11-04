@@ -38,10 +38,6 @@ export type ConnectionSummary = {
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
     tenant: 'pending' | 'ready' | 'failed';
-    /**
-     * Deprecated: use state. ready when state is ready, otherwise pending.
-     */
-    status: 'pending' | 'ready';
 } | null;
 
 export type AgentToken = {
@@ -2025,10 +2021,6 @@ export type ProviderConnection = {
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
     tenant: 'pending' | 'ready' | 'failed';
-    /**
-     * Deprecated: use state. ready when state is ready, otherwise pending.
-     */
-    status: 'pending' | 'ready';
     awsAccountId: string | null;
     roleArn: string | null;
     templateVersion: string | null;

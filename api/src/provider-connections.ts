@@ -15,11 +15,9 @@ const Create = z.object({ kind: Kind, region: z.string().max(32).regex(regionPat
 const AccountId = z.string().regex(/^\d{12}$/).openapi({ example: '123456789012' });
 const State = z.enum(CONNECTION_STATES).describe('awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.');
 const Tenant = z.enum(TENANT_STATES).describe('Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.');
-const Status = z.enum(['pending', 'ready']).describe('Deprecated: use state. ready when state is ready, otherwise pending.');
-const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, status: Status, awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
+const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
-export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant, status: Status }).openapi('ConnectionSummary');
-const legacyStatus = (state: ConnectionState) => state === 'ready' ? 'ready' as const : 'pending' as const;
+export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant }).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null };
 
 function owner(c: Ctx) {
@@ -59,14 +57,14 @@ function view(runtime: Runtime, row: Row) {
       param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
   }
-  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, status: legacyStatus(row.state), awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl };
+  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl };
 }
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'>>(sql`SELECT kind, region, state, tenant_state FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
-  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, status: legacyStatus(row.state) } : null;
+  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state } : null;
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
