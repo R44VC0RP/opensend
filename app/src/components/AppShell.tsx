@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
 import { useApi, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { workspaceApi } from '../data/workspaces'
+import { useDomainStep } from '../data/connections'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { Alert, Button, EmptyState, ErrorState, Select, Skeleton, SkeletonText, useToast } from './ui'
@@ -10,6 +11,7 @@ import { ThemeToggle } from './ThemeToggle'
 
 const SendingOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.SendingOnboarding })))
 const AdminSetupRequired = lazy(() => import('../features/onboarding').then(m => ({ default: m.AdminSetupRequired })))
+const DomainOnboarding = lazy(() => import('../features/onboarding').then(m => ({ default: m.DomainOnboarding })))
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
@@ -29,7 +31,11 @@ export function AppShell() {
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
   // Hosted workspaces need a ready sending connection; /v1/me carries its summary. Their regions are
   // managed by that connection, so SES discovery and its sidebar status don't apply.
-  const onboarding = access.multiTenant && api.mode !== 'demo' && session?.identity?.connection?.status !== 'ready'
+  const hostedSetup = access.multiTenant && api.mode !== 'demo'
+  const needsConnection = hostedSetup && session?.identity?.connection?.status !== 'ready'
+  // After choosing how to send, the add-domain step stays up until the user continues.
+  const domainStep = useDomainStep(hostedSetup && access.canAdminister && api.environment === 'live' ? session?.identity?.workspaceId : undefined)
+  const onboarding = needsConnection || domainStep !== null
   const discovery = useRegionDiscovery(access.multiTenant ? undefined : current)
   const quota = discovery.data?.account?.quota
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
@@ -81,7 +87,7 @@ export function AppShell() {
       <div className="sidebar-context">{workspaceSelect}</div>
       <div className="sidebar-footer"><Button variant="ghost" onClick={() => void session?.logout()}>Sign out</Button></div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{access.canAdminister ? <SendingOnboarding /> : <AdminSetupRequired />}</Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}><Suspense fallback={<RouteSkeleton />}>{!needsConnection && domainStep !== null ? <DomainOnboarding domainId={domainStep} /> : access.canAdminister ? <SendingOnboarding /> : <AdminSetupRequired />}</Suspense></main>
   </div>
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>

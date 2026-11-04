@@ -12,3 +12,10 @@
 .onboarding-steps > li { display: flex; flex-direction: column; gap: var(--space-12); padding-block: var(--space-20); border-top: 1px solid var(--color-border); }
 .onboarding-account { max-width: 240px; }
 @media (max-width: 900px) { .onboarding-options { grid-template-columns: 1fr; } }
+.onboarding--wide { max-width: 1040px; }
+.onboarding-domain-form { display: flex; align-items: flex-start; gap: var(--space-12); max-width: 520px; }
+.onboarding-domain-form > .ui-field { flex: 1; min-width: 0; }
+/* Line up with the input, below its label, whether or not an error shows. */
+.onboarding-domain-form > .ui-button { margin-top: calc(var(--leading-xs) + var(--space-8)); }
+.onboarding-domain-title { display: inline-flex; align-items: center; gap: var(--space-12); }
+.onboarding-domain-title .ui-status { font-size: var(--text-sm); }

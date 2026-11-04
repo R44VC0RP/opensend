@@ -832,6 +832,10 @@ export function createMockApi(): OpenSendApi {
         domain.records.forEach(record => { record.status = 'verified' })
         return domain
       }),
+      remove: (domainId, signal) => run(signal, true, s => {
+        const domain = find(s.domains, domainId, 'Domain')
+        s.domains.splice(s.domains.indexOf(domain), 1)
+      }),
     },
     mailboxes: {
       list: (input, signal) => run(signal, false, s => {

@@ -1,25 +1,19 @@
 import { useState, type FormEvent } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
-import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
+import { useApiMutation, useApiQuery, useRegion, useApi, useSession, useWorkspaceAccess } from '../../data/context'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { receivingStatus } from '../inbound/status'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
+import { DnsRecordTable, DomainRecords, domainState, recordsFor, useDomain, zoneLines } from './domain-records'
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
-const fqdn = (name: string) => name.endsWith('.') ? name : `${name}.`
-
-function downloadDnsRecords(domain: string, records: { type: string; name: string; value: string }[]) {
-  const lines = records.map(record => {
-    const value = record.type === 'TXT' ? `"${record.value.replace(/"/g, '\\"')}"`
-      : record.type === 'MX' ? record.value.replace(/(\S+)$/, target => fqdn(target))
-      : fqdn(record.value)
-    return `${fqdn(record.name)}\t3600\tIN\t${record.type}\t${value}`
-  })
-  const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${lines.join('\n')}\n`
+function downloadDnsRecords(domain: string, records: DnsRecord[]) {
+  const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }))
   const link = Object.assign(document.createElement('a'), { href: url, download: `${domain}-dns-records.txt` })
   link.click()
@@ -27,8 +21,9 @@ function downloadDnsRecords(domain: string, records: { type: string; name: strin
 }
 
 function setupSummary(domain: Domain) {
-  const parts = [domain.dkimStatus && domain.dkimStatus !== 'verified' && `DKIM ${domain.dkimStatus}`, ['pending', 'failed'].includes(domain.mailFromStatus) && `MAIL FROM ${domain.mailFromStatus}`].filter(Boolean)
-  return parts.length ? parts.join(' · ') : 'Waiting for SES'
+  const ownership = recordsFor(domain, 'ownership')
+  const parts = [domain.dkimStatus && domain.dkimStatus !== 'verified' && `DKIM ${domain.dkimStatus}`, ownership.length > 0 && !ownership.every(record => record.status === 'verified') && 'Ownership pending', ['pending', 'failed'].includes(domain.mailFromStatus) && `MAIL FROM ${domain.mailFromStatus}`].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'Waiting for DNS'
 }
 
 function LiveDomainsPage() {
@@ -75,14 +70,21 @@ function LiveDomainsPage() {
 
 function LiveDomainDetailPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const { regionId, setRegionId } = useRegion()
-  const domain = useApiQuery(['domain', id], (api, signal) => api.domains.get(id, signal), { interval: domain => domain?.status === 'pending' || domain?.mailFromStatus === 'pending' ? 60_000 : false })
-  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Domain readiness refreshed', true)
+  const { multiTenant } = useWorkspaceAccess()
+  const hosted = useSession()?.identity?.connection?.kind === 'shared'
+  const domain = useDomain(id)
+  const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true)
+  const client = useQueryClient()
+  // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
+  const remove = useApiMutation((api, domainId: string) => api.domains.remove(domainId), 'Domain deleted', true, false)
   const configureMailFrom = useApiMutation((api, input: {id: string; mailFromDomain: string}) => api.domains.configureMailFrom(input.id, input.mailFromDomain), 'Custom MAIL FROM configured', true)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const [mailFromOpen, setMailFromOpen] = useState(false)
   const [mailFromDomain, setMailFromDomain] = useState('')
   const [mailFromInvalid, setMailFromInvalid] = useState('')
-  function openMailFrom() { configureMailFrom.reset(); setMailFromDomain(domain.data?.mailFromDomain ?? domain.data?.records.find(record => record.type !== 'CNAME')?.name ?? `email.${domain.data?.name ?? ''}`); setMailFromInvalid(''); setMailFromOpen(true) }
+  function openMailFrom() { configureMailFrom.reset(); setMailFromDomain(domain.data?.mailFromDomain ?? `email.${domain.data?.name ?? ''}`); setMailFromInvalid(''); setMailFromOpen(true) }
   async function submitMailFrom(event: FormEvent) {
     event.preventDefault()
     const current = domain.data, value = mailFromDomain.trim().toLowerCase()
@@ -93,35 +95,34 @@ function LiveDomainDetailPage() {
   if (domain.isPending) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
-  const dkimRecords = current.records.filter(record => record.type === 'CNAME')
-  const mailFromRecords = current.records.filter(record => record.type !== 'CNAME')
+  const mailFromRecords = recordsFor(current, 'mail_from')
   const mailFromName = current.mailFromDomain ?? mailFromRecords[0]?.name ?? null
-  const dkimStatus = current.dkimStatus ?? (current.status === 'verified' ? 'verified' : 'pending')
-  const sending = current.status === 'verified' ? { status: 'Ready', tone: 'success' as const } : current.status === 'issue' ? { status: 'Failed', tone: 'danger' as const } : { status: 'Waiting for DNS', tone: 'warning' as const }
+  const state = domainState(current)
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
-    <PageHeader title={current.name} backTo="/domains" actions={<><a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a><Button variant="primary" loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Verify records</Button></>} />
+    <PageHeader title={current.name} backTo="/domains" actions={<>
+      {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
+      {current.status !== 'verified' && <Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Check now</Button>}
+      {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
+    </>} />
     <MutationError error={verify.error} />
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <dl className="settings-facts settings-account-summary">
-      <div><dt>Sending</dt><dd><StatusBadge status={sending.status} tone={sending.tone} /></dd></div>
-      <div><dt>DKIM</dt><dd><StatusBadge status={label(dkimStatus)} /></dd></div>
-      <div><dt>Custom MAIL FROM</dt><dd>{mailFromName ? <StatusBadge status={label(current.mailFromStatus)} /> : <span className="muted">Not configured</span>}</dd></div>
+      <div><dt>Status</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
       <div><dt>Region</dt><dd>{current.regionId}</dd></div>
     </dl>
-    <section className="section stack">
-      <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these records at your DNS provider, then verify. SES can take up to 72 hours to detect changes.</p></div>{current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>}</div>
-      {current.dnsStatus === 'unavailable' && <Alert tone="warning">{current.dnsUnavailableReason || 'DNS records are unavailable from SES. Try refreshing domain readiness.'}</Alert>}
-      {dkimRecords.length > 0 && <div className="stack settings-discovery-section">
-        <div className="ui-section-header"><div className="domain-group-title"><h3>DKIM</h3><p className="muted">Signs mail sent from {current.name}.</p></div></div>
-        <DnsRecordTable records={dkimRecords} />
-      </div>}
+    <DomainRecords domain={current} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+    <details className="settings-aws-details">
+      <summary>Advanced</summary>
       <div className="stack settings-discovery-section">
-        <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">{mailFromName ? 'Routes bounces through your subdomain and aligns SPF.' : 'Optional. Routes bounces through a subdomain you own and aligns SPF.'}</p></div><Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add custom MAIL FROM'}</Button></div>
-        {mailFromRecords.length > 0 && <DnsRecordTable records={mailFromRecords} />}
+        <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">{mailFromName ? 'Routes bounces through your subdomain and aligns SPF.' : 'Optional. Routes bounces through a subdomain you own and aligns SPF.'}</p></div>
+          <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add custom MAIL FROM'}</Button></div>
+        </div>
+        {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
       </div>
-    </section>
-    <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />
+    </details>
+    {!hosted && <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />}
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="You can no longer send from this domain. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'domain' && query.queryKey[4] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'domains' }) }} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
@@ -169,19 +170,11 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
       {state.status === 'provisioning' && <Alert tone="info">Creating the S3 bucket, SNS topic and SES receipt rule. This usually takes under a minute.</Alert>}
       {state.mx && state.status !== 'provisioning' && <Alert tone={mxTone(state.mx.state)}>{state.mx.message}</Alert>}
-      <DnsRecordTable records={records} />
+      <DnsRecordTable domain={domainName} records={records} />
     </>}
     <ConfirmDialog open={!!conflict} onOpenChange={open => { if (!open) setConflict(null) }} title={`Move mail for ${domainName}?`} description={`${conflict ?? ''} Mail stops arriving at that provider once the MX record changes.`} confirmLabel="Enable anyway" danger onConfirm={() => enable.mutateAsync(true)} />
     <ConfirmDialog open={disableOpen} onOpenChange={setDisableOpen} title={`Stop receiving on ${domainName}?`} description="SES stops accepting mail for this domain. Addresses and stored messages are kept." confirmLabel="Turn off" danger onConfirm={() => disable.mutateAsync()} />
   </section>
-}
-
-function DnsRecordTable({ records }: { records: DnsRecord[] }) {
-  return <DataTable rows={records} rowKey={record => record.id} columns={[
-    { ...settingsColumns.dns[0], render: record => record.type },
-    { ...settingsColumns.dns[1], render: record => <div className="settings-copy-cell"><code title={record.name}>{record.name}</code><CopyButton value={record.name} label={`Copy ${record.type} record name`} /></div> },
-    { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} record value`} /></div> },
-  ]} />
 }
 
 function TestDomainsNotice() { return <><PageHeader title="Domains" /><Alert tone="info">Domains are managed in live mode only.</Alert></> }
