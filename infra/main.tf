@@ -65,7 +65,7 @@ variable "environment" {
 
 variable "origin_connection_limit" {
   type    = number
-  default = 15
+  default = 30
 }
 
 variable "bucket_location" {

@@ -48,7 +48,7 @@ export interface DispatcherOptions {
   /** Refresh quota from the provider at most this often. */
   quotaRefreshMs?: number;
 }
-export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; recovered: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number }
+export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number }
 
 // Timestamps are cast to text so raw rows match Drizzle's string-mode timestamp columns.
 const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
@@ -185,14 +185,22 @@ async function leaseDue(runtime: Runtime, environment: Mode, region: string, lim
         ${dueForOwner} ${priority} LIMIT ${limit}
       ) q
     ), shares AS MATERIALIZED (
-      SELECT workspace_id, greatest(1, count(*) FILTER (WHERE place <= ${limit})) AS slots
+      SELECT workspace_id, count(*) AS candidates, greatest(1, count(*) FILTER (WHERE place <= ${limit})) AS slots
       FROM candidates GROUP BY workspace_id ORDER BY min(place)
-    ), due AS (
+    ), allocated AS MATERIALIZED (
       -- Allocate slots, not IDs: a competing shard can hold this owner's entire first page.
       -- Lock the next available rows in index order; later owners can fill slots skipped under contention.
       SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
         SELECT id ${dueForOwner} ${priority} LIMIT o.slots FOR UPDATE SKIP LOCKED
       ) e LIMIT ${limit}
+    ), due AS (
+      -- Consume the fair allocation first. A full lease skips the fallback; a short one only
+      -- revisits owners with candidates beyond their share. Our own locks are not SKIPped.
+      SELECT workspace_id, id FROM allocated UNION ALL
+      SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
+        SELECT id ${dueForOwner} AND e.id NOT IN (SELECT id FROM allocated)
+        ${priority} LIMIT ${limit} FOR UPDATE SKIP LOCKED
+      ) e WHERE o.candidates > o.slots LIMIT ${limit}
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*
     ), settings AS MATERIALIZED (
@@ -242,22 +250,6 @@ async function leaseDue(runtime: Runtime, environment: Mode, region: string, lim
     }
     return { mail, owner: ready ? owner! : null, review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], status: review_status as string | null, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
-}
-
-// A lease that expired while attempting means the provider call may have happened. SES has no
-// idempotency token, so the row becomes acceptance_unknown and is never automatically resent.
-async function recoverInterrupted(runtime: Runtime, environment: Mode, region: string, accountId?: string): Promise<number> {
-  const result = await runtime.db.execute<{ count: number }>(sql`WITH stale AS (
-      UPDATE sending_emails SET status = 'acceptance_unknown', error_code = 'INTERRUPTED_PROVIDER_ATTEMPT', lease_until = NULL, updated_at = clock_timestamp()
-       WHERE environment = ${environment} AND region = ${region} AND status = 'attempting' AND attempt_started_at < clock_timestamp() - interval '3 minutes'
-       ${runtime.config.multiTenant ? sql`AND workspace_id IN (SELECT workspace_id FROM ${sendingConnections(environment)} WHERE region=${region} AND aws_account_id=${accountId})` : sql``}
-      RETURNING id, workspace_id, environment, dispatch_version
-    ), events AS (
-      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-      SELECT 'event_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version, environment = 'test', '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb
-      FROM stale ON CONFLICT DO NOTHING RETURNING id
-    ) SELECT count(*)::int AS count FROM stale`);
-  return result.rows[0]?.count ?? 0;
 }
 
 // A screen rejection carries its verdict into the reject event.
@@ -557,9 +549,8 @@ async function releaseLeases(runtime: Runtime, environment: Mode, mails: Mail[])
 // One batch: lease up to batchSize rows and prepare them (CPU), then for each group of sendConcurrency
 // rows: one claim statement, paced provider calls, one record statement. Recording overlaps the next
 // group's claim and sends; failures surface at the end of the batch.
-async function dispatchBatch(base: Runtime, lane: Lane): Promise<{ processed: number; blocked: boolean }> {
+async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promise<{ processed: number; blocked: boolean }> {
   const { gate, options, counters, phase } = lane;
-  const leased = await phase('lease', () => leaseDue(base, options.environment, options.region, options.batchSize, lane.deferred, options.accountId));
   if (!leased.length) return { processed: 0, blocked: false };
   const environment = options.environment;
   const ready = leased.filter((item): item is Leased & { owner: Owner } => item.owner !== null);
@@ -638,33 +629,34 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   if (runtime.config.multiTenant && !/^\d{12}$/.test(options.accountId ?? '')) throw new ApiError(500, 'DISPATCH_ACCOUNT_REQUIRED', 'An MX dispatcher must be scoped to an AWS account.');
   const started = Date.now();
   const gate = options.gate ?? initialGate();
-  const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, recovered: 0, batches: 0, idle: false, durationMs: 0, timings: {}, statements: 0 };
+  const counters: DispatcherReport = { claimed: 0, sent: 0, deferred: 0, skipped: 0, batches: 0, idle: true, durationMs: 0, timings: {}, statements: 0 };
   const phase = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
     const startedAt = Date.now();
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
-  counters.recovered = await phase('recover', () => recoverInterrupted(runtime, options.environment, options.region, options.accountId));
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: options.environment === 'live' };
   const lane: Lane = { deferred: [], gate, pacing, activated: new Set(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
-  const lanes = Math.max(1, options.lanes ?? 2);
-  let idleLanes = 0, blocked = false;
-  await Promise.all(Array.from({ length: lanes }, async () => {
-    while (!blocked && (options.until === undefined || Date.now() < options.until)) {
-      const { processed, blocked: exhausted } = await dispatchBatch(runtime, lane);
+  const lease = () => phase('lease', () => leaseDue(runtime, options.environment, options.region, lane.options.batchSize, lane.deferred, options.accountId));
+  const first = await lease();
+  const lanes = first.length === lane.options.batchSize ? Math.max(1, options.lanes ?? 2) : 1;
+  let blocked = false;
+  const results = await Promise.allSettled(Array.from({ length: lanes }, async (_, i) => {
+    let batch = i === 0 ? first : await lease();
+    for (;;) {
+      const { processed, blocked: exhausted } = await dispatchBatch(runtime, lane, batch);
       counters.batches++;
-      if (exhausted) { blocked = true; break; }
-      if (processed) { idleLanes = 0; await options.onGate?.(gate); continue; }
-      // Empty lease: this lane is done unless a sibling is still producing (it may unblock more work).
-      if (++idleLanes >= lanes) break;
-      await sleep(50);
-      if (idleLanes >= lanes) break;
+      if (exhausted) blocked = true;
+      if (processed) await options.onGate?.(gate);
+      if (blocked || batch.length < lane.options.batchSize) return;
+      if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; return; }
+      batch = await lease();
     }
   }));
-  // Blocked counts as idle: nothing more can be sent until the quota window moves.
-  counters.idle = blocked || (counters.batches > 0 && idleLanes >= lanes);
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  if (blocked) counters.idle = true;
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
-  if (counters.claimed || counters.recovered || !counters.idle) log('info', { code: 'DISPATCH_RUN', environment: options.environment, accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
+  if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', environment: options.environment, accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
   return counters;
 }
 

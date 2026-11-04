@@ -246,36 +246,35 @@ function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, char
 export const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
 export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
 export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
-function keySender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
-  region(runtime, selectedRegion);
+function keySender(a: Actor, from: string) {
   const domain = from.split('@')[1]!.toLowerCase();
   if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
 }
-function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string, verified: boolean) {
-  keySender(runtime, a, from, selectedRegion);
-  if (runtime.config.multiTenant && !verified) throw unverifiedSender();
+function verifiedSender(a: Actor, from: string, verified: boolean) {
+  keySender(a, from);
+  if (!verified) throw unverifiedSender();
 }
 // Reuse the existing region-lock round trip for non-batch admission (including mailbox replies).
 async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string) {
   if (!runtime.config.multiTenant) {
     const selected = await assertRegionEnabled(db, a.workspaceId, requested);
-    sender(runtime, a, from, selected, false); return selected;
+    keySender(a, from); return selected;
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id,
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind'] }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,a.environment)} AS verified
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(a.environment)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
-  sender(runtime, a, from, state.region, state.verified);
+  verifiedSender(a, from, state.verified);
   if (!state.aws_account_id) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
-  a.dispatchAccountId = state.aws_account_id;
+  a.dispatchAccount = { aws_account_id: state.aws_account_id, kind: state.kind };
   return state.region;
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   region(runtime, draft.region);
-  if (draft.from) keySender(runtime, a, draft.from, draft.region);
+  if (draft.from) keySender(a, draft.from);
 }
 function readyCampaign(draft: CampaignDraft) {
   const parsed = CampaignReady.safeParse(draft);
@@ -550,7 +549,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
   const input = { ...request, region: sharedValidated ? request.region! : runtime.config.multiTenant ? await sendingRegion(runtime, db, a, request.from, request.region) : await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (!sharedValidated) {
     if (a.environment === 'live' && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
-    if (!runtime.config.multiTenant) keySender(runtime, a, input.from, input.region);
+    if (!runtime.config.multiTenant) keySender(a, input.from);
   }
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
@@ -592,8 +591,12 @@ async function queueEmail(db: DbExecutor, a: Actor, snapshot: EmailSnapshot, cam
   await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
   // The row itself is the dispatch queue entry; the request's response path nudges that region's dispatcher.
   void requestId;
-  (a.dispatchTargets ??= new Set()).add(`${a.environment}:${snapshot.region}`);
+  noteDispatch(a, snapshot.region);
   return { id: emailId, status: 'queued' as const, environment: a.environment, simulated: a.environment === 'test' };
+}
+function noteDispatch(a: Actor, region: string) {
+  const targets = a.dispatchTargets ??= new Map();
+  targets.set(region, (targets.get(region) ?? 0) + 1);
 }
 async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
@@ -623,24 +626,25 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(a.environment)} pc ON pc.workspace_id=settings.workspace_id` : sql``}`)).rows[0]!;
+      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(a.environment)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
     assertPending(a, mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
+    const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
     for (const [i, mail] of mails.entries()) {
       const region = mail.region ?? state.default_region;
       if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
-      if (c.env.config.multiTenant) sender(c.env, a, mail.from, region, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
+      if (mx) verifiedSender(a, mail.from, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
       if (mx && state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
       if (!mx && a.environment === 'live' && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
-      if (!c.env.config.multiTenant) keySender(c.env, a, mail.from, region);
+      if (!mx) keySender(a, mail.from);
       const ids = distinctAttachmentIds(mail.attachments);
       // PostgreSQL cannot bind NUL as text. Defer that invalid lookup to its own message, after domain/duplicate checks.
       const attached = ids.some(id => id.includes('\0')) ? await attachmentRows(db, a, ids, true) : ids.flatMap(id => locked.get(id) ?? []);
       validateAttachmentRows(mail.attachments, attached);
       const link = mail.kind === 'marketing' ? await createUnsubscribeLink(c.env, a.workspaceId, a.environment, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
-      const snapshot = await prepare(c.env, db, a, { ...mail, region }, false, attached, true, false, link?.url, state.connection ?? undefined);
+      const snapshot = await prepare(runtime, db, a, { ...mail, region }, false, attached, true, false, link?.url, state.connection ?? undefined);
       if (batch) {
         expandedBytes += Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
         if (expandedBytes > SENDING_LIMITS[a.environment].expandedCampaignBytes) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS[a.environment].expandedCampaignBytes / 1024 / 1024} MiB ${a.environment} limit. Submit smaller batches.`);
@@ -655,8 +659,8 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       INSERT INTO sending_emails (id, workspace_id, environment, actor_key_id, region, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated)
         SELECT id, ${a.workspaceId}, ${a.environment}, ${a.keyId}, snapshot->>'region', snapshot->>'from', snapshot->'to', snapshot->'cc', snapshot->'bcc',
           snapshot->>'subject', snapshot, ${a.environment === 'test'} FROM submitted`);
-    a.dispatchAccountId = state.connection?.aws_account_id;
-    for (const row of rows) (a.dispatchTargets ??= new Set()).add(`${a.environment}:${row.snapshot.region}`);
+    if (state.connection) a.dispatchAccount = { aws_account_id: state.connection.aws_account_id, kind: state.connection.kind };
+    for (const row of rows) noteDispatch(a, row.snapshot.region);
     return receipt;
   }, receipt);
 }
@@ -1571,7 +1575,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   const limitsTable = sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
-      accountId: runtime.config.multiTenant ? sql<string>`(SELECT aws_account_id FROM ${sendingConnections(a.environment)} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
+      account: runtime.config.multiTenant ? sql<Actor['dispatchAccount']>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind) FROM ${sendingConnections(a.environment)} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
       rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
       max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
       sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
@@ -1674,7 +1678,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
     });
     if (readyJobs) {
       // Expanded rows are claimed directly by the region dispatcher; the follow-up expansion job still needs the scheduler.
-      try { await runtime.dispatch?.(a.environment, review!.draft.region, initial.accountId ?? undefined); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId, message: 'Expanded mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+      try { await runtime.dispatch?.(a.environment, review!.draft.region, initial.account?.aws_account_id, readyJobs, initial.account?.kind); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId, message: 'Expanded mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       await wake(runtime, 1);
     }
   } catch (error) {

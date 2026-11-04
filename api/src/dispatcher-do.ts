@@ -59,7 +59,7 @@ export class DispatcherShard extends DurableObject<Env> {
       this.identity = identity;
     }
     // An alarm during a run is harmless: it re-checks for work after the current run returns.
-    if (!this.running && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now());
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now());
     return Response.json({ ok: true, running: this.running });
   }
 
@@ -96,7 +96,7 @@ export class DispatcherShard extends DurableObject<Env> {
     const config = loadConfig({ ...this.env });
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.
     if (!this.pool) {
-      this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 4, idleTimeoutMillis: 30000 });
+      this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
     return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE) };

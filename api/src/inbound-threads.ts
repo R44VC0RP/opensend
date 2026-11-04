@@ -190,7 +190,7 @@ export function assertInboundRecipients(expected: Recipients, resolved: Recipien
 }
 
 export async function wakeMailboxSend(c: Ctx, actor: Actor, runnable: number) {
-  for (const target of actor.dispatchTargets ?? []) { const [environment, region] = target.split(':') as ['live', string]; try { await c.env.dispatch?.(environment, region, actor.dispatchAccountId); } catch { /* The dispatcher polls queued mail. */ } }
+  for (const [region, count] of actor.dispatchTargets ?? []) { try { await c.env.dispatch?.(actor.environment, region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind); } catch { /* The dispatcher polls queued mail. */ } }
   actor.dispatchTargets?.clear();
   if (runnable) try { await c.env.wake?.(runnable); } catch { /* durable */ }
 }

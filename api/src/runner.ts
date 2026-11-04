@@ -13,7 +13,7 @@ import { ApiError, log } from './core.js';
 try {
   const { runtime, close } = nodeRuntime(process.env);
   const concurrency = jobConcurrency(process.env.JOB_CONCURRENCY);
-  let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0;
+  let stopped = false; let lastCleanup = 0; let lastOutboundSync = 0; let lastRecovery = 0;
   let sharedSetup: Promise<void> | undefined, lastSharedSetup = 0;
   // In-process pacing state per environment/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
@@ -38,7 +38,9 @@ try {
           lastOutboundSync = Date.now();
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
-        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates);
+        const recover = Date.now() - lastRecovery >= 60_000;
+        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover);
+        if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
         log('error', { code: error instanceof ApiError ? error.code : 'RUNNER_FAILED', message: error instanceof ApiError ? error.message : 'Job polling failed. Check database connectivity and migrations.' });

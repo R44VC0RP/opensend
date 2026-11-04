@@ -22,10 +22,13 @@ import { ingestFeedbackBatch } from './operations.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
 export { DispatcherShard } from './dispatcher-do.js';
 
-// Nudges every shard for one environment/region. Objects are created near the database on first use.
-async function wakeDispatchers(env: Env, environment: Mode, region: string, accountId?: string) {
-  const count = shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
-  await Promise.all(Array.from({ length: count }, (_, index) => {
+// A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
+let nextShard: number | undefined;
+async function wakeDispatchers(env: Env, environment: Mode, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo') {
+  const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
+  nextShard ??= Math.floor(Math.random() * 0x100000000);
+  const indexes = emails !== undefined && emails <= 6 ? [nextShard++ % count] : Array.from({ length: count }, (_, i) => i);
+  await Promise.all(indexes.map(index => {
     const identity = { environment, accountId, region, shard: { index, count } };
     const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
     return stub.fetch(`https://dispatcher/wake?environment=${environment}&region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}`);
@@ -39,11 +42,11 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fal
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, ctx?: ExecutionContext): Promise<T> {
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
   const config = loadConfig({ ...env });
   // A request-local lazy pool opens no connection for health, OpenAPI or missing-auth responses.
-  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: workerConcurrency(env) });
-  const nudges: Promise<void>[] = [];
+  const client = new Pool({ connectionString: env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max });
+  const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
     const db = drizzle(client);
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1) => {
@@ -77,11 +80,11 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
       }
       log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
-    }, dispatch: (environment, region, accountId) => wakeDispatchers(env, environment, region, accountId), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
-    // A post-commit queue reservation still needs this request's Hyperdrive pool.
-    if (ctx && nudges.length) ctx.waitUntil(Promise.allSettled(nudges).then(() => client.end()));
-    else await client.end();
+    await client.end();
+    // A dispatch-only nudge opens no connection. A queue reservation uses its own lazy connection.
+    if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
 export default {
@@ -108,7 +111,7 @@ export default {
         const result = await app.fetch(new Request(request, { headers }), runtime);
         const failureBucket = publicFailureBucket(new URL(request.url).pathname, result.status);
         return failureBucket && !await publicFailureAllowed(runtime, failureBucket, peer) ? publicFailureDenied() : result;
-      }, ctx);
+      }, 1, ctx);
       const runtimeMs = performance.now() - runtimeStarted;
       const responseHeaders = new Headers(response.headers);
       const innerTiming = responseHeaders.get('server-timing');
@@ -149,11 +152,10 @@ export default {
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }), 45000);
       log('info', { code: 'QUEUE_FOLLOW', outcome });
-    });
+    }, workerConcurrency(env));
     batch.ackAll();
   },
-  async scheduled(controller, env, ctx) {
-    if (controller.cron === '* * * * *') ctx.waitUntil(withRuntime(env, reconcileSharedConnections));
+  async scheduled(controller, env) {
     await withRuntime(env, async runtime => {
       if (controller.cron === '7 * * * *') {
         await cleanup(runtime);
@@ -162,13 +164,14 @@ export default {
         await mailboxHourly(await resolveRegionRuntime(runtime));
       }
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
-      const resolved = await resolveRegionRuntime(runtime);
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
-      try { await syncOutboundMessages(resolved); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
-      await Promise.allSettled((await dispatchPartitions(runtime)).map(({ region, environment, accountId }) => wakeDispatchers(env, environment, region, accountId)));
+      if (controller.cron !== '* * * * *') return;
+      try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
+      await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, environment, accountId, kind }) => wakeDispatchers(env, environment, region, accountId, undefined, kind)));
       const concurrency = workerConcurrency(env);
       // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
-    });
+      await reconcileSharedConnections(runtime);
+    }, workerConcurrency(env));
   },
 } satisfies ExportedHandler<Env>;

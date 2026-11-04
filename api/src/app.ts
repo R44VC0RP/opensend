@@ -2,7 +2,7 @@ import { OpenAPIHono } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { ApiError, log, SECURITY_HEADERS, timed } from './core.js';
-import type { Mode } from './core.js';
+import type { Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth } from './auth.js';
 import { registerGoogleAuth } from './google-auth.js';
@@ -43,17 +43,16 @@ export function createApp() {
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (enqueued > 0 || wakeJobs) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) ? c.env.wake : undefined;
-    const targets = c.get('actor')?.dispatchTargets;
+    const actor = c.get('actor'), targets = actor?.dispatchTargets;
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
     if (!wake && !dispatch) return;
-    const nudge = async () => {
-      if (wake) try { await wake(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
-      if (dispatch && targets) for (const target of targets) {
-        const [environment, region] = target.split(':') as [Mode, string];
-        try { await dispatch(environment, region, c.get('actor').dispatchAccountId); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+    const nudge = async (runtime: Runtime) => {
+      if (wake) try { await runtime.wake?.(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+      if (dispatch && targets) for (const [region, count] of targets) {
+        try { await runtime.dispatch?.(actor.environment, region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
-    if (c.env.deferNudge) c.env.deferNudge(nudge()); else await nudge();
+    if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
   });
   app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
   app.use('/v1/*', async (c, next) => {
@@ -89,8 +88,7 @@ export function createApp() {
   app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
   app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));
   app.on('POST', ['/v1/domains', '/v1/domains/:id/mail-from', '/v1/domains/:id/verify'], selfHostedRegions);
-  app.on('POST', ['/v1/emails/send', '/v1/emails/batch',
-    '/v1/campaigns', ...['test', 'reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
+  app.on('POST', ['/v1/campaigns', ...['test', 'reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
   app.on('PATCH', ['/v1/campaigns/:id', '/v1/campaigns/:id/archive'], regions);
   app.on('DELETE', '/v1/campaigns/:id', regions);
   app.onError((error, c) => {

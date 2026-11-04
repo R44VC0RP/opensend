@@ -19,18 +19,30 @@ const deleteAttachment: JobHandler = async (runtime, payload, job) => {
 };
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
 export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
-type Partition = { region: string; environment: Mode; accountId?: string };
-export async function dispatchPartitions(runtime: Runtime): Promise<Partition[]> {
-  if (runtime.config.multiTenant) return (await runtime.db.execute<Partition>(sql`
-    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.environment FROM (
-      SELECT workspace_id,region,aws_account_id,'live' AS environment FROM provider_sending_connections UNION ALL
-      SELECT workspace_id,region,aws_account_id,'test' FROM provider_test_connections) c
-    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.environment=c.environment AND e.status IN ('queued','attempting'))`)).rows;
-  const regions = await runtime.db.execute<{ region: string }>(sql`SELECT DISTINCT jsonb_array_elements_text(enabled_regions) AS region FROM ses_installation_settings`);
-  return regions.rows.flatMap(({ region }) => (['live','test'] as const).map(environment => ({ region, environment })));
+type Partition = { region: string; environment: Mode; accountId?: string; kind?: 'shared' | 'byo' };
+export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
+  // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may
+  // already have reached SES: record uncertainty atomically; never put it back on the send queue.
+  const recovery = recoverInterrupted ? sql`WITH stale AS (
+    UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
+    WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, environment, dispatch_version
+  ), events AS (
+    INSERT INTO sending_email_events(id,workspace_id,environment,email_id,type,external_id,simulated,data)
+    SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, environment, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
+      environment='test', '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb FROM stale ON CONFLICT DO NOTHING
+  )` : sql``;
+  const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
+  const partitions = runtime.config.multiTenant ? sql`
+    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.environment, c.kind FROM (
+      SELECT workspace_id,region,aws_account_id,kind,'live' AS environment FROM provider_sending_connections UNION ALL
+      SELECT workspace_id,region,aws_account_id,kind,'test' FROM provider_test_connections) c
+    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.environment=c.environment AND ${due})` : sql`
+    SELECT DISTINCT e.region, e.environment FROM sending_emails e JOIN ses_installation_settings s ON s.workspace_id=e.workspace_id
+    WHERE ${due} AND s.enabled_regions ? e.region`;
+  return (await runtime.db.execute<Partition>(sql`${recovery} ${partitions}`)).rows;
 }
 /** Jobs plus due mail for every environment/region, in this process. Node runners and tests use this. */
-export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>()) {
+export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true) {
   let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs);
   const dispatch = async ({ accountId, region, environment }: Partition) => {
     if (environment === 'live' && !runtime.config.liveEnabled) return 0;
@@ -42,7 +54,7 @@ export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDu
       return 0;
     }
   };
-  const partitions = await dispatchPartitions(runtime);
+  const partitions = await dispatchPartitions(runtime, recoverInterrupted);
   const width = runtime.config.multiTenant ? Math.max(2, concurrency) : 1;
   for (let i = 0; i < partitions.length; i += width) {
     const counts = await Promise.all(partitions.slice(i, i + width).map(dispatch));

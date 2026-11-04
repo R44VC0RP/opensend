@@ -14,9 +14,9 @@ export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
   workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
   role?: string;
-  // "environment:region" pairs whose queued mail this request committed; the response path nudges their dispatcher.
-  dispatchTargets?: Set<string>;
-  dispatchAccountId?: string;
+  // Number of emails queued per region, for a bounded post-commit wake.
+  dispatchTargets?: Map<string, number>;
+  dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
   wakeJobs?: number;
 }
@@ -68,10 +68,10 @@ export type FeedbackItem = { environment: Mode; region: string; topicArn: string
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
   wake?: (readyJobs?: number) => Promise<void>;
-  deferNudge?: (pending: Promise<void>) => void;
+  deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one environment/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
-  dispatch?: (environment: Mode, region: string, accountId?: string) => Promise<void>;
+  dispatch?: (environment: Mode, region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind']) => Promise<void>;
   // Verified provider feedback (and test-mode simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };

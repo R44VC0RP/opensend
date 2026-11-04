@@ -526,6 +526,21 @@ function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) 
   if ((runtime.config.multiTenant && !/^\d{12}$/.test(expected ?? '')) || (expected && accountId !== expected)) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this topic.');
 }
 function registerPublicEvents(app: App) {
+  type TopicBinding = { region: string; aws_account_id: string; kind: 'byo' | 'shared'; ready: boolean };
+  const sendingTopics = new Map<string, { binding: TopicBinding; expires: number }>();
+  async function sendingTopic(runtime: Runtime, arn: string, confirming: boolean) {
+    const cached = sendingTopics.get(arn);
+    if (cached && cached.expires > Date.now()) return cached.binding;
+    const binding = (await runtime.db.execute<TopicBinding>(sql`
+      SELECT region, aws_account_id, kind, status='ready' AS ready FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${arn}
+      UNION ALL SELECT region, aws_account_id, 'shared', ready FROM provider_pool_regions WHERE feedback_topic_arn=${arn}`)).rows[0];
+    if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
+    // A pending topic may confirm its subscription but must never prime trust for notifications.
+    if (!binding.ready) return confirming ? binding : undefined;
+    if (sendingTopics.size >= 1024) sendingTopics.delete(sendingTopics.keys().next().value!);
+    sendingTopics.set(arn, { binding, expires: Date.now() + 60_000 });
+    return binding;
+  }
   app.use('/v1/events/ses', async (c, next) => {
     // SNS sends JSON envelopes as text/plain. Normalize only the media type before
     // OpenAPI's required JSON validator; preserve the signed envelope bytes.
@@ -542,12 +557,7 @@ function registerPublicEvents(app: App) {
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     if (c.env.config.multiTenant) {
-      const confirming = envelope.Type === 'SubscriptionConfirmation';
-      const registered = await c.env.db.execute<{ region: string; aws_account_id: string }>(sql`
-        SELECT region, aws_account_id FROM provider_connections WHERE kind='byo' AND feedback_topic_arn=${envelope.TopicArn} AND (${confirming} OR status='ready')
-        UNION ALL SELECT region, aws_account_id FROM provider_pool_regions WHERE feedback_topic_arn=${envelope.TopicArn} AND (${confirming} OR ready)`);
-      const binding = registered.rows[0];
-      if (binding && envelope.TopicArn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) {
+      if (await sendingTopic(c.env, envelope.TopicArn, envelope.Type === 'SubscriptionConfirmation')) {
         c.env = { ...c.env, config: { ...c.env.config, snsTopicArns: [envelope.TopicArn], inboundTopicArns: [] } };
       } else {
         // Inbound has its own, pre-existing trust path; never fall back to legacy sending topics on MX.
@@ -779,17 +789,15 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       for (const entry of group) outcomes[entry.index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PERSIST_FAILED' };
     }
   }
-  if (other.length) {
-    // Non-routine receipts were persisted with their verified owner in the batch statement.
-    await Promise.all(other.map(async ({ index, item, workspaceId }) => {
-      try {
-        await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
-        outcomes[index] = { ok: true };
-      } catch (error) {
-        outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
-        log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', environment: item.environment, message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
-      }
-    }));
+  // The feedback consumer has one connection; finish each non-routine receipt before starting the next.
+  for (const { index, item, workspaceId } of other) {
+    try {
+      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: item.environment });
+      outcomes[index] = { ok: true };
+    } catch (error) {
+      outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
+      log(error instanceof ApiError && !error.retryable ? 'warn' : 'error', { code: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED', environment: item.environment, message: error instanceof ApiError ? error.message : 'Feedback processing failed; the message will be retried.' });
+    }
   }
   return outcomes;
 }
