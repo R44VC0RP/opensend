@@ -1,0 +1,40 @@
+/* Guided DNS records (onboarding): grouped cards with one row of copy targets per record. */
+.dns-guided { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
+.dns-guided-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); }
+.dns-guided-bar h2 { font-size: var(--text-md); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+
+.dns-card { --dns-columns: 60px minmax(0, 1fr) minmax(0, 1.25fr) 92px; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-surface); box-shadow: 0 1px 2px var(--color-shadow); transition: border-color 320ms ease, box-shadow 320ms ease; }
+/* Verifying settles the card into a soft success outline. */
+.dns-card[data-state='verified'] { border-color: var(--color-success-border); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success-marker) 12%, transparent), 0 1px 2px var(--color-shadow); }
+.dns-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-16); padding: var(--space-20) var(--space-20) var(--space-16); }
+.dns-card-title { display: grid; gap: var(--space-4); min-width: 0; }
+.dns-card-title h3 { display: flex; align-items: center; gap: var(--space-8); font-size: 15px; line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.dns-card-title p { font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.dns-card-optional { padding: 0 var(--space-6); border-radius: 4px; background: var(--color-layer-2); color: var(--color-muted); font-size: var(--text-xs); line-height: 18px; font-weight: var(--font-weight-regular); }
+.dns-card-header > .live-status { flex-shrink: 0; margin-top: 1px; }
+
+.dns-columns, .dns-record { display: grid; grid-template-columns: var(--dns-columns); align-items: center; gap: var(--space-12); padding-inline: var(--space-20); }
+.dns-columns { padding-block: var(--space-8); border-top: 1px solid var(--color-border-muted); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-bold); }
+.dns-list { margin: 0; padding: 0; list-style: none; }
+.dns-record { padding-block: var(--space-12); border-top: 1px solid var(--color-border-muted); }
+.dns-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+.dns-type code { display: inline-flex; padding: 2px var(--space-6); border-radius: 4px; background: var(--color-layer-2); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.dns-field { min-width: 0; }
+.dns-well { display: flex; align-items: center; gap: var(--space-8); min-height: 40px; padding: var(--space-6) var(--space-6) var(--space-6) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); box-shadow: inset 0 0 0 1px var(--color-border-muted); }
+.dns-well code { flex: 1; min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; user-select: all; }
+.dns-well .copy-action { flex-shrink: 0; }
+.dns-status { display: flex; justify-content: flex-end; }
+
+@media (max-width: 760px) {
+  .dns-card-header { padding: var(--space-16); }
+  .dns-columns { display: none; }
+  .dns-record { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'type status' 'name name' 'value value'; gap: var(--space-12); padding: var(--space-16); }
+  .dns-type { grid-area: type; }
+  .dns-status { grid-area: status; }
+  .dns-record > .dns-field:nth-child(2) { grid-area: name; }
+  .dns-record > .dns-field:nth-child(3) { grid-area: value; }
+  .dns-field { display: grid; gap: var(--space-6); }
+  .dns-field > .dns-label { position: static; width: auto; height: auto; overflow: visible; clip: auto; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+  .dns-well { min-height: 44px; }
+  .dns-well .copy-action { height: 32px; }
+}

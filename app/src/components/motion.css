@@ -1,0 +1,39 @@
+:root {
+  --ease-out-strong: cubic-bezier(.23, 1, .32, 1);
+  --ease-in-out-strong: cubic-bezier(.77, 0, .175, 1);
+}
+
+/* CopyAction: the icon morphs Copy → Check and only the changed letters roll (Cop|y → Cop|ied). */
+.ui-button.copy-action { transition: background var(--motion-duration), color 200ms ease, box-shadow 200ms ease, transform 160ms var(--ease-out-strong); }
+.ui-button.copy-action:active:not(:disabled) { transform: scale(.97); }
+.copy-action[data-copied]:not(.ui-button--primary) { color: var(--color-success); }
+.copy-action__icon, .copy-action__roll { display: inline-grid; }
+.copy-action__icon > svg, .copy-action__roll > span { grid-area: 1 / 1; transition: transform 220ms var(--ease-out-strong), opacity 160ms ease-out, filter 220ms var(--ease-out-strong); }
+.copy-action__icon > svg:last-child, .copy-action__roll > span:last-child { opacity: 0; filter: blur(2px); }
+.copy-action__icon > svg:last-child { transform: scale(.5); }
+.copy-action__roll > span:last-child { transform: translateY(70%); }
+.copy-action[data-copied] .copy-action__icon > svg:first-child { opacity: 0; transform: scale(.5); filter: blur(2px); }
+.copy-action[data-copied] .copy-action__roll > span:first-child { opacity: 0; transform: translateY(-70%); filter: blur(2px); }
+.copy-action[data-copied] .copy-action__icon > svg:last-child,
+.copy-action[data-copied] .copy-action__roll > span:last-child { opacity: 1; transform: none; filter: none; }
+.copy-action__text { display: inline-flex; overflow: hidden; }
+/* The roll reserves room for "ied"; trim the right padding so Copy still looks centred. */
+.copy-action__roll { text-align: left; }
+.ui-button.copy-action:not(.copy-action--compact) { padding-right: 7px; }
+.ui-button--sm.copy-action:not(.copy-action--compact) { padding-right: 5px; }
+.copy-action--compact { width: var(--control-height); padding: 0; }
+.copy-action--compact.ui-button--sm { width: 28px; height: 28px; }
+
+/* LiveStatus: colours cross-fade between tones; the pending dot breathes, the verified check pops in. */
+.live-status { transition: background-color 240ms ease, border-color 240ms ease, color 240ms ease; }
+.live-status__mark { position: relative; display: inline-grid; place-items: center; width: 11px; height: 11px; flex-shrink: 0; }
+.live-status__mark > * { grid-area: 1 / 1; transition: transform 260ms var(--ease-out-strong), opacity 180ms ease-out; }
+.live-status__dot { position: relative; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker); transition: background-color 240ms ease, transform 260ms var(--ease-out-strong), opacity 180ms ease-out; }
+.live-status__check { color: var(--tone-marker); opacity: 0; transform: scale(.4) rotate(-20deg); }
+.live-status[data-state='verified'] .live-status__dot { opacity: 0; transform: scale(.4); }
+.live-status[data-state='verified'] .live-status__check { opacity: 1; transform: none; }
+.live-status[data-state='pending'] .live-status__dot::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--tone-marker); animation: live-status-ping 1.8s var(--ease-out-strong) infinite; }
+.live-status__label { display: inline-grid; }
+.live-status__label > span { grid-area: 1 / 1; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong); }
+.live-status__label > span:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; transition: opacity 180ms ease-out, transform 240ms var(--ease-out-strong), filter 240ms var(--ease-out-strong), visibility 0s 240ms; }
+@keyframes live-status-ping { 0% { opacity: .7; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.8); } }

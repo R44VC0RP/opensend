@@ -1,11 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { Copy } from 'lucide-react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
+import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import type { DnsRecord, DnsRecordPurpose, Domain } from '../../data/types'
 import { settingsColumns } from './skeletons'
 import './settings.css'
+import './domain-records.css'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
 export function useDomain(id: string) {
@@ -58,8 +60,37 @@ function RecordGroup({ title, description, notes = [], verified, domain, records
   </div>
 }
 
+const liveState = (verified: boolean): LiveState => verified ? 'verified' : 'pending'
+
+// Long hostnames wrap at their dots rather than mid-label.
+const breakable = (text: string) => text.split('.').flatMap((part, index) => index === 0 ? [part] : [<wbr key={index} />, `.${part}`])
+
+function CopyField({ label, display, value, copyLabel }: { label: string; display: string; value: string; copyLabel: string }) {
+  return <div className="dns-field">
+    <span className="dns-label">{label}</span>
+    <div className="dns-well"><code title={value}>{breakable(display)}</code><CopyAction value={value} label={copyLabel} size="sm" /></div>
+  </div>
+}
+
+// Guided layout (onboarding): each group is a card and every record is a row of large copy targets.
+function RecordCard({ title, optional = false, description, notes = [], verified, domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; verified: boolean; domain: string; records: DnsRecord[] }) {
+  return <div className="dns-card" data-state={liveState(verified)}>
+    <div className="dns-card-header">
+      <div className="dns-card-title"><h3>{title}{optional && <span className="dns-card-optional">Optional</span>}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note} className="muted">{note}</p>)}</div>
+      <LiveStatus state={liveState(verified)} />
+    </div>
+    <div className="dns-columns" aria-hidden="true"><span>Type</span><span>Name</span><span>Value</span><span>Status</span></div>
+    <ul className="dns-list">{records.map((record, index) => <li key={record.id} className="dns-record" style={{ '--i': index } as CSSProperties}>
+      <div className="dns-type"><span className="dns-label">Type</span><code>{record.type}</code></div>
+      <CopyField label="Name" display={relativeHost(record.name, domain)} value={record.name} copyLabel={`Copy full ${record.type} name`} />
+      <CopyField label="Value" display={record.value} value={record.value} copyLabel={`Copy ${record.type} value`} />
+      <div className="dns-status"><span className="dns-label">Status</span><LiveStatus state={liveState(record.status === 'verified')} /></div>
+    </li>)}</ul>
+  </div>
+}
+
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
-export function DomainRecords({ domain, actions }: { domain: Domain; actions?: ReactNode }) {
+export function DomainRecords({ domain, actions, guided = false }: { domain: Domain; actions?: ReactNode; guided?: boolean }) {
   const toast = useToast()
   const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving')
   const all = [...sending, ...receiving]
@@ -68,12 +99,20 @@ export function DomainRecords({ domain, actions }: { domain: Domain; actions?: R
     try { await navigator.clipboard.writeText(`${zoneLines(all)}\n`); toast(`Copied ${all.length} records`, 'success') }
     catch { toast('Could not copy to clipboard.', 'error') }
   }
+  const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
+  const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
+  if (guided) return <section className="dns-guided" aria-label="DNS records">
+    <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
+    {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
+    {sending.length > 0 && <RecordCard title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordCard title="Receiving" optional description={`Add this to receive mail at ${domain.name}.`} notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
+  </section>
   return <section className="section stack">
     <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. They usually verify within minutes; you can leave this page and OpenSend keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
-    {sending.length > 0 && <RecordGroup title="Sending" description={`Signs mail sent from ${domain.name} and proves the domain is yours.`} verified={(domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'} domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordGroup title="Receiving" description="Optional — add to receive mail on this domain." notes={notes} verified={(domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'} domain={domain.name} records={receiving} />}
+    {sending.length > 0 && <RecordGroup title="Sending" description={`Signs mail sent from ${domain.name} and proves the domain is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordGroup title="Receiving" description="Optional — add to receive mail on this domain." notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
 }
