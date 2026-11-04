@@ -315,6 +315,9 @@ export type TemplateAssetUpload = {
     contentType?: string;
     disposition?: 'attachment' | 'inline';
     contentId?: string;
+    /**
+     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.
+     */
     content: string;
 };
 
@@ -497,12 +500,12 @@ export type Attachment = {
 export type AttachmentUpload = {
     filename: string;
     contentType?: string;
-    /**
-     * Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.
-     */
-    content: string;
     disposition?: 'attachment' | 'inline';
     contentId?: string;
+    /**
+     * Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB.
+     */
+    content: string;
 };
 
 export type AttachmentContent = Attachment & {
@@ -1075,7 +1078,10 @@ export type DomainReadiness = {
 
 export type CreateDomain = {
     name: string;
-    region: string;
+    /**
+     * Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.
+     */
+    region?: string;
 };
 
 export type ConfigureDomainMailFrom = {
@@ -1751,10 +1757,13 @@ export type CreateInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     * Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
+    /**
+     * Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.
+     */
     headers?: Array<{
         name: string;
         value: string;
@@ -1776,7 +1785,7 @@ export type CreateInboundThread = {
 export type InboundAttachmentInput = {
     filename: string;
     /**
-     * Standard padded base64.
+     * Base64; line breaks are accepted.
      */
     content: string;
     contentType?: string;
@@ -1797,10 +1806,13 @@ export type ReplyToInboundThread = {
     text?: string;
     html?: string;
     /**
-     * Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.
+     * Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).
      */
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
+    /**
+     * Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.
+     */
     headers?: Array<{
         name: string;
         value: string;

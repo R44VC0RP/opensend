@@ -1,4 +1,3 @@
-import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -6,8 +5,9 @@ import { actor, ApiError, errors, id, IdParams, json, notFound, PageQuery, page,
 import { attachmentLinks, attachments } from './db/sending.js';
 import { templateAssetLinks, templateAssets, templates, type TemplateDraft } from './db/templates.js';
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
+import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, MAX_ATTACHMENT_BYTES, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
-const MAX_ASSET_BYTES = 8 * 1024 * 1024;
+const MAX_ASSET_BYTES = MAX_ATTACHMENT_BYTES;
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/);
 const BlockHtml = z.string().max(512 * 1024).describe('Concrete OpenSend block HTML shared with the visual editor and renderer. Email-safe inline styles support color, typography, spacing, borders, radius and dimensions. Templates do not accept {{placeholders}}; edit the copied campaign when personalization is needed. Call getContentGuide before writing.').optional();
 const AssetIds = z.array(z.string().regex(/^tasset_[0-9a-f]{32}$/)).max(20).default([]);
@@ -20,25 +20,14 @@ const TemplateUpdate = z.object({ revision: z.number().int().positive(), draft: 
 const TemplateRevision = z.object({ revision: z.number().int().positive() }).strict();
 const TemplateArchive = z.object({ archived: z.boolean() }).strict();
 const TemplatePreview = z.object({ html: z.string(), text: z.string(), revision: z.number().int(), published: z.boolean() }).openapi('CampaignTemplatePreview');
-const AssetMetadata = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict();
-const AssetInput = AssetMetadata.extend({ content: z.string().min(4).max(Math.ceil(MAX_ASSET_BYTES / 3) * 4) }).strict().openapi('TemplateAssetUpload');
+const AssetInput = AttachmentUpload.openapi('TemplateAssetUpload');
 const Asset = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string() }).openapi('TemplateAsset');
-const ImageImport = z.object({ url: z.string().url().max(2048), filename: AssetMetadata.shape.filename.optional(), contentId: AssetMetadata.shape.contentId }).strict().openapi('TemplateImageImport');
+const ImageImport = z.object({ url: z.string().url().max(2048), filename: AttachmentFilename.optional(), contentId: AttachmentContentId.optional() }).strict().openapi('TemplateImageImport');
 const ImportedImage = z.object({ asset: Asset, src: z.string().regex(/^cid:/) }).openapi('ImportedTemplateImage');
 const TemplatePreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png'), revision: z.number().int(), published: z.boolean() }).openapi('CampaignTemplatePreviewImage');
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) });
 const Query = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional(), archived: z.enum(['true', 'false']).default('false'), publishedOnly: z.enum(['true', 'false']).default('false') });
 
-function validateAsset(metadata: z.infer<typeof AssetMetadata>, bytes: Uint8Array) {
-  const extension = metadata.filename.split('.').pop()?.toLowerCase();
-  const types: Record<string, string> = { pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar' };
-  const expected = extension ? types[extension] : undefined; if (!expected) throw new ApiError(422, 'UNSUPPORTED_TEMPLATE_ASSET', 'Template assets allow PDF, UTF-8 text, CSV, JSON, PNG, JPEG, GIF, WebP, and ICS files.');
-  const declared = metadata.contentType.split(';')[0]!.toLowerCase(); if (declared !== 'application/octet-stream' && declared !== expected) throw new ApiError(422, 'TEMPLATE_ASSET_TYPE_MISMATCH', 'The template asset content type does not match its filename.');
-  if (metadata.disposition === 'inline' && (!['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension!) || !metadata.contentId)) throw new ApiError(422, 'INLINE_TEMPLATE_ASSET_INVALID', 'Only raster images with a content ID may be inline.');
-  if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'TEMPLATE_ASSET_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
-  if (!attachmentContentMatches(extension!, bytes)) throw new ApiError(422, 'TEMPLATE_ASSET_INVALID', 'The template asset bytes do not match its filename.');
-  return { ...metadata, contentType: declared === 'application/octet-stream' ? expected : metadata.contentType };
-}
 function assertContent(html?: string, complete = false) { if (!html) return; try { validateBlockHtml(html, { complete }); } catch (error) { if (error instanceof BlockContentError) throw new ApiError(422, 'TEMPLATE_CONTENT_INVALID', error.message, 'html'); throw error; } }
 function assertLiteral(draft: z.infer<typeof TemplateDraftSchema>) { if ([draft.subject, draft.previewText, draft.html].some(value => value && /\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\}\}/.test(value))) throw new ApiError(422, 'TEMPLATE_PLACEHOLDERS_UNSUPPORTED', 'Templates use concrete example content. Replace placeholders with literal values; personalize the campaign after creating it from this template.', 'draft'); }
 function templateUrl(runtime: Runtime, templateId: string) { return new URL(`/templates/${encodeURIComponent(templateId)}`, runtime.config.publicUrl).href; }
@@ -48,9 +37,8 @@ async function findTemplate(db: DbExecutor, workspaceId: string, templateId: str
 async function assetRows(db: DbExecutor, workspaceId: string, ids: string[], lock = false) { const unique = [...new Set(ids)]; if (unique.length !== ids.length) throw new ApiError(422, 'DUPLICATE_TEMPLATE_ASSET', 'Template asset IDs must be unique.'); const query = db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, workspaceId), inArray(templateAssets.id, unique))).orderBy(templateAssets.id); const rows = unique.length ? lock ? await query.for('update') : await query : []; if (rows.length !== unique.length) throw new ApiError(422, 'TEMPLATE_ASSET_NOT_FOUND', 'A template asset was not found.'); if (rows.reduce((sum, row) => sum + row.size, 0) > MAX_ASSET_BYTES) throw new ApiError(413, 'TEMPLATE_ASSETS_TOO_LARGE', 'Template assets may total at most 8 MiB.'); return unique.map(value => rows.find(row => row.id === value)!); }
 async function replaceLinks(db: DbExecutor, workspaceId: string, templateId: string, stage: 'draft' | 'published', ids: string[]) { await assetRows(db, workspaceId, ids, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, workspaceId), eq(templateAssetLinks.templateId, templateId), eq(templateAssetLinks.stage, stage))); if (ids.length) await db.insert(templateAssetLinks).values(ids.map(assetId => ({ workspaceId, templateId, assetId, stage }))); }
 async function checksum(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), byte => byte.toString(16).padStart(2, '0')).join(''); }
-async function saveAsset(runtime: Runtime, identity: Actor, metadata: z.infer<typeof AssetMetadata>, bytes: Uint8Array) {
-  if (!bytes.length || bytes.length > MAX_ASSET_BYTES) throw new ApiError(413, 'TEMPLATE_ASSET_LIMIT_EXCEEDED', 'Template assets must be between 1 byte and 8 MiB.');
-  const input = validateAsset(metadata, bytes), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
+async function saveAsset(runtime: Runtime, identity: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
+  const input = validateAttachment(metadata, bytes), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
   await runtime.storage.put(storageKey, bytes, input.contentType);
   try { const [row] = await runtime.db.insert(templateAssets).values({ id: assetId, workspaceId: identity.workspaceId, ...input, contentId: input.contentId ?? null, size: bytes.length, storageKey, checksum: hash }).returning(); return Asset.parse(row); }
   catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }
@@ -99,7 +87,7 @@ export function registerTemplates(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/templates/{id}/archive', operationId: 'setCampaignTemplateArchived', tags: ['Templates'], security, request: { params: IdParams, body: json(TemplateArchive) }, responses: { 200: response(Template), ...errors } }), async c => { const identity = manageTemplates(c), archived = c.req.valid('json').archived; const [row] = await c.env.db.update(templates).set({ archivedAt: archived ? new Date().toISOString() : null, updatedAt: new Date().toISOString() }).where(and(eq(templates.workspaceId, identity.workspaceId), eq(templates.id, c.req.valid('param').id))).returning(); return c.json(view(c.env, row ?? notFound('Template')), 200); });
   app.openapi(createRoute({ method: 'delete', path: '/v1/templates/{id}', operationId: 'deleteCampaignTemplate', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => { const identity = manageTemplates(c), templateId = c.req.valid('param').id; await c.env.db.transaction(async db => { const current = await findTemplate(db, identity.workspaceId, templateId, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, identity.workspaceId), eq(templateAssetLinks.templateId, current.id))); await db.delete(templates).where(and(eq(templates.workspaceId, identity.workspaceId), eq(templates.id, current.id))); }); return c.json({ id: templateId, deleted: true as const }, 200); });
-  app.openapi(createRoute({ method: 'post', path: '/v1/template-assets', operationId: 'uploadTemplateAsset', tags: ['Templates'], security, request: { body: json(AssetInput) }, responses: { 201: response(Asset), ...errors } }), async c => { const identity = manageTemplates(c), input = c.req.valid('json'); let bytes: Uint8Array; try { if (input.content.length % 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(input.content)) throw new Error(); bytes = new Uint8Array(Buffer.from(input.content, 'base64')); } catch { throw new ApiError(422, 'INVALID_BASE64', 'Template asset content must be canonical padded base64.'); } if (Buffer.from(bytes).toString('base64') !== input.content) throw new ApiError(422, 'INVALID_BASE64', 'Template asset content must be canonical padded base64.'); return c.json(await saveAsset(c.env, identity, input, bytes), 201); });
+  app.openapi(createRoute({ method: 'post', path: '/v1/template-assets', operationId: 'uploadTemplateAsset', tags: ['Templates'], security, request: { body: json(AssetInput) }, responses: { 201: response(Asset), ...errors } }), async c => { const identity = manageTemplates(c), { content, ...metadata } = c.req.valid('json'); return c.json(await saveAsset(c.env, identity, metadata, decodeBase64(content)), 201); });
   app.openapi(createRoute({ method: 'post', path: '/v1/template-assets/import', operationId: 'importTemplateImage', description: 'Downloads a public HTTPS PNG, JPEG, GIF or WebP into private global template assets. Add asset.id to draft.attachments and use src in an img block. This is preferred over hotlinking and requires no browser automation or base64 in model context.', tags: ['Templates'], security, request: { body: json(ImageImport) }, responses: { 201: response(ImportedImage), ...errors } }), async c => {
     const identity = manageTemplates(c), input = c.req.valid('json');
     if (!c.env.importPublicImage) throw new ApiError(503, 'PUBLIC_IMAGE_IMPORT_UNAVAILABLE', 'Public image importing is not configured for this installation.', undefined, true);

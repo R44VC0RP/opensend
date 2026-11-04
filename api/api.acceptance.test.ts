@@ -509,7 +509,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { multiTenant: false, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], webhookAllowedHosts: [], configurationSets: { transactional: '', marketing: '' } },
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const kid = unique('mock-google-signing-key');
@@ -903,6 +903,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const {BucketName:bucket,TopicArn:topicArn}=rules.get(region)!.Actions[0].S3Action;
             const probe=async(addr:string)=>{const id=unique('probe');return acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});};
             assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
+            // Proven ownership is enough to create addresses; nothing routes until the MX record is observed.
+            const early=ok(await local('POST','/v1/inbound/addresses',{address:`early@${mx.name}`},b.cookie,{'x-opensend-environment':'live'}),201);
+            assert.equal(await probe(early.address),0); ok(await local('DELETE',`/v1/inbound/addresses/${early.id}`,undefined,b.cookie,{'x-opensend-environment':'live'}));
             const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
             const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
@@ -1061,7 +1064,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
         const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
-        assert.deepEqual(visible.map((r:Json)=>[r.name,r.verified]),[[domain,true]]); ok(await local('DELETE',`/v1/domains/${byoDomain.id}`,undefined,a.cookie));
+        assert.deepEqual(visible.map((r:Json)=>[r.name,r.verified]),[[domain,true]]);
         await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
@@ -1069,8 +1072,37 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           VALUES ($1,$2,$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
         try { error(await local('DELETE', path, undefined, a.cookie), 409, 'CONNECTION_IN_USE'); }
         finally { await pool.query('DELETE FROM sending_emails WHERE id=$1 AND workspace_id=$2', [queued, a.org.id]); }
+        // Disconnecting with a domain releases its claim instead of refusing: AWS keeps the identity, the
+        // workspace keeps the name, nothing sends or routes on it, and the next connection re-proves it from scratch.
+        const retained=calls.length;
         ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
+        assert.equal(calls.length,retained,'BYO identities stay in the customer account.'); assert.ok(identities.has(`${customer}:${domain}`));
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
+        const released=async()=>(await pool.query('SELECT connection_id,verified,ready,readiness,receiving_name,receiving_eligible FROM domain_claims WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rows;
+        assert.deepEqual(await released(),[{connection_id:null,verified:false,ready:false,readiness:null,receiving_name:null,receiving_eligible:false}]);
+        assert.equal((await pool.query('SELECT status FROM mailbox_domains WHERE domain_id=$1',[byoDomain.id])).rows[0].status,'disabled');
+        assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type IN ('domain.verify','domain.mx') AND status='pending'",[a.org.id])).rowCount,0);
+        assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
+        assert.deepEqual(ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data,[]); error(await local('GET',`/v1/domains/${byoDomain.id}`,undefined,a.cookie),404);
+        assert.deepEqual(ok(await local('GET','/v1/inbound/domains',undefined,a.cookie,{'x-opensend-environment':'live'})).data,[]);
+        error(await add(a.cookie,domain),409,'CONNECTION_REQUIRED');
+        ok(await choose('shared', a.cookie),201);
+        const reproved=ok(await local('POST','/v1/domains',{name:domain},a.cookie),201); // Region defaults to the connection.
+        assert.equal(reproved.region,region); assert.equal(reproved.verified,false); assert.equal(calls.at(-1),'CreateEmailIdentityCommand'); assert.notEqual(reproved.id,byoDomain.id);
+        const reconnected=ok(await local('GET', path, undefined, a.cookie)).connection;
+        assert.equal((await released())[0].connection_id,reconnected.id);
+        // Disconnecting a shared connection removes its tagged pool identities so a later reconnect never meets its own ghost.
+        associations.add(`opensend-${a.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`); const sharedCalls=calls.length;
+        ok(await local('DELETE', path, undefined, a.cookie));
+        assert.deepEqual(calls.slice(sharedCalls),['GetEmailIdentityCommand','ListResourceTenantsCommand','DeleteTenantResourceAssociationCommand','DeleteEmailIdentityCommand']);
+        assert.ok(!identities.has(`${platform}:${domain}`)); assert.equal(associations.size,[...associations].filter(k=>!k.endsWith(`:identity/${domain}`)).length);
+        assert.equal((await released())[0].connection_id,null); assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
+        assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
+        // A claim left detached by an older release (domain row, no connection) can still be deleted, not 404.
+        await pool.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)',['dom_legacy_'+unique('x'),a.org.id,domain,region]);
+        const {rows:[legacy]}=await pool.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain]);
+        ok(await local('DELETE',`/v1/domains/${legacy.id}`,undefined,a.cookie)); assert.deepEqual(await released(),[]);
+        assert.equal((await pool.query('SELECT 1 FROM operation_domains WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rowCount,0);
       });
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${invitation.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       assert.equal(ok(await local('GET', `${base}/invitations`, undefined, a.cookie)).data.length, 0);
@@ -2236,7 +2268,16 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [unique('attachment-missing')] })), 404, 'ATTACHMENT_NOT_FOUND');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'unsafe.exe', content: bytes.toString('base64') }), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content: '!!!!' }), 422, 'INVALID_BASE64');
-    error(await http('POST', '/v1/attachments', key.secret, { filename: 'inline.png', content: bytes.toString('base64'), disposition: 'inline' }), 422);
+    error(await http('POST', '/v1/attachments', key.secret, { filename: 'inline.png', content: bytes.toString('base64'), disposition: 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
+    // Only size and SES's banned extensions are checked: any type, MIME-wrapped base64, URL-safe alphabets and unpadded input all decode.
+    const wrapped = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'report.tar.gz', contentType: 'image/jpg', content: bytes.toString('base64').match(/.{1,4}/g)!.join('\r\n') + '\n' }), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${wrapped.id}`, key.secret), [200, 404]); });
+    assert.equal(wrapped.size, bytes.length); assert.equal(wrapped.contentType, 'image/jpg');
+    assert.equal(ok(await http('GET', `/v1/attachments/${wrapped.id}/content`, key.secret)).content, bytes.toString('base64'));
+    const urlSafe = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'binary.bin', content: Buffer.from([0xfb, 0xff, 0xbf, 0xfe, 0x01]).toString('base64url') }), 201);
+    cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${urlSafe.id}`, key.secret), [200, 404]); });
+    assert.equal(ok(await http('GET', `/v1/attachments/${urlSafe.id}/content`, key.secret)).content, Buffer.from([0xfb, 0xff, 0xbf, 0xfe, 0x01]).toString('base64'));
+    for (const content of ['QUJDR', 'QUJD\x01RA==', 'QUJD====', 'data:text/plain;base64,QUJDRA==']) error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content }), 422, 'INVALID_BASE64');
     const calendar = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n');
     const upload = async (filename: string, contentType: string, content: Buffer, extra: Record<string, string> = {}) => {
       const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-opensend-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
@@ -2246,8 +2287,8 @@ describe('Private attachment assets and campaign revisions', () => {
     cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${raw.id}`, key.secret), [200, 404]); });
     assert.equal(raw.contentType, 'text/calendar; method=REQUEST; charset=utf-8');
     assert.equal(ok(await http('GET', `/v1/attachments/${raw.id}/content`, key.secret)).content, calendar.toString('base64'));
-    error(await upload('fake.png', 'image/png', bytes), 422, 'ATTACHMENT_CONTENT_INVALID');
-    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-opensend-disposition': 'inline', 'x-opensend-content-id': 'not-an-image' }), 422, 'INLINE_ATTACHMENT_INVALID');
+    error(await upload('unsafe.vbs', 'text/plain', bytes), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
+    error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-opensend-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
     error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
     assert.equal(ok(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret)).deleted, true);
@@ -3349,10 +3390,22 @@ describe('Operational configuration and public event boundaries', () => {
     assert.deepEqual([...endpoint.eventTypes].sort(), defaults.sort());
     assert.equal(endpoint.paused, true);
     assert.equal(endpoint.regions, null);
-    for (const url of ['http://example.com/hook', 'https://127.0.0.1/hook', 'https://169.254.169.254/latest/meta-data', 'https://[::1]/hook', 'https://localhost/hook', 'https://user:password@example.com/hook', 'https://example.com:8443/hook']) {
+    for (const url of ['http://example.com/hook', 'https://127.0.0.1/hook', 'https://169.254.169.254/latest/meta-data', 'https://[::1]/hook', 'https://localhost/hook', 'https://user:password@example.com/hook', `https://${new URL(PUBLIC_ORIGIN).hostname}/v1/events/ses`]) {
       error(await http('POST', '/v1/webhooks', key.secret, { url, paused: true }), 422, 'INVALID_WEBHOOK_URL');
     }
     error(await http('PATCH', `/v1/webhooks/${endpoint.id}`, key.secret, { url: 'https://localhost/private' }), 422, 'INVALID_WEBHOOK_URL');
+    // Node delivery resolves the host itself and refuses non-global answers at connect time, so a public
+    // name rebound to loopback, RFC1918, link-local metadata, CGNAT or ULA space is never connected to.
+    const { isGlobalAddress, nodeWebhookFetch } = await import('./src/adapters/node.js'), dns = (await import('node:dns')).default;
+    for (const ip of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '100.64.0.1', '172.31.255.255', '192.168.0.1', '0.0.0.0', '224.0.0.1', '::1', '::ffff:127.0.0.1', 'fd12::1', 'fe80::1', '64:ff9b::10.0.0.1']) assert.equal(isGlobalAddress(ip), false, ip);
+    for (const ip of ['93.184.216.34', '8.8.8.8', '2606:4700::1111', '::ffff:93.184.216.34']) assert.equal(isGlobalAddress(ip), true, ip);
+    const resolver = t.mock.method(dns, 'lookup', (_host: string, _options: unknown, callback: (error: null, addresses: { address: string; family: number }[]) => void) => callback(null, [{ address: '169.254.169.254', family: 4 }, { address: 'fd00::1', family: 6 }]));
+    try { await assert.rejects(nodeWebhookFetch('https://rebound.example.org/hook', { method: 'POST', headers: {}, body: '{}', signal: AbortSignal.timeout(2000) }), { code: 'WEBHOOK_ADDRESS_BLOCKED' }); assert.equal(resolver.mock.callCount(), 1); }
+    finally { resolver.mock.restore(); }
+    // No host allowlist and no port rule: any public HTTPS endpoint, including a custom port, is accepted.
+    const portUrl = `https://hooks.${unique('port')}.example.org:8443/mail`;
+    assert.equal((await resource(t, key.secret, '/v1/webhooks', { url: portUrl, paused: true })).url, portUrl);
+    await resource(t, key.secret, '/v1/inbound/webhooks', { url: `https://hooks.${unique('inbound')}.example.org:8443/mail`, paused: true });
     const reveal = await http('GET', `/v1/webhooks/${endpoint.id}/secret`, key.secret);
     const firstSecret = ok(reveal).secret;
     assert.ok(typeof firstSecret === 'string' && /^whsec_[A-Za-z0-9+/]+={0,2}$/.test(firstSecret), 'Explicit reveal must return a whsec_ credential with a standard-base64 suffix.');
@@ -3422,19 +3475,19 @@ describe('Operational configuration and public event boundaries', () => {
     const nativeFetch = globalThis.fetch;
     t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
       const request = new Request(input, init);
-      const path = request.url === certUrl ? '/certificate' : request.url === webhookUrl ? '/webhook' : undefined;
-      assert.ok(path, `Unexpected transport origin: ${new URL(request.url).origin}`);
-      return nativeFetch(`${loopback}${path}`, { method: request.method, headers: request.headers,
-        ...(request.method === 'POST' ? { body: await request.text() } : {}), redirect: request.redirect, signal: request.signal });
+      assert.equal(request.url, certUrl, `Unexpected transport origin: ${new URL(request.url).origin}`);
+      return nativeFetch(`${loopback}/certificate`, { method: request.method, headers: request.headers, redirect: request.redirect, signal: request.signal });
     });
     const db = await fixtureDatabase(t);
     const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
       GOOGLE_CLIENT_ID: 'synthetic-redirect-client', GOOGLE_CLIENT_SECRET: 'synthetic-redirect-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
-      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', WEBHOOK_ALLOWED_HOSTS: 'example.com',
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
       S3_BUCKET: 'synthetic-redirect-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
     cleanup(t, instance.close);
     const runtime = instance.runtime;
     runtime.config.workspaceId = unique('redirect-workspace');
+    // The Node transport refuses loopback by design; route only this synthetic endpoint to the local 302 server.
+    runtime.webhookFetch = async (url, init) => { assert.equal(url, webhookUrl); const r = await nativeFetch(`${loopback}/webhook`, { ...init, redirect: 'manual' }); await r.body?.cancel(); return { status: r.status }; };
     const app = createApp();
     const rollback = new Error('Rollback isolated redirect acceptance fixtures');
     try {
@@ -3522,7 +3575,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
     GOOGLE_CLIENT_ID: 'synthetic-simulator-client', GOOGLE_CLIENT_SECRET: 'synthetic-simulator-secret', AUTH_ALLOWED_EMAILS: AUTH_EMAIL,
-    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', WEBHOOK_ALLOWED_HOSTS: 'example.com',
+    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
   const runtime = instance.runtime;
@@ -3748,12 +3801,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       const inboundId = await receive(support.address), deliveries = await jobs('mailbox.webhook'); assert.equal(deliveries.length, 1);
       let event: Json | undefined;
-      const hook = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      const transport = runtime.webhookFetch;
+      runtime.webhookFetch = async (url, init) => {
         assert.equal(url, 'https://example.com/support-hook'); const headers = new Headers(init.headers), body = String(init.body);
         const signature = createHmac('sha256', Buffer.from(webhook.secret.slice(6), 'base64')).update(`${headers.get('webhook-id')}.${headers.get('webhook-timestamp')}.${body}`).digest('base64');
-        assert.equal(headers.get('webhook-signature'), `v1,${signature}`); event = JSON.parse(body); return new Response(null, { status: 204 });
-      });
-      try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, attempts: 1 }); } finally { hook.mock.restore(); }
+        assert.equal(headers.get('webhook-signature'), `v1,${signature}`); event = JSON.parse(body); return { status: 204 };
+      };
+      try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, attempts: 1 }); } finally { runtime.webhookFetch = transport; }
       assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
       const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
       await dispatchDue(runtime, REGION);
@@ -3845,26 +3899,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const delivery = deliveries.find(d => d.webhook_id === allHook.id && d.payload.messageId === unrouted.id)!;
       const { mailboxEventJobs } = await import('./src/mailbox-events.js');
       let attempts = 0;
-      const receiver = t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+      const transport = runtime.webhookFetch;
+      runtime.webhookFetch = async (url, init) => {
         const h = new Headers(init.headers), body = String(init.body), event = JSON.parse(body);
         assert.equal(url, 'https://example.com/all'); assert.equal(event.type, 'message.stored'); assert.equal(event.addressId, null); assert.equal(event.id, delivery.payload.id);
         assert.equal(h.get('webhook-id'), event.id); assert.equal(h.get('webhook-signature'), 'v1,' + createHmac('sha256', Buffer.from(allHook.secret.slice(6),'base64')).update(`${event.id}.${h.get('webhook-timestamp')}.${body}`).digest('base64'));
-        return new Response(null, { status: ++attempts === 1 ? 503 : 204 });
-      });
+        return { status: ++attempts === 1 ? 503 : 204 };
+      };
       const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,attempts:attempt });
-      try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { receiver.mock.restore(); }
+      try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { runtime.webhookFetch = transport; }
       const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
-      error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name:'X-SeS-CONFIGURATION-SET',value:'override'}] },agent),422);
-      const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202);
-      assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true },idem),202).id,reply.id);
+      // Headers are denylisted, not X- only: structural headers OpenSend/SES own are refused, everything else passes through.
+      for (const name of ['X-SeS-CONFIGURATION-SET','From','content-type','In-Reply-To','List-Unsubscribe','Auto-Submitted','Resent-From','ARC-Seal','Authentication-Results','DomainKey-Signature','Feedback-ID']) error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name,value:'override'}] },agent),422);
+      error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no injection',headers:[{name:'Precedence',value:'bulk\r\nBcc: victim@example.net'}] },agent),422);
+      const reply = ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202);
+      assert.equal(ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202).id,reply.id);
       const tracked = ok(await post('/v1/emails/send',{ from:publicAddress,to:'customer@example.net',text:'Checking in',subject:'New case',replyMailboxId:box.id }),202);
       await dispatchDue(runtime, REGION);
       assert.equal(outgoing.get(tracked.id).FromEmailAddress,publicAddress);
       const wire = outgoing.get(reply.emailId); assert.equal(wire.FromEmailAddress,publicAddress); assert.equal(reply.threadId,detail.threadId);
       assert.deepEqual(wire.Destination,{ ToAddresses:['case-owner@example.net'],CcAddresses:['colleague@example.net'],BccAddresses:[] });
       assert.equal(wire.Content.Simple.Subject.Data,'Re: Widget issue');
-      assert.deepEqual(wire.Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<selected@example.net>'},{Name:'References',Value:'<initial@example.net> <selected@example.net>'}]);
+      assert.deepEqual(wire.Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<selected@example.net>'},{Name:'References',Value:'<initial@example.net> <selected@example.net>'},{Name:'Precedence',Value:'bulk'},{Name:'X-Ticket',Value:'42'}]);
       // Some clients return only the direct parent. No mailbox sync or subject match should be required.
       await receive(address,mime('answered','fourth zebra',[`In-Reply-To: <synthetic-${reply.emailId}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`]).replace('Subject: Widget issue','Subject: A different subject'));
       const continued = ok(await get(`${inbox}&direction=inbound&q=fourth`,agent)).data;
@@ -3892,7 +3949,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('attachment and template uploads accept JSON scalars and reject malformed file content', async t => {
+  test('attachment and template uploads share one validator: any content, SES banned extensions refused', async t => {
     await simulatedSesFixture(t, async ({ runtime, local }) => {
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
       runtime.storage = {
@@ -3905,17 +3962,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           const uploaded = ok(await local('POST', path, { filename: 'scalar.json', contentType: 'application/json', content: Buffer.from(text).toString('base64') }), 201);
           assert.equal(uploaded.size, Buffer.byteLength(text));
         }
+        // One shared validator: file bytes and declared types are never second-guessed; only SES's banned extensions are refused.
         for (const [filename, contentType, bytes] of [
           ['broken.json', 'application/json', Buffer.from('{')],
           ['invalid.txt', 'text/plain', Buffer.from([0xff])],
-          ['null.csv', 'text/csv', Buffer.from('a\0b')],
           ['fake.png', 'image/png', Buffer.from('not an image')],
-          ['broken.ics', 'text/calendar', Buffer.from('BEGIN:VCALENDAR\n')],
-        ] as const) {
-          error(await local('POST', path, { filename, contentType, content: bytes.toString('base64') }), 422, path === '/v1/attachments' ? 'ATTACHMENT_CONTENT_INVALID' : 'TEMPLATE_ASSET_INVALID');
-        }
-        error(await local('POST', path, { filename: 'mismatch.json', contentType: 'image/png', content: Buffer.from('{}').toString('base64') }), 422, path === '/v1/attachments' ? 'ATTACHMENT_CONTENT_TYPE_MISMATCH' : 'TEMPLATE_ASSET_TYPE_MISMATCH');
-        error(await local('POST', path, { filename: 'unsafe.exe', content: Buffer.from('unsafe').toString('base64') }), 422, path === '/v1/attachments' ? 'UNSUPPORTED_ATTACHMENT_TYPE' : 'UNSUPPORTED_TEMPLATE_ASSET');
+          ['mismatch.json', 'image/png', Buffer.from('{}')],
+        ] as const) assert.equal(ok(await local('POST', path, { filename, contentType, content: bytes.toString('base64') }), 201).size, bytes.length);
+        for (const filename of ['unsafe.exe', 'macro.ps1', 'UPPER.JS', 'archive.tar.lnk', 'trailing.exe.', 'trailing.exe . ']) error(await local('POST', path, { filename, content: Buffer.from('unsafe').toString('base64') }), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
+        error(await local('POST', path, { filename: 'empty.txt', content: '' }), 422);
       }
     });
   });

@@ -31,7 +31,6 @@ const values = z.object({
   // Absolute live SES target in recipients per second; replaces the quota-derived rate when set.
   DISPATCH_TARGET_RATE: optional(z.coerce.number().int().min(1).max(100000)),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
-  WEBHOOK_ALLOWED_HOSTS: z.string().default(''),
   // Requests per minute allowed for each API key, agent token, MCP grant and mailbox key.
   API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
@@ -77,7 +76,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE },
     aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
-    snsTopicArns: [], inboundTopicArns: [], webhookAllowedHosts: list(v.WEBHOOK_ALLOWED_HOSTS).map(h => h.toLowerCase()),
+    snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD } : undefined,
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,

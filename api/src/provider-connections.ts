@@ -6,6 +6,7 @@ import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { retryDatabaseFailures } from './jobs.js';
 import { preparePoolReceiving } from './mailbox-setup.js';
+import { releaseConnectionDomains } from './operations.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const Kind = z.enum(['shared', 'byo']);
@@ -233,19 +234,22 @@ export function registerProviderConnections(app: App) {
     if (row.platform_principal_arn!.split(':')[4] === account) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'The shared sending account cannot be used as a customer account.');
     try { return c.json(view(c.env, await provision(c.env, row, account, `arn:aws:iam::${account}:role/${stackName(row)}`)), 200); } catch (e) { throw awsError(e); }
   });
-  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. AWS resources are retained. Delete the customer stack in AWS to revoke the role.', responses: { 200: response(z.object({ deleted: z.literal(true) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. Domains stay claimed by this workspace but stop sending and receiving until they are added again on the next connection. AWS resources are retained. Delete the customer stack in AWS to revoke the role.', responses: { 200: response(z.object({ deleted: z.literal(true) })), ...errors } }), async c => {
     const wid = owner(c);
-    await c.env.db.transaction(async db => {
-      await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
-      const deleted = await db.execute(sql`DELETE FROM provider_connections WHERE workspace_id=${wid} AND coalesce(lease_until, '-infinity') <= now()
-        AND NOT EXISTS (SELECT 1 FROM domain_claims WHERE connection_id=provider_connections.id)
-        AND NOT EXISTS (SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown'))
-        AND NOT EXISTS (SELECT 1 FROM sending_campaigns WHERE workspace_id=${wid} AND status IN ('scheduled','sending'))`);
-      if (!deleted.rowCount) {
-        if (!(await db.execute(sql`SELECT 1 FROM provider_connections WHERE workspace_id=${wid}`)).rowCount) return notFound('Connection');
-        throw new ApiError(409, 'CONNECTION_IN_USE', 'Remove connected domains and finish queued work or active setup before disconnecting.');
-      }
-    });
+    try {
+      await c.env.db.transaction(async db => {
+        await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
+        const row = (await db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid} AND coalesce(lease_until, '-infinity') <= now()
+          AND NOT EXISTS (SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown'))
+          AND NOT EXISTS (SELECT 1 FROM sending_campaigns WHERE workspace_id=${wid} AND status IN ('scheduled','sending')) FOR UPDATE`)).rows[0];
+        if (!row) {
+          if (!(await db.execute(sql`SELECT 1 FROM provider_connections WHERE workspace_id=${wid}`)).rowCount) return notFound('Connection');
+          throw new ApiError(409, 'CONNECTION_IN_USE', 'Finish queued work or active setup before disconnecting.');
+        }
+        await releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_provisioned: false });
+        await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
+      });
+    } catch (e) { throw awsError(e); }
     return c.json({ deleted: true as const }, 200);
   });
 }

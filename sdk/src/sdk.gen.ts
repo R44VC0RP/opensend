@@ -2516,7 +2516,7 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
 /**
  * Create a receivable address
  *
- * Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ * Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
  */
 export const createInboundAddress = <ThrowOnError extends boolean = false>(options: Options<CreateInboundAddressData, ThrowOnError>): RequestResult<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundAddressResponses, CreateInboundAddressErrors, ThrowOnError>({
     security: [
@@ -2902,7 +2902,7 @@ export const listInboundWebhooks = <ThrowOnError extends boolean = false>(option
 /**
  * Subscribe to inbound events
  *
- * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.
+ * Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.
  */
 export const createInboundWebhook = <ThrowOnError extends boolean = false>(options: Options<CreateInboundWebhookData, ThrowOnError>): RequestResult<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError> => (options.client ?? client).post<CreateInboundWebhookResponses, CreateInboundWebhookErrors, ThrowOnError>({
     security: [
@@ -3189,7 +3189,7 @@ export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 });
 
 /**
- * Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. AWS resources are retained. Delete the customer stack in AWS to revoke the role.
+ * Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. Domains stay claimed by this workspace but stop sending and receiving until they are added again on the next connection. AWS resources are retained. Delete the customer stack in AWS to revoke the role.
  */
 export const deleteConnection = <ThrowOnError extends boolean = false>(options?: Options<DeleteConnectionData, ThrowOnError>): RequestResult<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError> => (options?.client ?? client).delete<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError>({
     security: [{

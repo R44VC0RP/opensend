@@ -10,6 +10,7 @@ import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, w
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
+import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, CustomHeaders, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
@@ -355,11 +356,12 @@ function registerAddresses(app: App) {
       q.cursor ? lt(mailboxes.id, q.cursor) : undefined)).orderBy(desc(mailboxes.id)).limit(q.limit + 1);
     return c.json({ data: await mailboxViews(c.env, rows.slice(0, q.limit)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: collection, operationId: 'createInboundAddress', summary: 'Create a receivable address', description: 'Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: collection, operationId: 'createInboundAddress', summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     const host = input.address.split('@')[1]!;
-    const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.status='ready' JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region WHERE d.id=${mailboxDomains.domainId} AND dc.workspace_id=${value.workspaceId} AND dc.receiving_name=${host}) AND ${mailboxDomains.status}='active'` : undefined));
-    if (!domain || ['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Receiving must be ready for ${host} before creating addresses on it.`, 'address');
+    // On MX, proven ownership of the claim is enough: routing follows the MX observation later.
+    const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.status='ready' JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region WHERE d.id=${mailboxDomains.domainId} AND dc.workspace_id=${value.workspaceId} AND (dc.verified OR dc.receiving_eligible))` : undefined));
+    if (!domain || ['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
     const publicAddress = input.publicAddress;
     if (publicAddress) {
       if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
@@ -452,15 +454,15 @@ export function registerMailbox(app: App) {
   // ---------- sending ----------
   const Recipients = z.array(Address).max(50);
   const AttachmentItem = z.union([
-    z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), content: z.string().min(4).max(11_200_000).describe('Standard padded base64.'), contentType: z.string().max(100).optional(), disposition: z.enum(['attachment', 'inline']).optional(), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict(),
+    z.object({ filename: AttachmentFilename, content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64; line breaks are accepted.'), contentType: AttachmentContentType.optional(), disposition: AttachmentDisposition.optional(), contentId: AttachmentContentId.optional() }).strict(),
     z.object({ id: z.string().min(1).max(120).describe('A received attachment in this mailbox (matt_…) or an OpenSend attachment upload (attachment_…).') }).strict(),
   ]).openapi('InboundAttachmentInput');
   const Compose = {
     from: Address.optional().describe('Defaults to the public address if configured, otherwise the primary receiving address. Address keys may use only addresses owned by this mailbox. Administrators may use any address on a domain registered in OpenSend for the receiving region; replies still return to whatever address the recipient answers.'),
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
-    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.'),
+    attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
     replyTo: Recipients.max(10).default([]),
-    headers: z.array(z.object({ name: z.string().regex(/^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$/, 'Use an X- extension header, not an X-SES- sending instruction.'), value: z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be printable ASCII.') })).max(10).refine(headers => new Set(headers.map(h => h.name.toLowerCase())).size === headers.length, 'Do not repeat a header name.').default([]),
+    headers: CustomHeaders.default([]).describe('Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.'),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),
   };
   const needsBody = (value: { text?: string; html?: string }) => !!value.text || !!value.html;
@@ -624,7 +626,7 @@ function registerInboundWebhooks(app: App) {
     if (ids !== null && types.includes('message.stored')) throw new ApiError(422, 'INVALID_EVENT_SCOPE', 'message.stored requires a workspace webhook without an addressIds filter.', 'addressIds');
   };
 
-  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string() }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path, operationId: 'createInboundWebhook', security, tags, summary: 'Subscribe to inbound events', description: 'Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.', request: { body: json(create.openapi('CreateInboundWebhook')) }, responses: { 201: response(InboundWebhookSchema.extend({ secret: z.string() }).openapi('InboundWebhookSecret')), ...errors } }), async c => {
     const value = admin(c), input = c.req.valid('json');
     const mailboxIds = input.addressIds;
     checkScope(mailboxIds, input.eventTypes);

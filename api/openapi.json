@@ -1522,7 +1522,7 @@
           "contentType": {
             "type": "string",
             "maxLength": 100,
-            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+$",
+            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$",
             "default": "application/octet-stream"
           },
           "disposition": {
@@ -1542,7 +1542,8 @@
           "content": {
             "type": "string",
             "minLength": 4,
-            "maxLength": 11184812
+            "maxLength": 12582912,
+            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB."
           }
         },
         "required": [
@@ -2243,14 +2244,8 @@
           "contentType": {
             "type": "string",
             "maxLength": 100,
-            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+$",
+            "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$",
             "default": "application/octet-stream"
-          },
-          "content": {
-            "type": "string",
-            "minLength": 4,
-            "maxLength": 11184812,
-            "description": "Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB."
           },
           "disposition": {
             "type": "string",
@@ -2265,6 +2260,12 @@
             "minLength": 1,
             "maxLength": 120,
             "pattern": "^[a-zA-Z0-9_.@-]+$"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 12582912,
+            "description": "Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. Maximum decoded bytes: 8 MiB."
           }
         },
         "required": [
@@ -2283,7 +2284,7 @@
             "properties": {
               "content": {
                 "type": "string",
-                "maxLength": 11184812
+                "maxLength": 12582912
               }
             },
             "required": [
@@ -4334,12 +4335,12 @@
             "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
           },
           "region": {
-            "type": "string"
+            "type": "string",
+            "description": "Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted."
           }
         },
         "required": [
-          "name",
-          "region"
+          "name"
         ]
       },
       "ConfigureDomainMailFrom": {
@@ -7106,7 +7107,7 @@
             },
             "maxItems": 20,
             "default": [],
-            "description": "Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents."
+            "description": "Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
           },
           "replyTo": {
             "type": "array",
@@ -7125,7 +7126,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z0-9-]+$"
                 },
                 "value": {
                   "type": "string",
@@ -7137,10 +7140,12 @@
               "required": [
                 "name",
                 "value"
-              ]
+              ],
+              "additionalProperties": false
             },
             "maxItems": 10,
-            "default": []
+            "default": [],
+            "description": "Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused."
           },
           "autoSubmitted": {
             "type": "string",
@@ -7213,12 +7218,13 @@
               "content": {
                 "type": "string",
                 "minLength": 4,
-                "maxLength": 11200000,
-                "description": "Standard padded base64."
+                "maxLength": 12582912,
+                "description": "Base64; line breaks are accepted."
               },
               "contentType": {
                 "type": "string",
-                "maxLength": 100
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9!#$&^_.+-]+\\/[a-zA-Z0-9!#$&^_.+-]+(?:\\s*;[ -~]*)?$"
               },
               "disposition": {
                 "type": "string",
@@ -7283,7 +7289,7 @@
             },
             "maxItems": 20,
             "default": [],
-            "description": "Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents."
+            "description": "Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused)."
           },
           "replyTo": {
             "type": "array",
@@ -7302,7 +7308,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "pattern": "^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$"
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "pattern": "^[A-Za-z0-9-]+$"
                 },
                 "value": {
                   "type": "string",
@@ -7314,10 +7322,12 @@
               "required": [
                 "name",
                 "value"
-              ]
+              ],
+              "additionalProperties": false
             },
             "maxItems": 10,
-            "default": []
+            "default": [],
+            "description": "Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused."
           },
           "autoSubmitted": {
             "type": "string",
@@ -18615,12 +18625,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { uploadAttachment } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await uploadAttachment({\n  client,\n  body: {\n    \"filename\": \"Example\",\n    \"contentType\": \"application/octet-stream\",\n    \"content\": \"example\",\n    \"disposition\": \"attachment\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { uploadAttachment } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await uploadAttachment({\n  client,\n  body: {\n    \"filename\": \"Example\",\n    \"contentType\": \"application/octet-stream\",\n    \"disposition\": \"attachment\",\n    \"content\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/attachments' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"filename\": \"Example\",\n  \"contentType\": \"application/octet-stream\",\n  \"content\": \"example\",\n  \"disposition\": \"attachment\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/attachments' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"filename\": \"Example\",\n  \"contentType\": \"application/octet-stream\",\n  \"disposition\": \"attachment\",\n  \"content\": \"example\"\n}'"
           }
         ]
       }
@@ -23229,12 +23239,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { createDomain } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createDomain({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"region\": \"us-east-1\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { createDomain } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createDomain({\n  client,\n  body: {\n    \"name\": \"Example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/domains' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"region\": \"us-east-1\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/domains' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\"\n}'"
           }
         ]
       }
@@ -29086,7 +29096,7 @@
         ],
         "operationId": "createInboundAddress",
         "summary": "Create a receivable address",
-        "description": "Admin only. Receiving must be enabled on the domain. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
+        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
         "requestBody": {
           "required": true,
           "content": {
@@ -31951,7 +31961,7 @@
           "Inbound webhooks"
         ],
         "summary": "Subscribe to inbound events",
-        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint host must be in the deployment webhook allowlist. The signing secret is returned once.",
+        "description": "Deliveries are signed with Standard Webhooks headers (Webhook-Id, Webhook-Timestamp, Webhook-Signature) and retried with backoff. The endpoint must be a public HTTPS URL. The signing secret is returned once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -34944,7 +34954,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. AWS resources are retained. Delete the customer stack in AWS to revoke the role.",
+        "description": "Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. Domains stay claimed by this workspace but stop sending and receiving until they are added again on the next connection. AWS resources are retained. Delete the customer stack in AWS to revoke the role.",
         "responses": {
           "200": {
             "description": "Success",

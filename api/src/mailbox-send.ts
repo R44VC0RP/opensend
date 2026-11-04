@@ -9,6 +9,7 @@ import { recordEvents, mailboxEventCtes } from './mailbox-events.js';
 import { assertMailboxKey,readableMailboxKey,workspacePrefix, mailboxS3 } from './mailbox-setup.js';
 import { attachToMailboxes, htmlToPlain, messageIdList, normalizeSubject, sesMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import { queueMailboxEmail, storeAttachmentBytes, verifiedAttachment, type SendRequest } from './sending.js';
+import { decodeBase64 } from './outbound-content.js';
 
 export const DEFAULT_SEND_LIMITS: SendLimits = { perHour: 100, perDay: 1000, perRecipientPerHour: 20, perThreadPer10Minutes: 10 };
 export const sendLimitsFor = (mailbox: typeof mailboxes.$inferSelect): SendLimits => ({ ...DEFAULT_SEND_LIMITS, ...mailbox.sendLimits });
@@ -30,8 +31,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
   if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
-      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(item.content) || item.content.length%4) throw new ApiError(422,'ATTACHMENT_CONTENT_INVALID','Use standard padded base64.','attachments');
-      out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},Buffer.from(item.content,'base64')));
+      out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
     } else if(item.id.startsWith('matt_')){
       const [file]=await runtime.db.select({file:mailAttachments,region:mailMessages.region}).from(mailAttachments).innerJoin(mailMessages,eq(mailMessages.id,mailAttachments.messageId))
         .innerJoin(mailboxMessages,and(eq(mailboxMessages.messageId,mailAttachments.messageId),eq(mailboxMessages.mailboxId,mailbox.id))).where(and(eq(mailAttachments.workspaceId,scope.workspaceId),eq(mailAttachments.id,item.id)));

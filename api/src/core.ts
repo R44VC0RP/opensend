@@ -54,7 +54,6 @@ export interface Config {
   snsTopicArns: string[];
   // Subset of snsTopicArns that carries SES inbound receipt notifications for mailboxes.
   inboundTopicArns?: string[];
-  webhookAllowedHosts: string[];
   reputationAlertUrl?: string;
   // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
   screen?: { apiKey: string; model: string; mode: 'reject' | 'flag'; threshold: number };
@@ -75,7 +74,11 @@ export interface Runtime {
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
+  // Outbound webhook transport. Node supplies a connect-time guard against private addresses
+  // (see adapters/node.ts); Workers use plain fetch, which cannot reach them.
+  webhookFetch?: WebhookFetch;
 }
+export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
 export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;

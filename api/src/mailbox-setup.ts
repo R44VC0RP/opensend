@@ -326,12 +326,13 @@ export async function saveMailboxMx(db:DbExecutor,wid:string,domainId:string,mx:
 /** Hourly: refresh MX state for receiving domains so status follows DNS changes. */
 export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
   if (runtime.config.multiTenant) {
-    // Rotate a bounded batch (never-checked first) across the hour, without reopening SES verification.
+    // Rotate a bounded batch of receiving-eligible claims (never-checked first) across the hour; unproven
+    // domains are still covered by their own verification poll and have nothing to route.
     const batch=Math.max(1,Math.min(50,limit));
     await runtime.db.execute(sql`WITH due AS (SELECT dc.token,dc.workspace_id,d.id,j.created_at FROM domain_claims dc
       JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.status='ready'
       JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region
-      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.readiness IS NOT NULL AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
+      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.readiness IS NOT NULL AND dc.receiving_eligible AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
       ORDER BY j.created_at NULLS FIRST,dc.token LIMIT ${batch})
       INSERT INTO jobs(id,type,workspace_id,payload,available_at)
       SELECT 'domain.mx:'||token,'domain.mx',workspace_id,jsonb_build_object('domainId',id,'token',token),

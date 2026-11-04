@@ -2,7 +2,7 @@ import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm
 import { ApiError, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { mailboxEvents, mailboxWebhookDeliveries, mailboxWebhooks } from './db/mailbox.js';
 import { MAX_ATTEMPTS } from './jobs.js';
-import { decrypt, hmac, webhookUrl } from './operations.js';
+import { decrypt, hmac, postWebhook, webhookUrl } from './operations.js';
 
 export const inboundEventTypes = ['message.received', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
@@ -69,8 +69,8 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
     const secret = await decrypt(runtime, endpoint.encryptedSecret, webhookSecretBinding(job.workspaceId, endpoint.id));
     const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
-    const result = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body, redirect: 'manual', signal: AbortSignal.timeout(5000) });
-    statusCode = result.status; await result.body?.cancel(); if (!result.ok) error = 'WEBHOOK_HTTP_ERROR';
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body);
+    statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
   await runtime.db.update(mailboxWebhookDeliveries).set({ attemptCount: sql`${mailboxWebhookDeliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: new Date().toISOString() }).where(where);

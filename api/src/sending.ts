@@ -1,4 +1,3 @@
-import { attachmentContentMatches } from './attachment-content.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -19,11 +18,18 @@ import { finishMailboxArchive,trackedAttachments,queueTrackedMailboxSend } from 
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, MAX_ATTACHMENT_BASE64, MAX_ATTACHMENT_BYTES, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 
-const MAX_ATTACHMENTS = 8 * 1024 * 1024;
+const MAX_ATTACHMENTS = MAX_ATTACHMENT_BYTES;
 const MAX_ENCODED_MESSAGE = 16 * 1024 * 1024;
 const MAX_BODY = 512 * 1024;
-const SENDING_LIMITS = { pending: 10000, keyPending: 2000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
+// Outstanding (queued or attempting) mail per workspace is capped by the account's SES 24-hour quota, which
+// the dispatcher keeps synced in the limits tables: a day of backlog is plenty, the floor keeps sandbox and
+// brand-new accounts usable, and the ceiling bounds queue bloat. Shared-pool workspaces never inherit the
+// pool's quota and stay at the floor; BYO and self-hosted use their own account's. There is no per-key cap.
+const SENDING_LIMITS = { pendingFloor: 10000, pendingCeiling: 200000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
+const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
+const pendingCap = (quota: number | string | null) => Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
 const CAMPAIGN_PREPARE_ROWS = 20000;
@@ -61,15 +67,17 @@ function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (a: Actor) => sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE actor_key_id = ${a.keyId})::int AS key
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor) => sql`SELECT count(*)::int AS total,
+  (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
+    ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
   FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
-function assertPending(incoming: number, counts: { total: number; key: number }) {
-  const limits = SENDING_LIMITS;
-  if (counts.total + incoming > limits.pending || counts.key + incoming > limits.keyPending) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit (${limits.pending} per workspace, ${limits.keyPending} per key). Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
+function assertPending(incoming: number, counts: { total: number; quota: number | string | null }) {
+  const cap = pendingCap(counts.quota);
+  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace, sized from its SES daily quota. Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
 }
-async function checkPending(db: DbExecutor, a: Actor, incoming: number) {
+async function checkPending(runtime: Pick<Runtime, 'config'>, db: DbExecutor, a: Actor, incoming: number) {
   await lockAdmission(db, a);
-  const { rows: [counts] } = await db.execute<{ total: number; key: number }>(pendingCounts(a));
+  const { rows: [counts] } = await db.execute<{ total: number; quota: number | null }>(pendingCounts(runtime, a));
   assertPending(incoming, counts!);
 }
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
@@ -107,26 +115,6 @@ const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQue
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: z.record(z.string(), z.unknown()) }).openapi('EmailEvent');
 const EmailContent = z.object({ subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentType: z.string(), size: z.number().int(), disposition: z.enum(['attachment', 'inline']), contentId: z.string().nullable(), createdAt: z.string() }).openapi('Attachment');
-const AttachmentInput = z.object({ filename: z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/), contentType: z.string().max(100).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/).default('application/octet-stream'), content: z.string().min(4).max(Math.ceil(MAX_ATTACHMENTS / 3) * 4).describe('Standard padded base64; no data URLs. Maximum decoded bytes: 8 MiB.'), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: z.string().min(1).max(120).regex(/^[a-zA-Z0-9_.@-]+$/).optional() }).strict().refine(v => v.disposition !== 'inline' || !!v.contentId, 'Inline attachments require contentId.').openapi('AttachmentUpload');
-const AttachmentMetadata = z.object({ filename: AttachmentInput.shape.filename, contentType: z.string().min(1).max(100), disposition: z.enum(['attachment', 'inline']).default('attachment'), contentId: AttachmentInput.shape.contentId }).strict();
-const attachmentTypes: Record<string, string> = {
-  pdf: 'application/pdf', txt: 'text/plain', csv: 'text/csv', json: 'application/json', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', ics: 'text/calendar',
-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-};
-function validateAttachment(metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
-  const extension = metadata.filename.split('.').pop()?.toLowerCase();
-  const expected = extension ? attachmentTypes[extension] : undefined;
-  if (!extension || !expected) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', 'Attachments allow PDF, UTF-8 text, CSV, JSON, raster images, ICS, and modern Office documents.');
-  const baseType = metadata.contentType.split(';')[0]!.trim().toLowerCase();
-  if (baseType !== 'application/octet-stream' && baseType !== expected) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_MISMATCH', `The declared content type does not match .${extension}.`);
-  if (metadata.contentType.includes(';') && expected !== 'text/calendar' && !/^text\/(?:plain|csv);\s*charset=utf-8$/i.test(metadata.contentType)) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_INVALID', 'Only UTF-8 text charset and calendar method parameters are supported.');
-  if (expected === 'text/calendar' && !/^text\/calendar(?:;\s*(?:method=(?:REQUEST|PUBLISH|CANCEL)|charset=utf-8))*$/i.test(metadata.contentType)) throw new ApiError(422, 'ATTACHMENT_CONTENT_TYPE_INVALID', 'Calendar content type supports UTF-8 and REQUEST, PUBLISH, or CANCEL methods.');
-  const image = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension);
-  if (metadata.disposition === 'inline' && (!image || !metadata.contentId)) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Only PNG, JPEG, GIF, and WebP images with a content ID may be inline.');
-  if (metadata.disposition === 'attachment' && metadata.contentId) throw new ApiError(422, 'ATTACHMENT_CONTENT_ID_INVALID', 'Content IDs are only supported for inline images.');
-  if (!attachmentContentMatches(extension, bytes)) throw new ApiError(422, 'ATTACHMENT_CONTENT_INVALID', `The file bytes do not match .${extension}.`);
-  return { ...metadata, contentType: baseType === 'application/octet-stream' ? expected : metadata.contentType };
-}
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
@@ -625,10 +613,10 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
+    const state = (await db.execute<{ total: number; quota: number | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+      FROM (${pendingCounts(c.env, a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
     assertPending(mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
@@ -670,8 +658,7 @@ async function wake(runtime: Runtime, readyJobs: number) {
   try { await runtime.wake?.(readyJobs); }
   catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Expanded jobs are durable; the scheduler will recover them.' }); }
 }
-async function saveAttachment(c: Ctx, a: Actor, metadata: z.infer<typeof AttachmentMetadata>, bytes: Uint8Array) {
-  if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be nonempty and at most 8 MiB decoded.');
+async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
   const input = validateAttachment(metadata, bytes);
   const checksum = await bytesDigest(bytes);
   return idempotent(c, a, { ...input, size: bytes.length, checksum }, async db => AttachmentInfo.parse(await storeValidatedAttachment(c.env, db, a, input, bytes, checksum)));
@@ -690,7 +677,6 @@ async function storeValidatedAttachment(runtime: Runtime, db: DbExecutor, a: Act
 /** Reserve quota before uploading. No database connection is held during object storage I/O.
  * Unused uploads (including a concurrent idempotency loser) use ordinary attachment retention. */
 export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'workspaceId'>, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array) {
-  if (!bytes.length || bytes.length > MAX_ATTACHMENTS) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most 8 MiB decoded.`);
   const parsed = AttachmentMetadata.safeParse({ filename: metadata.filename, contentType: metadata.contentType, disposition: metadata.disposition ?? 'attachment', ...(metadata.contentId ? { contentId: metadata.contentId } : {}) });
   if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
   const input=validateAttachment(parsed.data,bytes),checksum=await bytesDigest(bytes),attachmentId=id('attachment'),storageKey=`${a.workspaceId}/attachments/${attachmentId}`;
@@ -708,7 +694,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
-  await checkPending(db, a, 1);
+  await checkPending(runtime, db, a, 1);
   const snapshot = await prepare(runtime, db, a, parsed.data);
   snapshot.headers = [...snapshot.headers, ...request.headers];
   const receipt = await queueEmail(runtime, db, a, snapshot);
@@ -809,14 +795,9 @@ export function registerSending(app: App) {
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse({ ...r, data: a.permissions.includes('manage') ? r.data : redactCapabilityData(r.data) })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentInput) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
-    const a = actor(c, 'send'); const input = c.req.valid('json');
-    if (input.content.length > Math.ceil(MAX_ATTACHMENTS / 3) * 4) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', 'Attachments must be at most 8 MiB decoded.');
-    // Flat character validation avoids stack exhaustion from repeated regex groups on large uploads.
-    if (input.content.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.content)) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be standard padded base64.');
-    const bytes = Buffer.from(input.content, 'base64');
-    if (bytes.toString('base64') !== input.content) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be canonical padded base64.');
-    const { content: _content, ...metadata } = input;
+  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
+    const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
+    const bytes = decodeBase64(content);
     const result = await saveAttachment(c, a, metadata, bytes);
     return c.json(AttachmentInfo.parse(result), 201);
   });
@@ -836,7 +817,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]); return c.json(AttachmentInfo.parse(row), 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENTS / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 8 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(MAX_ATTACHMENT_BASE64) }).openapi('AttachmentContent')), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
     const asset = await c.env.storage.get(row!.storageKey);
     if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENTS || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
@@ -983,7 +964,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(c.env, db, a, snapshot, undefined, undefined, c.get('requestId')); });
+    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(c.env, db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(c.env, db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/reviews', operationId: 'startCampaignReview', description: 'Start durable preparation for up to 2,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(Revision) }, responses: { 202: response(AsyncReview), ...errors } }), async c => {
@@ -1589,13 +1570,13 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   const campaignId = payload.campaignId;
   const a: Actor = { workspaceId: job.workspaceId, keyId: 'worker', permissions: ['manage'], domains: [] };
   let sesAllowance = Number.POSITIVE_INFINITY, rateAllowance = Number.POSITIVE_INFINITY, shareRate = 0;
-  const limitsTable = sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
+  const limits = limitsTable(runtime);
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
       account: runtime.config.multiTenant ? sql<Actor['dispatchAccount']>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
-      rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
-      max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
-      sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
+      rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
+      max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
+      sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region'),0)`,
     }).from(campaignExpansions).leftJoin(campaignReviews, eq(campaignReviews.id, campaignExpansions.reviewId)).leftJoin(campaigns, eq(campaigns.id, campaignExpansions.campaignId))
       .where(and(eq(campaignExpansions.campaignId, campaignId), scope(campaignExpansions, a)));
     if (!initial || !['pending', 'expanding'].includes(initial.status) || initial.jobId !== job.id) return;
@@ -1662,7 +1643,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
       // Future schedules reserve their full audience without occupying the active dispatch buffer.
       if (campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now()) { await defer(campaign.scheduledAt); return; }
       const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
-        rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND region=${review!.draft.region}),0)`,
+        rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${review!.draft.region}),0)`,
       }).from(emails).where(and(scope(emails, a), isNotNull(emails.reviewId), inArray(emails.status, ['queued', 'attempting'])));
       // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release).
       const windowStart = expansion.pacePerDay !== null && (!expansion.windowStartedAt || Date.now() - Date.parse(expansion.windowStartedAt) >= DAY_MS) ? now() : expansion.windowStartedAt;
