@@ -196,7 +196,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
       ON CONFLICT(workspace_id) DO UPDATE SET status='ready',aws_account_id=coalesce(provider_connections.aws_account_id,excluded.aws_account_id) WHERE provider_connections.kind='shared' AND provider_connections.region=excluded.region RETURNING *),
       settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=jsonb_build_array(c.region) FROM connection c WHERE c.workspace_id=s.workspace_id),
       stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL,report=NULL FROM connection c WHERE c.workspace_id=d.workspace_id AND d.report IS NOT NULL),
-      queued AS (INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,'live',jsonb_build_object('connectionId',id) FROM connection JOIN pool USING (aws_account_id) WHERE NOT tenant_provisioned ON CONFLICT DO NOTHING RETURNING 1)
+      queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id) FROM connection JOIN pool USING (aws_account_id) WHERE NOT tenant_provisioned ON CONFLICT DO NOTHING RETURNING 1)
       SELECT *, EXISTS (SELECT 1 FROM queued) AS queued FROM connection`)).rows[0];
     if (!row) throw new ApiError(409,'CONNECTION_EXISTS','Disconnect the existing connection before choosing another.');
     return row;

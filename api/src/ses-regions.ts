@@ -40,7 +40,7 @@ async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: str
         sql`(${sesRegions.lastDiscoveredAt} IS NULL OR ${sesRegions.lastDiscoveredAt} <= ${report.checkedAt}::timestamptz)`)).returning({ region: sesRegions.region });
     if (!updated.length) return;
     if (connection) return; // Discovery is observational. Only our tagged CreateEmailIdentity can establish an MX claim.
-    for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, environment: 'live', region: report.region, name: domain.name }).onConflictDoNothing();
+    for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, region: report.region, name: domain.name }).onConflictDoNothing();
   });
 }
 export function registerSesRegions(app: App) {
@@ -89,7 +89,7 @@ export function registerSesRegions(app: App) {
         const [job] = await tx.select().from(jobs).where(and(eq(jobs.id, row!.provisionJobId), eq(jobs.workspaceId, value.workspaceId))).limit(1);
         if (job && ['pending', 'running'].includes(job.status)) return { jobId: job.id, status: job.status as 'pending' | 'running' };
       }
-      const jobId = await enqueue(tx, { type: 'ses.provision', workspaceId: value.workspaceId, environment: 'live', payload: {
+      const jobId = await enqueue(tx, { type: 'ses.provision', workspaceId: value.workspaceId, payload: {
         region, actorKeyId: value.keyId, credentialsFingerprint: await credentialFingerprint(c.env.config), publicUrl: discoveryTarget(c.env.config), requestId: c.get('requestId'),
       } });
       await tx.update(sesRegions).set({ provisionJobId: jobId }).where(regionWhere(value.workspaceId, region));
@@ -120,7 +120,7 @@ async function approvedOrigin(runtime: Runtime, keyId: string) {
     const grant = await getMcpGrantActor(runtime, keyId);
     return !!grant && (!runtime.config.multiTenant || grant.workspaceId === runtime.config.workspaceId) && grant.permissions.includes('manage') && !grant.domains.length;
   }
-  const [key] = await runtime.db.select().from(apiKeys).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, runtime.config.workspaceId), eq(apiKeys.environment, 'live'), isNull(apiKeys.revokedAt))).limit(1);
+  const [key] = await runtime.db.select().from(apiKeys).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, runtime.config.workspaceId), isNull(apiKeys.revokedAt))).limit(1);
   return Boolean(key?.permissions.includes('manage') && !key.domains.length);
 }
 const provision: JobHandler = async (runtime, payload, job) => {
@@ -156,7 +156,7 @@ export async function queueStartupDiscovery(runtime: Runtime): Promise<number> {
       const row = rows.find(value => value.region === region);
       if (row?.lastDiscoveredAt && row.credentialsFingerprint === fingerprint && row.publicUrl === target && Date.now() - Date.parse(row.lastDiscoveredAt) < DISCOVERY_TTL) continue;
       if (active.some(job => job.payload.region === region && job.payload.credentialsFingerprint === fingerprint && job.payload.publicUrl === target)) continue;
-      await enqueue(tx, { type: 'ses.discover', workspaceId: runtime.config.workspaceId, environment: 'live', payload: { region, credentialsFingerprint: fingerprint, publicUrl: target } });
+      await enqueue(tx, { type: 'ses.discover', workspaceId: runtime.config.workspaceId, payload: { region, credentialsFingerprint: fingerprint, publicUrl: target } });
       count++;
     }
     return count;

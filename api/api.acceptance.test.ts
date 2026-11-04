@@ -290,17 +290,14 @@ describe('Public contract and authentication', () => {
   test('an approved dashboard session creates scoped keys, listing never discloses secrets, revocation blocks reuse', async t => {
     const key = await keyFixture(t, { permissions: ['read'] });
     const db = await fixtureDatabase(t);
-    // Seed both old formats with valid hashes, so a 401 cannot pass just because no row exists.
+    // Even with a matching stored hash, the retired test key format cannot authenticate.
     for (const mode of ['live', 'test']) {
       const old = `os_${mode}_${key.secret.slice(3)}`, id = unique('legacy-key');
-      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) VALUES($1,'default',$2,'fixture',$3,$4,'["read"]','[]')`, [id, mode, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default','fixture',$2,$3,'["read"]','[]')`, [id, createHash('sha256').update(old).digest('hex'), old.slice(0,14)]);
       cleanup(t, async () => { await db.query('DELETE FROM api_keys WHERE id=$1', [id]); });
       const me = await http('GET','/v1/me',old);
       if (mode === 'live') assert.equal(ok(me).id,id); else {
         error(me,401,'AUTH_INVALID');
-        assert.ok(!(await allPages('/v1/api-keys?includeRevoked=true', MANAGER)).some(row => row.id === id));
-        error(await http('POST', `/v1/api-keys/${id}/revoke`, MANAGER),404,'NOT_FOUND');
-        assert.equal((await db.query('SELECT revoked_at FROM api_keys WHERE id=$1',[id])).rows[0].revoked_at,null);
       }
     }
     const rows = await allPages('/v1/api-keys', MANAGER);
@@ -817,7 +814,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(identityChecks - warmChecks, 0); assert.deepEqual(calls.slice(warmStart),[]);
         const runTenant=async()=>{
           const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[b.org.id]);
-          await tenantJob(runtime,j.payload,{id:j.id,attempts:1,workspaceId:b.org.id,environment:'live'});
+          await tenantJob(runtime,j.payload,{id:j.id,attempts:1,workspaceId:b.org.id});
         };
         await runTenant(); await runTenant();
         ok(await choose('shared',b.cookie),201); assert.equal(wakes,1,'A provisioned tenant needs no wake.');
@@ -883,7 +880,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const detail = `/v1/domains/${created.id}`;
           const {operationJobs}=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const {rows:[job]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
-          const check=()=>operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,attempts:1,workspaceId:b.org.id,environment:'live'});
+          const check=()=>operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,attempts:1,workspaceId:b.org.id});
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1);
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
@@ -899,7 +896,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
             const otherHost=`${unique('receiving')}.invalid`,blind=`private@${otherHost}`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
             const hook=unique('hook'); // Non-routable fixture: inspect the durable snapshot, never POST externally.
-            await pool.query(`INSERT INTO mailbox_webhooks(id,workspace_id,environment,url,event_types,encrypted_secret) VALUES ($1,$2,'live','https://fixture.invalid/','["message.received"]','fixture')`,[hook,b.org.id]);
+            await pool.query(`INSERT INTO mailbox_webhooks(id,workspace_id,url,event_types,encrypted_secret) VALUES ($1,$2,'https://fixture.invalid/','["message.received"]','fixture')`,[hook,b.org.id]);
             it.after(async()=>{await pool.query('DELETE FROM mailbox_webhooks WHERE id=$1',[hook]);});
             const mx=checked.dns.find((r:Json)=>r.purpose==='receiving');assert.equal(mx.name,`reply.${domain}`);assert.equal(mx.priority,10);assert.equal(mx.status,'pending');assert.ok(mx.note.includes('existing.invalid') && mx.note.includes(mx.name));
             assert.equal(checked.sending,'verified');assert.equal(checked.receiving,'pending');
@@ -907,7 +904,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const probe=async(addr:string)=>{const id=unique('probe');return acceptInboundNotification(runtime,{topicArn,region,message:{notificationType:'Received',mail:{messageId:id},receipt:{timestamp:new Date().toISOString(),recipients:[addr],action:{type:'S3',bucketName:bucket,topicArn,objectKey:'staging/'+id}}}});};
             assert.equal(await probe(custom),0,'Sending verification cannot authorize receipt before MX.');
             const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-            const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id,environment:'live'});
+            const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
             assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly MX-only job must use neither SES nor TXT.');
@@ -920,7 +917,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(await probe(`support@${domain}`),0,'Verifying the suggested reply host must not activate the conflicting root MX.');
             const other=ok(await add(a.cookie,otherHost),201),otherProof=other.dns.find((r:Json)=>r.purpose==='sending' && r.type==='TXT').value;
             const identity=identities.get(`${platform}:${otherHost}`)!;identity.DkimAttributes={...identity.DkimAttributes,Status:'PENDING'};identity.VerifiedForSendingStatus=false;identity.VerificationStatus='PENDING';
-            const verifyOther=()=>operationJobs['domain.verify']!(runtime,{domainId:other.id,token:otherProof},{id:unique('job'),attempts:1,workspaceId:a.org.id,environment:'live'});
+            const verifyOther=()=>operationJobs['domain.verify']!(runtime,{domainId:other.id,token:otherProof},{id:unique('job'),attempts:1,workspaceId:a.org.id});
             activeMx.add(otherHost);await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Correct MX alone is not proof of ownership.');
             answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Ownership and MX cannot receive before SES verifies the identity.');
             assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'pending');
@@ -936,7 +933,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const receipts=await pool.query('SELECT * FROM mail_receipts WHERE ses_message_id=$1',[sesMessageId]);assert.equal(receipts.rowCount,2);
             for(const [user,recipient,expected] of [[a,blind,raw],[b,custom,body]] as const){
               const wid=user.org.id,r=receipts.rows.find(r=>r.workspace_id===wid);assert.deepEqual(r.recipients,[recipient]);assert.ok(!JSON.stringify(r.notification).includes(blind));assert.ok(!JSON.stringify(r.notification).includes(dropped));
-              const n=queries.mock.callCount();await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),workspaceId:wid,environment:'live',attempts:1});it.diagnostic(`MX inbound ingest: ${queries.mock.callCount()-n} pg statements including transaction for new address, 1 attachment`);assert.equal(queries.mock.callCount()-n,5);
+              const n=queries.mock.callCount();await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),workspaceId:wid,attempts:1});it.diagnostic(`MX inbound ingest: ${queries.mock.callCount()-n} pg statements including transaction for new address, 1 attachment`);assert.equal(queries.mock.callCount()-n,5);
               const {rows:[stored]}=await pool.query('SELECT * FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);assert.deepEqual(stored.envelope_to,[recipient]);assert.deepEqual(stored.bcc,[]);assert.equal(stored.to[0].address,custom);assert.deepEqual(objects.get(`${bucket}/${stored.raw_key}`),expected);
               assert.equal(stored.raw_key,`workspaces/${wid}/raw/${sesMessageId}.eml`);assert.equal((await pool.query('SELECT 1 FROM mailboxes WHERE workspace_id=$1 AND address=$2 AND origin=\'auto\'',[wid,recipient])).rowCount,1);
               const {rows:[file]}=await pool.query('SELECT * FROM mail_attachments WHERE message_id=$1',[stored.id]);assert.ok(file.storage_key.startsWith(`workspaces/${wid}/att/`));assert.deepEqual(objects.get(`${bucket}/${file.storage_key}`),Buffer.from([255,0]));
@@ -965,8 +962,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             const sync=await import('./src/mailbox-send.js'),conn=await pool.connect();
             try { await conn.query('BEGIN');
               for(const {org} of [a,b]) {
-                const email=unique('outbound');await conn.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated) VALUES($1,$2,'live',$3,'fixture','sender@example.org','[]','[]','[]','Fixture','delivered',$1,'{}',false)`,[email,org.id,region]);
-                await conn.query(`INSERT INTO mail_messages(id,workspace_id,environment,direction,thread_id,sender_mailbox_id,sending_email_id,status) SELECT $1,workspace_id,environment,'outbound',thread_id,mailbox_id,$2,'queued' FROM mailbox_threads WHERE workspace_id=$3 LIMIT 1`,[unique('out'),email,org.id]);
+                const email=unique('outbound');await conn.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated) VALUES($1,$2,$3,'fixture','sender@example.org','[]','[]','[]','Fixture','delivered',$1,'{}',false)`,[email,org.id,region]);
+                await conn.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,sender_mailbox_id,sending_email_id,status) SELECT $1,workspace_id,'outbound',thread_id,mailbox_id,$2,'queued' FROM mailbox_threads WHERE workspace_id=$3 LIMIT 1`,[unique('out'),email,org.id]);
               }
               const n=queries.mock.callCount();assert.ok(await sync.syncOutboundMessages({...runtime,db:drizzle(conn)})>=2);assert.equal(queries.mock.callCount()-n,1);
               for(const {org} of [a,b]) assert.deepEqual((await conn.query("SELECT type FROM mailbox_events WHERE workspace_id=$1 AND type IN ('message.sent','message.delivered') ORDER BY seq",[org.id])).rows.map(r=>r.type),['message.sent','message.delivered']);
@@ -1043,12 +1040,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           // Verify and claim its new reconcile atomically so the separate, unmocked runner never takes it.
           const {operationJobs}=await import('./src/operations.js'),{sql}=await import('drizzle-orm');
           const scheduled=await runtime.db.transaction(async tx=>{
-            await operationJobs['domain.verify']!({...runtime,db:tx},j.payload,{id:j.id,attempts:1,workspaceId:wid,environment:'live'});
+            await operationJobs['domain.verify']!({...runtime,db:tx},j.payload,{id:j.id,attempts:1,workspaceId:wid});
             return (await tx.execute<{id:string}>(sql`UPDATE jobs SET available_at=now()+interval '1 day' WHERE workspace_id=${wid} AND type='mailbox.reconcile' AND status='pending' RETURNING id`)).rows[0]!.id;
           });
           const getDomain=async()=>ok(await local('GET',`/v1/domains/${byoDomain.id}`,undefined,a.cookie));
           const pendingRule=await getDomain();assert.equal(pendingRule.receiving,'pending');assert.equal(pendingRule.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
-          await (await import('./src/mailbox-setup.js')).mailboxSetupJobs['mailbox.reconcile']!(runtime,{region},{id:scheduled,attempts:1,workspaceId:wid,environment:'live'});
+          await (await import('./src/mailbox-setup.js')).mailboxSetupJobs['mailbox.reconcile']!(runtime,{region},{id:scheduled,attempts:1,workspaceId:wid});
           assert.equal((await getDomain()).receiving,'verified');
           await pool.query('DELETE FROM jobs WHERE id=$1',[scheduled]);
           const {rows:[r]}=await pool.query('SELECT bucket,topic_arn AS arn FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,region]);
@@ -1056,7 +1053,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
           const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
           assert.equal(await acceptInboundNotification(runtime,{topicArn:r.arn,region,message}),1);
-          await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid,environment:'live'});
+          await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid});
           assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
           const {rows:[stored]}=await pool.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);
           const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
@@ -1068,8 +1065,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
-        await pool.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
-          VALUES ($1,$2,'live',$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
+        await pool.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,scheduled_at)
+          VALUES ($1,$2,$3,'fixture','test@example.com','[]','[]','[]','Fixture','{}',true,now()+interval '1 day')`, [queued,a.org.id,region]);
         try { error(await local('DELETE', path, undefined, a.cookie), 409, 'CONNECTION_IN_USE'); }
         finally { await pool.query('DELETE FROM sending_emails WHERE id=$1 AND workspace_id=$2', [queued, a.org.id]); }
         ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
@@ -1086,7 +1083,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const contact = ok(await local('POST', '/v1/contacts', { email: address() }, guest), 201);
       error(await local('GET', `/v1/contacts/${contact.id}`, undefined, b.cookie), 404);
       const { originAllowed } = await import('./src/sending.js');
-      const queued = { workspaceId: a.org.id, environment: 'live' as const, actorKeyId: `user_${me.id}`, snapshot: { from: 'sender@example.com' } };
+      const queued = { workspaceId: a.org.id, actorKeyId: `user_${me.id}`, snapshot: { from: 'sender@example.com' } };
       assert.equal(await originAllowed(runtime, runtime.db, queued), true);
       assert.equal(await originAllowed(runtime, runtime.db, { ...queued, campaignId: 'campaign' }), false);
       const owner = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.role === 'owner');
@@ -1393,13 +1390,7 @@ describe('Hosted MCP OAuth and tools', () => {
     ok(await http('DELETE', `/v1/lists/${managedList.id}`, managed.token));
     error(await http('GET', '/v1/api-keys', managed.token), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
     error(await http('POST', '/v1/api-keys', managed.token, { name: 'Forbidden durable credential', permissions: ['read'], domains: [] }), 403, 'CREDENTIAL_DELEGATION_FORBIDDEN');
-    const legacyAgent = unique('retired-agent');
-    await db.query(`INSERT INTO agent_tokens(id,workspace_id,grant_id,environment,permissions,domains,purpose,expires_at) SELECT $1,workspace_id,grant_id,'test',permissions,domains,purpose,expires_at FROM agent_tokens WHERE id=$2`, [legacyAgent, temporary.id]);
-    cleanup(t, async () => { await db.query('DELETE FROM agent_tokens WHERE id=$1', [legacyAgent]); });
     const trackedTokens = page(await http('GET', '/v1/agent-tokens?includeInactive=true', MANAGER, undefined, { 'x-opensend-environment': 'live' }));
-    assert.ok(!trackedTokens.some(row => row.id === legacyAgent));
-    error(await http('POST', `/v1/agent-tokens/${legacyAgent}/revoke`, MANAGER),404,'NOT_FOUND');
-    assert.equal((await db.query('SELECT revoked_at FROM agent_tokens WHERE id=$1',[legacyAgent])).rows[0].revoked_at,null);
     assert.ok(trackedTokens.some(row => row.id === temporary.id && row.purpose === 'Synthetic acceptance script'));
     assert.ok(trackedTokens.some(row => row.id === managed.id && row.permissions.includes('manage')));
     ok(await http('POST', `/v1/agent-tokens/${temporary.id}/revoke`, MANAGER, undefined, { 'x-opensend-environment': 'live' }));
@@ -1409,7 +1400,6 @@ describe('Hosted MCP OAuth and tools', () => {
     const tampered = `${temporary.token.slice(0, -1)}${temporary.token.endsWith('a') ? 'b' : 'a'}`;
     error(await http('GET', '/v1/me', tampered), 401, 'AUTH_INVALID');
     ok(await http('POST', `/v1/mcp-connections/mcp_${consentId}/revoke`, MANAGER));
-    assert.equal((await db.query('SELECT revoked_at FROM agent_tokens WHERE id=$1',[legacyAgent])).rows[0].revoked_at,null);
     error(await http('GET', '/v1/me', managed.token), 401, 'AUTH_INVALID');
     const revokedConnection = await http('POST', '/mcp', token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders);
     assert.equal(revokedConnection.status, 401, diagnostic(revokedConnection));
@@ -1469,7 +1459,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const reader = await oauthGrant(t, db, 'opensend:read opensend:live offline_access', request);
       const domain = unique('dom'), parent = unique('dom');
       const name = 'inbox.example.com';
-      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES ($1,$2,'live',$3,$4), ($5,$2,'live','example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4), ($5,$2,'example.com',$4)`, [domain,runtime.config.workspaceId,name,REGION,parent]);
       runtime.config.liveEnabled = true; // SES transport is mocked below; the workspace transaction never commits.
       runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' };
       const { SESv2Client, GetEmailIdentityCommand } = await import('@aws-sdk/client-sesv2');
@@ -1515,13 +1505,13 @@ describe('Hosted MCP OAuth and tools', () => {
       const { dispatchDue } = await import('./src/dispatcher.js');
       const { mailMessages, mailAttachments } = await import('./src/db/mailbox.js');
       const { attachToMailboxes } = await import('./src/mailbox-store.js');
-      const scope = { workspaceId: runtime.config.workspaceId, environment: 'live' as const }, topic = `arn:aws:sns:${REGION}:111122223333:inbound-test`;
+      const scope = { workspaceId: runtime.config.workspaceId }, topic = `arn:aws:sns:${REGION}:111122223333:inbound-test`;
       runtime.config.liveEnabled = true; runtime.config.aws = { accessKeyId:'synthetic-fixture', secretAccessKey:'synthetic-fixture' };
       await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`,[scope.workspaceId,REGION,{ provisioned:true,account:{id:'111122223333',sendingEnabled:true},resources:{topic:{arn:topic},transactional:{sendingEnabled:true},marketing:{sendingEnabled:true}} },await credentialFingerprint(runtime.config),discoveryTarget(runtime.config),topic]);
       await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'synthetic',$3)`,[scope.workspaceId,REGION,topic]);
       const domainId = unique('dom');
-      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','example.com',$3)`, [domainId,scope.workspaceId,REGION]);
-      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status) VALUES($1,$2,'live',$3,'example.com',$4,'active')`,[unique('mdom'),scope.workspaceId,domainId,REGION]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)`, [domainId,scope.workspaceId,REGION]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,'example.com',$4,'active')`,[unique('mdom'),scope.workspaceId,domainId,REGION]);
       const sent = new Map<string, any>();
       t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled:true, SendQuota:{ MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0 } };
@@ -1654,9 +1644,9 @@ describe('Hosted MCP OAuth and tools', () => {
       await db.query('DELETE FROM sending_email_events WHERE email_id = $1', [emailId]);
       await db.query('DELETE FROM sending_emails WHERE id = $1', [emailId]);
     });
-    await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status)
-      VALUES ($1,'default','live',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
-    for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,'default','live',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
+    await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status)
+      VALUES ($1,'default',$2,'synthetic-stats',$3,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',true,'delivered')`, [emailId, REGION, campaign.id]);
+    for (const type of ['open', 'click', 'click']) await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated) VALUES ($1,'default',$2,$3,true)", [unique('mcp-stats-event'), emailId, type]);
     const populated = await callTool(token, 'getCampaignStats', { id: campaign.id });
     assert.deepEqual(populated, ok(await http('GET', `/v1/campaigns/${campaign.id}/stats`, MANAGER)));
     assert.equal(populated.totals.delivered, 1);
@@ -1779,7 +1769,7 @@ describe('DB region catalog and explicit SES setup', () => {
     };
     const sendThroughTransport = ses.SESv2Client.prototype.send;
     t.mock.method(ses.SESv2Client.prototype, 'send', function(this: InstanceType<typeof ses.SESv2Client>, command: { constructor: { name: string }; input: Json }) {
-      // Test-environment dispatch still runs the SES SDK, but its client must reach
+      // Simulated dispatch still runs the SES SDK, but its client must reach
       // the in-process request handler rather than this live-control-plane mock.
       if (command.constructor.name === 'SendEmailCommand') return Reflect.apply(sendThroughTransport as any, this, [command]);
       return provider(command);
@@ -1802,13 +1792,13 @@ describe('DB region catalog and explicit SES setup', () => {
           }), runtime);
           return { status: response.status, body: await response.json(), headers: response.headers };
         }
-        async function machine(environment: 'test' | 'live', permissions: string[], domains: string[] = []) {
+        async function machine(permissions: string[], domains: string[] = []) {
           return ok(await local('POST', '/v1/api-keys', { name: unique('mock-ses-key'), permissions, domains }), 201).secret as string;
         }
-        const testKey = await machine('test', ['read', 'send', 'manage']);
-        const reader = await machine('live', ['read']);
-        const admin = await machine('live', ['read', 'send', 'manage']);
-        const scoped = await machine('live', ['read', 'manage'], ['example.com']);
+        const testKey = await machine(['read', 'send', 'manage']);
+        const reader = await machine(['read']);
+        const admin = await machine(['read', 'send', 'manage']);
+        const scoped = await machine(['read', 'manage'], ['example.com']);
         const initial = ok(await local('GET', '/v1/regions', undefined, testKey));
         assert.equal(initial.defaultRegion, REGION);
         assert.ok(initial.data.some((row: Json) => row.region === REGION && row.enabled && row.isDefault));
@@ -1827,7 +1817,7 @@ describe('DB region catalog and explicit SES setup', () => {
         error(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin), 409, undefined);
         // Avoid routing the simulator's quota read through the live AWS mock; this
         // fixture is testing persisted region selection, not quota discovery.
-        await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, environment: 'live', region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
+        await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
         for (let count = 0; count < 5 && await drain(runtime, 10); count++) { /* Drain only this transaction's unique workspace. */ }
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'accepted');
         ok(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin));
@@ -1868,7 +1858,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(missing.account.id, accountId);
         assert.equal(missing.account.quota.maxSendRate, 10);
         assert.ok(missing.domains.some((domain: Json) => domain.name === 'example.com' && domain.sendingEnabled));
-        await db.query("INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','disabled.example.com',$3)", [unique('disabled-domain'), runtime.config.workspaceId, second]);
+        await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'disabled.example.com',$3)", [unique('disabled-domain'), runtime.config.workspaceId, second]);
         const enabledDomains = ok(await local('GET', '/v1/domains', undefined, reader));
         assert.ok(enabledDomains.data.some((domain: Json) => domain.name === 'example.com'));
         assert.ok(enabledDomains.data.every((domain: Json) => domain.region !== second));
@@ -2428,7 +2418,7 @@ describe('Dashboard API capabilities', () => {
     });
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
-      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
     });
     const stateFields = ['id', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
     const project = (value: Json) => Object.fromEntries(stateFields.map(field => [field, value[field]]));
@@ -2443,8 +2433,8 @@ describe('Dashboard API capabilities', () => {
     ok(await http('GET', `${path}/state`, live.secret));
     error(await http('GET', `/v1/campaigns/${unique('missing')}/state`, reader.secret), 404, 'NOT_FOUND');
     const foreignId = unique('foreign-campaign'), foreignWorkspace = unique('foreign-workspace');
-    cleanup(t, async () => { await db.query("DELETE FROM sending_campaigns WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [foreignId, foreignWorkspace]); });
-    await db.query("INSERT INTO sending_campaigns (id, workspace_id, environment, draft) VALUES ($1,$2,'live',$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
+    cleanup(t, async () => { await db.query("DELETE FROM sending_campaigns WHERE id = $1 AND workspace_id = $2", [foreignId, foreignWorkspace]); });
+    await db.query("INSERT INTO sending_campaigns (id, workspace_id, draft) VALUES ($1,$2,$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
     error(await http('GET', `/v1/campaigns/${foreignId}/state`, reader.secret), 404, 'NOT_FOUND');
 
     const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
@@ -2481,7 +2471,7 @@ describe('Dashboard API capabilities', () => {
     // Seed only state, never emails or dispatch jobs, to exercise each delivery lifecycle value.
     const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
     for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 AND environment = 'live' RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
       assert.equal(seeded.rowCount, 1);
       const state = ok(await http('GET', `${path}/state`, reader.secret));
       assert.deepEqual(state, project(ok(await http('GET', path, reader.secret))));
@@ -2630,7 +2620,7 @@ describe('Dashboard API capabilities', () => {
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
       ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
-      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2 AND environment = 'live'", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
     });
     for (const body of [{}, { archived: 'true' }, { archived: null }, { archived: 1 }, { archived: true, revision: 1 }]) error(await http('PATCH', `${path}/archive`, key.secret, body), 422);
     for (const value of ['1', 'TRUE', 'all', '']) error(await http('GET', `/v1/campaigns?archived=${value}`, key.secret), 422);
@@ -2653,20 +2643,20 @@ describe('Dashboard API capabilities', () => {
     const emailId = unique('archive-email'), eventId = unique('archive-event');
     const snapshot = { from: campaign.draft.from, to: [address()], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic archive history', text: 'Retained without sending.', attachments: [], tracking: false, headers: [] };
     cleanup(t, async () => {
-      await db.query("DELETE FROM sending_email_events WHERE id = $1 AND email_id = $2 AND workspace_id = $3 AND environment = 'live'", [eventId, emailId, list.workspaceId]);
-      await db.query("DELETE FROM sending_emails WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3 AND environment = 'live'", [emailId, campaign.id, list.workspaceId]);
+      await db.query("DELETE FROM sending_email_events WHERE id = $1 AND email_id = $2 AND workspace_id = $3", [eventId, emailId, list.workspaceId]);
+      await db.query("DELETE FROM sending_emails WHERE id = $1 AND campaign_id = $2 AND workspace_id = $3", [emailId, campaign.id, list.workspaceId]);
     });
-    await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
-      VALUES ($1,$2,'live',$3,$4,$5,$6,$7::jsonb,'[]','[]',$8,'simulated',$9::jsonb,true)`, [emailId, list.workspaceId, REGION, key.id, campaign.id, snapshot.from, JSON.stringify(snapshot.to), snapshot.subject, JSON.stringify(snapshot)]);
-    await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
-      VALUES ($1,$2,'live',$3,'simulated','{"synthetic":true}',true)`, [eventId, list.workspaceId, emailId]);
+    await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, snapshot, simulated)
+      VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,'[]','[]',$8,'simulated',$9::jsonb,true)`, [emailId, list.workspaceId, REGION, key.id, campaign.id, snapshot.from, JSON.stringify(snapshot.to), snapshot.subject, JSON.stringify(snapshot)]);
+    await db.query(`INSERT INTO sending_email_events (id, workspace_id, email_id, type, data, simulated)
+      VALUES ($1,$2,$3,'simulated','{"synthetic":true}',true)`, [eventId, list.workspaceId, emailId]);
     const email = ok(await http('GET', `/v1/emails/${emailId}`, key.secret));
     const content = ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret));
     const history = page(await http('GET', `/v1/emails/${emailId}/events`, key.secret));
     assert.equal(history.length, 1);
     // Scoped terminal/active states exercise guards without scheduling or sending email.
     for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 AND environment = 'live' RETURNING id", [status, campaign.id, list.workspaceId]);
+      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 RETURNING id", [status, campaign.id, list.workspaceId]);
       assert.equal(seeded.rowCount, 1);
       const before = ok(await http('GET', path, key.secret));
       assert.equal(before.status, status);
@@ -2729,7 +2719,7 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.html.indexOf('data-opensend-preview') < content.html.indexOf('Visible body'));
     // The sent row stores only a stub and its unsubscribe URL; the body above was rebuilt from the frozen review.
     const db = await fixtureDatabase(t);
-    const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1 AND environment = 'live'", [messages[0].id])).rows;
+    const [stored] = (await db.query("SELECT snapshot FROM sending_emails WHERE id = $1", [messages[0].id])).rows;
     assert.equal(stored.snapshot.html, undefined, 'Sent campaign emails must not persist rendered HTML.');
     assert.equal(stored.snapshot.text, undefined);
     assert.equal(stored.snapshot.deferredCampaign, true);
@@ -2787,7 +2777,6 @@ describe('Dashboard API capabilities', () => {
       { status: 'delivered', events: ['delivery'], campaignId: simulated.id, simulated: true },
       { status: 'delivered', events: ['delivery', 'open', 'click'], simulated: true },
       { status: 'delivered', events: [], workspaceId: 'foreign-stats-workspace' },
-      { status: 'delivered', events: [], environment: 'test' },
     ];
     const ids: string[] = [];
     cleanup(t, async () => {
@@ -2798,19 +2787,17 @@ describe('Dashboard API capabilities', () => {
       await db.query("UPDATE sending_campaigns SET status = 'draft', archived_at = NULL WHERE id = $1", [campaign.id]);
     });
     for (const fixture of fixtures) {
-      const emailId = unique('stats-email'), environment = fixture.environment ?? 'live', workspaceId = fixture.workspaceId ?? 'default';
+      const emailId = unique('stats-email'), workspaceId = fixture.workspaceId ?? 'default';
       ids.push(emailId);
-      await db.query(`INSERT INTO sending_emails (id, workspace_id, environment, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',$7,$8,$9,'2020-01-01T00:00:00Z')`,
-      [emailId, workspaceId, environment, REGION, live.id, fixture.campaignId ?? campaign.id, !!fixture.simulated, fixture.status, fixture.accepted ? unique('synthetic-provider') : null]);
-      for (const type of fixture.events) await recordEmailEvent(runtime, { workspaceId, environment: environment as 'live' | 'test', emailId, type, externalId: unique('stats-feedback'), data: { synthetic: true, isBotEvent: 'Likely' } });
+      await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, created_at)
+        VALUES ($1,$2,$3,$4,$5,'sender@example.com','["recipient@example.com"]','[]','[]','Synthetic stats','{}',$6,$7,$8,'2020-01-01T00:00:00Z')`,
+      [emailId, workspaceId, REGION, live.id, fixture.campaignId ?? campaign.id, !!fixture.simulated, fixture.status, fixture.accepted ? unique('synthetic-provider') : null]);
+      for (const type of fixture.events) await recordEmailEvent(runtime, { workspaceId, emailId, type, externalId: unique('stats-feedback'), data: { synthetic: true, isBotEvent: 'Likely' } });
     }
     // Even corrupt cross-scope feedback for a matching email ID must not be counted.
-    for (const [workspaceId, environment] of [['foreign-stats-workspace', 'live'], ['default', 'test']]) {
-      await db.query("INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, simulated) VALUES ($1,$2,$3,$4,'click',false)", [unique('foreign-event'), workspaceId, environment, ids[6]]);
-    }
+    await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated) VALUES ($1,$2,$3,'click',false)", [unique('foreign-event'), 'foreign-stats-workspace', ids[6]]);
     await db.query("UPDATE sending_campaigns SET status = 'completed', archived_at = now() WHERE id = $1", [campaign.id]);
-    await db.query("INSERT INTO sending_campaign_expansions (campaign_id, review_id, workspace_id, environment, actor_key_id, total, expanded, canceled, status) VALUES ($1,$2,'default','live',$3,13,11,2,'canceled')", [campaign.id, unique('stats-review'), live.id]);
+    await db.query("INSERT INTO sending_campaign_expansions (campaign_id, review_id, workspace_id, actor_key_id, total, expanded, canceled, status) VALUES ($1,$2,'default',$3,13,11,2,'canceled')", [campaign.id, unique('stats-review'), live.id]);
     const stats = ok(await http('GET', path, live.secret));
     assert.equal(stats.status, 'completed');
     assert.equal(stats.tracking, true);
@@ -2893,11 +2880,11 @@ describe('Dashboard API capabilities', () => {
     assert.ok(before.totals.emails >= 3);
     assert.equal(before.totals.accepted, 0, 'Simulated mail is not provider acceptance.');
     assert.equal(before.daily.reduce((sum: number, day: Json) => sum + day.count, 0), before.totals.emails);
-    const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND actor_key_id = $4', [ids[0], contact.workspaceId, 'live', key.id]);
+    const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND actor_key_id = $3', [ids[0], contact.workspaceId, key.id]);
     assert.equal(matched.rowCount, 1, 'Only an exact HTTP-created scoped email can receive synthetic replay source events.');
     const events = [unique('cohort-click'), unique('cohort-click-replay')];
-    cleanup(t, async () => { for (const id of events) await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [id, contact.workspaceId, 'live']); });
-    for (const id of events) await db.query('INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)', [id, contact.workspaceId, 'live', 'email.clicked', REGION, JSON.stringify({ emailId: ids[0], synthetic: true }), new Date(Date.parse(to) + 3_600_000)]);
+    cleanup(t, async () => { for (const id of events) await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2', [id, contact.workspaceId]); });
+    for (const id of events) await db.query('INSERT INTO operation_events (id, workspace_id, type, region, data, created_at) VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [id, contact.workspaceId, 'email.clicked', REGION, JSON.stringify({ emailId: ids[0], synthetic: true }), new Date(Date.parse(to) + 3_600_000)]);
     const after = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(after.totals.clicked, before.totals.clicked + 1, 'Two source events for one email count once, even when observed after the cohort end.');
     assert.equal(after.totals.emails, before.totals.emails);
@@ -2918,9 +2905,9 @@ describe('Dashboard API capabilities', () => {
     ok(await consent(key.secret, members[3].id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: members.map(row => row.id) }));
     ok(await http('POST', `/v1/lists/${other.id}/members`, key.secret, { contactIds: [members[0].id] }));
-    const suppression = await db.query('UPDATE audience_contacts SET suppressed = true, suppression_reason = $1 WHERE id = $2 AND workspace_id = $3 AND environment = $4 AND email = $5 AND marketing_consent = $6 AND suppressed = false RETURNING id', ['synthetic-acceptance-source', members[3].id, list.workspaceId, 'live', members[3].email, 'subscribed']);
+    const suppression = await db.query('UPDATE audience_contacts SET suppressed = true, suppression_reason = $1 WHERE id = $2 AND workspace_id = $3 AND email = $4 AND marketing_consent = $5 AND suppressed = false RETURNING id', ['synthetic-acceptance-source', members[3].id, list.workspaceId, members[3].email, 'subscribed']);
     assert.equal(suppression.rowCount, 1, 'Synthetic suppression must match the exact HTTP-created subscribed contact.');
-    cleanup(t, async () => { await db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL WHERE id = $1 AND workspace_id = $2 AND environment = $3', [members[3].id, list.workspaceId, 'live']); });
+    cleanup(t, async () => { await db.query('UPDATE audience_contacts SET suppressed = false, suppression_reason = NULL WHERE id = $1 AND workspace_id = $2', [members[3].id, list.workspaceId]); });
     const expected = { total: 4, subscribed: 1, unsubscribed: 1, unknown: 1, suppressed: 1 };
     assert.deepEqual(ok(await http('GET', `/v1/lists/${list.id}`, key.secret)).counts, expected);
     assert.deepEqual(page(await http('GET', `/v1/lists?search=${encodeURIComponent(list.name)}`, key.secret))[0].counts, expected);
@@ -3172,36 +3159,36 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     // Before any SQL writes, prove that this DB contains the exact HTTP-created
     // test email, its originating key, and our paused endpoint in the same scope.
     const matched = await db.query(`SELECT e.id FROM sending_emails e
-      JOIN api_keys k ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id AND k.environment = e.environment
-      JOIN operation_webhooks w ON w.workspace_id = e.workspace_id AND w.environment = e.environment
-      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND e.actor_key_id = $4
-        AND w.id = $5 AND w.paused = true AND w.url = $6`,
-    [queued.id, contact.workspaceId, 'live', manager.id, endpoint.id, endpoint.url]);
+      JOIN api_keys k ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id
+      JOIN operation_webhooks w ON w.workspace_id = e.workspace_id
+      WHERE e.id = $1 AND e.workspace_id = $2 AND e.actor_key_id = $3
+        AND w.id = $4 AND w.paused = true AND w.url = $5`,
+    [queued.id, contact.workspaceId, manager.id, endpoint.id, endpoint.url]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created email/key/paused endpoint; no synthetic rows were inserted.');
     const eventId = unique('acceptance-click');
     const operationId = unique('acceptance-operation');
     const deliveryId = unique('acceptance-delivery');
     const data = { emailId: queued.id, link: capabilityUrl, nested: { links: [capabilityUrl, { link: capabilityUrl }], label: 'ordinary click metadata', [`key-${token}`]: token }, values: [7, true, null] };
-    const payload = { id: operationId, type: 'email.clicked', createdAt: new Date().toISOString(), workspaceId: contact.workspaceId, environment: 'live', region: REGION, data };
+    const payload = { id: operationId, type: 'email.clicked', createdAt: new Date().toISOString(), workspaceId: contact.workspaceId, region: REGION, data };
     // Only event-source arrangement uses SQL: no SNS signature claim, provider
     // request, dispatch job, or webhook callback is manufactured or performed.
     await db.query('BEGIN');
     try {
-      await db.query(`INSERT INTO sending_email_events (id, workspace_id, environment, email_id, type, data, simulated)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [eventId, contact.workspaceId, 'live', queued.id, 'click', JSON.stringify(data), true]);
-      await db.query(`INSERT INTO operation_events (id, workspace_id, environment, type, region, data, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`, [operationId, contact.workspaceId, 'live', payload.type, REGION, JSON.stringify(data), payload.createdAt]);
-      await db.query(`INSERT INTO operation_deliveries (id, workspace_id, environment, webhook_id, event_id, payload, synthetic, status)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`, [deliveryId, contact.workspaceId, 'live', endpoint.id, operationId, JSON.stringify(payload), true, 'paused']);
+      await db.query(`INSERT INTO sending_email_events (id, workspace_id, email_id, type, data, simulated)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6)`, [eventId, contact.workspaceId, queued.id, 'click', JSON.stringify(data), true]);
+      await db.query(`INSERT INTO operation_events (id, workspace_id, type, region, data, created_at)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6)`, [operationId, contact.workspaceId, payload.type, REGION, JSON.stringify(data), payload.createdAt]);
+      await db.query(`INSERT INTO operation_deliveries (id, workspace_id, webhook_id, event_id, payload, synthetic, status)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`, [deliveryId, contact.workspaceId, endpoint.id, operationId, JSON.stringify(payload), true, 'paused']);
       await db.query('COMMIT');
     } catch (cause) {
       await db.query('ROLLBACK');
       throw cause;
     }
     cleanup(t, async () => {
-      await db.query('DELETE FROM operation_deliveries WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND webhook_id = $4 AND event_id = $5', [deliveryId, contact.workspaceId, 'live', endpoint.id, operationId]);
-      await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2 AND environment = $3', [operationId, contact.workspaceId, 'live']);
-      await db.query('DELETE FROM sending_email_events WHERE id = $1 AND workspace_id = $2 AND environment = $3 AND email_id = $4', [eventId, contact.workspaceId, 'live', queued.id]);
+      await db.query('DELETE FROM operation_deliveries WHERE id = $1 AND workspace_id = $2 AND webhook_id = $3 AND event_id = $4', [deliveryId, contact.workspaceId, endpoint.id, operationId]);
+      await db.query('DELETE FROM operation_events WHERE id = $1 AND workspace_id = $2', [operationId, contact.workspaceId]);
+      await db.query('DELETE FROM sending_email_events WHERE id = $1 AND workspace_id = $2 AND email_id = $3', [eventId, contact.workspaceId, queued.id]);
     });
     const observations: Array<{ route: string; managed: Json; readable: Json }> = [];
     const managerEvents = await allPages(`/v1/emails/${queued.id}/events`, manager.secret);
@@ -3243,8 +3230,8 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     const queued = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: contact.email })), 202);
     const matched = await db.query(`SELECT e.id FROM sending_emails e JOIN api_keys k
-      ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id AND k.environment = e.environment
-      WHERE e.id = $1 AND e.workspace_id = $2 AND e.environment = $3 AND k.id = $4`, [queued.id, contact.workspaceId, 'live', key.id]);
+      ON k.id = e.actor_key_id AND k.workspace_id = e.workspace_id
+      WHERE e.id = $1 AND e.workspace_id = $2 AND k.id = $3`, [queued.id, contact.workspaceId, key.id]);
     assert.equal(matched.rowCount, 1, 'API_FIXTURE_DATABASE_MISMATCH: no matching HTTP-created test email/key; no request budget was seeded.');
     fixtureWorkspace = contact.workspaceId;
     // This cleanup is registered after the key/contact fixtures, so it restores
@@ -3309,14 +3296,14 @@ describe('Operational configuration and public event boundaries', () => {
     const snapshot = { from: 'sender@example.com', to: [recipient], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'marketing', subject: 'Synthetic validation', text: 'Synthetic only', attachments: [], tracking: false, headers: [] };
     await db.query('BEGIN');
     try {
-      await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,marketing_consent) VALUES($1,$2,'live',$3,'subscribed')`, [contactId, runtime.config.workspaceId, recipient]);
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
-        VALUES($1,$2,'live',$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [emailId, runtime.config.workspaceId, REGION, JSON.stringify([recipient]), providerId, JSON.stringify(snapshot)]);
-      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment) VALUES($1,$2,$3,'live')`, [topicArn, messageId, runtime.config.workspaceId]);
-      await db.query(`INSERT INTO audience_contacts(id,workspace_id,environment,email,marketing_consent) VALUES($1,$2,'live',$3,'subscribed')`, [bouncedContactId, runtime.config.workspaceId, bouncedRecipient]);
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
-        VALUES($1,$2,'live',$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [bouncedId, runtime.config.workspaceId, REGION, JSON.stringify([bouncedRecipient]), bouncedProviderId, JSON.stringify({ ...snapshot, to: [bouncedRecipient] })]);
-      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id,environment) VALUES($1,$2,$3,'live')`, [topicArn, bouncedMessageId, runtime.config.workspaceId]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES($1,$2,$3,'subscribed')`, [contactId, runtime.config.workspaceId, recipient]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
+        VALUES($1,$2,$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [emailId, runtime.config.workspaceId, REGION, JSON.stringify([recipient]), providerId, JSON.stringify(snapshot)]);
+      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)`, [topicArn, messageId, runtime.config.workspaceId]);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES($1,$2,$3,'subscribed')`, [bouncedContactId, runtime.config.workspaceId, bouncedRecipient]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated)
+        VALUES($1,$2,$3,'worker','sender@example.com',$4::jsonb,'[]'::jsonb,'[]'::jsonb,'Synthetic validation','sent',$5,$6::jsonb,false)`, [bouncedId, runtime.config.workspaceId, REGION, JSON.stringify([bouncedRecipient]), bouncedProviderId, JSON.stringify({ ...snapshot, to: [bouncedRecipient] })]);
+      await db.query(`INSERT INTO operation_sns_receipts(topic_arn,message_id,workspace_id) VALUES($1,$2,$3)`, [topicArn, bouncedMessageId, runtime.config.workspaceId]);
       await db.query('COMMIT');
     } catch (cause) { await db.query('ROLLBACK'); throw cause; }
     cleanup(t, async () => {
@@ -3329,7 +3316,7 @@ describe('Operational configuration and public event boundaries', () => {
     await operationJobs['operation.ses']!(runtime, { topicArn, messageId, region: REGION, message: {
       eventType: 'Bounce', mail: { messageId: providerId, sendingAccountId: runtime.config.awsAccountId },
       bounce: { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed', bouncedRecipients: [{ emailAddress: recipient }], timestamp: new Date().toISOString() },
-    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' });
+    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId });
     const contact = (await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE id=$1', [contactId])).rows[0];
     assert.deepEqual(contact, { suppressed: true, suppression_reason: 'email_validation' });
     const event = (await db.query("SELECT data FROM sending_email_events WHERE email_id=$1 AND type='validation_suppressed'", [emailId])).rows[0];
@@ -3345,7 +3332,7 @@ describe('Operational configuration and public event boundaries', () => {
     await operationJobs['operation.ses']!(runtime, { topicArn, messageId: bouncedMessageId, region: REGION, message: {
       eventType: 'Bounce', mail: { messageId: bouncedProviderId, sendingAccountId: runtime.config.awsAccountId },
       bounce: { bounceType: 'Permanent', bounceSubType: 'General', bouncedRecipients: [{ emailAddress: bouncedRecipient }], timestamp: new Date().toISOString() },
-    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' });
+    } }, { id: unique('validation-job'), attempts: 1, workspaceId: runtime.config.workspaceId });
     assert.deepEqual((await db.query('SELECT suppressed, suppression_reason FROM audience_contacts WHERE id=$1', [bouncedContactId])).rows[0], { suppressed: true, suppression_reason: 'hard_bounce' });
     assert.deepEqual((await db.query('SELECT status, error_code, event_outcomes FROM sending_emails WHERE id=$1', [bouncedId])).rows[0], { status: 'bounced', error_code: null, event_outcomes: 5 });
     assert.equal((await db.query("SELECT count(*)::int AS n FROM sending_email_events WHERE email_id=$1 AND type='bounce'", [bouncedId])).rows[0].n, 1);
@@ -3487,7 +3474,7 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts.length, 1);
         assert.equal(delivery.attempts[0].statusCode, 302);
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
-        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND environment = 'live' AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
+        const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         throw rollback;
@@ -3561,9 +3548,9 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       }
       const jobs = async (type: string): Promise<Json[]> => (await db.query('SELECT * FROM jobs WHERE workspace_id = $1 AND type = $2 ORDER BY available_at, id', [runtime.config.workspaceId, type])).rows;
       async function run(type: string) {
-        // Mail is no longer a job: the dispatcher claims due rows for one environment/region directly.
+        // Mail is no longer a job: the dispatcher claims due rows for one region directly.
         if (type === 'email.dispatch') {
-          const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_test_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
+          const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_simulated_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
           await dispatchDue(runtime, REGION, {accountId}); return;
         }
         assert.ok(handlers[type], `No handler for ${type}`);
@@ -3572,7 +3559,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
         for (const job of pending) {
           await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = $1", [job.id]);
           try {
-            await handlers[type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: job.workspace_id, environment: job.environment });
+            await handlers[type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: job.workspace_id });
           } catch (error) {
             // Mirror processJobs: a deferral returns the same row to pending without consuming an attempt.
             if (!(error instanceof JobDeferred)) throw error;
@@ -3648,7 +3635,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const envelope={Type:'Notification',MessageId:unique('sns'),Message:'{}',Timestamp:new Date().toISOString(),SignatureVersion:'2',Signature:'!!!',SigningCertURL:`https://sns.${REGION}.amazonaws.com/SimpleNotificationService-fixture.pem`};
       for(const topic of [poolTopic,byoTopic]) error(await local('POST','/v1/events/ses',{...envelope,TopicArn:topic}),403,'SNS_INVALID_SIGNATURE');
       error(await local('POST','/v1/events/ses',{...envelope,TopicArn:byoTopic+'-unregistered'}),403,'SNS_TOPIC_NOT_ALLOWED');
-      const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,environment:'live' as const,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{opensend_email_id:[tag]}}:{})}}});
+      const delivery=(topicArn:string,sendingAccountId:string,tag?:string)=>({topicArn,region:REGION,messageId:unique('feedback'),message:{eventType:'Delivery',mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId,...(tag?{tags:{opensend_email_id:[tag]}}:{})}}});
       const results=await ingestFeedbackBatch(runtime,[delivery(byoTopic,account),delivery(byoTopic,pool),delivery(byoTopic,account,a.id)]);
       assert.deepEqual(results.map(r=>r.ok),[true,false,false]);
       assert.deepEqual((await db.query('SELECT workspace_id FROM operation_sns_receipts WHERE topic_arn=$1',[byoTopic])).rows,[{workspace_id:byo}]);
@@ -3665,10 +3652,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id) SELECT id,id,'shared','ready',$1,$2 FROM workspaces WHERE id LIKE 'bench-%' AND id<>'bench-100'`,[REGION,accounts[0]]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,status,region,aws_account_id,role_arn,external_id,template_version,platform_principal_arn,feedback_topic_arn)
         VALUES ('bench-100','bench-100','byo','ready',$1,$2,'fixture-role',gen_random_uuid(),'v1','fixture-platform',$3)`,[REGION,accounts[1],`arn:aws:sns:${REGION}:${accounts[1]}:fixture`]);
-      await db.query(`INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) SELECT id,id,'live','fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
+      await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) SELECT id,id,'fixture',id,id,'["send"]','[]' FROM workspaces WHERE id LIKE 'bench-%'`);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,verified) SELECT id||'.example',id,id,true FROM workspaces WHERE id LIKE 'bench-%'`);
-      await db.query(`INSERT INTO sending_emails(id,workspace_id,environment,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
-        SELECT 'email_'||id,id,'live',$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||id,id,$1,id,'sender@'||id||'.example','["fixture@example.net"]','[]','[]','fixture',
           $2::jsonb || jsonb_build_object('from','sender@'||id||'.example'),true FROM workspaces WHERE id LIKE 'bench-%'`,[REGION,JSON.stringify({to:['fixture@example.net'],cc:[],bcc:[],replyTo:[],region:REGION,kind:'transactional',subject:'fixture',text:'fixture',tracking:false,attachments:[],headers:[]})]);
       // Count actual pg round trips (including cache reads/writes), not timed dispatcher phases.
       const queries=t.mock.method(db,'query'); const counts:number[]=[];
@@ -3685,8 +3672,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const { drizzle } = await import('drizzle-orm/node-postgres');
     const { recordEvents, readEvents } = await import('./src/mailbox-events.js');
     const first = await fixtureDatabase(t), second = await fixtureDatabase(t), observer = await fixtureDatabase(t);
-    const scope = unique('event-order'), read = (after: number) => readEvents(drizzle(observer),scope,'live',{ after, mailboxIds:null, includeStored:true, types:['message.stored'], limit:5 });
-    const publish = (conn: pg.Client, id: string) => recordEvents(drizzle(conn),scope,'live',[{ type:'message.stored', mailboxId:null, messageId:id }]);
+    const scope = unique('event-order'), read = (after: number) => readEvents(drizzle(observer),scope,{ after, mailboxIds:null, includeStored:true, types:['message.stored'], limit:5 });
+    const publish = (conn: pg.Client, id: string) => recordEvents(drizzle(conn),scope,[{ type:'message.stored', mailboxId:null, messageId:id }]);
     await first.query('BEGIN'); await second.query('BEGIN');
     try {
       await second.query("SET LOCAL lock_timeout='5s'"); const pid = (await second.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
@@ -3713,7 +3700,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION,
         { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
       await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
-      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status) VALUES($1,$2,'live',$3,'example.com',$4,'active')`, [unique('domain'), scope, unique('verified'), REGION]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,'example.com',$4,'active')`, [unique('domain'), scope, unique('verified'), REGION]);
       const sends = new Map<string, any>();
       t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 10000, SentLast24Hours: 0 } };
@@ -3756,7 +3743,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         mime = `From: Customer <customer@example.net>\r\nTo: ${to}\r\nSubject: Re: Case 42\r\nMessage-ID: <${inboundId}>\r\nIn-Reply-To: <${wire}>\r\nReferences: <${wire}>\r\n\r\nThank you.`;
         const message = { notificationType: 'Received', mail: { messageId: receiptId, source: 'customer@example.net' }, receipt: { timestamp, recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey: `raw/${receiptId}`, topicArn: topic } } };
         await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message });
-        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, environment: 'live', attempts: 1 });
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
         return inboundId;
       }
       const inboundId = await receive(support.address), deliveries = await jobs('mailbox.webhook'); assert.equal(deliveries.length, 1);
@@ -3766,7 +3753,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const signature = createHmac('sha256', Buffer.from(webhook.secret.slice(6), 'base64')).update(`${headers.get('webhook-id')}.${headers.get('webhook-timestamp')}.${body}`).digest('base64');
         assert.equal(headers.get('webhook-signature'), `v1,${signature}`); event = JSON.parse(body); return new Response(null, { status: 204 });
       });
-      try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, environment: 'live', attempts: 1 }); } finally { hook.mock.restore(); }
+      try { await mailboxEventJobs['mailbox.webhook']!(runtime, deliveries[0]!.payload, { id: deliveries[0]!.id, workspaceId: scope, attempts: 1 }); } finally { hook.mock.restore(); }
       assert.equal(event?.threadId, sent.threadId); assert.equal(event?.addressId, support.id); assert.equal(event?.type, 'message.received');
       const reply = ok(await local('POST', replyPath, { addressId: support.id, replyToMessageId: event!.messageId, text: 'You are welcome' }, 'live', agent), 202);
       await dispatchDue(runtime, REGION);
@@ -3798,9 +3785,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const domainId = unique('domain'), publicAddress = 'support@example.com', address = 'support@inbox.example.com';
       runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
       await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
-      await db.query(`INSERT INTO operation_domains(id,workspace_id,environment,name,region) VALUES($1,$2,'live','example.com',$3),($4,$2,'live','inbox.example.com',$3)`, [unique('dom'),scope,REGION,domainId]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3),($4,$2,'inbox.example.com',$3)`, [unique('dom'),scope,REGION,domainId]);
       await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope,REGION,topic]);
-      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,environment,domain_id,name,region,status,catch_all) VALUES($1,$2,'live',$3,'inbox.example.com',$4,'active','store')`, [unique('mdom'),scope,domainId,REGION]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,'inbox.example.com',$4,'active','store')`, [unique('mdom'),scope,domainId,REGION]);
       const outgoing = new Map<string, any>(); let verified = false, dkim = false;
       t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
         if (cmd instanceof GetEmailIdentityCommand) { assert.equal(cmd.input.EmailIdentity, 'example.com'); return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: verified, VerificationStatus: verified ? 'SUCCESS' : 'PENDING', DkimAttributes: { Status: dkim ? 'SUCCESS' : 'PENDING', SigningEnabled: dkim } }; }
@@ -3825,7 +3812,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
         const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
         assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
-        await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,environment:'live',attempts:1});
+        await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,attempts:1});
       }
       const mime = (id: string, body: string, extra: string[]) => [`From: Customer <from@example.net>`,`To: ${publicAddress}`,'Subject: Widget issue',`Message-ID: <${id}@example.net>`,...extra,'',body].join('\r\n');
       const firstMime = mime('initial','original zebra',['Reply-To: first@example.net']);
@@ -3864,7 +3851,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(h.get('webhook-id'), event.id); assert.equal(h.get('webhook-signature'), 'v1,' + createHmac('sha256', Buffer.from(allHook.secret.slice(6),'base64')).update(`${event.id}.${h.get('webhook-timestamp')}.${body}`).digest('base64'));
         return new Response(null, { status: ++attempts === 1 ? 503 : 204 });
       });
-      const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,environment:'live',attempts:attempt });
+      const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,attempts:attempt });
       try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { receiver.mock.restore(); }
       const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
@@ -3916,7 +3903,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('job scheduling serves every class without claiming legacy test rows', async t => {
+  test('job scheduling serves every class', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { processJobs, enqueue } = await import('./src/jobs.js');
       const { jobHandlers } = await import('./src/sending.js');
@@ -3926,19 +3913,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const types = ['campaign.prepare', 'operation.webhook', 'operation.simulatedFeedback'];
       const handlers: Record<string, import('./src/core.js').JobHandler> = { 'email.dispatch': jobHandlers['email.dispatch']! };
       for (const type of types) {
-        handlers[type] = async (_runtime, _payload, job) => { seen.add(`${job.environment}:${type}`); };
-        for (const environment of ['live', 'test'] as const) {
-          for (let i = 0; i < 12; i++) await enqueue(runtime.db, { type, workspaceId: runtime.config.workspaceId, environment, payload: {} });
-        }
+        handlers[type] = async () => { seen.add(type); };
+        for (let i = 0; i < 12; i++) await enqueue(runtime.db, { type, workspaceId: runtime.config.workspaceId, payload: {} });
       }
       t.mock.method(Math, 'random', () => 0);
       assert.equal(await processJobs(runtime, handlers, 16, 2), 16);
-      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[0]))].sort(), ['live']);
-      assert.deepEqual([...new Set([...seen].map(value => value.split(':')[1]))].sort(), [...types].sort());
+      assert.deepEqual([...seen].sort(), [...types].sort());
       assert.equal(await processJobs(runtime, handlers, 100, 2), 20);
-      assert.deepEqual([...seen].sort(), types.map(type => `live:${type}`).sort());
+      assert.deepEqual([...seen].sort(), [...types].sort());
       await db.query('DELETE FROM jobs WHERE workspace_id = $1', [runtime.config.workspaceId]);
-      const retired = await enqueue(runtime.db, { type: 'email.dispatch', workspaceId: runtime.config.workspaceId, environment: 'live', payload: {} });
+      const retired = await enqueue(runtime.db, { type: 'email.dispatch', workspaceId: runtime.config.workspaceId, payload: {} });
       assert.equal(await processJobs(runtime, handlers, 1, 1), 1);
       assert.deepEqual((await db.query('SELECT status FROM jobs WHERE id = $1', [retired])).rows, [{ status: 'completed' }]);
     });
@@ -4080,17 +4064,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const feedback = await jobs('operation.simulatedFeedback');
       const deliver = feedback.find(job => job.payload.message.eventType === 'Delivery')!;
       const send = feedback.find(job => job.payload.message.eventType === 'Send')!;
-      const context = (job: Json) => ({ id: job.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const });
+      const context = (job: Json) => ({ id: job.id, attempts: 1, workspaceId: runtime.config.workspaceId });
       for (const job of [deliver, deliver, send, send]) await operationJobs['operation.simulatedFeedback']!(runtime, job.payload, context(job));
       const { recordEmailEvent } = await import('./src/sending.js');
-      assert.equal(await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'live', emailId: email.id, type: 'delivery', providerId: deliver.payload.message.mail.messageId, externalId: `${deliver.payload.topicArn}:${deliver.payload.messageId}` }), null, 'Replaying the same external event must not fan out again even without the receipt guard.');
+      assert.equal(await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, emailId: email.id, type: 'delivery', providerId: deliver.payload.message.mail.messageId, externalId: `${deliver.payload.topicArn}:${deliver.payload.messageId}` }), null, 'Replaying the same external event must not fan out again even without the receipt guard.');
       assert.equal(ok(await local('GET', `/v1/emails/${email.id}`)).status, 'delivered', 'Late Send feedback must not regress Delivery.');
       assert.equal(page(await local('GET', `/v1/emails/${email.id}/events`)).filter(event => ['send', 'delivery'].includes(event.type)).length, 2);
       const published = (await db.query('SELECT * FROM operation_events WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
       assert.deepEqual(published.map(event => event.type).sort(), ['email.delivered', 'email.sent']);
       const deliveries = (await db.query('SELECT * FROM operation_deliveries WHERE workspace_id = $1', [runtime.config.workspaceId])).rows;
       assert.equal(deliveries.length, 6);
-      assert.ok(deliveries.every(delivery => [...matching, liveEndpoint.id].includes(delivery.webhook_id) && delivery.environment === 'live' && delivery.payload.data.simulated === true));
+      assert.ok(deliveries.every(delivery => [...matching, liveEndpoint.id].includes(delivery.webhook_id) && delivery.payload.data.simulated === true));
       assert.equal(new Set(deliveries.map(delivery => `${delivery.webhook_id}:${delivery.event_id}`)).size, 6);
       assert.equal((await jobs('operation.webhook')).length, 6);
       assert.equal((await jobs('operation.publish')).length, 0);
@@ -4105,7 +4089,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const topicArn = `arn:aws:sns:${REGION}:111122223333:${setupResources(settings.installationId).topicName}`;
       await runtime.db.insert(sesRegions).values({ workspaceId: runtime.config.workspaceId, region: REGION, trustedAccountId: '111122223333', trustedTopicArn: topicArn });
       runtime.config.awsAccountId = '111122223333';
-      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, { ...context(deliver), environment: 'live' }), { code: 'SES_ACCOUNT_MISMATCH' });
+      await assert.rejects(operationJobs['operation.ses']!(runtime, deliver.payload, context(deliver)), { code: 'SES_ACCOUNT_MISMATCH' });
       error(await local('POST', '/v1/events/ses', { Type: 'Notification', MessageId: unique('unsigned-synthetic'), TopicArn: topicArn,
         Message: JSON.stringify(deliver.payload.message), Timestamp: new Date().toISOString(), SignatureVersion: '2', Signature: '!!!',
         SigningCertURL: `https://sns.${REGION}.amazonaws.com/SimpleNotificationService-synthetic.pem` }), 403, 'SNS_INVALID_SIGNATURE');
@@ -4149,10 +4133,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
       // is by contact ID; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live' ORDER BY id", [runtime.config.workspaceId])).rows;
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
-      assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND environment = 'live' AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
+      assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
       ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(contact => contact.id) }));
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('static-validation'), from: 'sender@example.com', subject: 'Unpersonalized subject', html: '<p>Unpersonalized content.</p>', audience: { listId: list.id } }), 201);
       const review = ok(await local('POST', `/v1/campaigns/${campaign.id}/reviews`, { revision: campaign.revision }), 202);
@@ -4185,7 +4169,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(await receipts(), [], 'Provider acceptance queues callback vehicles, not received feedback.');
       for (const [index, kind] of ['Send', 'Delivery'].entries()) {
         const callback = callbacks.find(job => job.payload.message.eventType === kind)!;
-        const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
+        const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId };
         await operationJobs['operation.simulatedFeedback']!(runtime, callback.payload, context);
         const persisted = await receipts();
         assert.equal(persisted.length, index + 1);
@@ -4249,7 +4233,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const providerId = `sim_${randomUUID()}`;
       const payload = { topicArn: `urn:opensend:simulated-ses:${REGION}`, messageId: unique('early-delivery'), region: REGION,
         message: { eventType: 'Delivery', mail: { messageId: providerId }, delivery: { timestamp: new Date().toISOString() } } };
-      const context = { id: unique('callback'), attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
+      const context = { id: unique('callback'), attempts: 1, workspaceId: runtime.config.workspaceId };
       const receipts = async () => (await db.query('SELECT processed_at FROM operation_sns_receipts WHERE workspace_id = $1 AND message_id = $2', [runtime.config.workspaceId, payload.messageId])).rows;
       for (let duplicate = 0; duplicate < 2; duplicate++) await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
       assert.deepEqual(await receipts(), [{ processed_at: null }]);
@@ -4266,7 +4250,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', '/v1/webhooks', { url: `https://example.com/${unique('recovery-hook')}`, eventTypes: ['email.delivered'] }), 201);
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
       // Simulate the provider association becoming durable after the callback.
-      await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, environment: 'live', emailId: email.id, providerId, type: 'accepted', externalId: unique('late-acceptance') });
+      await recordEmailEvent(runtime, { workspaceId: runtime.config.workspaceId, emailId: email.id, providerId, type: 'accepted', externalId: unique('late-acceptance') });
       await run('operation.simulatedFeedbackRecovery');
       await operationJobs['operation.simulatedFeedbackRecovery']!(runtime, payload, context);
       await operationJobs['operation.simulatedFeedback']!(runtime, payload, context);
@@ -4288,7 +4272,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const email = ok(await local('POST', '/v1/emails/send', mail()), 202);
       await run('email.dispatch');
       const callback = (await jobs('operation.simulatedFeedback')).find(job => job.payload.message.eventType === 'Delivery')!;
-      const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId, environment: 'live' as const };
+      const context = { id: callback.id, attempts: 1, workspaceId: runtime.config.workspaceId };
       const before = ok(await local('GET', `/v1/emails/${email.id}`));
       const beforeEvents = page(await local('GET', `/v1/emails/${email.id}/events`));
       // DDL and this workspace-only trigger are rollback-only. PostgreSQL itself
@@ -4342,16 +4326,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('refill-buffer') }), 201);
       // Bulk-seed reserved-domain contacts before the normal immutable snapshot.
-      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
-        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'refill-' || n || '@example.com', 'subscribed'
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'refill-' || n || '@example.com', 'subscribed'
         FROM generate_series(1, 500) AS n`, [runtime.config.workspaceId]);
-      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id)
-        SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [runtime.config.workspaceId, list.id]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id)
+        SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [runtime.config.workspaceId, list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('refill-buffer'), from: 'sender@example.com', subject: 'Synthetic refill capacity', html: '<p>Synthetic buffer acceptance only.</p>', audience: { listId: list.id } }), 201);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 500);
       await run('campaign.prepare');
       // Without a cached regional rate the buffer is the 400-row floor: one chunk fills it and the continuation waits.
-      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'live' AND region = $2", [runtime.config.workspaceId, REGION]);
+      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2", [runtime.config.workspaceId, REGION]);
       await run('campaign.expand');
       const floor = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(floor.counts.total, 400);
@@ -4360,10 +4344,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await jobs('email.dispatch')).length, 0, 'Expansion materializes rows, never per-email dispatch jobs.');
       for (const rate of [20, null]) {
         if (rate === null) {
-          await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND environment = 'live' AND region = $2", [runtime.config.workspaceId, REGION]);
+          await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2", [runtime.config.workspaceId, REGION]);
         } else {
-          await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
-            VALUES ($1, 'live', $2, $3, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+          await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at)
+            VALUES ($1, $2, $3, clock_timestamp()) ON CONFLICT ON CONSTRAINT sending_region_limits_pkey
             DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION, rate]);
         }
         const before = Date.now();
@@ -4382,8 +4366,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(full.expansion.expanded, 400);
       }
       // A high cached rate widens the buffer (ten seconds of sends), so the remaining recipients materialize at once.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at)
-        VALUES ($1, 'live', $2, 5000, clock_timestamp()) ON CONFLICT (workspace_id, environment, region)
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at)
+        VALUES ($1, $2, 5000, clock_timestamp()) ON CONFLICT ON CONSTRAINT sending_region_limits_pkey
         DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION]);
       await run('campaign.expand');
       const widened = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
@@ -4407,13 +4391,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const ws = runtime.config.workspaceId;
       const list = ok(await local('POST', '/v1/lists', { name: unique('paced') }), 201);
       // Bulk-seed reserved-domain contacts; every fourth one is plan=active so priority ordering is observable.
-      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent, properties)
-        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'paced-' || n || '@example.com', 'subscribed', CASE WHEN n % 4 = 0 THEN '{"plan":"active"}'::jsonb ELSE '{"plan":"none"}'::jsonb END
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent, properties)
+        SELECT 'con_' || md5($1 || n::text), $1, 'paced-' || n || '@example.com', 'subscribed', CASE WHEN n % 4 = 0 THEN '{"plan":"active"}'::jsonb ELSE '{"plan":"none"}'::jsonb END
         FROM generate_series(1, 1400) AS n`, [ws]);
-      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [ws, list.id]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [ws, list.id]);
       // A high cached rate keeps the dispatch buffer out of the way; the daily SES quota is unknown (0) until set below.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'live', $2, 5000, clock_timestamp())
-        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('paced'), from: 'sender@example.com', subject: 'Synthetic paced send', html: '<p>Synthetic pacing acceptance only.</p>', audience: { listId: list.id, priority: { property: 'plan', values: ['active'] } } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 99 } }), 422);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 1100, rateShare: 1 } }), 202).queued, 1400);
@@ -4467,18 +4451,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
       // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.expansion.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
       await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
-      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.expand');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.expansion.expanded, 1200, 'Nothing is released into the reserved SES quota.');
       assert.equal(view.expansion.waiting.reason, 'ses_daily_quota');
       // With quota available, the rest of the new 200/day window (100 already released) goes out.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND environment = 'live' AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
       await run('campaign.expand');
@@ -4500,12 +4484,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;
       const list = ok(await local('POST', '/v1/lists', { name: unique('shared') }), 201);
-      await db.query(`INSERT INTO audience_contacts (id, workspace_id, environment, email, marketing_consent)
-        SELECT 'con_' || md5($1 || n::text), $1, 'live', 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
-      await db.query(`INSERT INTO audience_list_members (workspace_id, environment, list_id, contact_id) SELECT workspace_id, environment, $2, id FROM audience_contacts WHERE workspace_id = $1 AND environment = 'live'`, [ws, list.id]);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'shared-' || n || '@example.com', 'subscribed' FROM generate_series(1, 1000) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [ws, list.id]);
       // 20/s regional rate: the 400-row campaign buffer only limits the final full-rate step.
-      await db.query(`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, checked_at) VALUES ($1, 'live', $2, 20, clock_timestamp())
-        ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = 20, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 20, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 20, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('shared'), from: 'sender@example.com', subject: 'Synthetic shared rate', html: '<p>Synthetic rate share acceptance only.</p>', audience: { listId: list.id } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { rateShare: 0.01 } }), 422);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: {} }), 202);
@@ -4622,9 +4606,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const callbacks = await jobs('operation.simulatedFeedback');
       assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
-      const versions = (await db.query('SELECT environment, dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
-      assert.deepEqual(versions, [{ environment: 'live', dispatch_version: 1 }, { environment: 'live', dispatch_version: 0 }, { environment: 'live', dispatch_version: 0 }]);
-      assert.equal((await db.query("SELECT count(*)::int AS count FROM jobs WHERE workspace_id = $1 AND environment = 'test'", [runtime.config.workspaceId])).rows[0].count, 0);
+      const versions = (await db.query('SELECT dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
+      assert.deepEqual(versions, [{ dispatch_version: 1 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
     });
   });
 

@@ -17,7 +17,7 @@ import { browserImageRenderer } from './adapters/browser-rendering.js';
 import { publicImageImporter } from './adapters/public-image.js';
 import { dispatcherName, shardCount } from './dispatcher-do.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
-import type { FeedbackItem, Mode } from './core.js';
+import type { FeedbackItem } from './core.js';
 import { ingestFeedbackBatch } from './operations.js';
 import { feedbackSink } from './adapters/feedback-queue.js';
 export { DispatcherShard } from './dispatcher-do.js';

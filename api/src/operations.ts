@@ -4,7 +4,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, DeleteEmailIdentityCommand, DeleteTenantResourceAssociationCommand, GetAccountCommand, GetEmailIdentityCommand, ListResourceTenantsCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
-import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
+import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { ensureTenant } from './provider-connections.js';
 import { jobs } from './db/core.js';
@@ -26,7 +26,7 @@ import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes
 export type { PublishedEvent } from './db/operations.js';
 
 const now = () => new Date().toISOString();
-const scoped = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, 'live'));
+const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
 const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
 const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false) }).openapi('CreateWebhook');
@@ -58,7 +58,7 @@ async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
     throw new ApiError(503, 'SES_UNAVAILABLE', 'SES could not complete the operation. Check service availability and deployment connectivity.', undefined, true);
   }
 }
-function metadata(row: typeof webhooks.$inferSelect) { const { encryptedSecret: _, workspaceId: _w, environment: _e, ...value } = row; return value; }
+function metadata(row: typeof webhooks.$inferSelect) { const { encryptedSecret: _, workspaceId: _w, ...value } = row; return value; }
 
 // Only administrator-controlled public DNS names belong in this exact-match allowlist.
 // It is the trust boundary against DNS rebinding: untrusted tenants cannot add hosts.
@@ -105,7 +105,7 @@ export async function reencryptWebhookSecrets(db: Database, config: Config): Pro
   const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
   let cursor: string | undefined;
   for (;;) {
-    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(and(eq(webhooks.environment, 'live'), cursor ? lt(webhooks.id, cursor) : undefined)).orderBy(desc(webhooks.id)).limit(100);
+    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(cursor ? lt(webhooks.id, cursor) : undefined).orderBy(desc(webhooks.id)).limit(100);
     if (!rows.length) return counts;
     for (const row of rows) {
       counts.scanned++;
@@ -136,8 +136,8 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
     for (const endpoint of endpoints) {
       if (!endpoint.eventTypes.includes(event.type) || (endpoint.regions && event.region !== null && !endpoint.regions.includes(event.region))) continue;
       const deliveryId = id('whd');
-      await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event });
-      await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } });
+      await tx.insert(deliveries).values({ id: deliveryId, workspaceId: event.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event });
+      await enqueue(tx, { type: 'operation.webhook', workspaceId: event.workspaceId, payload: { deliveryId, generation: 0 } });
       count++;
     }
     return count;
@@ -145,12 +145,12 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
   if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
-export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, environment: Mode, email: string) {
+export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, email: string) {
   const token = randomSecret('u_');
-  return { url: `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, environment, email: email.trim().toLowerCase() } };
+  return { url: `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, email: email.trim().toLowerCase() } };
 }
-export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, environment: Mode, email: string, db: DbExecutor = runtime.db): Promise<string> {
-  const link = await createUnsubscribeLink(runtime, workspaceId, environment, email);
+export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, email: string, db: DbExecutor = runtime.db): Promise<string> {
+  const link = await createUnsubscribeLink(runtime, workspaceId, email);
   await db.insert(unsubscribeTokens).values(link.record);
   return link.url;
 }
@@ -165,7 +165,7 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND p.inbound_bucket IS NOT NULL) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND pc.status='ready'
-    WHERE d.workspace_id=${wid} AND d.environment='live' AND d.id=${domainId} ${lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``}`;
+    WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``}`;
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheckDomains?.length ? sql`WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheckDomains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql``;
@@ -234,7 +234,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,report:Readiness,w
   const next=holding && prior ? prior : observation ? {...observation.mx.expected,purpose:'receiving' as const,status:state(observed!==null),...(observation.note?{note:observation.note}:{})} : record;
   if (target && target!==row.receiving_name) {
     // A workspace may claim both example.com and reply.example.com. Never route one address twice.
-    const owner=(await db.execute<{name:string}>(sql`SELECT name FROM mailbox_domains WHERE workspace_id=${wid} AND environment='live' AND receiving_host=${target} AND name<>${row.name} AND status IN ('active','provisioning') LIMIT 1`)).rows[0];
+    const owner=(await db.execute<{name:string}>(sql`SELECT name FROM mailbox_domains WHERE workspace_id=${wid} AND receiving_host=${target} AND name<>${row.name} AND status IN ('active','provisioning') LIMIT 1`)).rows[0];
     if (owner) { target=null;next.note=`${next.name} already receives mail through ${owner.name}.`; }
   }
   report.dns=report.dns.map(r=>r.purpose==='receiving'?next:r);
@@ -243,9 +243,9 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,report:Readiness,w
   const mx=holding ? null : observation?.mx;
   await db.execute(sql`WITH claim AS (UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb,verified=${report.verified},ready=${report.ready},
     receiving_name=${target},receiving_eligible=${eligible},txt_misses=${txtMisses},mx_misses=${holding?misses:0} WHERE name=${row.name} AND token=${row.token} AND connection_id=${row.connection.id} RETURNING workspace_id)
-    INSERT INTO mailbox_domains AS m(id,workspace_id,environment,domain_id,name,region,receiving_host,status,enabled_at,mx,checked_at)
-    SELECT ${id('mdom')},workspace_id,'live',${row.id},${row.name},${row.region},${next.name},${status},CASE WHEN ${!!target} THEN now() END,${mx?JSON.stringify(mx):null}::jsonb,${mx?.checkedAt??null}::timestamptz FROM claim
-    ON CONFLICT(workspace_id,environment,name) DO UPDATE SET domain_id=excluded.domain_id,parent_id=NULL,region=excluded.region,receiving_host=excluded.receiving_host,status=excluded.status,
+    INSERT INTO mailbox_domains AS m(id,workspace_id,domain_id,name,region,receiving_host,status,enabled_at,mx,checked_at)
+    SELECT ${id('mdom')},workspace_id,${row.id},${row.name},${row.region},${next.name},${status},CASE WHEN ${!!target} THEN now() END,${mx?JSON.stringify(mx):null}::jsonb,${mx?.checkedAt??null}::timestamptz FROM claim
+    ON CONFLICT ON CONSTRAINT mailbox_domains_name DO UPDATE SET domain_id=excluded.domain_id,parent_id=NULL,region=excluded.region,receiving_host=excluded.receiving_host,status=excluded.status,
       enabled_at=CASE WHEN ${!!target && target===row.receiving_name} THEN m.enabled_at ELSE excluded.enabled_at END,
       mx=coalesce(excluded.mx,m.mx),checked_at=coalesce(excluded.checked_at,m.checked_at),updated_at=now()`);
   if (byo && (target!==row.receiving_name || status==='provisioning')) await queueReconcile(db,wid,row.region);
@@ -273,7 +273,7 @@ async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string
 }
 function recheckJob(wid: string, source: SQL, supersede=false) {
   // A recovered creation or MAIL FROM change supersedes even a running poll based on an older SES read.
-  return sql`INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},'live',
+  return sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},
     jsonb_build_object('domainId',r.id,'token',r.token) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
     payload=excluded.payload,created_at=now() ${supersede ? sql`` : sql`WHERE jobs.status<>'running'`}`;
 }
@@ -369,7 +369,8 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', tags: ['Settings'], security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).openapi('UpdateWorkspaceSettings')) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), { name } = c.req.valid('json');
     if (c.env.config.multiTenant) await c.env.db.update(workspaces).set({ name }).where(eq(workspaces.id, a.workspaceId));
-    else await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
+    else await c.env.db.execute(sql`INSERT INTO operation_settings(workspace_id,name) VALUES (${a.workspaceId},${name})
+      ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=excluded.name,updated_at=now()`);
     return c.json({ name }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
@@ -439,7 +440,9 @@ export function registerOperations(app: App) {
       catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    const [row] = await c.env.db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
+    const { rows: [row] } = await c.env.db.execute<DomainRef>(sql`INSERT INTO operation_domains(id,workspace_id,name,region)
+      VALUES (${id('dom')},${a.workspaceId},${body.name},${body.region}) ON CONFLICT ON CONSTRAINT operation_domain_scope
+      DO UPDATE SET updated_at=now() RETURNING id,name,region`);
     return c.json(await domainReadiness(c.env, row!, identity), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
@@ -509,7 +512,7 @@ export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), body = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
-    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, environment: a.environment, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, webhookId)) }).returning();
+    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, webhookId)) }).returning();
     return c.json(metadata(row!), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => c.json(metadata(await getWebhook(c.env, workspaceActor(c), c.req.valid('param').id)), 200));
@@ -524,7 +527,7 @@ export function registerOperations(app: App) {
         for (const delivery of paused) {
           const generation = delivery.generation + 1;
           await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(and(scoped(deliveries, a), eq(deliveries.id, delivery.id)));
-          await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId: delivery.id, generation } });
+          await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId: delivery.id, generation } });
         }
       }
       return updated!;
@@ -541,8 +544,8 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks/{id}/test', operationId: 'testWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 202: response(queuedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), endpoint = await getWebhook(c.env, a, c.req.valid('param').id); webhookUrl(c.env, endpoint.url);
-    const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, environment: a.environment, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
-    await c.env.db.transaction(async tx => { await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, environment: a.environment, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId, generation: 0 } }); });
+    const deliveryId = id('whd'), event: PublishedEvent = { id: id('evt_test'), type: 'email.delivered', createdAt: now(), workspaceId: a.workspaceId, region: null, data: { synthetic: true, test: true, message: 'Explicit webhook endpoint test. No email was sent.' } };
+    await c.env.db.transaction(async tx => { await tx.insert(deliveries).values({ id: deliveryId, workspaceId: a.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event, synthetic: true }); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId, generation: 0 } }); });
     return c.json({ id: deliveryId, status: 'pending' as const }, 202);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}/deliveries', operationId: 'listWebhookDeliveries', tags: ['Webhooks'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(listSchema(deliverySchema, 'WebhookDeliveryPage')), ...errors } }), async c => {
@@ -557,7 +560,7 @@ export function registerOperations(app: App) {
     await c.env.db.transaction(async tx => {
       const [row] = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, p.id), eq(deliveries.id, p.deliveryId))).for('update'); if (!row) return notFound('Delivery');
       if (row.status === 'pending') throw new ApiError(409, 'DELIVERY_PENDING', 'This delivery already has a pending attempt.');
-      const generation = row.generation + 1; await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(eq(deliveries.id, row.id)); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, environment: a.environment, payload: { deliveryId: row.id, generation } });
+      const generation = row.generation + 1; await tx.update(deliveries).set({ status: 'pending', generation, updatedAt: now() }).where(eq(deliveries.id, row.id)); await enqueue(tx, { type: 'operation.webhook', workspaceId: a.workspaceId, payload: { deliveryId: row.id, generation } });
     });
     return c.json({ id: p.deliveryId, status: 'pending' as const }, 202);
   });
@@ -693,13 +696,13 @@ function registerPublicEvents(app: App) {
   const tokenParams = z.object({ token: z.string().regex(/^u_[a-f0-9]{64}$/) }).openapi('UnsubscribeToken');
   for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...errors } }), async c => {
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-    const [token] = await c.env.db.select().from(unsubscribeTokens).where(and(eq(unsubscribeTokens.environment, 'live'), eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token)))); if (!token) return notFound('Unsubscribe link');
+    const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(c.req.valid('param').token))); if (!token) return notFound('Unsubscribe link');
     // Link scanners and mail security gateways fetch every link in a message, so a footer GET only asks for
     // confirmation. Mailbox one-click (RFC 8058, List-Unsubscribe-Post) and the confirmation form are POSTs.
     if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', '<p>You will no longer receive marketing emails from this workspace.</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>'), 200);
     const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>));
     // The audience helper commits consent, audit, and the subscription event outbox atomically.
-    await recordUnsubscribe(c.env, token.workspaceId, token.environment, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
+    await recordUnsubscribe(c.env, token.workspaceId, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
     return c.html(unsubscribePage('You’re unsubscribed', '<p>You will no longer receive marketing emails from this workspace.</p>'), 200);
   });
 }
@@ -751,7 +754,7 @@ function registerMetrics(app: App) {
     return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) };
     };
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
-    // 60-second cache per workspace/environment/filters/window; API keys, MCP and agent tokens stay exact.
+    // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
     const startMs = Date.parse(start), endMs = Date.parse(end), nowMs = Date.now();
     // "Last N days/hours as of now" windows move every request; bucket them by minute and window length.
@@ -759,7 +762,7 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, a.environment, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
+    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });
@@ -820,7 +823,7 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
   await runtime.db.transaction(async tx => {
-    await tx.insert(deliveryAttempts).values({ id: id('wha'), workspaceId: job.workspaceId, environment: job.environment, deliveryId: delivery.id, statusCode, error, durationMs: Date.now() - start });
+    await tx.insert(deliveryAttempts).values({ id: id('wha'), workspaceId: job.workspaceId, deliveryId: delivery.id, statusCode, error, durationMs: Date.now() - start });
     await tx.update(deliveries).set({ attemptCount: sql`${deliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: now() }).where(where);
   });
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
@@ -837,7 +840,7 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const timestamp = type !== 'receipt' ? data[type]?.timestamp : undefined;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  return { environment: 'live', type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
+  return { type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
     ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther ? undefined : simulated ? 'operation.simulatedFeedbackRecovery' : 'operation.ses' } };
 }
 /**
@@ -866,7 +869,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
         if (result.error || !result.workspaceId) { outcomes[entry.index] = { ok: false, error: result.error ?? 'SES_EMAIL_NOT_FOUND' }; continue; }
         if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
         outcomes[entry.index] = { ok: true };
-        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, environment: entry.input.environment, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
+        log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
       }
       // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
       if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
@@ -877,7 +880,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
   // The feedback consumer has one connection; finish each non-routine receipt before starting the next.
   for (const { index, item, workspaceId } of other) {
     try {
-      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId, environment: 'live' });
+      await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId });
       outcomes[index] = { ok: true };
     } catch (error) {
       outcomes[index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PROCESS_FAILED' };
@@ -907,9 +910,9 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
     const preferences = data.subscription?.newTopicPreferences;
     // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
     if (preferences?.unsubscribeAll === true && email.to.length === 1 && !email.cc.length && !email.bcc.length) {
-      await recordUnsubscribe(runtime, job.workspaceId, job.environment, email.to[0]!, 'ses-subscription');
+      await recordUnsubscribe(runtime, job.workspaceId, email.to[0]!, 'ses-subscription');
     } else {
-      await publishEvent(runtime, { id: `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`, type: 'contact.subscription_changed', createdAt: receipt.createdAt, workspaceId: job.workspaceId, environment: job.environment, region: email.region, data: { emailId: email.id, source: 'ses', preferences: preferences ?? null, appliedToWorkspaceConsent: false } });
+      await publishEvent(runtime, { id: `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`, type: 'contact.subscription_changed', createdAt: receipt.createdAt, workspaceId: job.workspaceId, region: email.region, data: { emailId: email.id, source: 'ses', preferences: preferences ?? null, appliedToWorkspaceConsent: false } });
     }
     await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere); return;
   }
@@ -918,14 +921,14 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const eventDetail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
   const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
   const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;
-  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, environment: job.environment, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
+  const normalized: PublishedEvent = { id: eventId, workspaceId: job.workspaceId, region: email.region, type: mapped.type, createdAt: eventTime, data: { emailId: email.id, providerId, ...(kind === 'Open' || kind === 'Click' ? { isBotEvent: eventDetail.isBotEvent ?? 'Unknown' } : {}), ...((kind === 'Bounce') ? { bounceType: eventDetail.bounceType ?? 'Unknown', bounceSubType: eventDetail.bounceSubType ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof eventDetail.link === 'string' ? { link: eventDetail.link } : {}) } };
   // Routine send/delivery events have no later consent or engagement writes.
   // Mark their receipt in the same commit as status, event and webhook fan-out.
   const routine = kind === 'Send' || kind === 'Delivery';
   // SES Auto Validation drops risky recipients before sending and reports each as a Permanent bounce with this subtype.
   // It never left SES, so record it as suppressed (not bounced); the contact is still suppressed below.
   const validationSuppressed = kind === 'Bounce' && eventDetail.bounceSubType === 'EmailValidationSuppressed';
-  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, environment: job.environment, emailId: email.id, providerId, type: validationSuppressed ? 'validation_suppressed' : mapped.rawType,
+  await recordEmailEvent(runtime, { workspaceId: job.workspaceId, emailId: email.id, providerId, type: validationSuppressed ? 'validation_suppressed' : mapped.rawType,
     ...(validationSuppressed ? { errorCode: 'EMAIL_VALIDATION_SUPPRESSED' } : {}), externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime,
     ...(routine ? { receipt: { topicArn: String(payload.topicArn), messageId: String(payload.messageId) } } : {}),
   });
@@ -939,7 +942,9 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (suppress) {
         const suppressionReason = kind === 'Complaint' ? 'complaint' : validationSuppressed ? 'email_validation' : 'hard_bounce';
-        await tx.insert(contacts).values({ id: id('con'), workspaceId: job.workspaceId, environment: job.environment, email: address, suppressed: true, suppressionReason }).onConflictDoUpdate({ target: [contacts.workspaceId, contacts.environment, contacts.email], set: { suppressed: true, suppressionReason, updatedAt: now() } });
+        await tx.execute(sql`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason)
+          VALUES (${id('con')},${job.workspaceId},${address},true,${suppressionReason}) ON CONFLICT ON CONSTRAINT audience_contacts_email_scope
+          DO UPDATE SET suppressed=true,suppression_reason=excluded.suppression_reason,updated_at=now()`);
       } else if (observeEngagement) {
         const column = kind === 'Open' ? contacts.lastOpenAt : contacts.lastClickAt;
         const observed = kind === 'Open' ? contacts.openObservedSince : contacts.clickObservedSince;
@@ -974,7 +979,7 @@ const simulatedFeedbackRecovery: JobHandler = async (runtime, payload, job) => {
 const publishJob: JobHandler = async (runtime, payload, job) => {
   const parsed = eventSchema.safeParse(payload.event);
   if (!parsed.success || parsed.data.workspaceId !== job.workspaceId) throw new ApiError(422, 'INVALID_EVENT_JOB', 'The queued event is invalid or has mismatched scope.');
-  await publishEvent(runtime, { ...parsed.data, environment: 'live' });
+  await publishEvent(runtime, parsed.data);
 };
 const publishBatchJob: JobHandler = async (runtime, payload, job) => {
   if (!Array.isArray(payload.events) || payload.events.length < 1 || payload.events.length > 100) throw new ApiError(422, 'INVALID_EVENT_BATCH', 'Event batches must contain between one and 100 events.');
@@ -982,7 +987,7 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
   for (const value of payload.events) {
     const parsed = eventSchema.safeParse(value);
     if (!parsed.success || parsed.data.workspaceId !== job.workspaceId) throw new ApiError(422, 'INVALID_EVENT_JOB', 'A queued batch event is invalid or has mismatched scope.');
-    batch.push({ ...parsed.data, environment: 'live' });
+    batch.push(parsed.data);
   }
   const unique = batch.filter((event, index) => batch.findIndex(candidate => candidate.id === event.id) === index);
   await runtime.db.transaction(async tx => {
@@ -996,8 +1001,8 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     if (!queued.length) return;
     for (let offset = 0; offset < queued.length; offset += 1000) {
       const group = queued.slice(offset, offset + 1000);
-      await tx.insert(deliveries).values(group.map(({ event, endpoint, deliveryId }) => ({ id: deliveryId, workspaceId: event.workspaceId, environment: event.environment, webhookId: endpoint.id, eventId: event.id, payload: event })));
-      await tx.insert(jobs).values(group.map(({ event, deliveryId }) => ({ id: id('job'), type: 'operation.webhook', workspaceId: event.workspaceId, environment: event.environment, payload: { deliveryId, generation: 0 } })));
+      await tx.insert(deliveries).values(group.map(({ event, endpoint, deliveryId }) => ({ id: deliveryId, workspaceId: event.workspaceId, webhookId: endpoint.id, eventId: event.id, payload: event })));
+      await tx.insert(jobs).values(group.map(({ event, deliveryId }) => ({ id: id('job'), type: 'operation.webhook', workspaceId: event.workspaceId, payload: { deliveryId, generation: 0 } })));
     }
   });
 };

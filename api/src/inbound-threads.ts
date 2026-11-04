@@ -47,14 +47,14 @@ const encodeCursor = (time: string, id: string) => Buffer.from(JSON.stringify([t
 type Filter = { addressId?: string; threadId?: string; messageId?: string };
 function visibleLinks(value: MailboxAccess, filter: Filter) {
   if (filter.addressId && value.mailboxIds && !value.mailboxIds.includes(filter.addressId)) throw new ApiError(404, 'NOT_FOUND', 'Address was not found.');
-  return and(eq(links.workspaceId, value.workspaceId), eq(links.environment, value.environment),
+  return and(eq(links.workspaceId, value.workspaceId),
     filter.addressId ? eq(links.mailboxId, filter.addressId) : value.mailboxIds ? inArray(links.mailboxId, value.mailboxIds) : undefined,
     filter.threadId ? eq(links.threadId, filter.threadId) : undefined, filter.messageId ? eq(links.messageId, filter.messageId) : undefined);
 }
 
 export function visibleThreadAddresses(value: MailboxAccess, threadId: string, addressId?: string) {
   if (addressId && value.mailboxIds && !value.mailboxIds.includes(addressId)) throw new ApiError(404,'NOT_FOUND','Address was not found.');
-  return and(eq(mailboxThreads.threadId,threadId),eq(mailboxThreads.workspaceId,value.workspaceId),eq(mailboxThreads.environment,value.environment),
+  return and(eq(mailboxThreads.threadId,threadId),eq(mailboxThreads.workspaceId,value.workspaceId),
     addressId ? eq(mailboxThreads.mailboxId,addressId) : value.mailboxIds ? inArray(mailboxThreads.mailboxId,value.mailboxIds) : undefined);
 }
 
@@ -70,7 +70,7 @@ async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, 
   const rows = await db.execute<{ id: string; subject: string; snippet: string; at: string; address_ids: string[]; message_count: number }>(sql`
     WITH threads AS MATERIALIZED (
       SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
-      FROM ${t} WHERE ${and(eq(t.workspaceId,value.workspaceId),eq(t.environment,value.environment),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
+      FROM ${t} WHERE ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
         filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
         ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
       GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
@@ -157,7 +157,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     return c.json(result, 200);
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND ${links.messageId}=${messages.id} ORDER BY ${links.mailboxId})`;
-  const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),eq(messages.environment,v.environment),
+  const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
     v.admin && !f.addressId ? undefined : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
   // Never grant this projection to an address key, even a key that can read every address.

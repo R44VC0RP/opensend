@@ -87,7 +87,7 @@ async function queueIfChanged(runtime: Runtime, workspaceId: string, region: str
     const history = recent.map(row => ({ level: (LEVELS as readonly string[]).includes(String(row.payload.level)) ? row.payload.level as Level : 'ok' as Level, at: Date.parse(row.createdAt) }));
     const decision = decideAlert(metric, value, history, Date.now());
     if (!decision) return false;
-    await enqueue(tx, { type: JOB, workspaceId, environment: 'live', payload: { region, metric, ...decision, value } });
+    await enqueue(tx, { type: JOB, workspaceId, payload: { region, metric, ...decision, value } });
     return true;
   });
 }

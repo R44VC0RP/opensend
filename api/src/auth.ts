@@ -68,7 +68,7 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       const tracked = await timed(c, 'budget-db', () => chargeCredential(c, agentTokens, sql`
         SELECT id, workspace_id, grant_id AS key_id, ${limit}::int AS max_requests FROM agent_tokens
         WHERE id = ${temporary.id} AND revoked_at IS NULL AND workspace_id = ${grant.workspaceId} AND grant_id = ${temporary.grant}
-          AND environment = 'live' AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
+          AND date_trunc('milliseconds', expires_at) = ${new Date(temporary.exp).toISOString()}::timestamptz
           AND permissions = ${JSON.stringify(temporary.permissions)}::jsonb AND domains = ${JSON.stringify(temporary.domains)}::jsonb`));
       if (!tracked) throw invalid();
       c.set('actor', { ...grant, permissions: temporary.permissions, domains: temporary.domains, credential: 'agentToken' });
@@ -79,9 +79,9 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string }>(c, apiKeys, sql`
         SELECT id, workspace_id, id AS key_id, permissions, domains,
           ${limit}::int AS max_requests
-        FROM api_keys WHERE hash = ${hash} AND environment = 'live' AND revoked_at IS NULL`));
+        FROM api_keys WHERE hash = ${hash} AND revoked_at IS NULL`));
       if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
-      c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, environment: 'live', permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
+      c.set('actor', { keyId: key.id, workspaceId: key.workspace_id, permissions: key.permissions, domains: key.domains, credential: 'apiKey' });
     }
   } else {
     const dashboard = await getDashboardActor(c.env, c.req.raw.headers, async (name, work) => timed(c, name, work), headers => {
@@ -102,7 +102,7 @@ function manageKeys(c: Parameters<typeof actor>[0]) {
   if (value.domains.length) throw new ApiError(403, 'PERMISSION_DENIED', 'Key administration requires unrestricted management access.');
   return value;
 }
-const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, workspaceId: _workspace, environment: _environment, ...view } = key; return view; };
+const keyView = (key: typeof apiKeys.$inferSelect) => { const { hash: _hash, workspaceId: _workspace, ...view } = key; return view; };
 export function registerAuth(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens', operationId: 'createAgentToken', tags: ['Auth'], security, description: 'Creates a nonrefreshable, short-lived API token for temporary uncommitted scripts. Requires an MCP OAuth principal and cannot delegate permissions beyond that originating approval. Manage tokens cannot administer credentials.', request: { body: json(z.object({
     permissions: z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3).refine(value => value[0] === 'read' && new Set(value).size === value.length, 'Start with read and do not repeat permissions.'),
@@ -116,35 +116,35 @@ export function registerAuth(app: App) {
     const expiresAt = new Date(Date.now() + input.expiresInSeconds * 1000).toISOString();
     const tokenId = id('agt');
     const token = await createAgentToken(c.env.config, { id: tokenId, grant: identity.keyId, permissions: input.permissions, domains: input.domains, expiresAt });
-    await c.env.db.insert(agentTokens).values({ id: tokenId, workspaceId: identity.workspaceId, grantId: identity.keyId, environment: 'live', permissions: input.permissions, domains: input.domains, purpose: input.purpose, expiresAt });
+    await c.env.db.insert(agentTokens).values({ id: tokenId, workspaceId: identity.workspaceId, grantId: identity.keyId, permissions: input.permissions, domains: input.domains, purpose: input.purpose, expiresAt });
     return c.json({ id: tokenId, token, expiresAt, permissions: input.permissions, domains: input.domains, purpose: input.purpose }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/agent-tokens', operationId: 'listAgentTokens', tags: ['Auth'], security, request: { query: PageQuery.extend({ includeInactive: z.enum(['true', 'false']).default('false') }) }, responses: { 200: response(page(AgentTokenRecord)), ...errors } }), async c => {
     const identity = manageKeys(c); const query = c.req.valid('query');
-    const rows = await c.env.db.select().from(agentTokens).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.environment, 'live'), query.includeInactive === 'false' ? and(isNull(agentTokens.revokedAt), gt(agentTokens.expiresAt, new Date().toISOString())) : undefined, query.cursor ? gt(agentTokens.id, query.cursor) : undefined)).orderBy(agentTokens.id).limit(query.limit + 1);
-    const data = rows.slice(0, query.limit).map(({ workspaceId: _workspace, environment: _environment, ...row }) => row);
+    const rows = await c.env.db.select().from(agentTokens).where(and(eq(agentTokens.workspaceId, identity.workspaceId), query.includeInactive === 'false' ? and(isNull(agentTokens.revokedAt), gt(agentTokens.expiresAt, new Date().toISOString())) : undefined, query.cursor ? gt(agentTokens.id, query.cursor) : undefined)).orderBy(agentTokens.id).limit(query.limit + 1);
+    const data = rows.slice(0, query.limit).map(({ workspaceId: _workspace, ...row }) => row);
     return c.json({ data, nextCursor: rows.length > query.limit ? rows[query.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent-tokens/{id}/revoke', operationId: 'revokeAgentToken', tags: ['Auth'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const identity = manageKeys(c), tokenId = c.req.valid('param').id;
-    const [row] = await c.env.db.update(agentTokens).set({ revokedAt: new Date().toISOString() }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.environment, 'live'), eq(agentTokens.id, tokenId), isNull(agentTokens.revokedAt))).returning({ id: agentTokens.id });
+    const [row] = await c.env.db.update(agentTokens).set({ revokedAt: new Date().toISOString() }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.id, tokenId), isNull(agentTokens.revokedAt))).returning({ id: agentTokens.id });
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Agent token was not found or is already revoked.');
     return c.json({ id: row.id, revoked: true as const }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys', operationId: 'createApiKey', tags: ['ApiKeys'], security, request: { body: json(KeyInput) }, responses: { 201: response(KeySchema.extend({ secret: z.string() })), ...errors } }), async c => {
     const auth = manageKeys(c); const input = c.req.valid('json');
     const secret = randomSecret('os_');
-    const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, environment: 'live', hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
+    const [key] = await c.env.db.insert(apiKeys).values({ id: id('key'), workspaceId: auth.workspaceId, ...input, hash: await digest(secret), prefix: secret.slice(0, 14) }).returning();
     return c.json({ ...keyView(key!), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
     const auth = manageKeys(c); const q = c.req.valid('query');
-    const rows = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, auth.workspaceId), eq(apiKeys.environment, 'live'), q.includeRevoked === 'false' ? isNull(apiKeys.revokedAt) : undefined, q.cursor ? gt(apiKeys.id, q.cursor) : undefined)).orderBy(apiKeys.id).limit(q.limit + 1);
+    const rows = await c.env.db.select().from(apiKeys).where(and(eq(apiKeys.workspaceId, auth.workspaceId), q.includeRevoked === 'false' ? isNull(apiKeys.revokedAt) : undefined, q.cursor ? gt(apiKeys.id, q.cursor) : undefined)).orderBy(apiKeys.id).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(keyView), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/api-keys/{id}/revoke', operationId: 'revokeApiKey', tags: ['ApiKeys'], security, request: { params: IdParams }, responses: { 200: response(z.object({ id: z.string(), revoked: z.literal(true) })), ...errors } }), async c => {
     const auth = manageKeys(c); const keyId = c.req.valid('param').id;
-    const [key] = await c.env.db.update(apiKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, auth.workspaceId), eq(apiKeys.environment, 'live'))).returning({ id: apiKeys.id });
+    const [key] = await c.env.db.update(apiKeys).set({ revokedAt: new Date().toISOString() }).where(and(eq(apiKeys.id, keyId), eq(apiKeys.workspaceId, auth.workspaceId))).returning({ id: apiKeys.id });
     if (!key) throw new ApiError(404, 'NOT_FOUND', 'API key was not found.');
     return c.json({ id: key.id, revoked: true as const }, 200);
   });

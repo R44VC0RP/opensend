@@ -249,7 +249,7 @@ export async function getDashboardActor(runtime: Runtime, headers: Headers, meas
       if (!member) return null;
       principal = { ...member, email: user.email, name: user.name };
     }
-    return { keyId: `user_${session.user.id}`, ...principal, environment: 'live', permissions: principal.role === 'member' ? ['read', 'send'] : ['manage'], domains: [], credential: 'dashboard' };
+    return { keyId: `user_${session.user.id}`, ...principal, permissions: principal.role === 'member' ? ['read', 'send'] : ['manage'], domains: [], credential: 'dashboard' };
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (error instanceof APIError && error.statusCode === 401) return null;

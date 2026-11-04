@@ -26,13 +26,13 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   // already have reached SES: record uncertainty atomically; never put it back on the send queue.
   const recovery = recoverInterrupted ? sql`WITH stale AS (
     UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
-    WHERE environment='live' AND status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, environment, simulated, dispatch_version
+    WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, simulated, dispatch_version
   ), events AS (
-    INSERT INTO sending_email_events(id,workspace_id,environment,email_id,type,external_id,simulated,data)
-    SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, environment, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
+    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
+    SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
       simulated, '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb FROM stale ON CONFLICT DO NOTHING
   )` : sql``;
-  const due = sql`e.environment='live' AND e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
+  const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
     SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c
     WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND ${due})` : sql`

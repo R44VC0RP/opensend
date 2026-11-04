@@ -26,7 +26,7 @@ type MessageRow = typeof mailMessages.$inferSelect;
 
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */
 export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
-  const scope={workspaceId:mailbox.workspaceId,environment:mailbox.environment}, out:ResolvedAttachment[]=[];
+  const scope={workspaceId:mailbox.workspaceId}, out:ResolvedAttachment[]=[];
   if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
@@ -45,7 +45,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
       } catch (e) {if(e instanceof ApiError) throw e; throw new ApiError(503,'ATTACHMENT_UNAVAILABLE','The attachment could not be read.','attachments',true);} finally{s3.destroy();}
       out.push(await storeAttachmentBytes(runtime,scope,{filename:file.file.filename,contentType:file.file.contentType,disposition:file.file.disposition,contentId:file.file.contentId??undefined},bytes));
     } else {
-      const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.environment,scope.environment),eq(sendingAttachments.id,item.id)));
+      const [source]=await runtime.db.select().from(sendingAttachments).where(and(eq(sendingAttachments.workspaceId,scope.workspaceId),eq(sendingAttachments.id,item.id)));
       if(!source || !ownsUpload(scope.workspaceId,source))throw new ApiError(404,'ATTACHMENT_NOT_FOUND','The upload was not found.','attachments');
       out.push(source);
     }
@@ -58,7 +58,7 @@ export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, it
 export async function archiveMailboxFiles(runtime:Runtime,wid:string,messageId:string,client?:S3Client){
   const rows=await runtime.db.select({file:mailAttachments,source:sendingAttachments,region:mailMessages.region}).from(mailAttachments)
     .innerJoin(mailMessages,and(eq(mailMessages.id,mailAttachments.messageId),eq(mailMessages.workspaceId,wid)))
-    .innerJoin(sendingAttachments,and(eq(sendingAttachments.id,mailAttachments.sourceId),eq(sendingAttachments.workspaceId,wid),eq(sendingAttachments.environment,mailAttachments.environment)))
+    .innerJoin(sendingAttachments,and(eq(sendingAttachments.id,mailAttachments.sourceId),eq(sendingAttachments.workspaceId,wid)))
     .where(and(eq(mailAttachments.workspaceId,wid),eq(mailAttachments.messageId,messageId)));
   if(!rows.length)return;
   const {region,file:first}=rows[0]!;
@@ -143,7 +143,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND c.status='ready')` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
   const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`,runtime) : sql`true`} AS verified
-    FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId} AND d.environment=${message.scope.environment}`)).rows[0];
+    FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
   if (message.region && domain.region !== message.region) throw new ApiError(422, 'MAILBOX_REGION_MISMATCH', 'Tracked mail must use the mailbox region.', 'region');
@@ -179,7 +179,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
     await tx.insert(attachmentLinks).values(files.map(f=>({...message.scope,attachmentId:f.sourceId,ownerType:'mailbox' as const,ownerId:f.id})));
   }
   await attachToMailboxes(tx, message.scope, row!, [message.mailbox.id]);
-  const queued = await recordEvents(tx, message.scope.workspaceId, message.scope.environment, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
+  const queued = await recordEvents(tx, message.scope.workspaceId, [{ type: 'message.queued', mailboxId: message.mailbox.id, threadId, messageId: row!.id, data: { to: message.to, subject: message.subject, emailId } }]);
   return { message: row!, runnable: queued };
 }
 
@@ -187,20 +187,20 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
 export async function assertRegisteredSender(db: DbExecutor, scope: Scope, region: string, from: string, field = 'from') {
   const host = from.split('@')[1]!.toLowerCase();
   const names = host.split('.').map((_, index, parts) => parts.slice(index).join('.')).filter(name => name.includes('.'));
-  const [registered] = await db.select({ name: domains.name }).from(domains).where(and(eq(domains.workspaceId, scope.workspaceId), eq(domains.environment, scope.environment), eq(domains.region, region), inArray(domains.name, names))).limit(1);
+  const [registered] = await db.select({ name: domains.name }).from(domains).where(and(eq(domains.workspaceId, scope.workspaceId), eq(domains.region, region), inArray(domains.name, names))).limit(1);
   if (!registered) throw new ApiError(422, 'SENDER_DOMAIN_NOT_REGISTERED', `Add ${host} or a parent domain to OpenSend in ${region} before sending from it.`, field);
 }
 
 /** Explicit bridge only: an ordinary send from the same address must not become readable by a mailbox key. */
 export async function trackedAttachments(runtime:Runtime,actor:Actor,mailboxId:string,input:SendRequest){
-  const [mailbox]=await runtime.db.select().from(mailboxes).where(and(eq(mailboxes.id,mailboxId),eq(mailboxes.workspaceId,actor.workspaceId),eq(mailboxes.environment,actor.environment)));
+  const [mailbox]=await runtime.db.select().from(mailboxes).where(and(eq(mailboxes.id,mailboxId),eq(mailboxes.workspaceId,actor.workspaceId)));
   if(!mailbox)throw new ApiError(404,'NOT_FOUND','Receivable address was not found.');
   return resolveAttachments(runtime,mailbox,input.attachments.map(id=>({id})),input.from);
 }
 export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, actor: Actor, mailboxId: string, input: SendRequest, field: 'replyAddressId' | 'replyMailboxId',files:ResolvedAttachment[]) {
   if (input.kind !== 'transactional' || input.template || !input.subject) throw new ApiError(422, 'MAILBOX_CONTENT_UNSUPPORTED', 'Use an explicit transactional subject and body for tracked sends.', field);
-  const scope = { workspaceId: actor.workspaceId, environment: actor.environment };
-  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status, region: mailboxDomains.region }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.environment, scope.environment), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
+  const scope = { workspaceId: actor.workspaceId };
+  const [target] = await tx.select({ mailbox: mailboxes, receiving: mailboxDomains.status, region: mailboxDomains.region }).from(mailboxes).innerJoin(mailboxDomains, eq(mailboxDomains.id, mailboxes.domainId)).where(and(eq(mailboxes.workspaceId, scope.workspaceId), eq(mailboxes.id, mailboxId))).for('share', { of: mailboxDomains });
   if (!target) throw new ApiError(404, 'NOT_FOUND', 'Receivable address was not found.');
   if (target.receiving !== 'active') throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The receiving domain must be active before starting a tracked conversation.', field);
   const { mailbox } = target;
@@ -240,7 +240,7 @@ export async function replyParentId(db: DbExecutor, original: MessageRow) {
   // Inbound mail is allowed to omit Message-ID; never invent one that the recipient cannot match.
   if (original.direction !== 'outbound') return null;
   if (original.sendingEmailId) {
-    const [sent] = await db.select({ providerId: emails.providerId, region: emails.region }).from(emails).where(and(eq(emails.id, original.sendingEmailId), eq(emails.workspaceId, original.workspaceId), eq(emails.environment, original.environment)));
+    const [sent] = await db.select({ providerId: emails.providerId, region: emails.region }).from(emails).where(and(eq(emails.id, original.sendingEmailId), eq(emails.workspaceId, original.workspaceId)));
     if (sent?.providerId) return sesMessageId(sent.providerId, sent.region);
   }
   throw new ApiError(409, 'REPLY_TARGET_NOT_ACCEPTED', 'The original outbound email has no provider Message-ID. Wait for acceptance or reply to an earlier received message.');
@@ -259,15 +259,15 @@ export function safeForwardHtml(html: string) {
 /** Copies delivery status and the SES Message-ID from the sending pipeline onto outbound mailbox messages and emits events. Every minute. */
 export async function syncOutboundMessages(runtime: Runtime, limit = 500) {
   const result=await runtime.db.execute<{n:number;queued:number}>(sql`WITH batch AS MATERIALIZED (
-    SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id AND e.environment=m.environment
+    SELECT m.id,m.status AS previous,e.status,e.provider_id,e.error_code,e.region FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id AND e.workspace_id=m.workspace_id
     WHERE m.direction='outbound' AND m.status IN ('queued','attempting','accepted','sent','delayed','acceptance_unknown') AND (e.status<>m.status OR (e.provider_id IS NOT NULL AND m.message_id IS NULL)) ORDER BY m.created_at,m.id LIMIT ${limit} FOR UPDATE OF m SKIP LOCKED
   ), changed AS (UPDATE mail_messages m SET status=b.status,error_code=b.error_code,message_id=coalesce(m.message_id,b.provider_id||'@'||CASE b.region WHEN 'us-east-1' THEN 'email' ELSE b.region END||'.amazonses.com'),ses_message_id=coalesce(m.ses_message_id,b.provider_id),updated_at=now() FROM batch b WHERE m.id=b.id RETURNING m.*,b.previous
-  ), ids AS (INSERT INTO mail_message_ids(workspace_id,environment,message_id,mail_message_id,thread_id) SELECT workspace_id,environment,message_id,id,thread_id FROM changed WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
+  ), ids AS (INSERT INTO mail_message_ids(workspace_id,message_id,mail_message_id,thread_id) SELECT workspace_id,message_id,id,thread_id FROM changed WHERE message_id IS NOT NULL ON CONFLICT DO NOTHING
   ), updates AS (SELECT c.*,e.type,e.ord FROM changed c CROSS JOIN LATERAL (VALUES
     (CASE WHEN previous IN ('queued','attempting','acceptance_unknown') AND status IN ('delivered','bounced','complained') THEN 'message.sent' END,1),
     (CASE WHEN status IN ('accepted','sent') THEN 'message.sent' WHEN status IN ('delivered','bounced','complained','delayed') THEN 'message.'||status WHEN status IN ('rejected','rendering_failed','suppressed','canceled') THEN 'message.failed' END,2)) e(type,ord)
     WHERE c.sender_mailbox_id IS NOT NULL AND c.status<>c.previous AND e.type IS NOT NULL
-  ), ${mailboxEventCtes(sql`SELECT workspace_id,environment,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END)) AS data FROM updates`)}
+  ), ${mailboxEventCtes(sql`SELECT workspace_id,type,sender_mailbox_id AS mailbox_id,thread_id,id AS message_id,row_number() OVER(ORDER BY id,ord) AS ord,jsonb_strip_nulls(jsonb_build_object('subject',subject,'status',CASE WHEN ord=2 THEN status END,'errorCode',CASE WHEN ord=2 THEN error_code END)) AS data FROM updates`)}
   SELECT (SELECT count(*)::int FROM changed) AS n,(SELECT count(*)::int FROM queued) AS queued`);
   const {n,queued}=result.rows[0]!;
   if (queued) try { await runtime.wake?.(queued); } catch { /* Webhook jobs are durable. */ }

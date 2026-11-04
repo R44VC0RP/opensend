@@ -108,7 +108,7 @@ async function loadGrant(runtime: Runtime, keyId: string, db: DbExecutor = runti
   const allowed = original.scopes.filter(scope => !(role === 'member' && scope === 'opensend:manage') && row.scopes.includes(scope) && (row.clientScopes ?? scopes).includes(scope) && (row.resourceScopes ?? scopes).includes(scope));
   const granted = grantPermissions(allowed);
   if (!granted.length) return null;
-  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, environment: 'live', permissions: granted, domains: [], credential: 'mcp' };
+  const actor: Actor = { keyId, workspaceId: member.workspaceId, role, permissions: granted, domains: [], credential: 'mcp' };
   return { actor, legacy: original.legacy, scopes: allowed, userId: row.userId, clientId: row.clientId };
 }
 
@@ -399,7 +399,7 @@ export function registerMcpAuth(app: App): void {
         await tx.update(oauthAccessToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthAccessToken.clientId, connection.clientId), eq(oauthAccessToken.userId, connection.userId), eq(oauthAccessToken.referenceId, connection.referenceId)));
         await tx.update(oauthRefreshToken).set({ revoked: new Date(revokedAt) }).where(and(eq(oauthRefreshToken.clientId, connection.clientId), eq(oauthRefreshToken.userId, connection.userId), eq(oauthRefreshToken.referenceId, connection.referenceId)));
       }
-      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.environment, 'live'), eq(agentTokens.grantId, connectionId)));
+      await tx.update(agentTokens).set({ revokedAt }).where(and(eq(agentTokens.workspaceId, identity.workspaceId), eq(agentTokens.grantId, connectionId)));
       await tx.delete(oauthConsent).where(eq(oauthConsent.id, consentId));
       return true;
     });

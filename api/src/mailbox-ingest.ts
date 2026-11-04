@@ -3,7 +3,7 @@ import { storeIncoming } from './mailbox-ingest-store.js';
 import PostalMime, { type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
-import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
+import { ApiError, digest, log, type JobHandler, type Runtime } from './core.js';
 import { MAX_ATTEMPTS } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
@@ -14,7 +14,6 @@ const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MI
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
-const live: Scope['environment'] = 'live';
 
 type ReceivedNotification = {
   notificationType?: string;
@@ -52,14 +51,14 @@ export async function acceptInboundNotification(runtime: Runtime, input: { topic
   const result=await runtime.db.execute<{trusted:boolean;n:number}>(sql`WITH binding AS (${binding}), env AS (
     SELECT addr,split_part(addr,'@',2) AS host FROM jsonb_array_elements_text(${JSON.stringify(recipients)}::jsonb) e(addr)
   ), matched AS (
-    SELECT m.workspace_id AS wid,e.addr FROM env e JOIN mailbox_domains m ON ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.environment='live' AND m.region=${input.region}
+    SELECT m.workspace_id AS wid,e.addr FROM env e JOIN mailbox_domains m ON ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=${input.region}
     JOIN binding b ON b.wid=m.workspace_id OR b.kind='shared' WHERE m.status IN ('provisioning','waiting_for_mx','active') AND ${hosted ? sql`m.status='active' AND EXISTS (
       SELECT 1 FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id AND dc.receiving_name=e.host
       JOIN provider_connections c ON c.id=dc.connection_id AND c.workspace_id=dc.workspace_id AND c.kind=b.kind AND c.region=d.region AND c.status='ready' AND c.aws_account_id=${account}
-      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.environment='live' AND d.created_at<=${at}::timestamptz AND m.enabled_at<=${at}::timestamptz)` : sql`(m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
-  ), receipts AS (INSERT INTO mail_receipts(workspace_id,ses_message_id,environment,region,bucket,object_key,recipients,notification)
-    SELECT wid,${sesMessageId},'live',${input.region},${action.bucketName},'workspaces/'||wid||'/raw/'||${sesMessageId}||'.eml',jsonb_agg(addr ORDER BY addr),${JSON.stringify(metadata)}::jsonb FROM matched GROUP BY wid ON CONFLICT DO NOTHING RETURNING workspace_id
-  ), queued AS (INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,'live',jsonb_build_object('sesMessageId',${sesMessageId}::text) FROM receipts RETURNING 1)
+      WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.region=m.region AND d.created_at<=${at}::timestamptz AND m.enabled_at<=${at}::timestamptz)` : sql`(m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
+  ), receipts AS (INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification)
+    SELECT wid,${sesMessageId},${input.region},${action.bucketName},'workspaces/'||wid||'/raw/'||${sesMessageId}||'.eml',jsonb_agg(addr ORDER BY addr),${JSON.stringify(metadata)}::jsonb FROM matched GROUP BY wid ON CONFLICT DO NOTHING RETURNING workspace_id
+  ), queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',workspace_id,jsonb_build_object('sesMessageId',${sesMessageId}::text) FROM receipts RETURNING 1)
   SELECT EXISTS(SELECT 1 FROM binding) AS trusted,(SELECT count(*)::int FROM queued) AS n`);
   if (!result.rows[0]?.trusted) throw new ApiError(403,'MAILBOX_NOTIFICATION_UNTRUSTED','Unknown receiving account, topic or bucket.');
   return result.rows[0].n;
@@ -83,7 +82,7 @@ function automated(email: Email | null, from: string) {
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 
 const ingestJob: JobHandler = async (runtime, payload, job) => {
-  const scope: Scope = { workspaceId: job.workspaceId, environment: live as Mode };
+  const scope: Scope = { workspaceId: job.workspaceId };
   const sesMessageId = String(payload.sesMessageId ?? '');
   const [read] = await runtime.db.select({receipt:mailReceipts,binding:runtime.config.multiTenant ? storageBinding(scope.workspaceId,sql`mail_receipts.region`,sql`mail_receipts.bucket`) : sql<null>`NULL`}).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
   const receipt=read?.receipt;
@@ -161,7 +160,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
 
 /** Re-queues receipts whose ingest job was lost (for example after a failed attempt ceiling). Hourly. */
 export async function recoverMailReceipts(runtime: Runtime) {
-  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',r.workspace_id,'live',jsonb_build_object('sesMessageId',r.ses_message_id) FROM mail_receipts r WHERE r.status='pending' AND r.created_at < now() - interval '30 minutes'
+  await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'job_'||gen_random_uuid(),'mailbox.ingest',r.workspace_id,jsonb_build_object('sesMessageId',r.ses_message_id) FROM mail_receipts r WHERE r.status='pending' AND r.created_at < now() - interval '30 minutes'
     AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.workspace_id = r.workspace_id AND j.type = 'mailbox.ingest' AND j.status IN ('pending','running') AND j.payload->>'sesMessageId' = r.ses_message_id) LIMIT 100`);
 }
 

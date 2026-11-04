@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, sql } from 'drizzle-orm';
+import { getTableColumns, sql } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
@@ -78,7 +78,7 @@ async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: Gat
   if (gate.quota && Date.now() - gate.quota.checkedAt <= refreshMs) return false;
   const cached = await runtime.db.execute<{ max_send_rate: number; max_24_hour_send: number; sent_last_24_hours: number; checked_at: string }>(sql`
     SELECT max_send_rate, max_24_hour_send, sent_last_24_hours, checked_at::text FROM sending_region_limits
-    WHERE workspace_id = ${a.workspaceId} AND environment = ${a.environment} AND region = ${region} AND checked_at > clock_timestamp() - (${refreshMs}::int * interval '1 millisecond')`);
+    WHERE workspace_id = ${a.workspaceId} AND region = ${region} AND checked_at > clock_timestamp() - (${refreshMs}::int * interval '1 millisecond')`);
   const row = cached.rows[0];
   if (row && Number(row.max_send_rate) > 0) {
     // A cached row without a daily figure (0) means unknown, not exhausted; SES enforces the real cap.
@@ -87,9 +87,9 @@ async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: Gat
     return true;
   }
   const quota = await fetchQuota(ses);
-  await runtime.db.execute(sql`INSERT INTO sending_region_limits (workspace_id, environment, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
-    VALUES (${a.workspaceId}, ${a.environment}, ${region}, ${quota.maxSendRate}, ${quota.max24HourSend}, ${quota.sentLast24Hours}, 0, clock_timestamp())
-    ON CONFLICT (workspace_id, environment, region) DO UPDATE SET max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
+  await runtime.db.execute(sql`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
+    VALUES (${a.workspaceId}, ${region}, ${quota.maxSendRate}, ${quota.max24HourSend}, ${quota.sentLast24Hours}, 0, clock_timestamp())
+    ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
       sent_last_24_hours = excluded.sent_last_24_hours, reserved = 0, next_allowed_at = NULL, checked_at = excluded.checked_at
     WHERE sending_region_limits.checked_at IS NULL OR sending_region_limits.checked_at <= clock_timestamp() - (${refreshMs}::int * interval '1 millisecond')`);
   gate.quota = quota; gate.sentSinceRefresh = 0;
@@ -99,15 +99,15 @@ async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: Gat
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
 // interrupted fetch keeps its fence until the next cache period; no DB lock is held over AWS I/O.
 async function ensureAccountQuota(owner: Owner, account: string, region: string, gate: GateState, refreshMs: number) {
-  const { runtime, a, ses } = owner;
-  const key = sql`aws_account_id=${account} AND region=${region} AND environment=${a.environment}`;
+  const { runtime, ses } = owner;
+  const key = sql`aws_account_id=${account} AND region=${region}`;
   const period = sql`(${Math.max(1000, refreshMs)}::int * interval '1 millisecond')`;
   type Row = { fence: string | null; checked: string; rate: number; max: number; sent: number };
   const cached = sql`SELECT NULL::text AS fence, checked_at::text AS checked, max_send_rate AS rate, max_24_hour_send AS max, sent_last_24_hours AS sent
     FROM provider_account_limits WHERE ${key} AND checked_at > clock_timestamp()-${period}`;
   const result = await runtime.db.execute<Row>(sql`WITH elected AS (
-    INSERT INTO provider_account_limits(aws_account_id,region,environment,refresh_after) VALUES (${account},${region},${a.environment},clock_timestamp()+${period})
-    ON CONFLICT (aws_account_id,region,environment) DO UPDATE SET refresh_after=clock_timestamp()+${period} WHERE provider_account_limits.refresh_after <= clock_timestamp()
+    INSERT INTO provider_account_limits(aws_account_id,region,refresh_after) VALUES (${account},${region},clock_timestamp()+${period})
+    ON CONFLICT ON CONSTRAINT provider_account_limits_pkey DO UPDATE SET refresh_after=clock_timestamp()+${period} WHERE provider_account_limits.refresh_after <= clock_timestamp()
     RETURNING refresh_after::text AS fence)
     SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent FROM elected UNION ALL ${cached} LIMIT 1`);
   let row = result.rows[0];
@@ -165,7 +165,7 @@ function dailyRemaining(gate: GateState) {
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind'] };
 async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string): Promise<Leased[]> {
-  const queued = sql`environment = 'live' AND region = ${region} AND status = 'queued'`;
+  const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
   const priority = sql`ORDER BY (campaign_id IS NULL) DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
@@ -216,7 +216,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       r.draft AS review_draft, r.rendered AS review_rendered, r.status AS review_status, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
-    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id AND r.environment = leased.environment
+    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
@@ -245,7 +245,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const pc = connection as (ReadyConnection & { feedback_topic_arn: string }) | undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region)], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, environment: 'live', keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
+      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     return { mail, owner: ready ? owner! : null, review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], status: review_status as string | null, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
@@ -281,8 +281,7 @@ function batchAttachments(runtime: Runtime, batch: Leased[]) {
   let rows: Promise<AttachmentRow[]> | undefined;
   return async (mail: Mail) => {
     if (!mail.snapshot.attachments.length) return [];
-    rows ??= runtime.db.select().from(attachments).where(and(eq(attachments.environment, 'live'),
-      sql`(${attachments.workspaceId}, ${attachments.id}) IN (SELECT workspace_id, id FROM jsonb_to_recordset(${JSON.stringify(wanted)}::jsonb) AS x(workspace_id text, id text))`)).orderBy(attachments.id).execute();
+    rows ??= runtime.db.select().from(attachments).where(sql`(${attachments.workspaceId}, ${attachments.id}) IN (SELECT workspace_id, id FROM jsonb_to_recordset(${JSON.stringify(wanted)}::jsonb) AS x(workspace_id text, id text))`).orderBy(attachments.id).execute();
     return (await rows).filter(row => row.workspaceId === mail.workspaceId && mail.snapshot.attachments.includes(row.id));
   };
 }
@@ -320,17 +319,17 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
     // Transient dependency failure: release the lease with a short backoff and let the loop retry.
     await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL, scheduled_at = greatest(coalesce(scheduled_at, clock_timestamp()), clock_timestamp() + interval '15 seconds'), error_code = ${code}, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion}`);
-    log('warn', { code, emailId: mail.id, environment: a.environment, message: 'Dispatch preflight failed; retrying after a short delay.' });
+    log('warn', { code, emailId: mail.id, message: 'Dispatch preflight failed; retrying after a short delay.' });
     return;
   }
   await runtime.db.execute(sql`WITH rejected AS (
       UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
       WHERE workspace_id = ${mail.workspaceId} AND id = ${mail.id} AND status = 'queued' AND dispatch_version = ${mail.dispatchVersion} RETURNING id
-    ) INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-    SELECT ${id('event')}, ${a.workspaceId}, ${a.environment}, id, 'reject', ${`preflight-failed:${mail.id}`}, ${isSimulatedSes(runtime)}::boolean, ${JSON.stringify({ code, providerCalled: false, ...(error instanceof ScreenRejected ? { screen: error.screen } : {}) })}::jsonb FROM rejected ON CONFLICT DO NOTHING`);
+    ) INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated, data)
+    SELECT ${id('event')}, ${a.workspaceId}, id, 'reject', ${`preflight-failed:${mail.id}`}, ${isSimulatedSes(runtime)}::boolean, ${JSON.stringify({ code, providerCalled: false, ...(error instanceof ScreenRejected ? { screen: error.screen } : {}) })}::jsonb FROM rejected ON CONFLICT DO NOTHING`);
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
-  if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, environment: a.environment, spam: error.screen.spam, model: error.screen.model });
-  else log('error', { code, emailId: mail.id, environment: a.environment, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
+  if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
+  else log('error', { code, emailId: mail.id, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
   await finishEmailCampaign(runtime, a, mail);
 }
 
@@ -362,23 +361,22 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)
     ), key_state AS MATERIALIZED (
-      SELECT id, workspace_id, permissions, domains FROM api_keys WHERE environment = 'live' AND revoked_at IS NULL
+      SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL
         AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input) FOR SHARE
     ), campaign_state AS MATERIALIZED (
-      SELECT id, workspace_id, status FROM sending_campaigns WHERE environment = 'live'
-        AND (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
+      SELECT id, workspace_id, status FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
     ), dest AS (
       SELECT x.id AS email_id, x.workspace_id, d.value AS email FROM input x, jsonb_array_elements_text(x.destinations) d
     ), consent AS MATERIALIZED (
       SELECT workspace_id, email, suppressed, deleted_at, marketing_consent FROM audience_contacts
-      WHERE environment = 'live' AND (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
+      WHERE (workspace_id, email) IN (SELECT workspace_id, email FROM dest)
       ORDER BY id FOR UPDATE
     ), eligibility AS MATERIALIZED (
       SELECT x.id,
         CASE WHEN starts_with(x.actor_key_id, 'mcp_') THEN x.mcp_allowed
           WHEN starts_with(x.actor_key_id, 'user_') THEN EXISTS (${approvedOriginUser(runtime, sql`x.workspace_id`, sql`substr(x.actor_key_id, 6)`, sql`x.campaign_id IS NULL`)})
           WHEN starts_with(x.actor_key_id, 'mbk_') THEN EXISTS (
-            SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.environment = 'live' AND b.address = x.sender
+            SELECT 1 FROM mailbox_keys k JOIN mailbox_addresses b ON b.workspace_id = k.workspace_id AND b.address = x.sender
             WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id AND k.revoked_at IS NULL AND k.permissions ? 'send'
               AND (k.mailbox_ids IS NULL OR k.mailbox_ids ? b.mailbox_id) FOR SHARE OF k, b)
           ELSE EXISTS (SELECT 1 FROM key_state k WHERE k.workspace_id = x.workspace_id AND k.id = x.actor_key_id
@@ -397,20 +395,20 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
         error_code = CASE WHEN NOT el.origin_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
         ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
       FROM input x JOIN eligibility el ON el.id = x.id
-      WHERE e.workspace_id = x.workspace_id AND e.environment = 'live' AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
+      WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version
       RETURNING e.id, e.workspace_id, e.status
     ), token AS (
-      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, environment, email)
-      SELECT x.token_hash, c.workspace_id, 'live', x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
+      INSERT INTO operation_unsubscribe_tokens(token_hash, workspace_id, email)
+      SELECT x.token_hash, c.workspace_id, x.token_email FROM claimed c JOIN input x ON x.id = c.id WHERE x.token_hash IS NOT NULL AND c.status = 'attempting'
       ON CONFLICT DO NOTHING
     ), attempt AS (
-      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
-      SELECT x.event_id, c.workspace_id, 'live', c.id, 'dispatch_attempt', x.external_id, ${isSimulatedSes(runtime)}::boolean,
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated, data)
+      SELECT x.event_id, c.workspace_id, c.id, 'dispatch_attempt', x.external_id, ${isSimulatedSes(runtime)}::boolean,
         jsonb_build_object('attempt', x.attempt, 'providerCallPlanned', true, 'providerCallSimulated', ${isSimulatedSes(runtime)}::boolean)
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'attempting' ON CONFLICT DO NOTHING
     ), suppressed AS (
-      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated)
-      SELECT x.event_id, c.workspace_id, 'live', c.id, 'suppressed', 'suppressed:' || c.id, ${isSimulatedSes(runtime)}::boolean
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, external_id, simulated)
+      SELECT x.event_id, c.workspace_id, c.id, 'suppressed', 'suppressed:' || c.id, ${isSimulatedSes(runtime)}::boolean
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'suppressed' ON CONFLICT DO NOTHING
     ) SELECT id, status FROM claimed`);
   return new Map(claimed.rows.map(row => [row.id, row.status]));
@@ -420,7 +418,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
 // upgrade that concurrent shards would otherwise deadlock on.
 async function activateCampaigns(runtime: Runtime, campaigns: { workspace_id: string; id: string }[]) {
   await runtime.db.execute(sql`UPDATE sending_campaigns SET status = 'sending', updated_at = clock_timestamp()
-    WHERE environment = 'live' AND status = 'scheduled' AND (workspace_id, id) IN
+    WHERE status = 'scheduled' AND (workspace_id, id) IN
       (SELECT workspace_id, id FROM jsonb_to_recordset(${JSON.stringify(campaigns)}::jsonb) x(workspace_id text, id text))`);
 }
 
@@ -487,10 +485,10 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
         AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, requeue_at timestamptz)
     ), mail AS MATERIALIZED (
       SELECT e.id, e.workspace_id, e.status, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
-      WHERE e.environment = 'live' ORDER BY e.id FOR UPDATE
+      ORDER BY e.id FOR UPDATE
     ), inserted AS (
-      INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, provider_id, external_id, data, simulated, created_at)
-      SELECT x.event_id, m.workspace_id, 'live', m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
+      SELECT x.event_id, m.workspace_id, m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
       FROM input x JOIN mail m ON m.id = x.email_id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
@@ -504,28 +502,28 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
         AND ((x.type = 'provider_throttled' AND m.status = 'attempting') OR (x.type <> 'provider_throttled' AND x.next_rank >= (${rankJson()}::jsonb ->> m.status)::int))
       RETURNING e.id
     ), published AS (
-      INSERT INTO operation_events(id, workspace_id, environment, type, region, created_at, data)
-      SELECT i.id, i.workspace_id, i.environment, x.public_type, m.region, i.created_at,
+      INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
+      SELECT i.id, i.workspace_id, x.public_type, m.region, i.created_at,
         x.data || jsonb_build_object('emailId', m.id, 'simulated', ${simulated}::boolean) || CASE WHEN x.provider_id IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('providerId', x.provider_id) END
       FROM inserted i JOIN input x ON x.event_id = i.id JOIN mail m ON m.id = i.email_id WHERE x.public_type IS NOT NULL ON CONFLICT DO NOTHING RETURNING *
     ), deliveries AS (
-      INSERT INTO operation_deliveries(id, workspace_id, environment, webhook_id, event_id, payload)
-      SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, p.environment, w.id, p.id,
+      INSERT INTO operation_deliveries(id, workspace_id, webhook_id, event_id, payload)
+      SELECT 'whd_' || replace(gen_random_uuid()::text, '-', ''), p.workspace_id, w.id, p.id,
         jsonb_build_object('id', p.id, 'workspaceId', p.workspace_id, 'type', p.type, 'region', p.region, 'createdAt', p.created_at, 'data', p.data)
-      FROM published p JOIN operation_webhooks w ON w.workspace_id = p.workspace_id AND w.environment = p.environment
+      FROM published p JOIN operation_webhooks w ON w.workspace_id = p.workspace_id
       WHERE NOT w.paused AND w.event_types ? p.type AND (w.regions IS NULL OR p.region IS NULL OR w.regions ? p.region)
-      ON CONFLICT DO NOTHING RETURNING id, workspace_id, environment
+      ON CONFLICT DO NOTHING RETURNING id, workspace_id
     ), webhook_jobs AS (
-      INSERT INTO jobs(id, workspace_id, environment, type, payload)
-      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, environment, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
+      INSERT INTO jobs(id, workspace_id, type, payload)
+      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
     ), simulated_callbacks AS (
       SELECT 'urn:opensend:simulated-ses:' || m.region AS topic_arn, m.id || ':' || kind AS message_id, i.workspace_id, m.region, x.provider_id,
         i.created_at + CASE WHEN kind = 'Delivery' THEN ${runtime.config.simulatedSes.deliveryDelayMs}::int ELSE 0 END * interval '1 millisecond' AS created_at, kind
       FROM inserted i JOIN input x ON x.event_id = i.id JOIN mail m ON m.id = i.email_id, unnest(ARRAY['Send','Delivery']) kind
       WHERE ${simulated && !runtime.feedback}::boolean AND x.type = 'accepted' AND x.provider_id LIKE 'sim\\_%'
     ), simulated_jobs AS (
-      INSERT INTO jobs(id, workspace_id, environment, type, available_at, payload)
-      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, 'live', 'operation.simulatedFeedback', r.created_at,
+      INSERT INTO jobs(id, workspace_id, type, available_at, payload)
+      SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), r.workspace_id, 'operation.simulatedFeedback', r.created_at,
         jsonb_build_object('topicArn', r.topic_arn, 'messageId', r.message_id, 'region', r.region,
           'message', jsonb_build_object('eventType', r.kind, 'mail', jsonb_build_object('messageId', r.provider_id), lower(r.kind), jsonb_build_object('timestamp', r.created_at)))
       FROM simulated_callbacks r RETURNING id
@@ -545,7 +543,7 @@ function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
 async function releaseLeases(runtime: Runtime, mails: Mail[]) {
   await runtime.db.execute(sql`UPDATE sending_emails e SET lease_until = NULL FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion })))}::jsonb) x(workspace_id text, id text, version int)
-    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.environment = 'live' AND e.status = 'queued'`);
+    WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = 'queued'`);
 }
 
 // One batch: lease up to batchSize rows and prepare them (CPU), then for each group of sendConcurrency

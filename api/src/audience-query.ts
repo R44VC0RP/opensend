@@ -15,7 +15,7 @@ const ApplyResult = z.object({ id: z.string(), operation: z.enum(['update_contac
 type Literal = string | number | boolean | null;
 type UpdateSet = { name?: string | null; consent?: 'subscribed' | 'unsubscribed'; properties?: Record<string, Literal> };
 
-function scoped(column: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, identity: Actor) { return and(eq(column.workspaceId, identity.workspaceId), eq(column.environment, identity.environment))!; }
+function scoped(column: { workspaceId: AnyPgColumn }, identity: Actor) { return eq(column.workspaceId, identity.workspaceId); }
 function clean(statement: string) {
   const value = statement.trim();
   if (/[;\0]|--|\/\*/.test(value)) throw new ApiError(422, 'AUDIENCEQL_INVALID', 'AudienceQL does not allow semicolons, comments, or multiple statements.', 'statement');
@@ -86,7 +86,7 @@ async function whereSql(db: DbExecutor, identity: Actor, source: string | undefi
   }
   return result;
 }
-function mScope(identity: Actor) { return sql`m.workspace_id = ${identity.workspaceId} AND m.environment = ${identity.environment}`; }
+function mScope(identity: Actor) { return sql`m.workspace_id = ${identity.workspaceId}`; }
 async function targetRows(db: DbExecutor, identity: Actor, where: string, extra?: SQL) {
   const conditions = await whereSql(db, identity, where);
   const rows = await db.select().from(contacts).where(and(scoped(contacts, identity), isNull(contacts.deletedAt), ...conditions, extra)).orderBy(asc(contacts.id)).limit(10_001);
@@ -140,7 +140,7 @@ async function planAudience(db: DbExecutor, identity: Actor, statement: string) 
   const requiresResubscribeConfirmation = operation.kind === 'update_contacts' && operation.set.consent === 'subscribed' && operation.targets.some(target => target.consent === 'unsubscribed');
   const warnings = [...(rows.some(row => row.suppressed) ? [`${rows.filter(row => row.suppressed).length} suppressed contact(s) remain suppressed.`] : []), ...(requiresResubscribeConfirmation ? ['The plan includes prior opt-outs and requires explicit resubscribe confirmation.'] : [])];
   const planId = id('aqp'), expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
-  await db.insert(audiencePlans).values({ id: planId, workspaceId: identity.workspaceId, environment: identity.environment, actorKeyId: identity.keyId, statement, operation, matched: rows.length, expiresAt });
+  await db.insert(audiencePlans).values({ id: planId, workspaceId: identity.workspaceId, actorKeyId: identity.keyId, statement, operation, matched: rows.length, expiresAt });
   return { id: planId, operation: operation.kind, matched: rows.length, sample: sample(rows), warnings, requiresResubscribeConfirmation, expiresAt };
 }
 const chunks = <T,>(values: T[], size: number) => Array.from({ length: Math.ceil(values.length / size) }, (_, index) => values.slice(index * size, (index + 1) * size));
@@ -159,8 +159,8 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
       for (const batch of chunks(ids, 5000)) await tx.update(contacts).set({ ...(Object.hasOwn(operation.set, 'name') ? { name: operation.set.name } : {}), ...(operation.set.consent ? { marketingConsent: operation.set.consent } : {}), ...(operation.set.properties ? { properties: sql`${contacts.properties} || ${JSON.stringify(operation.set.properties)}::jsonb` } : {}), updatedAt: appliedAt }).where(and(scoped(contacts, identity), inArray(contacts.id, batch)));
       if (operation.set.consent) {
         const changed = current.filter(row => row.marketingConsent !== operation.set.consent).map(row => ({ row, eventId: id('cns') }));
-        for (const batch of chunks(changed, 500)) await tx.insert(consentAudit).values(batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, environment: identity.environment, contactId: row.id, email: row.email, status: operation.set.consent!, source: 'audienceql', actorKeyId: identity.keyId, occurredAt: appliedAt })));
-        for (const batch of chunks(changed, 100)) await enqueue(tx, { type: 'operation.publishBatch', workspaceId: identity.workspaceId, environment: identity.environment, payload: { events: batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, environment: identity.environment, type: 'contact.subscription_changed', region: null, createdAt: appliedAt, data: { contactId: row.id, status: operation.set.consent, source: 'audienceql' } })) } });
+        for (const batch of chunks(changed, 500)) await tx.insert(consentAudit).values(batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, contactId: row.id, email: row.email, status: operation.set.consent!, source: 'audienceql', actorKeyId: identity.keyId, occurredAt: appliedAt })));
+        for (const batch of chunks(changed, 100)) await enqueue(tx, { type: 'operation.publishBatch', workspaceId: identity.workspaceId, payload: { events: batch.map(({ row, eventId }) => ({ id: eventId, workspaceId: identity.workspaceId, type: 'contact.subscription_changed', region: null, createdAt: appliedAt, data: { contactId: row.id, status: operation.set.consent, source: 'audienceql' } })) } });
       }
     } else {
       const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scoped(lists, identity), eq(lists.id, operation.listId))).limit(1).for('update');
@@ -168,7 +168,7 @@ async function applyPlan(db: Database, identity: Actor, planId: string, confirmR
       const currentMemberships = operation.targetIds.length ? await tx.select({ contactId: listMembers.contactId }).from(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, operation.targetIds))) : [];
       if (operation.kind === 'add_to_list' && currentMemberships.length || operation.kind === 'remove_from_list' && currentMemberships.length !== operation.targetIds.length) throw new ApiError(409, 'STALE_AUDIENCE_PLAN', 'List memberships changed after review. Review a new plan.');
       if (operation.kind === 'add_to_list') {
-        for (const batch of chunks(operation.targetIds, 1000)) if (batch.length) await tx.insert(listMembers).values(batch.map(contactId => ({ workspaceId: identity.workspaceId, environment: identity.environment, listId: operation.listId, contactId }))).onConflictDoNothing();
+        for (const batch of chunks(operation.targetIds, 1000)) if (batch.length) await tx.insert(listMembers).values(batch.map(contactId => ({ workspaceId: identity.workspaceId, listId: operation.listId, contactId }))).onConflictDoNothing();
       } else {
         for (const batch of chunks(operation.targetIds, 5000)) if (batch.length) await tx.delete(listMembers).where(and(scoped(listMembers, identity), eq(listMembers.listId, operation.listId), inArray(listMembers.contactId, batch)));
       }

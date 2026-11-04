@@ -28,6 +28,8 @@ Apply migrations through `019_batch_dispatcher.sql` before deploying this backen
 
 ## Configuration
 
+**Upgrading from the live/test split:** release `052_prepare_drop_environment.sql` with the backend that stops using environment columns. Migration 052 permanently discards test data and test-only OAuth approvals, but keeps the columns, defaults and conflict targets needed by the previous single-mode backend (`2f350fa`). Release `053_drop_environment.sql` separately, only after all API instances, runners and dispatchers use the new backend and old invocations have drained. After 053, do not roll back to a backend that names those columns. Fresh installations can apply both migrations together.
+
 Use Node.js **24** and Docker Compose for the local quickstart. All commands below run from `api/` unless stated otherwise.
 
 ```sh

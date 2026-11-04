@@ -15,7 +15,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
 
 // Used in the existing admission/dispatch statements. The connection join also fences
 // disconnects and verifies the region. Simulation needs a claim, never delivery proof.
-export const sendingConnections = (runtime: Runtime) => sql.identifier(isSimulatedSes(runtime) ? 'provider_test_connections' : 'provider_sending_connections');
+export const sendingConnections = (runtime: Runtime) => sql.identifier(isSimulatedSes(runtime) ? 'provider_simulated_connections' : 'provider_sending_connections');
 export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL, runtime: Runtime) => sql`EXISTS (SELECT 1 FROM domain_claims dc
   JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
   WHERE dc.workspace_id=${workspace} AND pc.region=${region} AND pc.status='ready' ${!isSimulatedSes(runtime) ? sql`AND dc.verified` : sql``}

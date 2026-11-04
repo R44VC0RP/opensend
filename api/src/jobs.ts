@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, id, log } from './core.js';
-import type { DbExecutor, JobHandler, Mode, Runtime } from './core.js';
+import type { DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 export const MAX_ATTEMPTS = 6;
@@ -29,7 +29,7 @@ export async function countEnqueued(work: () => Promise<void>) {
   await enqueued.run(scope, work);
   return scope.count;
 }
-export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; environment: Mode; payload: Record<string, unknown>; availableAt?: string }) {
+export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; payload: Record<string, unknown>; availableAt?: string }) {
   const jobId = id('job');
   await db.insert(jobs).values({ id: jobId, ...input });
   const scope = enqueued.getStore();
@@ -67,18 +67,18 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
-  const handle = async (job: { id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
+  const handle = async (job: { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
     const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'));
-    const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, environment: job.environment, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
+    const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     try {
       const handler = handlers[job.type];
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
-      await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id, environment: job.environment });
+      await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id });
       await runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence);
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
@@ -108,14 +108,14 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const activeAtClaim = active.size;
       const claimStarted = Date.now();
       const claimed = await runtime.db.execute<{
-        id: string; workspace_id: string; environment: Mode; type: string; payload: Record<string, unknown>; attempts: number;
+        id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number;
       }>(sql`WITH feedback AS (
-        SELECT j.id FROM jobs j WHERE j.environment='live' AND ${effectiveConcurrency > 1 && activeFeedback === 0}
+        SELECT j.id FROM jobs j WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
         ORDER BY j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1
       ), regular AS (
-        SELECT j.id FROM jobs j WHERE j.environment='live' AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
+        SELECT j.id FROM jobs j WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
@@ -164,7 +164,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
 export async function nextWakeDelay(runtime: Runtime) {
   const result = await runtime.db.execute<{ delay: number | null }>(sql`SELECT CASE WHEN due IS NULL THEN NULL ELSE greatest(0, ceil(extract(epoch FROM due - now())))::int END AS delay
     FROM (SELECT min(CASE WHEN status = 'running' THEN lease_until ELSE available_at END) AS due
-      FROM jobs WHERE environment='live' AND status IN ('pending','running')) upcoming`);
+      FROM jobs WHERE status IN ('pending','running')) upcoming`);
   const delay = result.rows[0]?.delay;
   return delay !== null && delay !== undefined && delay <= 60 ? delay : null;
 }

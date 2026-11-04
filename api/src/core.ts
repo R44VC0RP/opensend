@@ -9,10 +9,9 @@ import { workspaceCredentials, type ReadyConnection } from './provider-credentia
 
 export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
-export type Mode = 'live' | 'test';
 export type Permission = 'read' | 'send' | 'manage';
 export interface Actor {
-  workspaceId: string; environment: Mode; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
+  workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
   role?: string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, number>;
@@ -77,11 +76,11 @@ export interface Runtime {
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
   renderHtmlImage?: (html: string) => Promise<RenderedImage>; importPublicImage?: (url: string) => Promise<PublicImage>;
 }
-export type MailboxAccess = { keyId: string; workspaceId: string; environment: Mode; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
+export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; permissions: ('read' | 'send' | 'modify')[] };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string; environment: Mode }) => Promise<void>;
+export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string }) => Promise<void>;
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false) { super(message); }

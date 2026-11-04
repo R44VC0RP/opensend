@@ -70,15 +70,15 @@ try {
   const active = await pool.query("SELECT count(*)::int AS n FROM jobs WHERE status IN ('pending','running')");
   assert.equal(active.rows[0].n, 0, 'Previous workload must drain before measuring.');
   // No active work exists; discard this isolated run's cached simulated quota.
-  await pool.query("DELETE FROM sending_region_limits WHERE workspace_id='default' AND environment='live'");
+  await pool.query("DELETE FROM sending_region_limits WHERE workspace_id='default'");
   const keyId = id('key'), secret = `os_${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().replaceAll('-', '')}`;
-  await pool.query("INSERT INTO api_keys(id,workspace_id,environment,name,hash,prefix,permissions,domains) VALUES($1,'default','live',$2,$3,'os_', '[\"read\",\"send\",\"manage\"]','[]')", [keyId, runId, await digest(secret)]);
+  await pool.query("INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES($1,'default',$2,$3,'os_', '[\"read\",\"send\",\"manage\"]','[]')", [keyId, runId, await digest(secret)]);
   const listId = id('lst');
-  await pool.query("INSERT INTO audience_lists(id,workspace_id,environment,name) VALUES($1,'default','live',$2)", [listId, runId]);
+  await pool.query("INSERT INTO audience_lists(id,workspace_id,name) VALUES($1,'default',$2)", [listId, runId]);
   await pool.query(`WITH inserted AS (
-    INSERT INTO audience_contacts(id,workspace_id,environment,email,marketing_consent,properties)
-    SELECT $1 || '-' || n, 'default','live',$1 || '-' || n || '@example.invalid','subscribed','{}'::jsonb FROM generate_series(1,$2::int) n RETURNING id
-  ) INSERT INTO audience_list_members(workspace_id,environment,list_id,contact_id) SELECT 'default','live',$3,id FROM inserted`, [runId, count, listId]);
+    INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,properties)
+    SELECT $1 || '-' || n, 'default',$1 || '-' || n || '@example.invalid','subscribed','{}'::jsonb FROM generate_series(1,$2::int) n RETURNING id
+  ) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT 'default',$3,id FROM inserted`, [runId, count, listId]);
   const call = async (path: string, body: unknown) => {
     const response = await app.request(path, { method: 'POST', headers: { authorization: `Bearer ${secret}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }, runtime);
     const value = await response.json() as any;

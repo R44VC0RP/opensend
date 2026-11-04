@@ -66,7 +66,7 @@ export async function instantiateTemplate(runtime: Runtime, db: DbExecutor, iden
   const template = await findTemplate(db, identity.workspaceId, templateId, true);
   if (template.archivedAt || !template.published || !template.publishedRevision) throw new ApiError(409, 'TEMPLATE_NOT_AVAILABLE', 'Choose a published, active template.');
   const source = await assetRows(db, identity.workspaceId, template.published.attachments, true);
-  const cloned = source.map(asset => ({ id: id('attachment'), workspaceId: identity.workspaceId, environment: identity.environment, filename: asset.filename, contentType: asset.contentType, size: asset.size, disposition: asset.disposition, contentId: asset.contentId, storageKey: asset.storageKey, checksum: asset.checksum, sourceTemplateAssetId: asset.id }));
+  const cloned = source.map(asset => ({ id: id('attachment'), workspaceId: identity.workspaceId, filename: asset.filename, contentType: asset.contentType, size: asset.size, disposition: asset.disposition, contentId: asset.contentId, storageKey: asset.storageKey, checksum: asset.checksum, sourceTemplateAssetId: asset.id }));
   if (cloned.length) await db.insert(attachments).values(cloned);
   return { draft: { ...template.published, tracking: true, defaults: {}, attachments: cloned.map(asset => asset.id) }, templateId: template.id, templateRevision: template.publishedRevision };
 }
