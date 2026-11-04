@@ -721,8 +721,10 @@ export function registerMailbox(app: App) {
     if (from && !owned) {
       // Scoped keys may only speak as their own addresses; an administrator may use any registered sender.
       if (!access(c).admin) throw new ApiError(403, 'FROM_NOT_ALLOWED', 'Inbound keys can send only from their own addresses. Use administrator access for another sender.', 'from');
-      const [domain] = await db.select({ region: mailboxDomains.region }).from(mailboxDomains).where(eq(mailboxDomains.id, mailbox.domainId));
-      await assertRegisteredSender(db, scopeOf(access(c)), domain!.region, from);
+      if (!c.env.config.multiTenant) {
+        const [domain] = await db.select({ region: mailboxDomains.region }).from(mailboxDomains).where(eq(mailboxDomains.id, mailbox.domainId));
+        await assertRegisteredSender(db, scopeOf(access(c)), domain!.region, from);
+      }
       return from;
     }
     return owned?.address ?? mailbox.address;

@@ -8,6 +8,8 @@ import { isApprovedUser } from './google-auth.js';
 import { approvedOriginUser } from './sending.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
+import { domainName, importByoDomains } from './domain-claims.js';
+import { workspaceConnection, workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
 import { assertProvisionable, AutoValidationModeSchema, discoverSes, provisionSes, SesDiscoverySchema, setAutoValidation, type SesDiscovery } from './ses-setup.js';
 import { configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
 export { ensureRegionSettings, resolveRegionRuntime } from './ses-region-state.js';
@@ -25,17 +27,27 @@ function access(c: Parameters<typeof actor>[0], mutate = false, aws = false) {
   const value = actor(c, mutate ? 'manage' : 'read');
   if (value.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Region configuration requires unrestricted workspace access.');
   if ((mutate || aws) && value.environment !== 'live') throw new ApiError(403, 'TEST_EXTERNAL_OPERATION', 'Use live administrator context for AWS discovery and region configuration.');
-  if (c.env.config.multiTenant && (mutate || aws)) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use the workspace sending connection to manage its AWS region.');
+  if (c.env.config.multiTenant && mutate) throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Use the workspace sending connection to manage its AWS region.');
   return value;
 }
-async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: string, workspaceId = runtime.config.workspaceId) {
+async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: string, workspaceId = runtime.config.workspaceId, connection?: ReadyConnection) {
+  if (runtime.config.multiTenant && connection?.kind !== 'byo') throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Shared account discovery is not available.');
   const fingerprint = await credentialFingerprint(runtime.config);
   await runtime.db.transaction(async tx => {
+    if (connection && !(await tx.execute(sql`SELECT 1 FROM provider_connections WHERE id=${connection.id} AND workspace_id=${workspaceId} FOR SHARE`)).rowCount) throw new ApiError(409, 'AWS_CONNECTION_CHANGED', 'The sending connection changed during discovery.');
     await tx.insert(sesRegions).values({ workspaceId, region: report.region }).onConflictDoNothing();
     const updated = await tx.update(sesRegions).set({ report, credentialsFingerprint: fingerprint, publicUrl: discoveryTarget(runtime.config), lastDiscoveredAt: report.checkedAt })
       .where(and(regionWhere(workspaceId, report.region), jobId ? eq(sesRegions.provisionJobId, jobId) : undefined,
         sql`(${sesRegions.lastDiscoveredAt} IS NULL OR ${sesRegions.lastDiscoveredAt} <= ${report.checkedAt}::timestamptz)`)).returning({ region: sesRegions.region });
     if (!updated.length) return;
+    if (connection) {
+      const names = new Map<string, boolean>();
+      for (const d of report.domains) {
+        const name = domainName.safeParse(d.name);
+        if (name.success) names.set(name.data, d.verificationStatus === 'SUCCESS' && d.sendingEnabled === true);
+      }
+      return importByoDomains(tx, connection.id, workspaceId, report.region, [...names].map(([name, verified]) => ({ name, verified })));
+    }
     for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, environment: 'live', region: report.region, name: domain.name }).onConflictDoNothing();
   });
 }
@@ -56,11 +68,19 @@ export function registerSesRegions(app: App) {
     const value = access(c, false, true); const { region } = c.req.valid('param');
     const settings = await getRegionSettings(c.env.db, value.workspaceId);
     if (!settings.enabledRegions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'Enable this SES region before discovery.', 'region');
+    let runtime = c.env, connection: ReadyConnection | undefined;
+    if (runtime.config.multiTenant) {
+      runtime = { ...runtime, config: { ...runtime.config, workspaceId: value.workspaceId } };
+      connection = await workspaceConnection(runtime, region);
+      if (connection.kind !== 'byo') throw new ApiError(409, 'CONNECTION_MANAGED_REGION', 'Shared account discovery is not available.');
+      runtime.config.aws = await workspaceCredentials(runtime, region, connection);
+      runtime.config.awsAccountId = connection.aws_account_id;
+    }
     const [cached] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
-    const fingerprint = await credentialFingerprint(c.env.config);
-    if (c.req.valid('query').refresh !== 'true' && cached?.report && cached.credentialsFingerprint === fingerprint && cached.publicUrl === discoveryTarget(c.env.config) && cached.lastDiscoveredAt && Date.now() - Date.parse(cached.lastDiscoveredAt) < DISCOVERY_TTL) return c.json(SesDiscoverySchema.parse(cached.report), 200);
-    const report = await discoverSes(c.env, { region, installationId: settings.installationId });
-    await saveDiscovery(c.env, report, undefined, value.workspaceId); return c.json(report, 200);
+    const fingerprint = await credentialFingerprint(runtime.config);
+    if (c.req.valid('query').refresh !== 'true' && cached?.report && cached.credentialsFingerprint === fingerprint && cached.publicUrl === discoveryTarget(runtime.config) && cached.lastDiscoveredAt && Date.now() - Date.parse(cached.lastDiscoveredAt) < DISCOVERY_TTL) return c.json(SesDiscoverySchema.parse(cached.report), 200);
+    const report = await discoverSes(runtime, { region, installationId: connection?.id ?? settings.installationId });
+    await saveDiscovery(runtime, report, undefined, value.workspaceId, connection); return c.json(report, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/regions/{region}/provision', operationId: 'provisionRegion', tags: ['Regions'], security,
     description: 'Explicitly queue idempotent setup of OpenSend-owned SES configuration sets, SNS topic/policy/event destinations and signed HTTPS subscription. Never sends email, changes DNS, or grants SES production approval. Repeated requests reuse the active job; inspect listRegions and discovery for completion and remaining blockers.',

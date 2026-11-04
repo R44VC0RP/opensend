@@ -58,6 +58,7 @@
       "Effect": "Allow",
       "Action": [
         "ses:CreateEmailIdentity",
+        "ses:TagResource",
         "ses:GetEmailIdentity",
         "ses:PutEmailIdentityMailFromAttributes"
       ],

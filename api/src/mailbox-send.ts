@@ -3,6 +3,7 @@ import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments as sendingAttachments, emails } from './db/sending.js';
 import { domains } from './db/operations.js';
+import { unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { mailAttachments, mailboxAddresses, mailboxDomains, mailboxes, mailboxMessages, mailboxRegions, mailMessages, mailThreads, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { recordEvents, type MailboxEventInput, type MailboxEventType } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3 } from './mailbox-setup.js';
@@ -111,8 +112,10 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   await enforceLimits(tx, message);
   const [domain] = await tx.select().from(mailboxDomains).where(eq(mailboxDomains.id, message.mailbox.domainId));
-  const [region] = domain ? await tx.select().from(mailboxRegions).where(and(eq(mailboxRegions.workspaceId, message.scope.workspaceId), eq(mailboxRegions.region, domain.region))) : [];
+  const [region] = domain ? await tx.select({ bucket: mailboxRegions.bucket, verified: runtime.config.multiTenant
+    ? verifiedClaim(sql`${message.scope.workspaceId}`, sql`${domain.region}`, sql`${message.from.split('@')[1]!.toLowerCase()}::text`) : sql`true` }).from(mailboxRegions).where(and(eq(mailboxRegions.workspaceId, message.scope.workspaceId), eq(mailboxRegions.region, domain.region))) : [];
   if (!domain || !region?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
+  if (!region.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (message.region && domain.region !== message.region) throw new ApiError(422, 'MAILBOX_REGION_MISMATCH', 'Tracked mail must use the mailbox region.', 'region');
   const messageRowId = id('msg');
   const sendingIds: string[] = [];
@@ -176,7 +179,8 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
   const owned = new Set((await tx.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address));
   // Reply-To must route back into this address so the conversation keeps tracking. From can be any registered sender.
   if (input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'Reply-To must belong to the selected receivable address.', field);
-  if (!owned.has(input.from.toLowerCase())) await assertRegisteredSender(tx, scope, target.region, input.from, 'from');
+  // Hosted admission checks every From (including mailbox-owned addresses) against verified claims.
+  if (!runtime.config.multiTenant && !owned.has(input.from.toLowerCase())) await assertRegisteredSender(tx, scope, target.region, input.from, 'from');
   const { message, runnable } = await sendFromMailbox(runtime, tx, {
     mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,

@@ -10,6 +10,7 @@ import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFo
 import { enqueue, JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { getMcpGrantActor } from './mcp-auth.js';
+import { unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
@@ -244,14 +245,32 @@ function literalSearch(value: string) { return `%${value.replace(/[\\%_]/g, char
 export const scope = (table: { workspaceId: AnyPgColumn; environment: AnyPgColumn }, a: Pick<Actor, 'workspaceId' | 'environment'>) => and(eq(table.workspaceId, a.workspaceId), eq(table.environment, a.environment));
 export const mailWhere = (a: Pick<Actor, 'workspaceId' | 'environment'>, emailId: string) => and(scope(emails, a), eq(emails.id, emailId));
 export const campaignWhere = (a: Actor, campaignId: string) => and(scope(campaigns, a), eq(campaigns.id, campaignId));
-function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
+function keySender(runtime: Runtime, a: Actor, from: string, selectedRegion: string) {
   region(runtime, selectedRegion);
   const domain = from.split('@')[1]!.toLowerCase();
   if (!senderDomainAllowed(a.domains, domain)) throw new ApiError(403, 'SENDER_DOMAIN_FORBIDDEN', 'This API key cannot send from this domain or its parent domain.', 'from');
 }
+function sender(runtime: Runtime, a: Actor, from: string, selectedRegion: string, verified: boolean) {
+  keySender(runtime, a, from, selectedRegion);
+  if (runtime.config.multiTenant && !verified) throw unverifiedSender();
+}
+// Reuse the existing region-lock round trip for non-batch admission (including mailbox replies).
+async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string) {
+  if (!runtime.config.multiTenant) {
+    const selected = await assertRegionEnabled(db, a.workspaceId, requested);
+    sender(runtime, a, from, selected, false); return selected;
+  }
+  const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean }>(sql`SELECT ${selected} AS region, s.enabled_regions,
+    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
+    FROM ses_installation_settings s WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+  if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
+  if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
+  sender(runtime, a, from, state.region, state.verified); return state.region;
+}
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   region(runtime, draft.region);
-  if (draft.from) sender(runtime, a, draft.from, draft.region);
+  if (draft.from) keySender(runtime, a, draft.from, draft.region);
 }
 function readyCampaign(draft: CampaignDraft) {
   const parsed = CampaignReady.safeParse(draft);
@@ -523,10 +542,10 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
   snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: AttachmentSize[], sharedValidated = false, htmlValidated = false, preparedUnsubscribeUrl?: string): Promise<EmailSnapshot> {
-  const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
+  const input = { ...request, region: sharedValidated ? request.region! : runtime.config.multiTenant ? await sendingRegion(runtime, db, a, request.from, request.region) : await assertRegionEnabled(db, a.workspaceId, request.region) };
   if (!sharedValidated) {
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind, false, a.workspaceId);
-    sender(runtime, a, input.from, input.region);
+    if (!runtime.config.multiTenant) keySender(runtime, a, input.from, input.region);
   }
   const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
@@ -591,9 +610,12 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       SELECT id, size, content_id AS "contentId" FROM sending_attachments
       WHERE workspace_id = (SELECT workspace_id FROM settings) AND environment = ${a.environment} AND ${inArray(attachments.id, attachmentIds)}
       ORDER BY id FOR UPDATE) asset)` : sql`NULL`;
-    const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; assets: AttachmentSize[] | null }>(sql`
+    const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
+      FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
+      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
+    const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
-      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets
+      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified
       FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true`)).rows[0]!;
     assertPending(a, mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
@@ -602,8 +624,9 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     for (const [i, mail] of mails.entries()) {
       const region = mail.region ?? state.default_region;
       if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
+      if (c.env.config.multiTenant) sender(c.env, a, mail.from, region, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
       if (a.environment === 'live' && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
-      sender(c.env, a, mail.from, region);
+      if (!c.env.config.multiTenant) keySender(c.env, a, mail.from, region);
       const ids = distinctAttachmentIds(mail.attachments);
       // PostgreSQL cannot bind NUL as text. Defer that invalid lookup to its own message, after domain/duplicate checks.
       const attached = ids.some(id => id.includes('\0')) ? await attachmentRows(db, a, ids, true) : ids.flatMap(id => locked.get(id) ?? []);
@@ -937,12 +960,11 @@ export function registerSending(app: App) {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     const result = await idempotent(c, a, input, async db => {
       const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
-      const draft = readyCampaign(row.draft); sender(c.env, a, draft.from, draft.region);
+      const draft = readyCampaign(row.draft); await sendingRegion(c.env, db, a, draft.from, draft.region);
       if (row.preparingReviewId) {
         const [active] = await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId)));
         if (active && active.revision === row.revision && ['pending', 'processing'].includes(active.status)) return asyncReviewView(active);
       }
-      await assertRegionEnabled(db, a.workspaceId, draft.region);
       if (a.environment === 'live') await assertLiveRegionReady(c.env, db, draft.region, 'marketing', false, a.workspaceId);
       const lockedAttachments = await attachmentRows(db, a, draft.attachments, true);
       const rendered = renderCampaignContent(c.env, draft);
@@ -1070,8 +1092,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   // Only clients explicitly supplying reviewId request that snapshot contract.
   let reviewId = input.reviewId;
   if (!reviewId) {
-    const draft = readyCampaign(row.draft); sender(runtime, a, draft.from, draft.region);
-    await assertRegionEnabled(db, a.workspaceId, draft.region);
+    const draft = readyCampaign(row.draft); await sendingRegion(runtime, db, a, draft.from, draft.region);
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
     let active = row.preparingReviewId ? (await db.select().from(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.id, row.preparingReviewId), eq(campaignReviews.campaignId, campaignId), eq(campaignReviews.revision, row.revision))))[0] : undefined;
     let captured = false;
@@ -1105,8 +1126,7 @@ async function launchCampaign(runtime: Runtime, db: DbExecutor, a: Actor, campai
   if (!review) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'The selected review is no longer current.');
   if (review.storageVersion !== 2) throw new ApiError(409, 'STALE_CAMPAIGN_REVIEW', 'Prepare a new review for the current campaign revision.');
   if (review.status !== 'ready' || review.processed !== review.eligible) throw new ApiError(409, 'CAMPAIGN_REVIEW_NOT_READY', 'Wait for every reviewed recipient to finish preparation.');
-  sender(runtime, a, review.draft.from, review.draft.region);
-  await assertRegionEnabled(db, a.workspaceId, review.draft.region);
+  await sendingRegion(runtime, db, a, review.draft.from, review.draft.region);
   if (a.environment === 'live') await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', false, a.workspaceId);
   await checkCampaignCapacity(db, a, review.eligible);
   await attachmentRows(db, a, review.draft.attachments, true);

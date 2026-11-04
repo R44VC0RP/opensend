@@ -688,12 +688,23 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assumptions++; return { Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
         });
         const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
+        const identities = new Map<string, Json>(), associations = new Set<string>();
+        const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
+        const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture'], SigningHostedZone:'dkim.amazonses.com' } };
+        identities.set(`${platform}:${foreign}`, verifiedIdentity);
         const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
         async function aws(this: InstanceType<typeof SNSClient> | InstanceType<typeof SESv2Client>, command: any) {
           const account = (await this.config.credentials()).accessKeyId === platformKey.accessKeyId ? platform : customer;
           const region = await this.config.region(), name = command.constructor.name, i = command.input, setKey = `${region}:${i.ConfigurationSetName}`, set = sets.get(setKey), topic = topics.get(i.TopicArn ?? i.ResourceArn ?? i.SubscriptionArn?.split(':').slice(0, 6).join(':'));
           calls.push(name);
           switch (name) {
+            case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
+            case 'CreateEmailIdentityCommand': {
+              assert.equal(account, platform); assert.ok(!identities.has(`${account}:${i.EmailIdentity}`));
+              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags }); return {};
+            }
+            case 'ListEmailIdentitiesCommand': assert.equal(account, customer); return { EmailIdentities:[{ IdentityType:'DOMAIN', IdentityName:domain, SendingEnabled:true, VerificationStatus:'SUCCESS' }, { IdentityType:'DOMAIN', IdentityName:foreign, SendingEnabled:true, VerificationStatus:'SUCCESS' }] };
+            case 'PutEmailIdentityMailFromAttributesCommand': identities.get(`${account}:${i.EmailIdentity}`)!.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; return {};
             case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
             case 'GetConfigurationSetCommand': return set ?? missing();
             case 'GetConfigurationSetEventDestinationsCommand': return { EventDestinations: set!.destinations };
@@ -719,7 +730,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               return { TenantName: i.TenantName, TenantArn: `arn:aws:ses:${region}:${account}:tenant/${i.TenantName}/fixture` };
             }
             case 'UpdateReputationEntityPolicyCommand': assert.equal(i.ReputationEntityPolicy, `arn:aws:ses:${region}:aws:reputation-policy/strict`); return {};
-            case 'CreateTenantResourceAssociationCommand': assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `opensend-${wid}`)); assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/); return {};
+            case 'CreateTenantResourceAssociationCommand':
+              assert.ok([a.org.id, b.org.id].some(wid => i.TenantName === `opensend-${wid}`));
+              if (i.ResourceArn.includes(':identity/')) {
+                assert.equal(account, platform); const binding = `${i.TenantName}:${i.ResourceArn}`;
+                if (associations.has(binding)) throw Object.assign(new Error('Already associated'), { name:'AlreadyExistsException' });
+                associations.add(binding);
+              } else assert.match(i.ResourceArn, /:configuration-set\/opensend-mx-(transactional|marketing)$/);
+              return {};
             default: throw new Error(`Unexpected AWS command ${name}`);
           }
         }
@@ -759,6 +777,48 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(calls.filter(n => n === 'CreateTenantResourceAssociationCommand').length, 4);
         const scoped = (wid: string) => ({ ...runtime, config: { ...runtime.config, workspaceId: wid, regions: [region] } });
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
+        const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
+        const discovery = `/v1/regions/${region}/discovery`;
+        // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
+        await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
+          let answer = '', lookups = 0;
+          dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
+            const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query'); assert.equal(url.searchParams.get('type'),'TXT');
+            lookups++; return Response.json({ Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] });
+          });
+          const before = calls.length;
+          error(await local('GET',discovery,undefined,b.cookie),409,'CONNECTION_MANAGED_REGION');
+          assert.equal(calls.length,before);
+          error(await add(b.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
+          assert.deepEqual(calls.slice(before),['GetEmailIdentityCommand']);
+          assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=$1',[foreign])).rowCount,0);
+          const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.type === 'TXT');
+          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.ok(created.dns.some((r:Json) => r.type==='CNAME'));
+          assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,1);
+          assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
+          for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
+          const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',environment:'test',permissions:['send'] },b.cookie),201).secret;
+          const send = (from:string) => local('POST','/v1/emails/send',mail({ region,from }),undefined,{ authorization:`Bearer ${key}` });
+          error(await send(`hi@sub.${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          const detail = `/v1/domains/${created.id}`;
+          answer=proof.value; const checked = ok(await local('POST',`${detail}/verify`,undefined,b.cookie));
+          assert.equal(checked.verified,true); assert.equal(checked.ready,true); assert.equal(lookups,2);
+          assert.equal(ok(await local('GET','/v1/domains?refresh=false',undefined,b.cookie)).data[0].verified,true); assert.equal(lookups,2);
+          const sent = ok(await send(`hi@sub.${domain}`),202); await pool.query('DELETE FROM sending_emails WHERE id=$1',[sent.id]);
+          error(await send(`hi@not${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          const configured = ok(await local('POST',`${detail}/mail-from`,{ mailFromDomain:`bounce.${domain}` },b.cookie));
+          assert.ok(configured.dns.some((r:Json) => r.type==='MX')); assert.ok(configured.dns.some((r:Json) => r.value===proof.value));
+          assert.equal(ok(await add(b.cookie,domain),201).id,created.id,'The creating claim can resume safely.');
+          const identity = identities.get(`${platform}:${domain}`)!;
+          identity.DkimAttributes = { ...verifiedIdentity.DkimAttributes, Status:'PENDING' };
+          assert.equal(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)).verified,false,'TXT alone cannot replace DKIM.');
+          identity.DkimAttributes = verifiedIdentity.DkimAttributes;
+          answer='wrong-token'; assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false);
+          error(await send(`hi@${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          const race = `${unique('race')}.invalid`;
+          const raced = await Promise.all([add(a.cookie,race),add(b.cookie,`child.${race}`)]);
+          assert.deepEqual(raced.map(r => r.status).sort(),[201,409]); error(raced.find(r => r.status===409)!,409,'DOMAIN_CLAIMED');
+        });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v1.yaml';
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
@@ -772,6 +832,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);
+        identities.set(`${customer}:${foreign}`,verifiedIdentity);
+        const adopted = ok(await add(a.cookie,foreign),201); assert.equal(adopted.verified,true); assert.ok(!adopted.dns.some((r:Json) => r.name.startsWith('_opensend.')));
+        providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
+        assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
+        const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
+        assert.ok(visible.some((r:Json) => r.name===foreign && r.verified)); assert.ok(!visible.some((r:Json) => r.name===domain));
         await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
@@ -1118,6 +1184,9 @@ describe('Hosted MCP OAuth and tools', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
+      const connection = unique('conn');
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,status,aws_account_id) VALUES ($1,$2,'shared',$3,'ready','111122223333')",[connection,wid,REGION]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('example.com',$1,$2,true)",[wid,connection]);
       await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       const deniedClient = ok(await registerClient(t, db, {}, request), 201);
       const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
@@ -1134,6 +1203,9 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const first = await send(); await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
+      const lostProof = await send(); await db.query('UPDATE domain_claims SET verified=false WHERE workspace_id=$1',[wid]); await run('email.dispatch');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled');
+      await db.query('UPDATE domain_claims SET verified=true WHERE workspace_id=$1',[wid]);
       const second = await send();
       await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       assert.equal((await call('getContext')).response.role, 'member', 'An existing member grant must not grow on promotion.');
@@ -1297,6 +1369,11 @@ describe('Hosted MCP OAuth and tools', () => {
       for (const [hookId,prefix] of [[canonicalHook.id,'address'],[legacyHook.id,'mailbox']]) {
         const bodies=deliveries.filter(d=>d.webhook_id===hookId).map(d=>d.payload);
         assert.deepEqual(bodies.map(e=>e.type),[`${prefix}.created`,`${prefix}.created`,`${prefix}.deleted`]); assert.equal(bodies.at(-1).addressId,b.id);
+      }
+      runtime.config.multiTenant = true;
+      // Neither a registered parent domain nor the mailbox's own address is sufficient on MX.
+      for (const from of ['team@mail.example.com','support@example.com']) {
+        error(await post(`/threads/${solo.threadId}/reply`,{from,text:'MX unverified sender',replyToMessageId:solo.id}),403,'SENDER_DOMAIN_NOT_VERIFIED');
       }
     });
   });

@@ -37,11 +37,16 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
     return value;
   } finally { client.destroy(); }
 }
-export async function workspaceCredentials(runtime: Runtime, region: string) {
-  const result = await runtime.db.execute<{ kind: 'shared' | 'byo'; role_arn: string; external_id: string }>(sql`
-    SELECT kind, role_arn, external_id FROM provider_connections
+export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string };
+export async function workspaceConnection(runtime: Runtime, region: string) {
+  const result = await runtime.db.execute<ReadyConnection>(sql`
+    SELECT id, kind, aws_account_id, role_arn, external_id FROM provider_connections
     WHERE workspace_id = ${runtime.config.workspaceId} AND region = ${region} AND status = 'ready'`);
   const row = result.rows[0];
   if (!row) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+  return row;
+}
+export async function workspaceCredentials(runtime: Runtime, region: string, connection?: ReadyConnection) {
+  const row = connection ?? await workspaceConnection(runtime, region);
   return row.kind === 'shared' ? platformCredentials(runtime) : assume(runtime, region, row.role_arn, row.external_id);
 }

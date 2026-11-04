@@ -5,7 +5,7 @@ import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
-import { workspaceCredentials } from './provider-credentials.js';
+import { workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
 
 export type Database = NodePgDatabase;
 export type DbExecutor = Pick<Database, 'select' | 'insert' | 'update' | 'delete' | 'execute'>;
@@ -113,13 +113,14 @@ export function region(runtime: Runtime, value: string) {
 // Runtime identities are invocation-local in Workers; never reuse an I/O client
 // across requests. Node drains also receive a fresh resolved runtime.
 const sesClients = new WeakMap<Runtime, Map<string, SESv2Client>>();
-export function getSes(runtime: Runtime, selectedRegion: string): SESv2Client {
+export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection): SESv2Client {
   region(runtime, selectedRegion);
   if (!runtime.config.liveEnabled || !runtime.config.aws) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
   let clients = sesClients.get(runtime);
   if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
-  let client = clients.get(selectedRegion);
-  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(selectedRegion, client); }
+  const key = connection ? `${selectedRegion}:${connection.id}` : selectedRegion;
+  let client = clients.get(key);
+  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
   return client;
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {
