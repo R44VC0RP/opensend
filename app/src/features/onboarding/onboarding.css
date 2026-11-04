@@ -52,3 +52,4 @@
   .onboarding-half + .onboarding-half { border-left: 0; border-top: 1px solid var(--color-border); }
   .onboarding-workspace { width: 140px; }
 }
+.onboarding .developer-section { max-width: none; }

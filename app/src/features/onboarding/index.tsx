@@ -1,14 +1,15 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, ArrowUpRight } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, PageHeader, StatusBadge } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, CopyButton, ErrorState, Field, Input, PageHeader, SectionHeader, StatusBadge } from '../../components/ui'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
 import { useApi, useApiMutation, useApiQuery, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
-import { setDomainStep, type OnboardingStage } from '../../data/onboarding'
+import { agentStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DomainRecords, domainState, useDomain } from '../settings/domain-records'
+import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../developer/agent-setup'
 import { ApiError, type ConnectionKind, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
@@ -93,7 +94,8 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   }
   const reset = () => { setPicked(null); setQueued(false) }
   if (stage.step === 'setup-required') return <AdminSetupRequired />
-  if (stage.step === 'domain' && stage.domainId) return <DomainSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} onMissing={() => setDomainStep(workspaceId, '')} />
+  if (stage.step === 'agent') return <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} />
+  if (stage.step === 'domain' && stage.domainId) return <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} />
   const current = connection.data
   const pendingAws = sending && current?.kind === 'byo' && current.status === 'pending' ? current : null
   if (sending && !pendingAws && !picked) {
@@ -228,22 +230,56 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region
   </div>
 }
 
-function DomainSetup({ domainId, onFinish, onMissing }: { domainId: string; onFinish: () => void; onMissing: () => void }) {
+function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; onContinue: () => void; onMissing: () => void }) {
   const domain = useDomain(domainId)
   const verified = domain.data?.status === 'verified'
   const missing = domain.error instanceof ApiError && domain.error.status === 404
   useEffect(() => { if (missing) onMissing() }, [missing]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Verified: show it, then carry on to the dashboard.
-  useEffect(() => { if (!verified) return; const timer = setTimeout(onFinish, 2500); return () => clearTimeout(timer) }, [verified]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Verified: show it, then carry on to the agent setup.
+  useEffect(() => { if (!verified) return; const timer = setTimeout(onContinue, 2500); return () => clearTimeout(timer) }, [verified]) // eslint-disable-line react-hooks/exhaustive-deps
   if (domain.isPending || missing) return <BootLoader inline />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   const state = domainState(current)
   return <div className="stack onboarding onboarding--wide">
-    <PageHeader title={<span className="onboarding-domain-title">{current.name}<StatusBadge status={state.status} tone={state.tone} /></span>} actions={<Button variant={verified ? 'primary' : 'secondary'} onClick={onFinish}>Continue to dashboard</Button>} />
-    {verified ? <Alert tone="success" title="Domain verified">You can send from {current.name}. Opening your dashboard…</Alert>
+    <PageHeader title={<span className="onboarding-domain-title">{current.name}<StatusBadge status={state.status} tone={state.tone} /></span>} actions={<Button variant={verified ? 'primary' : 'secondary'} onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>} />
+    {verified ? <Alert tone="success" title="Domain verified">You can send from {current.name}. Continuing…</Alert>
       : current.status === 'issue' ? <Alert tone="danger">Verification stopped. Check the records below, then use Check now on the domain’s page in Domains.</Alert>
       : <p className="muted onboarding-lead" role="status">Checking automatically. Continue whenever you like; {current.name} keeps verifying in the background.</p>}
     <DomainRecords domain={current} />
+  </div>
+}
+
+// Last step: everything a coding agent needs. Domain verification keeps running in the background.
+function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => void }) {
+  const identity = useSession()?.identity
+  const origin = usePublicOrigin()
+  const domain = useDomain(domainId)
+  const create = useApiMutation((api, _: void) => api.keys.create({ name: 'Coding agent', permission: 'manage', domains: [] }))
+  const [secret, setSecret] = useState<string | null>(null)
+  async function createKey() {
+    try { setSecret((await create.mutateAsync(undefined)).secret) } catch { /* Shown inline. */ }
+  }
+  // A removed domain still leaves a useful prompt without domain details.
+  const missing = domain.error instanceof ApiError && domain.error.status === 404
+  if (domain.isPending) return <BootLoader inline />
+  if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
+  const prompt = agentPrompt({ origin, domain: domain.data ?? null, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true })
+  return <div className="stack onboarding">
+    <PageHeader title="Set up your agent" actions={<Button variant="primary" onClick={onFinish}>Go to dashboard</Button>} />
+    <p className="muted onboarding-lead">Give your coding agent an API key, this prompt and the MCP server. You can find them again under Developer.</p>
+    <section className="section stack developer-section" aria-label="API key">
+      <SectionHeader title="API key" />
+      {secret ? <>
+        <div className="developer-url"><code>{secret}</code><CopyButton value={secret} label="Copy API key" /></div>
+        <p className="muted developer-copy" role="status">Shown once. Store it as <code>OPENSEND_API_KEY</code> in your project’s environment.</p>
+      </> : <>
+        <p className="muted developer-copy">Full access to send and manage this workspace, for every domain.</p>
+        <div><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
+        {create.error ? <Alert tone="danger">{message(create.error)}</Alert> : null}
+      </>}
+    </section>
+    <AgentPrompt prompt={prompt} />
+    <McpSetup />
   </div>
 }

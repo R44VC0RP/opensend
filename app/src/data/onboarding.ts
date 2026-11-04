@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import type { Identity } from './types'
 
-// The add-domain step follows a fresh connection until the user continues to the dashboard.
-// Stored per workspace so a reload returns to the same records: '' before a domain is added, else its ID.
+// The add-domain and agent steps follow a fresh connection until the user continues to the dashboard.
+// Stored per workspace so a reload returns to the same step: '' before a domain is added, then its ID,
+// then `agent:<ID>` once the user continues to the agent setup.
 const stepKey = (workspaceId: string) => `opensend.onboarding.domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const memory = new Map<string, string | null>()
@@ -21,12 +22,15 @@ export function useDomainStep(workspaceId: string | undefined) {
 }
 
 // Hosted workspaces need a ready sending connection (summarised in /v1/me) before the dashboard opens.
-export type OnboardingStage = { step: 'sending' } | { step: 'setup-required' } | { step: 'domain'; domainId: string } | null
+export type OnboardingStage = { step: 'sending' } | { step: 'setup-required' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null
+const agentPrefix = 'agent:'
+export const agentStep = (domainId: string) => `${agentPrefix}${domainId}`
 export function onboardingStage(identity: Identity | null | undefined, domainStep: string | null): OnboardingStage {
   if (!identity?.multiTenant) return null
   const admin = identity.role === 'owner' || identity.role === 'admin'
   if (identity.connection?.status !== 'ready') return { step: admin ? 'sending' : 'setup-required' }
-  return admin && domainStep !== null ? { step: 'domain', domainId: domainStep } : null
+  if (!admin || domainStep === null) return null
+  return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
 }
 export const identityOnboardingStage = (identity: Identity | null | undefined) => onboardingStage(identity, identity ? readDomainStep(identity.workspaceId) : null)
 

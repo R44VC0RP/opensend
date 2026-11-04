@@ -1,8 +1,8 @@
-.developer-page > .section { max-width: 840px; gap: var(--space-16); }
+.developer-section { max-width: 840px; gap: var(--space-16); }
 .developer-url { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding: var(--space-8) var(--space-12); background: var(--color-canvas); border-radius: var(--radius-sm); min-width: 0; }
 .developer-url > code { min-width: 0; overflow-wrap: anywhere; }
 .developer-url > .cluster { flex-shrink: 0; }
-.developer-page .ui-icon-button { min-width: 40px; min-height: 40px; }
+.developer-section .ui-icon-button { min-width: 40px; min-height: 40px; }
 .developer-copy { max-width: 72ch; margin: 0; text-wrap: pretty; }
 .developer-access { max-width: 420px; }
 .developer-access .ui-select-trigger { min-height: 40px; height: auto; }
@@ -12,7 +12,10 @@
 .developer-steps li + li { margin-top: var(--space-12); }
 .developer-steps code { overflow-wrap: anywhere; }
 @media (max-width: 560px) {
-  .developer-page .ui-icon-button { min-width: 44px; min-height: 44px; }
+  .developer-section .ui-icon-button { min-width: 44px; min-height: 44px; }
   .developer-access .ui-select-trigger { min-height: 44px; font-size: 16px; }
   .developer-code { padding: var(--space-12); font-size: var(--text-xs); white-space: pre; overflow: auto; }
 }
+.developer-client-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
+.developer-client-bar > :first-child { min-width: 0; }
+@media (max-width: 560px) { .developer-code.developer-code--wrap { white-space: pre-wrap; } }

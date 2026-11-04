@@ -1,42 +1,22 @@
-import { useState } from 'react'
-import { CopyButton, Field, PageHeader, SectionHeader, Select } from '../../components/ui'
+import { PageHeader } from '../../components/ui'
+import { useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from './agent-setup'
 import './developer.css'
 
-const accessOptions = [
-  { value: 'read', label: 'Read only', scope: 'opensend:read offline_access', hint: 'Read data without sending email.' },
-  { value: 'manage', label: 'Full access', scope: 'opensend:read opensend:send opensend:manage offline_access', hint: 'Includes sending email and changing configuration.' },
-]
-
 export function DeveloperPage() {
-  const [access, setAccess] = useState(accessOptions[0].value)
-  const selected = accessOptions.find(option => option.value === access) ?? accessOptions[0]
-  const serverUrl = new URL('/mcp', window.location.origin).href
-  const configuration = JSON.stringify({
-    $schema: 'https://opencode.ai/config.json',
-    mcp: { servers: { opensend: { type: 'remote', url: serverUrl, oauth: { scope: selected.scope } } } },
-  }, null, 2)
-
+  const identity = useSession()?.identity
+  const { multiTenant } = useWorkspaceAccess()
+  const origin = usePublicOrigin()
+  const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20 }, signal))
+  // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
+  const items = domains.data?.items ?? []
+  const listed = items.find(row => row.status === 'verified') ?? items[0] ?? null
+  // The detail read carries the current DNS records, including the receiving MX.
+  const detail = useApiQuery(['domain', listed?.id], (api, signal) => api.domains.get(listed!.id, signal), { enabled: !!listed })
+  const domain = detail.data ?? listed
   return <div className="stack developer-page">
     <PageHeader title="Developer" />
-    <section className="section stack" aria-label="MCP server">
-      <SectionHeader title="MCP server" />
-      <div className="developer-url"><code>{serverUrl}</code><CopyButton value={serverUrl} label="Copy MCP URL" /></div>
-      <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s Google login; no API key or local MCP process is needed.</p>
-    </section>
-    <section className="section stack" aria-label="OpenCode setup">
-      <SectionHeader title="OpenCode" actions={<CopyButton key={access} value={configuration} label="Copy OpenCode configuration" />} />
-      <div className="developer-access">
-        <Field label="Requested access" htmlFor="developer-mcp-access" hint={selected.hint}>
-          <Select id="developer-mcp-access" value={access} onValueChange={setAccess} options={accessOptions} />
-        </Field>
-      </div>
-      <pre className="developer-code" tabIndex={0} aria-label="OpenCode configuration"><code>{configuration}</code></pre>
-      <ol className="developer-steps">
-        <li>Merge this entry into your project or global <code>opencode.json</code>. Keep your existing servers and settings.</li>
-        <li>Open <code>/mcps</code>, select <strong>opensend</strong>, then choose <strong>Sign in</strong>.</li>
-        <li>Approve the requested access in your browser. A dashboard session in that browser profile skips Google sign-in.</li>
-      </ol>
-      <p className="muted developer-copy">Code Mode is enabled by default. Tools include typed input and output schemas. The access selection only changes the configuration above; reconnect and authorize after changing scopes.</p>
-    </section>
+    {!domains.isPending && !(listed && detail.isPending) && <AgentPrompt prompt={agentPrompt({ origin, domain, email: identity?.email ?? null, multiTenant })} />}
+    <McpSetup chooseAccess />
   </div>
 }
