@@ -3808,9 +3808,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
-      async function receive(to: string, mime: string) {
+      async function receive(to: string | string[], mime: string, dmarc = 'PASS') {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
-        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: Array.isArray(to) ? to : [to], dmarcVerdict: { status: dmarc }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
         assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
         await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,attempts:1});
       }
@@ -3872,6 +3872,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await receive(address,mime('separate','separate case',[`In-Reply-To: <synthetic-${tracked.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`,'References: <selected@example.net>']));
       const separate = ok(await get(`${inbox}&direction=inbound&q=separate`,agent)).data;
       assert.equal(separate.length,1); assert.equal(separate[0].threadId,tracked.threadId,'A direct, not-yet-synced SES parent takes priority over a known older reference.');
+      // An address that requires DMARC keeps unverified mail for a person and announces only verified mail.
+      assert.equal(box.requireDmarc,false); assert.equal(ok(await local('PATCH',`${addresses}/${box.id}`,{ requireDmarc:true },'live')).requireDmarc,true);
+      const other = ok(await post(addresses,{address:'archive@inbox.example.com',requireDmarc:true}),201);
+      assert.equal(other.requireDmarc,true); assert.equal(ok(await local('PATCH',`${addresses}/${other.id}`,{requireDmarc:false},'live')).requireDmarc,false);
+      const announced = async () => (await db.query(`SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1`,[boxHook.id])).rows.map(row => row.payload);
+      const labels = async (messageId: string) => Object.fromEntries((await db.query(`SELECT mailbox_id,labels FROM mailbox_messages WHERE message_id=$1`,[messageId])).rows.map(row=>[row.mailbox_id,row.labels]));
+      const before = (await announced()).length;
+      await receive([address,other.address],mime('spoofed','unverified zebra',[]),'GRAY');
+      const held = ok(await get(`${inbox}&direction=inbound&q=unverified`,agent)).data; assert.equal(held.length,1);
+      assert.deepEqual(await labels(held[0].id),{[box.id]:['unverified'],[other.id]:[]});
+      const events = ok(await get(`${base}/events?types=message.received&after=0`)).data.filter((e:Json)=>e.messageId===held[0].id);
+      assert.deepEqual(events.map((e:Json)=>[e.addressId,e.data.dmarc]),[[other.id,'GRAY']]);
+      assert.equal((await announced()).length,before);
+      await receive(address,mime('verified','verified zebra',[]));
+      const passed = ok(await get(`${inbox}&direction=inbound&q=verified`,agent)).data; assert.equal(passed.length,1); assert.deepEqual(await labels(passed[0].id),{[box.id]:[]});
+      const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
+      assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
     });
   });
 

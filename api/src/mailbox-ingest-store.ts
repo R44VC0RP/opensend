@@ -15,6 +15,8 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
   const names=fields.map(([name])=>sql.identifier(name));
   const candidates=[...new Set([m.inReplyTo,...[...(m.references??[])].reverse(),m.messageId].filter((s):s is string=>!!s))].slice(0,101);
   const recipients=m.envelopeTo.map((addr,n)=>({addr,n,valid:ADDRESS.test(addr)}));
+  // A deduplicated target can come from another receipt; authenticate this delivery, not the original one.
+  const dmarc=m.verdicts?.dmarc??null;
   const result=await tx.execute<{n:number}>(sql`WITH input AS MATERIALIZED (
     SELECT x.* FROM jsonb_populate_record(NULL::mail_messages,${JSON.stringify(Object.fromEntries(fields))}::jsonb) x
     JOIN mail_receipts r ON r.workspace_id=x.workspace_id AND r.ses_message_id=x.ses_message_id AND r.status='pending'
@@ -54,13 +56,15 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
   resolved AS (SELECT r.addr,CASE WHEN r.owner IS NOT NULL THEN CASE WHEN r.receives THEN r.owner END ELSE coalesce(base.id,r.ruled,exact.id) END AS box
     FROM routes r LEFT JOIN boxes exact ON exact.address=r.addr LEFT JOIN (boxes base JOIN misses earlier ON earlier.addr=base.address) ON base.address=r.base AND earlier.n<r.n),
   unrouted AS (INSERT INTO mail_unrouted(workspace_id,message_id,address) SELECT x.workspace_id,x.id,r.addr FROM target x,resolved r WHERE r.box IS NULL ON CONFLICT DO NOTHING),
-  added AS (INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at)
-    SELECT DISTINCT r.box,x.id,x.workspace_id,x.thread_id,'inbound',false,x.received_at FROM target x,resolved r WHERE r.box IS NOT NULL ON CONFLICT DO NOTHING RETURNING *),
+  added AS (INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,labels)
+    SELECT DISTINCT r.box,x.id,x.workspace_id,x.thread_id,'inbound',false,x.received_at,CASE WHEN b.require_dmarc THEN ARRAY['unverified'] ELSE ARRAY[]::text[] END
+    FROM target x CROSS JOIN resolved r LEFT JOIN mailboxes b ON b.id=r.box AND ${dmarc!=='PASS'} WHERE r.box IS NOT NULL ON CONFLICT DO NOTHING RETURNING *),
   summaries AS (INSERT INTO mailbox_threads AS t(mailbox_id,thread_id,workspace_id,subject,snippet,participants,message_count,unread_count,last_message_at,last_inbound_at,spam,labels)
     SELECT a.mailbox_id,x.thread_id,x.workspace_id,x.subject,x.snippet,(SELECT coalesce(jsonb_agg(p ORDER BY n),'[]') FROM (SELECT * FROM (SELECT DISTINCT ON(lower(p->>'address')) p,n FROM jsonb_array_elements(jsonb_build_array(jsonb_build_object('name',x.from_name,'address',x.from_address))||x."to"||x.cc) WITH ORDINALITY v(p,n) WHERE p->>'address'<>'' ORDER BY lower(p->>'address'),n) first_seen ORDER BY n LIMIT 20) limited),1,1,x.received_at,x.received_at,x.spam,CASE WHEN x.spam THEN ARRAY['spam'] ELSE ARRAY[]::text[] END FROM target x JOIN added a ON a.message_id=x.id ORDER BY a.mailbox_id ${threadSummaryConflict} RETURNING mailbox_id),
   done AS (UPDATE mail_receipts SET status='processed',processed_at=now(),error=NULL WHERE workspace_id=${m.workspaceId} AND ses_message_id=${m.sesMessageId} AND status='pending'),
   ${mailboxEventCtes(sql`SELECT workspace_id,'message.stored' AS type,NULL::text AS mailbox_id,thread_id,id AS message_id,'{}'::jsonb AS data,1 AS ord FROM stored
     UNION ALL SELECT workspace_id,'address.created',id,NULL,NULL,'{"origin":"auto"}'::jsonb,2 FROM boxes
-    UNION ALL SELECT x.workspace_id,'message.received',s.mailbox_id,x.thread_id,x.id,jsonb_build_object('from',jsonb_build_object('name',x.from_name,'address',x.from_address),'subject',x.subject,'snippet',x.snippet,'attachmentCount',x.attachment_count,'spam',x.spam,'automated',x.automated),3 FROM target x,summaries s`)} SELECT count(*)::int AS n FROM queued`);
+    UNION ALL SELECT x.workspace_id,'message.received',a.mailbox_id,x.thread_id,x.id,jsonb_build_object('from',jsonb_build_object('name',x.from_name,'address',x.from_address),'subject',x.subject,'snippet',x.snippet,'attachmentCount',x.attachment_count,'spam',x.spam,'automated',x.automated,'dmarc',${dmarc}::text),3
+    FROM target x JOIN added a ON a.message_id=x.id JOIN summaries s ON s.mailbox_id=a.mailbox_id WHERE NOT ('unverified'=ANY(a.labels))`)} SELECT count(*)::int AS n FROM queued`);
   return result.rows[0]!.n;
 }

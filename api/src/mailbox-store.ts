@@ -77,7 +77,7 @@ export function checkTemporaryMailboxRouting(input: { aliases?: string[]; rules?
 }
 
 /** Creates a mailbox with its primary address and aliases. Addresses stay reserved until deletion. */
-export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits>; ttlSeconds?: number }) {
+export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domainId: string; domainName: string; address: string; displayName?: string | null; aliases?: string[]; rules?: string[]; metadata?: Record<string, unknown>; origin: 'api' | 'auto'; sendLimits?: Partial<SendLimits>; requireDmarc?: boolean; ttlSeconds?: number }) {
   const address = input.address.trim().toLowerCase();
   if (input.ttlSeconds !== undefined) checkTemporaryMailboxRouting(input);
   const aliases = [...new Set((input.aliases ?? []).map(value => value.trim().toLowerCase()))].filter(value => value !== address);
@@ -89,7 +89,7 @@ export async function createMailbox(tx: DbExecutor, scope: Scope, input: { domai
   const mailboxId = id('mbx');
   // Start the lease after acquiring the address lock, not at transaction start before any wait.
   const lease = input.ttlSeconds === undefined ? {} : { createdAt: sql`statement_timestamp()`, updatedAt: sql`statement_timestamp()`, expiresAt: sql`statement_timestamp() + ${input.ttlSeconds}::int * interval '1 second'` };
-  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin, sendLimits: input.sendLimits ?? {}, ...lease }).returning();
+  const [row] = await tx.insert(mailboxes).values({ id: mailboxId, ...scope, domainId: input.domainId, address, displayName: input.displayName ?? null, rules, metadata: input.metadata ?? {}, origin: input.origin, sendLimits: input.sendLimits ?? {}, requireDmarc: input.requireDmarc ?? false, ...lease }).returning();
   await tx.insert(mailboxAddresses).values(all.map((value, index) => ({ ...scope, address: value, mailboxId, kind: index === 0 ? 'primary' as const : 'alias' as const })));
   return row!;
 }

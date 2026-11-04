@@ -6221,6 +6221,10 @@
               "perThreadPer10Minutes"
             ],
             "description": "Outbound limits that guard against runaway agents and reply loops."
+          },
+          "requireDmarc": {
+            "type": "boolean",
+            "description": "When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received."
           }
         },
         "required": [
@@ -6237,7 +6241,8 @@
           "updatedAt",
           "expiresAt",
           "stats",
-          "sendLimits"
+          "sendLimits",
+          "requireDmarc"
         ]
       },
       "CreateInboundAddress": {
@@ -6318,6 +6323,11 @@
             },
             "additionalProperties": false,
             "description": "Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending."
+          },
+          "requireDmarc": {
+            "type": "boolean",
+            "default": false,
+            "description": "Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received."
           }
         },
         "required": [
@@ -6382,6 +6392,9 @@
             },
             "additionalProperties": false,
             "description": "Override outbound limits. Defaults: perHour 100, perDay 1000, perRecipientPerHour 20, perThreadPer10Minutes 10. 0 blocks sending."
+          },
+          "requireDmarc": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -29200,12 +29213,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { createInboundAddress } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createInboundAddress({\n  client,\n  body: {\n    \"address\": \"example\",\n    \"aliases\": [],\n    \"rules\": [],\n    \"metadata\": {}\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { createInboundAddress } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await createInboundAddress({\n  client,\n  body: {\n    \"address\": \"example\",\n    \"aliases\": [],\n    \"rules\": [],\n    \"metadata\": {},\n    \"requireDmarc\": false\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/inbound/addresses' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"address\": \"example\",\n  \"aliases\": [],\n  \"rules\": [],\n  \"metadata\": {}\n}'"
+            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/inbound/addresses' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"address\": \"example\",\n  \"aliases\": [],\n  \"rules\": [],\n  \"metadata\": {},\n  \"requireDmarc\": false\n}'"
           }
         ]
       }

@@ -15,7 +15,7 @@ interface __BaseEnv_Env {
 	SIMULATED_SES_RATE: "5000";
 	DISPATCH_SHARDS: "4";
 	DISPATCH_RATE_FACTOR: "1.1";
-	WEBHOOK_ALLOWED_HOSTS: "opencode.ai,dev.opencode.ai";
+	WEBHOOK_ALLOWED_HOSTS: "opencode.ai,dev.opencode.ai,blhp.app";
 	DISPATCHER: DurableObjectNamespace<import("./src/dispatcher-do").DispatcherShard>;
 }
 declare namespace Cloudflare {
