@@ -15,7 +15,8 @@ const values = z.object({
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // Comma-separated regions offered for MX shared sending.
   SHARED_SENDING_REGIONS: z.string().default('us-east-2'),
-  SHARED_INBOUND_DOMAIN: z.hostname().toLowerCase().max(189).default('in.opensend.mx'),
+  // Multi-tenant only: workspaces receive at <anything>@<slug>.<this domain>. No default: it is the operator's own zone.
+  SHARED_INBOUND_DOMAIN: optional(z.hostname().toLowerCase().max(189)),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
   // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
@@ -61,6 +62,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (allowedEmails.some(e => !z.email().safeParse(e).success) || allowedDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact email addresses and domain names in the authentication allowlists, without wildcards or URLs.');
   const regions = [v.DEFAULT_SES_REGION];
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
+  if (v.MULTI_TENANT === 'true' && !v.SHARED_INBOUND_DOMAIN) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_INBOUND_DOMAIN when MULTI_TENANT is true.');
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
   const url = new URL(v.PUBLIC_URL);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');

@@ -644,7 +644,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const pool = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 5 });
       cleanup(t, () => pool.end());
       runtime.db = drizzle(pool);
-      Object.assign(runtime.config, { multiTenant: true, googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
+      Object.assign(runtime.config, { multiTenant: true, sharedInboundDomain: 'in.opensend.mx', googleClientSecret: 'synthetic-client-secret', allowedDomains: ['example.com'], defaultWorkspaceOwners: [] });
       const base = '/v1/workspaces/current', workspaces: string[] = [];
       cleanup(t, async () => {
         for (const wid of workspaces) {
@@ -1336,7 +1336,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
   test('MX: MCP consent and queued sends respect the originating workspace and member ceiling', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
-      Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
+      Object.assign(runtime.config, { multiTenant: true, sharedInboundDomain: 'in.opensend.mx', allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
       // A cold hosted connection and unverified claim are sufficient for simulated delivery, even without AWS credentials.
@@ -3513,7 +3513,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const shared = runtime.config.workspaceId, byo = unique('customer'), pool = '111122223333', account = '444455556666', externalId = randomUUID();
       const poolTopic = `arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`, byoTopic = `arn:aws:sns:${REGION}:${account}:${setupResources(byo).topicName}`;
       const role = `arn:aws:iam::${account}:role/OpenSendMX-fixture`;
-      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      Object.assign(runtime.config, { multiTenant:true, sharedInboundDomain:'in.opensend.mx', liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
       await db.query('INSERT INTO workspaces(id,slug,name) VALUES ($1,$1,$1)',[byo]);
       await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
       await db.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $2,$2,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$1',[shared,byo]);

@@ -22,7 +22,8 @@ const PURPOSE = 'mailbox-inbound';
 const RULE_CAPACITY = 500; // SES receipt-rule recipient quota.
 export const STAGING_PREFIX = 'staging/';
 export const workspacePrefix = (wid:string, kind:'raw'|'att') => `workspaces/${wid}/${kind}/`;
-export const sharedInboundDomain = (runtime:Runtime) => runtime.config.sharedInboundDomain ?? 'in.opensend.mx';
+// Unset on self-hosted installs: an empty domain matches no recipient host or reserved address.
+export const sharedInboundDomain = (runtime:Runtime) => runtime.config.sharedInboundDomain ?? '';
 export const instantRegion=(runtime:Runtime)=>sql`(SELECT p.region FROM provider_pool_regions p JOIN jsonb_array_elements_text(${JSON.stringify(runtime.config.sharedRegions??['us-east-2'])}::jsonb) WITH ORDINALITY offered(region,n) ON p.region=offered.region WHERE p.inbound_domain=${sharedInboundDomain(runtime)} ORDER BY offered.n LIMIT 1)`;
 export function assertMailboxKey(wid:string,key:string,kind:'raw'|'att') {
   if (!key.startsWith(workspacePrefix(wid,kind)) || key.split('/').some(s=>!s || s==='.' || s==='..')) throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The object is not in this workspace.');
