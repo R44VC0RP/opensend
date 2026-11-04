@@ -4416,6 +4416,14 @@
                 },
                 "priority": {
                   "type": "number"
+                },
+                "purpose": {
+                  "type": "string",
+                  "enum": [
+                    "dkim",
+                    "ownership",
+                    "mail_from"
+                  ]
                 }
               },
               "required": [
@@ -11029,8 +11037,7 @@
           }
         },
         "required": [
-          "kind",
-          "region"
+          "kind"
         ],
         "additionalProperties": false
       }
@@ -25794,7 +25801,7 @@
     "/v1/domains": {
       "get": {
         "operationId": "listDomains",
-        "description": "Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.",
+        "description": "MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.",
         "tags": [
           "Domains"
         ],
@@ -26298,6 +26305,7 @@
     "/v1/domains/{id}": {
       "get": {
         "operationId": "getDomain",
+        "description": "On MX, read the stored DNS records and verification status without an AWS call.",
         "tags": [
           "Domains"
         ],
@@ -26448,11 +26456,177 @@
             "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/v1/domains/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
           }
         ]
+      },
+      "delete": {
+        "operationId": "deleteDomain",
+        "tags": [
+          "Domains"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "MX only. Delete this claim’s tagged SES identity and release the domain. Does not remove DNS records.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    }
+                  },
+                  "required": [
+                    "deleted"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { deleteDomain } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await deleteDomain({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request DELETE \\\n  --url 'https://opensend.anoma.ly/v1/domains/resource_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
       }
     },
     "/v1/domains/{id}/verify": {
       "post": {
         "operationId": "verifyDomain",
+        "description": "On MX, request a background verification and return the current stored status. Read the domain again for updates.",
         "tags": [
           "Domains"
         ],
@@ -45961,7 +46135,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Shared connections return ready, or pending while scheduled setup finishes; poll getConnection. BYO returns a CloudFormation quick-create URL. Never sends mail.",
+        "description": "Choose a sending provider. Hosted mail is ready immediately; platform setup runs in the background. BYO returns a CloudFormation quick-create URL. Never sends mail.",
         "requestBody": {
           "required": true,
           "content": {
@@ -45974,16 +46148,6 @@
         },
         "responses": {
           "201": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProviderConnection"
-                }
-              }
-            }
-          },
-          "202": {
             "description": "Success",
             "content": {
               "application/json": {
@@ -46098,12 +46262,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { createConnection } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await createConnection({\n  client,\n  body: {\n    \"kind\": \"shared\",\n    \"region\": \"us-east-1\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
+            "source": "import { createClient } from 'opensend-js/client';\nimport { createConnection } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await createConnection({\n  client,\n  body: {\n    \"kind\": \"shared\"\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"shared\",\n  \"region\": \"us-east-1\"\n}'"
+            "source": "curl --request POST \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"kind\": \"shared\"\n}'"
           }
         ]
       },

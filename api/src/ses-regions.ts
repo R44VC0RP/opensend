@@ -8,7 +8,6 @@ import { isApprovedUser } from './google-auth.js';
 import { approvedOriginUser } from './sending.js';
 import { getMcpGrantActor } from './mcp-auth.js';
 import { enqueue } from './jobs.js';
-import { domainName, importByoDomains } from './domain-claims.js';
 import { workspaceConnection, workspaceCredentials, type ReadyConnection } from './provider-credentials.js';
 import { assertProvisionable, AutoValidationModeSchema, discoverSes, provisionSes, SesDiscoverySchema, setAutoValidation, type SesDiscovery } from './ses-setup.js';
 import { configureRegion, credentialFingerprint, discoveryTarget, DISCOVERY_TTL, getRegionSettings, regionCatalog, regionPattern, regionWhere } from './ses-region-state.js';
@@ -40,14 +39,7 @@ async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: str
       .where(and(regionWhere(workspaceId, report.region), jobId ? eq(sesRegions.provisionJobId, jobId) : undefined,
         sql`(${sesRegions.lastDiscoveredAt} IS NULL OR ${sesRegions.lastDiscoveredAt} <= ${report.checkedAt}::timestamptz)`)).returning({ region: sesRegions.region });
     if (!updated.length) return;
-    if (connection) {
-      const names = new Map<string, boolean>();
-      for (const d of report.domains) {
-        const name = domainName.safeParse(d.name);
-        if (name.success) names.set(name.data, d.verificationStatus === 'SUCCESS' && d.sendingEnabled === true);
-      }
-      return importByoDomains(tx, connection.id, workspaceId, report.region, [...names].map(([name, verified]) => ({ name, verified })));
-    }
+    if (connection) return; // Discovery is observational. Only our tagged CreateEmailIdentity can establish an MX claim.
     for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, environment: 'live', region: report.region, name: domain.name }).onConflictDoNothing();
   });
 }

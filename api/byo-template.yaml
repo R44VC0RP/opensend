@@ -43,8 +43,12 @@ Resources:
                 Resource: '*'
                 Condition: { StringEquals: { 'aws:RequestedRegion': !Ref 'AWS::Region' } }
               - Effect: Allow
-                Action: ['ses:GetEmailIdentity', 'ses:CreateEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
+                Action: ['ses:GetEmailIdentity', 'ses:CreateEmailIdentity', 'ses:TagResource']
                 Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+              - Effect: Allow
+                Action: ['ses:DeleteEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                Condition: { 'Null': { 'aws:ResourceTag/opensend:domain-claim': 'false' } }
               - Effect: Allow
                 Action: ['ses:GetConfigurationSet', 'ses:CreateConfigurationSet', 'ses:TagResource', 'ses:GetConfigurationSetEventDestinations', 'ses:CreateConfigurationSetEventDestination', 'ses:UpdateConfigurationSetEventDestination', 'ses:PutConfigurationSetSuppressionOptions']
                 Resource:

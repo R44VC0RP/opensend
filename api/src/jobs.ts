@@ -42,6 +42,13 @@ export class JobDeferred extends Error {
   constructor(readonly availableAt: string, readonly payload?: Record<string, unknown>) { super('Job deferred.'); }
 }
 
+export const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
+  try { await handler(runtime, payload, job); } catch (error) {
+    if (error instanceof ApiError || error instanceof JobDeferred) throw error;
+    throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
+  }
+};
+
 // Postgres is the durable queue. CF Queue messages only wake it; cron/polling recovers missed wakeups.
 export function jobConcurrency(value: unknown, maximum = 8) {
   const number = Number(value);

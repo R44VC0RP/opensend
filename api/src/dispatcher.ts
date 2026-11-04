@@ -3,7 +3,8 @@ import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client,
 import { ApiError, getSes, id, log, type Actor, type DbExecutor, type Mode, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
-import { verifiedClaim } from './domain-claims.js';
+import { sendingConnections, verifiedClaim } from './domain-claims.js';
+import { ensureTenant } from './provider-connections.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import type { ReadyConnection } from './provider-credentials.js';
@@ -173,7 +174,7 @@ async function leaseDue(runtime: Runtime, environment: Mode, region: string, lim
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
   // Interleaving the bounded owner queues by turn gives every active owner a slot before any gets two.
   const mx = runtime.config.multiTenant;
-  const ownersSql = mx ? sql`SELECT workspace_id FROM provider_sending_connections WHERE region=${region} AND aws_account_id=${accountId}` : sql`
+  const ownersSql = mx ? sql`SELECT workspace_id FROM ${sendingConnections(environment)} WHERE region=${region} AND aws_account_id=${accountId}` : sql`
       (SELECT workspace_id FROM sending_emails WHERE ${queued} ORDER BY workspace_id LIMIT 1)
       UNION ALL SELECT n.workspace_id FROM owners o CROSS JOIN LATERAL (
         SELECT workspace_id FROM sending_emails WHERE ${queued} AND workspace_id > o.workspace_id ORDER BY workspace_id LIMIT 1
@@ -202,7 +203,7 @@ async function leaseDue(runtime: Runtime, environment: Mode, region: string, lim
         AND d.report->'resources'->p.stream->'sendingEnabled' = 'true'::jsonb)`} AS ready
       FROM (SELECT DISTINCT workspace_id, snapshot->>'kind' AS stream FROM leased) p
       LEFT JOIN ses_installation_settings s USING (workspace_id)
-      ${mx ? sql`JOIN provider_sending_connections pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : environment === 'live' ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
+      ${mx ? sql`JOIN ${sendingConnections(environment)} pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : environment === 'live' ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
     ) SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,
       r.draft AS review_draft, r.rendered AS review_rendered, r.status AS review_status, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
@@ -211,8 +212,18 @@ async function leaseDue(runtime: Runtime, environment: Mode, region: string, lim
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
+  const unready = new Set<string>(), checked = new Set<string>();
+  if (mx && environment==='live') for (const {connection,workspaceId} of result.rows) {
+    const pc=connection as ReadyConnection & {tenant_provisioned:boolean};
+    if (pc.kind==='shared' && !pc.tenant_provisioned && !checked.has(pc.id)) {
+      checked.add(pc.id);
+      try { await ensureTenant(runtime,String(workspaceId),pc.id); }
+      catch (error) { unready.add(pc.id); log('warn',{operation:'dispatch-tenant-setup',workspaceId,code:error instanceof ApiError ? error.code : 'TENANT_SETUP_FAILED'}); }
+    }
+  }
   return result.rows.map(row => {
-    const { review_draft, review_rendered, review_status, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready, connection, ...fields } = row;
+    const { review_draft, review_rendered, review_status, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, ...fields } = row;
+    const ready=regionReady && !unready.has((connection as ReadyConnection | null)?.id ?? '');
     const mail = fields as Mail, { workspaceId } = mail;
     if (installation_id == null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     let owner = owners.get(workspaceId);
@@ -239,7 +250,7 @@ async function recoverInterrupted(runtime: Runtime, environment: Mode, region: s
   const result = await runtime.db.execute<{ count: number }>(sql`WITH stale AS (
       UPDATE sending_emails SET status = 'acceptance_unknown', error_code = 'INTERRUPTED_PROVIDER_ATTEMPT', lease_until = NULL, updated_at = clock_timestamp()
        WHERE environment = ${environment} AND region = ${region} AND status = 'attempting' AND attempt_started_at < clock_timestamp() - interval '3 minutes'
-       ${runtime.config.multiTenant ? sql`AND workspace_id IN (SELECT workspace_id FROM provider_connections WHERE region=${region} AND aws_account_id=${accountId})` : sql``}
+       ${runtime.config.multiTenant ? sql`AND workspace_id IN (SELECT workspace_id FROM ${sendingConnections(environment)} WHERE region=${region} AND aws_account_id=${accountId})` : sql``}
       RETURNING id, workspace_id, environment, dispatch_version
     ), events AS (
       INSERT INTO sending_email_events(id, workspace_id, environment, email_id, type, external_id, simulated, data)
@@ -380,7 +391,7 @@ async function claimGroup(runtime: Runtime, environment: Mode, prepared: Prepare
             AND (k.permissions ? 'manage' OR k.permissions ? 'send') AND (k.domains = '[]'::jsonb OR EXISTS (
               SELECT 1 FROM jsonb_array_elements_text(k.domains) d WHERE split_part(x.sender, '@', 2) = lower(d.value)
                 OR right(split_part(x.sender, '@', 2), length(d.value) + 1) = '.' || lower(d.value)))) END
-          ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${prepared[0]!.mail.region}`, sql`split_part(x.sender, '@', 2)`)}` : sql``} AS origin_ok,
+          ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${prepared[0]!.mail.region}`, sql`split_part(x.sender, '@', 2)`,environment)}` : sql``} AS origin_ok,
         (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.status <> 'canceled')) AS campaign_allowed,
         NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (workspace_id, email)
           WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed

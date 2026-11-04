@@ -1,11 +1,12 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, GetAccountCommand, GetEmailIdentityCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
+import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, DeleteEmailIdentityCommand, DeleteTenantResourceAssociationCommand, GetAccountCommand, GetEmailIdentityCommand, ListResourceTenantsCommand, PutEmailIdentityMailFromAttributesCommand, type GetEmailIdentityCommandOutput } from '@aws-sdk/client-sesv2';
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Mode, type Permission, type Runtime } from './core.js';
-import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
+import { ensureTenant } from './provider-connections.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
 import { contacts } from './db/audience.js';
@@ -30,7 +31,7 @@ const webhookPatch = webhookInput.partial().extend({ description: z.string().max
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
 const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
-const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional() })) }).openapi('DomainReadiness');
+const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), ready: z.boolean(), mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(z.object({ name: z.string(), type: z.enum(['CNAME', 'TXT', 'MX']), value: z.string(), priority: z.number().optional(), purpose: z.enum(['dkim','ownership','mail_from']).optional() })) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const settingsSchema = z.object({ name: z.string(), environment: z.enum(['live', 'test']) }).openapi('WorkspaceSettings');
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
@@ -152,18 +153,21 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, envi
   return link.url;
 }
 const claimTag = 'opensend:domain-claim';
-type DomainClaim = { connection: ReadyConnection; token: string };
+type Readiness = z.infer<typeof domainSchema>;
+type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
+type HostedDomain = DomainRef & { connection: ReadyConnection & { tenant_provisioned: boolean }; token: string; readiness: Readiness | null; created_at: string };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
-function assertIdentityOwner(identity: GetEmailIdentityCommandOutput, claim?: DomainClaim) {
-  if (claim?.connection.kind === 'shared' && !identity.Tags?.some(t => t.Key === claimTag && t.Value === claim.token)) throw unavailableDomain();
-}
-async function currentClaim(runtime: Runtime, row: typeof domains.$inferSelect): Promise<DomainClaim | undefined> {
-  if (!runtime.config.multiTenant) return;
-  const connection = (await runtime.db.execute<ReadyConnection & { token: string }>(sql`SELECT pc.id,pc.kind,pc.aws_account_id,pc.role_arn,pc.external_id,dc.token
-    FROM provider_connections pc JOIN domain_claims dc ON dc.connection_id=pc.id AND dc.workspace_id=pc.workspace_id
-    WHERE dc.name=${row.name} AND pc.workspace_id=${row.workspaceId} AND pc.region=${row.region} AND pc.status='ready'`)).rows[0];
-  if (!connection) return notFound('Domain');
-  return { connection, token: connection.token };
+const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
+async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheckDomains?: readonly string[]) {
+  const target = sql`SELECT d.id,d.name,d.region,d.created_at,to_jsonb(pc) AS connection,dc.token,dc.readiness
+    FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
+    JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND pc.status='ready'
+    WHERE d.workspace_id=${wid} AND d.environment='live' AND d.id=${domainId} ${lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``}`;
+  // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
+  const allowed = recheckDomains?.length ? sql`WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheckDomains)}::jsonb) p(parent)
+    WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql``;
+  const query = recheckDomains ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target ${allowed}`)}) SELECT * FROM target` : target;
+  return (await db.execute<HostedDomain>(query)).rows[0];
 }
 async function txtProof(name: string, token: string) {
   try {
@@ -173,44 +177,105 @@ async function txtProof(name: string, token: string) {
     return answer.Status === 0 && !answer.TC && !!answer.Answer?.some(rr => rr.type === 16 && rr.name.toLowerCase().replace(/\.$/, '') === name && (rr.data === `"${token}"` || rr.data === token));
   } catch { return false; }
 }
-async function domainReadiness(runtime: Runtime, row: typeof domains.$inferSelect, identity?: GetEmailIdentityCommandOutput, claim?: DomainClaim) {
-  claim ??= await currentClaim(runtime, row);
-  const client = getSes(runtime, row.region, claim?.connection);
-  let value: GetEmailIdentityCommandOutput;
-  try {
-    value = identity ?? await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: row.name })));
-    assertIdentityOwner(value, claim);
-  } catch (e) {
-    if (claim && e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) await runtime.db.execute(sql`UPDATE domain_claims SET verified=false, ready=false WHERE name=${row.name} AND connection_id=${claim.connection.id}`);
-    throw e;
-  }
+function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; proven:boolean }): Readiness {
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
   const dns: z.infer<typeof domainSchema>['dns'] = [];
   let dnsUnavailableReason: string | null = null;
   if (dkim?.SigningAttributesOrigin === 'EXTERNAL') dnsUnavailableReason = 'Bring-your-own DKIM records must be obtained from the identity owner.';
   else if (!suffix || !/^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}\.?$/.test(suffix) || !dkim?.Tokens?.length) dnsUnavailableReason = 'SES did not return an authoritative DKIM signing zone and tokens; DNS records are unavailable.';
-  else dns.push(...dkim.Tokens.map(token => ({ name: `${token}._domainkey.${row.name}`, type: 'CNAME' as const, value: `${token}.${suffix}` })));
+  else dns.push(...dkim.Tokens.map(token => ({ name: `${token}._domainkey.${row.name}`, type: 'CNAME' as const, value: `${token}.${suffix}`, ...(hosted ? {purpose:'dkim' as const} : {}) })));
   const mailFrom = value.MailFromAttributes;
   if (mailFrom?.MailFromDomain) {
     if (/^(?:us-(?:east|west)|af-south|ap-(?:east|south|northeast|southeast)|ca-(?:central|west)|eu-(?:central|north|south|west)|il-central|me-(?:south|central)|mx-central|sa-east)-\d+$/.test(row.region)) {
-      dns.push({ name: mailFrom.MailFromDomain, type: 'MX', value: `feedback-smtp.${row.region}.amazonses.com`, priority: 10 });
-      dns.push({ name: mailFrom.MailFromDomain, type: 'TXT', value: 'v=spf1 include:amazonses.com ~all' });
+      const purpose=hosted ? {purpose:'mail_from' as const} : {};
+      dns.push({ name: mailFrom.MailFromDomain, type: 'MX', value: `feedback-smtp.${row.region}.amazonses.com`, priority: 10, ...purpose });
+      dns.push({ name: mailFrom.MailFromDomain, type: 'TXT', value: 'v=spf1 include:amazonses.com ~all', ...purpose });
     } else dnsUnavailableReason = 'MAIL FROM DNS instructions are supported only for commercial AWS regions.';
   }
   const signed = dkim?.Status === 'SUCCESS' && dkim.SigningEnabled === true;
   let verified = value.VerifiedForSendingStatus === true, verificationStatus = value.VerificationStatus ?? 'NOT_STARTED';
-  if (claim?.connection.kind === 'shared') {
-    const name = `_opensend.${row.name}`;
-    dns.push({ name, type: 'TXT', value: claim.token });
-    const proven = await txtProof(name, claim.token);
-    verified = verified && signed && proven;
+  if (hosted) {
+    if (hosted.shared) dns.push({ name:`_opensend.${row.name}`,type:'TXT',value:hosted.token,purpose:'ownership' });
+    verified = verified && signed && hosted.proven && new Set(dkim?.Tokens).size===3 && (!dkim?.SigningAttributesOrigin || dkim.SigningAttributesOrigin==='AWS_SES');
     if (!verified && verificationStatus === 'SUCCESS') verificationStatus = 'PENDING';
   }
-  const ready = verified && signed && (!mailFrom?.MailFromDomain || mailFrom.MailFromDomainStatus === 'SUCCESS');
-  if (claim) await runtime.db.execute(sql`UPDATE domain_claims SET verified=${verified}, ready=${ready} WHERE name=${row.name} AND workspace_id=${row.workspaceId} AND connection_id=${claim.connection.id}`);
+  const ready = verified && signed && (!!hosted || !mailFrom?.MailFromDomain || mailFrom.MailFromDomainStatus === 'SUCCESS');
   return { id: row.id, name: row.name, region: row.region, verificationStatus, verified, dkimStatus: dkim?.Status ?? 'NOT_STARTED', ready, mailFromDomain: mailFrom?.MailFromDomain ?? null, mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
 }
-async function account(runtime: Runtime, selectedRegion: string) { const a = await sesCall(() => getSes(runtime, selectedRegion).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
+async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetEmailIdentityCommandOutput) {
+  return readiness(row,identity ?? await sesCall(() => getSes(runtime,row.region).send(new GetEmailIdentityCommand({ EmailIdentity:row.name }))));
+}
+const claimProof = (row: {connection:ReadyConnection;token:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',proven });
+const cachedDomain = (row:HostedDomain) => row.readiness ?? readiness(row,{VerificationStatus:'PENDING'},claimProof(row));
+const identityBinding = (row:HostedDomain,wid:string) => ({TenantName:`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
+async function saveReadiness(db:DbExecutor,row:{token:string;connection:ReadyConnection},report:Readiness) {
+  await db.execute(sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb,verified=${report.verified},ready=${report.ready} WHERE name=${report.name} AND token=${row.token} AND connection_id=${row.connection.id}`);
+}
+async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string}) {
+  await db.execute(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND token=${row.token} RETURNING name,token),
+    canceled AS (DELETE FROM jobs USING released r WHERE jobs.id='domain.verify:'||r.token AND jobs.workspace_id=${wid} AND jobs.type='domain.verify' AND jobs.status='pending')
+    DELETE FROM operation_domains WHERE workspace_id=${wid} AND id=${row.id} AND name IN (SELECT name FROM released)`);
+}
+function recheckJob(wid: string, source: SQL, supersede=false) {
+  // A recovered creation or MAIL FROM change supersedes even a running poll based on an older SES read.
+  return sql`INSERT INTO jobs(id,type,workspace_id,environment,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},'live',
+    jsonb_build_object('domainId',r.id,'token',r.token) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
+    payload=excluded.payload,created_at=now() ${supersede ? sql`` : sql`WHERE jobs.status<>'running'`}`;
+}
+const domainVerify: JobHandler = async (runtime,payload,job) => {
+  if (!runtime.config.multiTenant || job.environment!=='live' || typeof payload.domainId!=='string') return;
+  const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
+  if (!row || row.token!==payload.token) return; // Deleted, reclaimed or disconnected.
+  const start=Number(payload.start ?? Date.now()), poll=Number(payload.poll ?? 0), deadline=start+72*3600_000;
+  const expire=()=>runtime.db.execute(sql`UPDATE domain_claims SET readiness=jsonb_set(readiness,'{verificationStatus}','"FAILED"'::jsonb)
+    WHERE token=${row.token} AND connection_id=${row.connection.id} AND NOT verified AND readiness IS NOT NULL`);
+  const defer=(ms:number, next=poll) => { throw new JobDeferred(new Date(Math.min(deadline,Date.now()+ms)).toISOString(),{...payload,start,poll:next}); };
+  const scoped={...runtime,config:{...runtime.config,workspaceId:job.workspaceId,regions:[row.region]}};
+  try {
+    // Reserve the next GetEmailIdentity across workers, not per workspace or per invocation.
+    const lane='domain.verify:'+(row.connection.kind==='shared'?'platform':row.connection.aws_account_id);
+    if (!(await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before) VALUES (${lane},clock_timestamp()+interval '1 second') ON CONFLICT(workspace_id)
+      DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) {
+      if (Date.now()<deadline) defer(1000+Math.random()*1000); await expire(); return;
+    }
+    const client=getSes(scoped,row.region,row.connection);
+    const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+    if (!ownsIdentity(identity,row.token)) throw unavailableDomain();
+    const shared=row.connection.kind==='shared', signed=identity.DkimAttributes?.Status==='SUCCESS' && identity.DkimAttributes.SigningEnabled;
+    const proven=!shared || !!(signed && await txtProof(`_opensend.${row.name}`,row.token));
+    const report=readiness(row,identity,claimProof(row,proven));
+    if (shared && report.ready && !row.connection.tenant_provisioned) await ensureTenant(scoped,job.workspaceId,row.connection.id);
+    await runtime.db.transaction(async db=>{
+      // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
+      const current=await hostedDomain(db,job.workspaceId,row.id,true);
+      if (!current || current.token!==row.token) return;
+      if (current.readiness?.mailFromDomain!==row.readiness?.mailFromDomain || (current.readiness?.mailFromStatus==='PENDING' &&
+        (row.readiness?.mailFromStatus!=='PENDING' || current.readiness.mailFromDomain!==report.mailFromDomain))) {
+        if (Date.now()<deadline) defer(5000);
+        return; // The newer configuration has its own poll; never replace it with an expired observation.
+      }
+      if (shared && report.ready && !current.readiness?.ready) {
+        try { await sesCall(()=>client.send(new CreateTenantResourceAssociationCommand(identityBinding(current,job.workspaceId)))); }
+        catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e; }
+      }
+      await saveReadiness(db,current,report);
+    });
+    if (report.ready && report.mailFromStatus!=='PENDING') return;
+  } catch (e) {
+    if (e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) {
+      if (row.readiness) await saveReadiness(runtime.db,row,{...cachedDomain(row),verified:false,ready:false,verificationStatus:e.code==='DOMAIN_UNAVAILABLE'?'FAILED':'PENDING'});
+      if (e.code==='DOMAIN_UNAVAILABLE') return;
+    } else if (!(e instanceof ApiError) || !e.retryable) throw e;
+  }
+  if (Date.now()<deadline) defer([15000,30000,120000,600000,1800000,3600000][Math.min(poll,5)]!,poll+1);
+  await expire();
+};
+async function account(runtime: Runtime, wid: string, requested?: string) {
+  const connection=runtime.config.multiTenant ? await workspaceConnection({...runtime,config:{...runtime.config,workspaceId:wid}},requested) : undefined;
+  if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
+  const selectedRegion=connection?.region ?? requested ?? runtime.config.regions[0]!;
+  if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[connection.region]}};
+  const a = await sesCall(() => getSes(runtime, selectedRegion,connection).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
 export function registerOperations(app: App) {
@@ -226,21 +291,25 @@ export function registerOperations(app: App) {
     else await c.env.db.insert(workspaceSettings).values({ workspaceId: a.workspaceId, environment: a.environment, name }).onConflictDoUpdate({ target: [workspaceSettings.workspaceId, workspaceSettings.environment], set: { name, updatedAt: now() } });
     return c.json({ name, environment: a.environment }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env, c.req.valid('query').region ?? c.env.config.regions[0]!), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'Refreshes at most 10 identities, sequentially with one second between SES reads. Use refresh=false for cached sender selection without AWS calls. Default page size is 5; use individual domain detail for a single live refresh. Concurrent refresh clients may still encounter account-level throttling.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'); external(a); getSes(c.env, q.region ?? c.env.config.regions[0]!);
+  app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); external(a); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(listSchema(domainSchema, 'DomainPage')), ...errors } }), async c => {
+    const a = actor(c), q = c.req.valid('query'); external(a); if (!c.env.config.multiTenant) getSes(c.env, q.region ?? c.env.config.regions[0]!);
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
-    const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
-    const hosted = c.env.config.multiTenant ? await c.env.db.select({ row: domains, verified: domainClaims.verified, ready: domainClaims.ready }).from(domains)
-      .innerJoin(domainClaims, and(eq(domainClaims.name, domains.name), eq(domainClaims.workspaceId, domains.workspaceId), sql`EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.id=${domainClaims.connectionId} AND pc.region=${domains.region} AND pc.status='ready')`))
-      .where(where).orderBy(desc(domains.id)).limit(q.limit + 1) : undefined;
-    const rows = hosted?.map(r => r.row) ?? await c.env.db.select().from(domains).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
+    const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
+    if (c.env.config.multiTenant) {
+      const rows=await c.env.db.select({row:domains,token:domainClaims.token,readiness:domainClaims.readiness,shared:sql<boolean>`pc.kind='shared'`}).from(domains)
+        .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
+        .innerJoin(sql`provider_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND pc.status='ready'`)
+        .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
+      return c.json({data:rows.slice(0,q.limit).map(r=>r.readiness ? domainSchema.parse(r.readiness) : readiness(r.row,{VerificationStatus:'PENDING'},{...r,proven:false})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
+    }
+    const rows = await c.env.db.select().from(domains).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
     if (q.refresh === 'false') {
-      const reports = hosted ? [] : await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
-      const data = rows.slice(0, q.limit).map((row, i) => {
+      const reports = await c.env.db.select({ region: sesRegions.region, report: sesRegions.report }).from(sesRegions).where(eq(sesRegions.workspaceId, a.workspaceId));
+      const data = rows.slice(0, q.limit).map(row => {
         const cached = reports.find(report => report.region === row.region)?.report?.domains.find(domain => domain.name === row.name);
-        const ready = hosted?.[i]?.ready ?? (cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true), verified = hosted?.[i]?.verified ?? (cached?.sendingEnabled === true);
-        return { id: row.id, name: row.name, region: row.region, verificationStatus: hosted ? (verified ? 'SUCCESS' : 'PENDING') : cached?.verificationStatus ?? 'NOT_STARTED', verified, dkimStatus: ready ? 'SUCCESS' : hosted ? 'UNKNOWN' : 'NOT_STARTED', ready, mailFromDomain: null, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
+        const ready = cached?.verificationStatus === 'SUCCESS' && cached.sendingEnabled === true, verified = cached?.sendingEnabled === true;
+        return { id: row.id, name: row.name, region: row.region, verificationStatus: cached?.verificationStatus ?? 'NOT_STARTED', verified, dkimStatus: ready ? 'SUCCESS' : 'NOT_STARTED', ready, mailFromDomain: null, mailFromStatus: null, dnsStatus: 'unavailable' as const, dnsUnavailableReason: 'Open the domain to refresh DNS details.', dns: [] };
       });
       return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
     }
@@ -250,50 +319,99 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string() }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const body = c.req.valid('json'); allowedDomain(a, body.name);
-    const connection = c.env.config.multiTenant ? await workspaceConnection(c.env, body.region) : undefined;
-    const client = getSes(c.env, body.region, connection); let identity: GetEmailIdentityCommandOutput | undefined;
+    if (c.env.config.multiTenant) {
+      const claim=await reserveClaim(c.env,a.workspaceId,body.name,body.region), row={...body,id:claim.id};
+      if (claim.readiness != null) return c.json(domainSchema.parse(claim.readiness),201);
+      a.wakeJobs=1;
+      const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
+      const client=getSes(runtime,row.region,claim.connection);
+      let identity: Partial<GetEmailIdentityCommandOutput>;
+      try {
+        identity=await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:row.name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:claim.token}]})));
+      } catch(e) {
+        if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') {
+          if (claim.fresh && e instanceof ApiError && !e.retryable && e.status<500) await releaseClaim(c.env.db,a.workspaceId,claim);
+          throw e;
+        }
+        // A lost response (or racing POST) can leave our exact tagged identity in SES. Never adopt by name.
+        const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+        if (!ownsIdentity(existing,claim.token)) { await releaseClaim(c.env.db,a.workspaceId,claim); throw unavailableDomain(); }
+        identity=existing;
+      }
+      const report=readiness(row,{...identity,VerificationStatus:'PENDING'},claimProof(claim));
+      // Never overwrite a verifier that already recovered a lost/slow Create response.
+      const saved=sql`UPDATE domain_claims SET readiness=${JSON.stringify(report)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND readiness IS NULL RETURNING ${row.id}::text AS id,token`;
+      await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,true)}`);
+      return c.json(report,201);
+    }
+    const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
     catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'SES_IDENTITY_NOT_FOUND') throw error;
     }
-    const claim = connection ? await c.env.db.transaction(async db => {
-      const claim = { connection, token: await reserveClaim(db, a.workspaceId, body.name) };
-      // Reject an existing foreign identity without retaining a reservation or touching AWS.
-      if (identity) assertIdentityOwner(identity, claim);
-      return claim;
-    }) : undefined;
     if (!identity) {
-      const Tags = claim?.connection.kind === 'shared' ? [{ Key: claimTag, Value: claim.token }] : undefined;
-      try { await sesCall(() => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' }, Tags }))); }
+      try { await sesCall(() => client.send(new CreateEmailIdentityCommand({ EmailIdentity: body.name, DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' } }))); }
       catch (createError) { if (!(createError instanceof ApiError) || createError.code !== 'SES_IDENTITY_EXISTS') throw createError; }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    if (connection?.kind === 'shared') {
-      // Also fences an AlreadyExists race and makes a retry after a lost Create response safe.
-      identity ??= await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name })));
-      assertIdentityOwner(identity, claim);
-      try { await sesCall(() => client.send(new CreateTenantResourceAssociationCommand({ TenantName: `opensend-${a.workspaceId}`, ResourceArn: `arn:aws:ses:${body.region}:${connection.aws_account_id}:identity/${body.name}` }))); }
-      catch (e) { if (!(e instanceof ApiError) || e.code !== 'SES_IDENTITY_EXISTS') throw e; }
-    }
-    const saveDomain = (db: DbExecutor) => db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
-    const [row] = connection ? await c.env.db.transaction(async db => {
-      await db.execute(sql`UPDATE domain_claims SET connection_id=${connection.id}, verified=false, ready=false WHERE name=${body.name} AND workspace_id=${a.workspaceId} AND connection_id IS DISTINCT FROM ${connection.id}`);
-      return saveDomain(db);
-    }) : await saveDomain(c.env.db);
-    return c.json(await domainReadiness(c.env, row!, identity, claim), 201);
+    const [row] = await c.env.db.insert(domains).values({ id: id('dom'), workspaceId: a.workspaceId, environment: a.environment, ...body }).onConflictDoUpdate({ target: [domains.workspaceId, domains.environment, domains.name, domains.region], set: { updatedAt: now() } }).returning();
+    return c.json(await domainReadiness(c.env, row!, identity), 201);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains/{id}/mail-from', operationId: 'configureDomainMailFrom', tags: ['Domains'], security, description: 'Configure a custom SES MAIL FROM subdomain with fallback to the default amazonses.com MAIL FROM value while DNS is unavailable.', request: { params: IdParams, body: json(z.object({ mailFromDomain: domainName }).strict().openapi('ConfigureDomainMailFrom')) }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, 'manage'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id)));
     if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const { mailFromDomain } = c.req.valid('json');
     if (mailFromDomain === row.name || !mailFromDomain.endsWith(`.${row.name}`)) throw new ApiError(422, 'MAIL_FROM_DOMAIN_INVALID', `Use a subdomain of ${row.name}.`, 'mailFromDomain');
-    const claim = await currentClaim(c.env, row), client = getSes(c.env, row.region, claim?.connection);
-    if (claim?.connection.kind === 'shared') assertIdentityOwner(await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: row.name }))), claim);
+    if (c.env.config.multiTenant) {
+      const report=await c.env.db.transaction(async db=>{
+        const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
+        const client=getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,current.connection);
+        const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+        if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
+        await sesCall(()=>client.send(new PutEmailIdentityMailFromAttributesCommand({EmailIdentity:row.name,MailFromDomain:mailFromDomain,BehaviorOnMxFailure:'USE_DEFAULT_VALUE'})));
+        const report=readiness(row,{...identity,MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}},claimProof(current,!!current.readiness?.verified));
+        await saveReadiness(db,current,report);
+        await db.execute(recheckJob(a.workspaceId,sql`SELECT ${current.id}::text AS id,${current.token}::text AS token`,true)); return report;
+      }); a.wakeJobs=1; return c.json(report,200);
+    }
+    const client = getSes(c.env, row.region);
     await sesCall(() => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
-    return c.json(await domainReadiness(c.env, row, undefined, claim), 200);
+    return c.json(await domainReadiness(c.env, row), 200);
   });
-  for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, verifyRoute ? 'manage' : 'read'); external(a); const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
+  for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, verifyRoute ? 'manage' : 'read'); external(a);
+    if (c.env.config.multiTenant) {
+      const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,verifyRoute?a.domains:undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
+      if (verifyRoute) a.wakeJobs=1;
+      return c.json(cachedDomain(row),200);
+    }
+    const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
+  });
+  app.openapi(createRoute({method:'delete',path:'/v1/domains/{id}',operationId:'deleteDomain',tags:['Domains'],security,description:'MX only. Delete this claim’s tagged SES identity and release the domain. Does not remove DNS records.',request:{params:IdParams},responses:{200:response(z.object({deleted:z.literal(true)})),...errors}}),async c=>{
+    const a=actor(c,'manage'); external(a); if (!c.env.config.multiTenant) return notFound('Endpoint');
+    await c.env.db.transaction(async db=>{
+      const row=await hostedDomain(db,a.workspaceId,c.req.valid('param').id,true) ?? notFound('Domain'); allowedDomain(a,row.name);
+      if (!row.readiness && Date.now()-new Date(row.created_at).getTime()<60000) throw new ApiError(409,'DOMAIN_BUSY','Domain creation is in progress.',undefined,true);
+      const runtime={...c.env,config:{...c.env.config,regions:[row.region]}},client=getSes(runtime,row.region,row.connection);
+      const ignoreMissing=async <T>(fn:()=>Promise<T>)=>{ try {return await sesCall(fn);} catch(e){if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND') throw e;} };
+      const identity=await ignoreMissing(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
+      if (identity && ownsIdentity(identity,row.token)) {
+        // Read actual SES membership, not readiness: DNS can regress, or the association acknowledgement can be lost.
+        // Keep the per-claim fence through deletion so a concurrent release/re-claim cannot delete a new owner's identity.
+        if (row.connection.kind==='shared' && row.connection.aws_account_id) {
+          const binding=identityBinding(row,a.workspaceId); let next: string | undefined;
+          do {
+            const page=await sesCall(()=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,NextToken:next})));
+            if (page.ResourceTenants?.some(t=>t.TenantName===binding.TenantName)) {
+              await ignoreMissing(()=>client.send(new DeleteTenantResourceAssociationCommand(binding))); break;
+            }
+            next=page.NextToken;
+          } while (next);
+        }
+        await ignoreMissing(()=>client.send(new DeleteEmailIdentityCommand({EmailIdentity:row.name})));
+      }
+      await releaseClaim(db,a.workspaceId,row);
+    }); return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'); const rows = await c.env.db.select().from(webhooks).where(and(scoped(webhooks, a), q.cursor ? lt(webhooks.id, q.cursor) : undefined)).orderBy(desc(webhooks.id)).limit(q.limit + 1);
@@ -791,10 +909,4 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     }
   });
 };
-const retryDatabaseFailures = (handler: JobHandler): JobHandler => async (runtime, payload, job) => {
-  try { await handler(runtime, payload, job); } catch (error) {
-    if (error instanceof ApiError) throw error;
-    throw new ApiError(503, 'OPERATION_TEMPORARILY_UNAVAILABLE', 'The background operation could not complete; it will be retried.', undefined, true);
-  }
-};
-export const operationJobs: Record<string, JobHandler> = { 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'domain.verify': retryDatabaseFailures(domainVerify), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

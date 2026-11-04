@@ -9,6 +9,7 @@ import { reputationAlertJobs } from './reputation-alerts.js';
 import { mailboxSetupJobs } from './mailbox-setup.js';
 import { mailboxIngestJobs } from './mailbox-ingest.js';
 import { mailboxEventJobs } from './mailbox-events.js';
+import { tenantJob } from './provider-connections.js';
 const mailboxJobs = { ...mailboxSetupJobs, ...mailboxIngestJobs, ...mailboxEventJobs };
 const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.key !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion job is missing its object key.');
@@ -17,12 +18,14 @@ const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   catch { throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true); }
 };
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
-export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
+export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
 type Partition = { region: string; environment: Mode; accountId?: string };
 export async function dispatchPartitions(runtime: Runtime): Promise<Partition[]> {
   if (runtime.config.multiTenant) return (await runtime.db.execute<Partition>(sql`
-    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, m.environment FROM provider_sending_connections c CROSS JOIN (VALUES ('test'),('live')) m(environment)
-    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.environment=m.environment AND e.status IN ('queued','attempting'))`)).rows;
+    SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.environment FROM (
+      SELECT workspace_id,region,aws_account_id,'live' AS environment FROM provider_sending_connections UNION ALL
+      SELECT workspace_id,region,aws_account_id,'test' FROM provider_test_connections) c
+    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND e.environment=c.environment AND e.status IN ('queued','attempting'))`)).rows;
   const regions = await runtime.db.execute<{ region: string }>(sql`SELECT DISTINCT jsonb_array_elements_text(enabled_regions) AS region FROM ses_installation_settings`);
   return regions.rows.flatMap(({ region }) => (['live','test'] as const).map(environment => ({ region, environment })));
 }

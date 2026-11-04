@@ -10,7 +10,7 @@ import { actor, ApiError, digest, errors, getSes, id, IdParams, json, log, notFo
 import { enqueue, JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, snapshotCampaignAudience } from './audience.js';
 import { getMcpGrantActor } from './mcp-auth.js';
-import { unverifiedSender, verifiedClaim } from './domain-claims.js';
+import { sendingConnections, unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
@@ -263,8 +263,8 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
   const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id,
-    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
-    FROM ses_installation_settings s LEFT JOIN provider_sending_connections pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
+    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,a.environment)} AS verified
+    FROM ses_installation_settings s LEFT JOIN ${sendingConnections(a.environment)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
@@ -619,11 +619,11 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       ORDER BY id FOR UPDATE) asset)` : sql`NULL`;
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
-      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
+      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,a.environment)})` : sql`ARRAY[]::text[]`;
     const state = (await db.execute<{ total: number; key: number; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN provider_sending_connections pc ON pc.workspace_id=settings.workspace_id` : sql``}`)).rows[0]!;
+      FROM (${pendingCounts(a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(a.environment)} pc ON pc.workspace_id=settings.workspace_id` : sql``}`)).rows[0]!;
     assertPending(a, mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     const locked = new Map(state.assets?.map(row => [row.id, row]));
@@ -1570,7 +1570,7 @@ const expandCampaign: JobHandler = async (runtime, payload, job) => {
   const limitsTable = sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
   try {
     const [initial] = await runtime.db.select({ ...getTableColumns(campaignExpansions), scheduledAt: campaigns.scheduledAt,
-      accountId: runtime.config.multiTenant ? sql<string>`(SELECT aws_account_id FROM provider_sending_connections WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
+      accountId: runtime.config.multiTenant ? sql<string>`(SELECT aws_account_id FROM ${sendingConnections(a.environment)} WHERE workspace_id=${a.workspaceId} AND region=${campaignReviews.draft}->>'region')` : sql<null>`NULL`,
       rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
       max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,
       sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limitsTable} WHERE workspace_id=${a.workspaceId} AND environment=${a.environment} AND region=${campaignReviews.draft}->>'region'),0)`,

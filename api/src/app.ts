@@ -85,8 +85,11 @@ export function createApp() {
   };
   // Discovery, provisioning and the catalog load persisted settings themselves.
   app.on('GET', ['/v1/emails', '/v1/campaigns', '/v1/metrics'], (c, next) => c.req.query('region') ? regions(c, next) : next());
-  app.on('GET', ['/v1/settings/ses', '/v1/domains', '/v1/domains/:id'], regions);
-  app.on('POST', ['/v1/domains', '/v1/domains/:id/mail-from', '/v1/domains/:id/verify', '/v1/emails/send', '/v1/emails/batch',
+  const selfHostedRegions = (c: Ctx, next: () => Promise<void>) => c.env.config.multiTenant ? next() : regions(c, next);
+  app.on('GET', ['/v1/settings/ses', '/v1/domains/:id'], selfHostedRegions);
+  app.on('GET', '/v1/domains', (c, next) => c.req.query('region') !== undefined ? regions(c, next) : selfHostedRegions(c, next));
+  app.on('POST', ['/v1/domains', '/v1/domains/:id/mail-from', '/v1/domains/:id/verify'], selfHostedRegions);
+  app.on('POST', ['/v1/emails/send', '/v1/emails/batch',
     '/v1/campaigns', ...['test', 'reviews', 'send', 'schedule', 'cancel', 'pause', 'resume', 'pacing'].map(action => `/v1/campaigns/:id/${action}`)], regions);
   app.on('PATCH', ['/v1/campaigns/:id', '/v1/campaigns/:id/archive'], regions);
   app.on('DELETE', '/v1/campaigns/:id', regions);
@@ -99,7 +102,7 @@ export function createApp() {
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
-  app.get('/health', c => c.json({ status: 'ok', service: 'opensend' }));
+  app.get('/health', c => c.json({ status: 'ok', service: 'opensend', multiTenant: c.env.config.multiTenant }));
   registerMcpAuth(app); registerGoogleAuth(app); registerAuth(app); registerAudience(app); registerAudienceQuery(app); registerTemplates(app); registerSending(app); registerOperations(app); registerSesRegions(app); registerMailbox(app);
   registerWorkspaces(app); registerProviderConnections(app); registerMcp(app);
   let openApiDocument: ReturnType<typeof createOpenApiDocument> | undefined;

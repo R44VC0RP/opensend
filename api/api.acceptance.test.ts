@@ -689,8 +689,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
         const identities = new Map<string, Json>(), associations = new Set<string>();
+        let loseCreateResponse = false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
-        const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture'], SigningHostedZone:'dkim.amazonses.com' } };
+        const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
         identities.set(`${platform}:${foreign}`, verifiedIdentity);
         const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
         async function aws(this: InstanceType<typeof SNSClient> | InstanceType<typeof SESv2Client>, command: any) {
@@ -700,9 +701,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           switch (name) {
             case 'GetEmailIdentityCommand': return identities.get(`${account}:${i.EmailIdentity}`) ?? missing();
             case 'CreateEmailIdentityCommand': {
-              assert.equal(account, platform); assert.ok(!identities.has(`${account}:${i.EmailIdentity}`));
-              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags }); return {};
+              if (identities.has(`${account}:${i.EmailIdentity}`)) throw Object.assign(new Error('Existing identity'),{name:'AlreadyExistsException'});
+              assert.equal(i.Tags[0].Key,'opensend:domain-claim');
+              identities.set(`${account}:${i.EmailIdentity}`, { ...verifiedIdentity, Tags:i.Tags });
+              if (loseCreateResponse) { loseCreateResponse=false; throw new Error('Synthetic connection reset after SES accepted Create'); }
+              return {DkimAttributes:{...verifiedIdentity.DkimAttributes,Status:'PENDING'},VerifiedForSendingStatus:false};
             }
+            case 'ListResourceTenantsCommand': return {ResourceTenants:[...associations].filter(k=>k.endsWith(`:${i.ResourceArn}`)).map(k=>({TenantName:k.split(':')[0]}))};
+            case 'DeleteTenantResourceAssociationCommand': assert.ok(associations.delete(`${i.TenantName}:${i.ResourceArn}`),'Never remove an association that does not exist'); return {};
+            case 'DeleteEmailIdentityCommand': assert.ok(identities.delete(`${account}:${i.EmailIdentity}`)); return {};
             case 'ListEmailIdentitiesCommand': assert.equal(account, customer); return { EmailIdentities:[{ IdentityType:'DOMAIN', IdentityName:domain, SendingEnabled:true, VerificationStatus:'SUCCESS' }, { IdentityType:'DOMAIN', IdentityName:foreign, SendingEnabled:true, VerificationStatus:'SUCCESS' }] };
             case 'PutEmailIdentityMailFromAttributesCommand': identities.get(`${account}:${i.EmailIdentity}`)!.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; return {};
             case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
@@ -749,16 +756,21 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const verify = (cookie: string) => local('POST', `${path}/verify`, { awsAccountId: customer }, cookie);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
         error(await local('GET', path, undefined, guest), 403); error(await choose('byo', a.cookie), 503, 'BYO_NOT_CONFIGURED');
-        const pending = ok(await choose('shared', a.cookie), 202);
-        assert.equal(pending.status, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
+        const queries=providerTest.mock.method(pg.Client.prototype,'query');
+        const originalWake=runtime.wake; let wakes=0; runtime.wake=async()=>{wakes++;}; providerTest.after(()=>{runtime.wake=originalWake;});
+        const pending = ok(await local('POST',path,{kind:'shared'},a.cookie), 201);
+        providerTest.diagnostic(`POST shared connection: ${queries.mock.callCount()} pg round trips including dashboard auth`);
+        assert.equal(pending.status, 'ready'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
+        assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
-        const { reconcileSharedConnections } = await import('./src/provider-connections.js');
+        const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
         assert.ok(!calls.includes('CreateTenantCommand'), 'A tenant must wait for the confirmed regional feedback pool.');
         const waitingStart = calls.length + identityChecks;
-        assert.deepEqual(ok(await choose('shared', a.cookie), 202), pending);
+        assert.deepEqual(ok(await choose('shared', a.cookie), 201), pending);
         assert.equal(calls.length + identityChecks, waitingStart, 'Retrying a pending connection must not touch AWS.');
+        assert.equal(wakes,0,'Even a registered AWS account is not a ready pool until SNS confirms.');
         ohioConfirmationPending = false;
         await reconcileSharedConnections(runtime);
         const recovered = ok(await local('GET', path, undefined, a.cookie)).connection;
@@ -766,9 +778,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.deepEqual((await pool.query('SELECT region FROM provider_pool_regions WHERE ready AND aws_account_id=$1 ORDER BY region', [platform])).rows.map(r => r.region), [...offered].sort(), 'Warm even regions with no customers.');
         const warmStart = calls.length, warmChecks = identityChecks;
         const connected = ok(await choose('shared', b.cookie), 201);
+        assert.equal(wakes,1);
         assert.equal(connected.status, 'ready'); assert.equal(connected.awsAccountId, platform); assert.equal(connected.quickCreateUrl, null);
         assert.deepEqual(ok(await local('GET', path, undefined, b.cookie)).connection, connected);
-        assert.equal(identityChecks - warmChecks, 1);
+        assert.equal(identityChecks - warmChecks, 0); assert.deepEqual(calls.slice(warmStart),[]);
+        const runTenant=async()=>{
+          const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[b.org.id]);
+          await tenantJob(runtime,j.payload,{id:j.id,attempts:1,workspaceId:b.org.id,environment:'live'});
+        };
+        await runTenant(); await runTenant();
+        ok(await choose('shared',b.cookie),201); assert.equal(wakes,1,'A provisioned tenant needs no wake.');
         assert.deepEqual(calls.slice(warmStart), ['CreateTenantCommand', 'UpdateReputationEntityPolicyCommand', 'CreateTenantResourceAssociationCommand', 'CreateTenantResourceAssociationCommand']);
         const idleStart = calls.length + identityChecks;
         await reconcileSharedConnections(runtime);
@@ -788,36 +807,69 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           });
           const before = calls.length;
           error(await local('GET',discovery,undefined,b.cookie),409,'CONNECTION_MANAGED_REGION');
+          error(await local('GET','/v1/settings/ses',undefined,b.cookie),403,'SHARED_ACCOUNT_PRIVATE');
           assert.equal(calls.length,before);
+          // No request reached SES, but the reservation was durable. Retry must create, not serve empty DNS.
+          const recovery=`${unique('recover')}.invalid`;
+          runtime.config.liveEnabled=false;
+          try { error(await add(b.cookie,recovery),503,'SES_NOT_CONFIGURED'); error(await add(b.cookie,foreign),503,'SES_NOT_CONFIGURED'); }
+          finally {runtime.config.liveEnabled=true;}
+          assert.equal(calls.length,before);
+          loseCreateResponse=true; error(await add(b.cookie,recovery),503,'SES_UNAVAILABLE');
+          // The second failed request did reach SES. Recover only this claim's tagged identity.
+          const restored=ok(await add(b.cookie,recovery),201);
+          assert.equal(restored.dns.filter((r:Json)=>r.purpose==='dkim').length,3); assert.equal(restored.verified,false);
+          assert.deepEqual(calls.slice(before),['CreateEmailIdentityCommand','CreateEmailIdentityCommand','GetEmailIdentityCommand']);
+          ok(await local('DELETE',`/v1/domains/${restored.id}`,undefined,b.cookie));
+          const collisionStart=calls.length;
           error(await add(b.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
-          assert.deepEqual(calls.slice(before),['GetEmailIdentityCommand']);
+          assert.deepEqual(calls.slice(collisionStart),['CreateEmailIdentityCommand','GetEmailIdentityCommand']);
+          assert.ok(identities.has(`${platform}:${foreign}`));
           assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=$1',[foreign])).rowCount,0);
-          const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.type === 'TXT');
-          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.ok(created.dns.some((r:Json) => r.type==='CNAME'));
-          assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,1);
-          assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
+          const n=queries.mock.callCount(),creates=calls.length;
+          const created = ok(await add(b.cookie,domain),201), proof = created.dns.find((r:Json) => r.purpose === 'ownership');
+          dt.diagnostic(`POST domain: ${queries.mock.callCount()-n} pg round trips including dashboard auth`);
+          assert.deepEqual(calls.slice(creates),['CreateEmailIdentityCommand']);
+          assert.equal(proof.name,`_opensend.${domain}`); assert.ok(proof.value); assert.equal(created.dns.filter((r:Json)=>r.type==='CNAME' && r.purpose==='dkim').length,3);
+          assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
+          assert.equal(associations.size,0);
           for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
           const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',environment:'test',permissions:['send'] },b.cookie),201).secret;
           const send = (from:string) => local('POST','/v1/emails/send',mail({ region,from }),undefined,{ authorization:`Bearer ${key}` });
-          error(await send(`hi@sub.${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          const sent=ok(await send(`hi@sub.${domain}`),202); assert.equal(sent.simulated,true); await pool.query('DELETE FROM sending_emails WHERE id=$1',[sent.id]);
           const detail = `/v1/domains/${created.id}`;
-          answer=proof.value; const checked = ok(await local('POST',`${detail}/verify`,undefined,b.cookie));
-          assert.equal(checked.verified,true); assert.equal(checked.ready,true); assert.equal(lookups,2);
-          assert.equal(ok(await local('GET','/v1/domains?refresh=false',undefined,b.cookie)).data[0].verified,true); assert.equal(lookups,2);
-          const sent = ok(await send(`hi@sub.${domain}`),202); await pool.query('DELETE FROM sending_emails WHERE id=$1',[sent.id]);
+          const {operationJobs}=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
+          const {rows:[job]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
+          const check=()=>operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,attempts:1,workspaceId:b.org.id,environment:'live'});
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,1);
+          await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
+          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+          answer=proof.value; await check(); const readStart=calls.length;
+          const readQueries=queries.mock.callCount();
+          const checked=ok(await local('GET',detail,undefined,b.cookie)); assert.equal(checked.verified,true); assert.equal(checked.ready,true);
+          dt.diagnostic(`GET domain detail: ${queries.mock.callCount()-readQueries} pg round trips including dashboard auth`);
+          const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
+          dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
+          assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,2);
+          assert.ok(associations.has(`opensend-${b.org.id}:arn:aws:ses:${region}:${platform}:identity/${domain}`));
           error(await send(`hi@not${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          await pool.query("UPDATE jobs SET status='running',lease_until=now()+interval '3 minutes' WHERE id=$1",[job.id]);
           const configured = ok(await local('POST',`${detail}/mail-from`,{ mailFromDomain:`bounce.${domain}` },b.cookie));
           assert.ok(configured.dns.some((r:Json) => r.type==='MX')); assert.ok(configured.dns.some((r:Json) => r.value===proof.value));
+          assert.equal(configured.ready,true); assert.equal(configured.mailFromStatus,'PENDING');
+          assert.notEqual((await pool.query('SELECT status FROM jobs WHERE id=$1',[job.id])).rows[0].status,'running','The old running poll cannot complete the new MAIL FROM check.');
           assert.equal(ok(await add(b.cookie,domain),201).id,created.id,'The creating claim can resume safely.');
-          const identity = identities.get(`${platform}:${domain}`)!;
-          identity.DkimAttributes = { ...verifiedIdentity.DkimAttributes, Status:'PENDING' };
-          assert.equal(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)).verified,false,'TXT alone cannot replace DKIM.');
-          identity.DkimAttributes = verifiedIdentity.DkimAttributes;
-          answer='wrong-token'; assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false);
-          error(await send(`hi@${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
+          error(await local('DELETE',detail,undefined,a.cookie),404);
+          await pool.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour' WHERE id=$1",[job.id]);
+          ok(await local('DELETE',detail,undefined,b.cookie)); assert.ok(!identities.has(`${platform}:${domain}`)); error(await local('GET',detail,undefined,b.cookie),404);
+          assert.equal((await pool.query('SELECT 1 FROM jobs WHERE id=$1',[job.id])).rowCount,0);
+          const reclaimed=ok(await add(a.cookie,domain),201); assert.notEqual(reclaimed.dns.find((r:Json)=>r.purpose==='ownership').value,proof.value);
+          await check(); assert.equal(ok(await local('GET',`/v1/domains/${reclaimed.id}`,undefined,a.cookie)).verified,false);
+          ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
           const race = `${unique('race')}.invalid`;
           const raced = await Promise.all([add(a.cookie,race),add(b.cookie,`child.${race}`)]);
           assert.deepEqual(raced.map(r => r.status).sort(),[201,409]); error(raced.find(r => r.status===409)!,409,'DOMAIN_CLAIMED');
+          const i=raced.findIndex(r=>r.status===201); ok(await local('DELETE',`/v1/domains/${ok(raced[i]!,201).id}`,undefined,[a,b][i]!.cookie));
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v1.yaml';
@@ -832,12 +884,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);
+        assert.equal(ok(await local('GET','/v1/settings/ses',undefined,a.cookie)).region,region);
         identities.set(`${customer}:${foreign}`,verifiedIdentity);
-        const adopted = ok(await add(a.cookie,foreign),201); assert.equal(adopted.verified,true); assert.ok(!adopted.dns.some((r:Json) => r.name.startsWith('_opensend.')));
+        error(await add(a.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
+        const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['dkim','dkim','dkim']);
+        const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
+        await (await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,j.payload,{id:j.id,attempts:1,workspaceId:a.org.id,environment:'live'});
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
         const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
-        assert.ok(visible.some((r:Json) => r.name===foreign && r.verified)); assert.ok(!visible.some((r:Json) => r.name===domain));
+        assert.deepEqual(visible.map((r:Json)=>[r.name,r.verified]),[[domain,true]]); ok(await local('DELETE',`/v1/domains/${byoDomain.id}`,undefined,a.cookie));
         await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
@@ -1185,9 +1241,9 @@ describe('Hosted MCP OAuth and tools', () => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
-      await db.query("INSERT INTO provider_pool_regions(region,aws_account_id,ready,feedback_topic_arn) VALUES ($1,'111122223333',true,$2)",[REGION,`arn:aws:sns:${REGION}:111122223333:opensend-mx-feedback`]);
-      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,status,aws_account_id) VALUES ($1,$2,'shared',$3,'ready','111122223333')",[connection,wid,REGION]);
-      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('example.com',$1,$2,true)",[wid,connection]);
+      // A cold hosted connection and unverified claim are sufficient for simulated delivery, even without AWS credentials.
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,status) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
       await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       const deniedClient = ok(await registerClient(t, db, {}, request), 201);
       const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
@@ -1204,9 +1260,9 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const first = await send(); await run('email.dispatch');
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [first])).rows[0].status, 'accepted');
-      const lostProof = await send(); await db.query('UPDATE domain_claims SET verified=false WHERE workspace_id=$1',[wid]); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled');
-      await db.query('UPDATE domain_claims SET verified=true WHERE workspace_id=$1',[wid]);
+      const lostProof = await send(); await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]); await run('email.dispatch');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still exist at dispatch.');
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
       const second = await send();
       await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       assert.equal((await call('getContext')).response.role, 'member', 'An existing member grant must not grow on promotion.');
@@ -3323,7 +3379,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
       async function run(type: string) {
         // Mail is no longer a job: the dispatcher claims due rows for one environment/region directly.
         if (type === 'email.dispatch') {
-          const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
+          const accountId = runtime.config.multiTenant ? (await db.query('SELECT aws_account_id FROM provider_test_connections WHERE workspace_id=$1',[runtime.config.workspaceId])).rows[0]?.aws_account_id : undefined;
           await dispatchDue(runtime, 'test', REGION, {accountId}); return;
         }
         assert.ok(handlers[type], `No handler for ${type}`);
@@ -3364,7 +3420,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner')",[unique('member'),byo,manager!.userId]);
       await db.query('INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $2,$2,default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$1',[shared,byo]);
       await db.query('INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,ready) VALUES ($1,$2,$3,true)',[REGION,pool,poolTopic]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id) VALUES ($1,$1,$2,'ready','shared',$3)`,[shared,REGION,pool]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id,tenant_provisioned) VALUES ($1,$1,$2,'ready','shared',$3,true)`,[shared,REGION,pool]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,status,kind,aws_account_id,external_id,template_version,platform_principal_arn,role_arn,feedback_topic_arn)
         VALUES ($1,$1,$2,'ready','byo',$3,$4,'v1',$5,$6,$7)`,[byo,REGION,account,externalId,`arn:aws:iam::${pool}:user/test`,role,byoTopic]);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,verified) VALUES ('pool.example',$1,$1,true),('customer.example',$2,$2,true)",[shared,byo]);

@@ -1084,6 +1084,7 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
+        purpose?: 'dkim' | 'ownership' | 'mail_from';
     }>;
 };
 
@@ -2777,7 +2778,7 @@ export type ConnectionRegions = {
 
 export type CreateConnection = {
     kind: 'shared' | 'byo';
-    region: string;
+    region?: string;
 };
 
 export type ListMcpConnectionsData = {
@@ -8523,6 +8524,71 @@ export type ConfigureDomainMailFromResponses = {
 };
 
 export type ConfigureDomainMailFromResponse = ConfigureDomainMailFromResponses[keyof ConfigureDomainMailFromResponses];
+
+export type DeleteDomainData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/domains/{id}';
+};
+
+export type DeleteDomainErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DeleteDomainError = DeleteDomainErrors[keyof DeleteDomainErrors];
+
+export type DeleteDomainResponses = {
+    /**
+     * Success
+     */
+    200: {
+        deleted: true;
+    };
+};
+
+export type DeleteDomainResponse = DeleteDomainResponses[keyof DeleteDomainResponses];
 
 export type GetDomainData = {
     body?: never;
@@ -16214,10 +16280,6 @@ export type CreateConnectionResponses = {
      * Success
      */
     201: ProviderConnection;
-    /**
-     * Success
-     */
-    202: ProviderConnection;
 };
 
 export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
