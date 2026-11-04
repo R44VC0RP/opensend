@@ -1679,6 +1679,10 @@ export type InboundAddress = {
         perRecipientPerHour: number;
         perThreadPer10Minutes: number;
     };
+    /**
+     * When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received.
+     */
+    requireDmarc: boolean;
 };
 
 export type CreateInboundAddress = {
@@ -1709,6 +1713,10 @@ export type CreateInboundAddress = {
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
     };
+    /**
+     * Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.
+     */
+    requireDmarc?: boolean;
 };
 
 export type UpdateInboundAddress = {
@@ -1727,6 +1735,7 @@ export type UpdateInboundAddress = {
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
     };
+    requireDmarc?: boolean;
 };
 
 export type MailboxOk = {
@@ -1773,6 +1782,10 @@ export type Mailbox = {
         perRecipientPerHour: number;
         perThreadPer10Minutes: number;
     };
+    /**
+     * When true, received mail without a DMARC pass for its From domain is stored with the unverified label and does not emit message.received.
+     */
+    requireDmarc: boolean;
 };
 
 export type CreateMailbox = {
@@ -1803,6 +1816,10 @@ export type CreateMailbox = {
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
     };
+    /**
+     * Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.
+     */
+    requireDmarc?: boolean;
 };
 
 export type UpdateMailbox = {
@@ -1821,6 +1838,7 @@ export type UpdateMailbox = {
         perRecipientPerHour?: number;
         perThreadPer10Minutes?: number;
     };
+    requireDmarc?: boolean;
 };
 
 export type MailboxThreadPage = {

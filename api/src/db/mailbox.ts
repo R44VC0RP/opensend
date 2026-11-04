@@ -45,6 +45,7 @@ export const mailboxes = pgTable('mailboxes', {
   rules: jsonb('rules').$type<string[]>().notNull().default([]), metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
   origin: text('origin').$type<'api' | 'auto'>().notNull().default('api'),
   sendLimits: jsonb('send_limits').$type<Partial<SendLimits>>().notNull().default({}),
+  requireDmarc: boolean('require_dmarc').notNull().default(false),
   expiresAt: ts('expires_at'),
   createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 }, t => [index('mailboxes_page').on(t.workspaceId, t.environment, t.id), index('mailboxes_domain').on(t.workspaceId, t.environment, t.domainId)]);

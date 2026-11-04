@@ -3178,9 +3178,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', mailboxIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
-      async function receive(to: string, mime: string) {
+      async function receive(to: string, mime: string, dmarc = 'PASS') {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
-        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: dmarc }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
         assert.equal(await acceptInboundNotification(runtime,input),1); assert.equal(await acceptInboundNotification(runtime,input),0);
         await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId:receipt},{id:unique('job'),workspaceId:scope,environment:'live',attempts:1});
       }
@@ -3237,6 +3237,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await receive(address,mime('separate','separate case',[`In-Reply-To: <synthetic-${tracked.id}@${REGION === 'us-east-1' ? 'email' : REGION}.amazonses.com>`,'References: <selected@example.net>']));
       const separate = ok(await get(`${inbox}?direction=inbound&q=separate`,agent)).data;
       assert.equal(separate.length,1); assert.equal(separate[0].threadId,tracked.threadId,'A direct, not-yet-synced SES parent takes priority over a known older reference.');
+      // An address that requires DMARC keeps unverified mail for a person and announces only verified mail.
+      assert.equal(box.requireDmarc,false); assert.equal(ok(await local('PATCH',`${mailboxes}/${box.id}`,{ requireDmarc:true },'live')).requireDmarc,true);
+      const announced = async () => (await db.query(`SELECT payload FROM mailbox_webhook_deliveries WHERE webhook_id=$1`,[boxHook.id])).rows.map(row => row.payload);
+      const before = (await announced()).length;
+      await receive(address,mime('spoofed','unverified zebra',[]),'GRAY');
+      const held = ok(await get(`${inbox}?direction=inbound&q=unverified`,agent)).data; assert.equal(held.length,1); assert.deepEqual(held[0].labels,['unverified']);
+      assert.equal((await announced()).length,before);
+      await receive(address,mime('verified','verified zebra',[]));
+      const passed = ok(await get(`${inbox}?direction=inbound&q=verified`,agent)).data; assert.equal(passed.length,1); assert.deepEqual(passed[0].labels,[]);
+      const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
+      assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
     });
   });
 

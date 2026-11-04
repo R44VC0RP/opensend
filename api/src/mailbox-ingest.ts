@@ -3,7 +3,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Mode, type Runtime } from './core.js';
 import { enqueue, MAX_ATTEMPTS } from './jobs.js';
-import { mailAttachments, mailboxDomains, mailboxRegions, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
+import { mailAttachments, mailboxDomains, mailboxes, mailboxMessages, mailboxRegions, mailMessageIds, mailMessages, mailReceipts, mailUnrouted, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents, recordEvents, type MailboxEventInput } from './mailbox-events.js';
 import { ATTACHMENT_PREFIX, mailboxS3, RAW_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { assignThread, attachToMailboxes, lockMailboxLane, messageIdList, normalizeMessageId, rememberMessageIds, routeRecipients, snippetOf, type Scope } from './mailbox-store.js';
@@ -172,8 +172,11 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     // References select a conversation, not its readers. Even a DKIM-authenticated sender can supply a copied ID.
     if (routed.unrouted.length) await tx.insert(mailUnrouted).values(routed.unrouted.map(address => ({ ...scope, messageId: target!.id, address }))).onConflictDoNothing();
     const added = await attachToMailboxes(tx, scope, target, routed.mailboxIds);
+    // Addresses that require DMARC keep unverified mail for a person (labelled unverified) without announcing it as received.
+    const held = added.length && verdicts.dmarc !== 'PASS' ? (await tx.select({ id: mailboxes.id }).from(mailboxes).where(and(inArray(mailboxes.id, added), eq(mailboxes.requireDmarc, true)))).map(row => row.id) : [];
+    if (held.length) await tx.update(mailboxMessages).set({ labels: sql`array_append(array_remove(${mailboxMessages.labels}, 'unverified'), 'unverified')` }).where(and(eq(mailboxMessages.messageId, target.id), inArray(mailboxMessages.mailboxId, held)));
     for (const mailboxId of routed.created) events.push({ type: 'mailbox.created', mailboxId, data: { origin: 'auto' } });
-    for (const mailboxId of added) events.push({ type: 'message.received', mailboxId, threadId: target.threadId, messageId: target.id, data: { from: { name: target.fromName, address: target.fromAddress }, subject: target.subject, snippet: target.snippet, attachmentCount: target.attachmentCount, spam: target.spam, automated: target.automated } });
+    for (const mailboxId of added.filter(id => !held.includes(id))) events.push({ type: 'message.received', mailboxId, threadId: target.threadId, messageId: target.id, data: { from: { name: target.fromName, address: target.fromAddress }, subject: target.subject, snippet: target.snippet, attachmentCount: target.attachmentCount, spam: target.spam, automated: target.automated, dmarc: verdicts.dmarc ?? null } });
     await done();
     return recordEvents(tx, scope.workspaceId, scope.environment, events);
   });
