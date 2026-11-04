@@ -63,6 +63,11 @@ variable "environment" {
   description = "Resource name suffix, e.g. production."
 }
 
+variable "origin_connection_limit" {
+  type    = number
+  default = 15
+}
+
 variable "bucket_location" {
   type    = string
   default = "enam"
@@ -116,6 +121,9 @@ resource "cloudflare_hyperdrive_config" "db" {
   }
   # Query caching would serve stale rows to the API; production runs with it disabled too.
   caching = { disabled = true }
+  # Leave database connections free for migrations and operators: PlanetScale PS-20 has far fewer
+  # than Hyperdrive's default 60, and the first deploy that filled them failed with 53300.
+  origin_connection_limit = var.origin_connection_limit
 }
 
 output "work_queue" {
