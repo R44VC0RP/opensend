@@ -20,7 +20,7 @@ type Addresses = Map<string, InboundAddress>
 const ownAddresses = (addresses: Addresses) => new Set([...addresses.values()].flatMap(address => [...ownAddressesOf(address)]))
 
 function AddressLabels({ ids, addresses }: { ids: string[]; addresses: Addresses }) {
-  return <span className="mailbox-labels">{ids.slice(0, 3).map(id => <span key={id} className="mailbox-label" title={addressName(addresses, id)}>{addressName(addresses, id)}</span>)}{ids.length > 3 && <span className="mailbox-label">+{ids.length - 3}</span>}</span>
+  return <>{ids.slice(0, 3).map(id => <span key={id} className="mailbox-address-label" title={addressName(addresses, id)}>{addressName(addresses, id)}</span>)}{ids.length > 3 && <span className="mailbox-address-label">+{ids.length - 3}</span>}</>
 }
 
 function ThreadRow({ thread, addresses, showAddresses, selected, onSelect }: { thread: InboundThread; addresses: Addresses; showAddresses: boolean; selected: boolean; onSelect: () => void }) {
@@ -31,7 +31,7 @@ function ThreadRow({ thread, addresses, showAddresses, selected, onSelect }: { t
       <time className="mailbox-thread-row__time" dateTime={thread.lastMessageAt}>{when(thread.lastMessageAt)}</time>
     </span>
     <span className="mailbox-thread-row__snippet">{thread.snippet}</span>
-    {showAddresses && thread.addressIds.length > 0 && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
+    {showAddresses && thread.addressIds.length > 0 && <span className="mailbox-labels"><AddressLabels ids={thread.addressIds} addresses={addresses} /></span>}
   </button></li>
 }
 
@@ -58,7 +58,6 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
     catch (error) { toast(error instanceof Error ? error.message : 'The attachment could not be opened.', 'error') }
   }
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
-    <span className="mailbox-message__node" aria-hidden="true" />
     <article className="mailbox-message__card">
       <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
         <span className="mailbox-message__from"><strong>{outbound ? 'You' : nameOf(message.from)}</strong><span className="muted">{message.from.address}</span></span>
@@ -150,8 +149,10 @@ function Conversation({ thread, addressId, addresses, focusMessage, onBack }: { 
       <div className="mailbox-conversation__title">
         <h2>{thread.subject || '(no subject)'}</h2>
         <p className="muted">{thread.messageCount} message{thread.messageCount === 1 ? '' : 's'}{people.length > 0 && ` · with ${people.map(nameOf).join(', ')}`}</p>
-        {!addressId && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
-        {flags && flags.labels.length > 0 && <span className="mailbox-labels">{flags.labels.map(item => <span key={item} className="mailbox-label">{item}</span>)}</span>}
+        {(!addressId || (flags && flags.labels.length > 0)) && <span className="mailbox-labels">
+          {!addressId && <AddressLabels ids={thread.addressIds} addresses={addresses} />}
+          {flags?.labels.map(item => <span key={item} className="mailbox-label">{item}</span>)}
+        </span>}
       </div>
       {flags && <div className="cluster mailbox-conversation__actions">
         <IconButton variant="ghost" label={flags.unreadCount ? 'Mark read' : 'Mark unread'} onClick={() => act({ read: flags.unreadCount > 0 })}>{flags.unreadCount ? <MailOpen size={16} /> : <Mail size={16} />}</IconButton>
@@ -223,7 +224,7 @@ function Composer({ thread, target, explicit, onClearTarget, addressId, addresse
           {resolved.cc.length > 0 && <RecipientList label="Cc" values={resolved.cc} people={people} />}
         </>}
     </div>
-    <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder={senderAddress ? `Write a reply as ${senderOf(senderAddress).address}` : 'Write a reply'} disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
+    <Textarea ref={textarea} id="inbound-reply" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="Write a reply" disabled={send.isPending} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit() }} />
     {send.error && <Alert tone="danger">{changed ? 'The recipients changed since you reviewed them. Check To and Cc above, then send again.' : send.error instanceof Error ? send.error.message : 'The reply could not be sent.'}</Alert>}
     <div className="mailbox-composer__actions">
       {replyAll || extra > 0 ? <Checkbox label={replyAll ? 'Reply all' : `Reply all (+${extra})`} checked={replyAll} onCheckedChange={setReplyAll} disabled={send.isPending} /> : <span />}
@@ -242,7 +243,6 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   const key = useRef({ key: '', body: '' })
   const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.startThread>[0], 'idempotencyKey'>) => api.inbound.startThread({ ...input, idempotencyKey: idempotencyFor(key.current, input) }), 'Message queued')
   useEffect(() => { if (open) { send.reset(); setErrors({}); setFrom(current => current || defaultAddress || (addresses.length === 1 ? addresses[0]!.id : '')) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
-  const selected = addresses.find(address => address.id === from)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const recipients = to.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean)
@@ -260,10 +260,10 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
       onOpenChange(false); onSent(message.threadId)
     } catch { /* Shown in the form. */ }
   }
-  return <Dialog open={open} onOpenChange={next => { if (!send.isPending) onOpenChange(next) }} title="New message" description="Starts a new conversation from one of your receiving addresses. Nothing is sent until you choose Send." footer={<><Button disabled={send.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-new-thread" loading={send.isPending}>Send</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!send.isPending) onOpenChange(next) }} title="New message" footer={<><Button disabled={send.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-new-thread" loading={send.isPending}>Send</Button></>}>
     <form id="inbound-new-thread" className="stack" onSubmit={submit} noValidate>
       <MutationError error={send.error} />
-      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')} hint={selected ? `Sends as ${full(senderOf(selected))}.` : undefined}>
+      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')}>
         <Select id="inbound-new-from" value={from} onValueChange={setFrom} disabled={send.isPending} placeholder="Choose an address" options={addresses.map(address => ({ value: address.id, label: address.displayName ? `${address.displayName} <${address.address}>` : address.address }))} />
       </Field>
       <Field label="To" htmlFor="inbound-new-to" error={errors.to || fieldError(send.error, 'to')} hint="Separate several recipients with commas."><Input id="inbound-new-to" value={to} onChange={event => setTo(event.target.value)} disabled={send.isPending} placeholder="name@example.com" autoComplete="off" /></Field>
@@ -315,7 +315,7 @@ export function InboundPage() {
           </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/inbound/addresses">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
-        {!threadId ? <EmptyState title="Select a conversation" description="Messages are grouped by their reply headers across every address that received them." />
+        {!threadId ? <EmptyState title="Select a conversation" />
           : thread.error ? <ErrorState error={thread.error} onRetry={() => void thread.refetch()} />
           : thread.isPending || !thread.data ? <div className="mailbox-thread-skeleton"><SkeletonText width="50%" lineHeight={24} /><SkeletonText width="80%" /><SkeletonText width="70%" /></div>
           : <Conversation thread={thread.data} addressId={addressId} addresses={addresses} focusMessage={params.get('message')} onBack={() => change({ thread: null, message: null })} />}
