@@ -60,7 +60,7 @@ export function RegionDiscoverySkeleton() {
 
 export function SesSendingSkeleton({ regionId }: { regionId: string }) {
   return <LoadingRegion label="Loading sending regions" className="settings-loading-body">
-    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
+    <section id="sending" className="section stack settings-group"><SectionHeader title="Regions" actions={<div className="cluster"><ControlSkeleton width={88} /><ControlSkeleton width={114} /></div>} /><div className="ui-field"><span className="ui-field__label">Default sending region</span><ControlSkeleton width={320} /><span className="ui-field__hint">Used for API sends that omit a region.</span></div><TableSkeleton columns={settingsColumns.regions} rows={2} /></section>
     <section className="section stack settings-rule"><SectionHeader title={<span className="cluster">{regionId}<Skeleton width={64} /></span>} actions={<div className="cluster"><ControlSkeleton width={100} /><ControlSkeleton width={180} /></div>} /><div className="settings-setup-checklist"><h3>Provisioning</h3><ul className="settings-setup-steps">{['AWS account access', 'SES configuration sets', 'SNS topic and permissions', 'SES event destinations', 'HTTPS subscription'].map(name => <li key={name}><Skeleton width={16} /><div className="settings-setup-step-heading settings-setup-step"><span>{name}</span><SkeletonText width={100} /></div></li>)}</ul></div><RegionDiscoverySkeleton /></section>
   </LoadingRegion>
 }
@@ -85,8 +85,8 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
     {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={76} /><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
       <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /><SkeletonText width={250} /></section>
-      <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={settingsColumns.deliveries} rows={3} /></section>
-      <div className="settings-rule"><ControlSkeleton width={146} /></div>
+      <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={settingsColumns.deliveries} rows={2} /></section>
+      <div><ControlSkeleton width={146} /></div>
     </>}
   </LoadingRegion>
 }

@@ -56,7 +56,7 @@ function Invitations({ owner }: { owner: boolean }) {
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
   return <section className="section stack settings-rule">
     <SectionHeader title="Invitations" />
-    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={1} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={1} empty={<span className="muted">No pending invitations</span>} columns={[
+    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={2} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={2} empty={<EmptyState title="No pending invitations" />} columns={[
       { key: 'email', label: 'Email', width: '40%', render: invitation => <span className="settings-break">{invitation.email}</span> },
       { key: 'role', label: 'Role', width: 160, render: invitation => roleLabel[invitation.role] },
       { key: 'expires', label: 'Expires', render: invitation => date(invitation.expiresAt) },

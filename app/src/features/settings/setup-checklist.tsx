@@ -26,7 +26,7 @@ export function SetupChecklist({report, running, queued, bare}: {report?: SesDis
   const pending = topic?.subscription === 'pending'
   const snsUrl = report && topic?.arn ? `https://${report.region}.console.aws.amazon.com/sns/v3/home?region=${report.region}#/topic/${encodeURIComponent(topic.arn)}` : undefined
   return <div className="settings-setup-checklist" aria-label="Provisioning checklist">
-    {(!bare || running) && <div className="settings-setup-heading">{bare ? <span /> : <h3>Provisioning</h3>}{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>}
+    {!bare && <div className="settings-setup-heading"><h3>Provisioning</h3>{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>}
     {running && report && <p className="muted">Last checked state.</p>}
     <ul className="settings-setup-steps">{checks.map(check => {
       const Icon = check.state === 'complete' ? Check : check.state === 'waiting' ? Clock3 : check.state === 'blocked' ? CircleAlert : Circle
