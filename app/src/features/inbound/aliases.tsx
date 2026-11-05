@@ -23,10 +23,10 @@ const reasons = (domain: string, address: string): Record<Reason, string> => ({
   limit: `An address can have at most ${MAX_ALIASES} aliases.`,
 })
 
-/** Adds every address in the draft (separated by spaces, commas, semicolons or new lines); anything invalid stays in the draft. */
-export function commitAliases(state: AliasState, { address, temporary }: Rules): AliasState & { ok: boolean; added: string[] } {
+/** Adds every address in the draft; anything invalid stays in the draft. Typed text splits on commas and semicolons only, so a typed space is invalid; pasted lists also split on whitespace. */
+export function commitAliases(state: AliasState, { address, temporary }: Rules, pasted = false): AliasState & { ok: boolean; added: string[] } {
   const domain = domainOf(address)
-  const tokens = state.draft.split(/[\s,;]+/).map(token => token.trim().toLowerCase().replace(/^<|>$/g, '')).filter(Boolean)
+  const tokens = state.draft.split(pasted ? /[\s,;]+/ : /[,;\n]+/).map(token => token.trim().toLowerCase().replace(/^<|>$/g, '')).filter(Boolean)
   if (!tokens.length) return { ...state, draft: '', ok: true, added: [] }
   const list = [...state.list], rest: string[] = []
   let reason: Reason | null = null, duplicates = 0
@@ -65,8 +65,8 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
     ;(removers.current.get(focusAfterRemove) ?? input.current)?.focus()
     setFocusAfterRemove(null)
   }, [focusAfterRemove])
-  function add(draft = value.draft) {
-    const next = commitAliases({ ...value, draft }, { address, temporary })
+  function add(draft = value.draft, pasted = false) {
+    const next = commitAliases({ ...value, draft }, { address, temporary }, pasted)
     onChange({ list: next.list, draft: next.draft, message: next.message })
     if (next.added.length) setAnnouncement(next.added.length === 1 ? `Added ${next.added[0]}` : `Added ${next.added.length} aliases`)
     if (next.list.length >= MAX_ALIASES && !next.draft) requestAnimationFrame(() => removers.current.get(next.list.at(-1)!)?.focus())
@@ -86,7 +86,7 @@ export function AliasEditor({ id, address, temporary, saved, value, onChange, di
     if (!/[\s,;]/.test(text.trim())) return
     event.preventDefault()
     const target = event.currentTarget
-    add(value.draft.slice(0, target.selectionStart ?? value.draft.length) + ' ' + text + ' ' + value.draft.slice(target.selectionEnd ?? value.draft.length))
+    add(value.draft.slice(0, target.selectionStart ?? value.draft.length) + ' ' + text + ' ' + value.draft.slice(target.selectionEnd ?? value.draft.length), true)
   }
   const shown = value.message ?? (error ? { tone: 'error' as const, text: error } : null)
   const hint = temporary ? 'Temporary addresses cannot have aliases.'
