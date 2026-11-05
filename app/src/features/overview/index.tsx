@@ -29,7 +29,7 @@ export function OverviewPage() {
   }
   const navigate = useNavigate()
   const intent = useRouteIntent()
-  // Each refresh runs four created-cohort metrics aggregations; aggregates over hours or days do not need
+  // Each refresh runs one created-cohort metrics aggregation (chart, previous period and streams in a single request); aggregates over hours or days do not need
   // the 3-second polling used for live queues, and a hidden tab should not keep the database busy.
   const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
   const regions = useRegionCatalog()

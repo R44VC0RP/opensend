@@ -3214,6 +3214,15 @@ describe('Dashboard API capabilities', () => {
     assert.ok(before.totals.emails >= 3);
     assert.equal(before.totals.accepted, 0, 'Simulated mail is not provider acceptance.');
     assert.equal(before.daily.reduce((sum: number, day: Json) => sum + day.count, 0), before.totals.emails);
+    // include=previous,streams returns, in one statement, exactly what the separate window, previous-window and per-stream requests return.
+    const extras = ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, region: REGION, stream: 'transactional', include: 'previous,streams' })}`, key.secret));
+    assert.deepEqual(extras.totals, before.totals);
+    assert.deepEqual(extras.daily, before.daily);
+    const previousFrom = new Date(Date.parse(from) - (Date.parse(to) - Date.parse(from))).toISOString();
+    assert.deepEqual(extras.previous, { from: previousFrom, to: from, totals: ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from: previousFrom, to: from, region: REGION, stream: 'transactional' })}`, key.secret)).totals });
+    for (const kind of ['transactional', 'marketing']) assert.deepEqual(extras.streams[kind], ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, region: REGION, stream: kind })}`, key.secret)).totals);
+    assert.equal(ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret)).previous, undefined, 'Without include the response is unchanged.');
+    error(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, include: 'bogus' })}`, key.secret), 422);
     const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND actor_key_id = $3', [ids[0], contact.workspaceId, key.id]);
     assert.equal(matched.rowCount, 1, 'Only an exact HTTP-created scoped email can receive synthetic replay source events.');
     const events = [unique('cohort-click'), unique('cohort-click-replay')];

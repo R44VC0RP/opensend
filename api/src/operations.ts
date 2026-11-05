@@ -823,32 +823,59 @@ function unsubscribePage(title: string, body: string) {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}body,body *{letter-spacing:-0.01em}</style><body style="font-family:Inter,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
 }
 function registerMetrics(app: App) {
-  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day') }).openapi('MetricsQuery');
+  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day'), include: z.string().regex(/^(?:previous|streams)(?:,(?:previous|streams))*$/).optional().describe('Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).') }).openapi('MetricsQuery');
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
-  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(bucket), hourly: z.array(bucket).optional() }).openapi('Metrics');
+  const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
+  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
   app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
     const compute = async () => {
-    const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+    const extras = new Set((q.include ?? '').split(',').filter(Boolean));
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     // Outcomes come from the per-email flags kept by the operation_events trigger (migration 031): the same
     // union of public events the old per-query event aggregation produced, without re-reading the events.
-    const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
-    const result = await c.env.db.execute<{ date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }>(sql`
-      SELECT ${date} AS "date", count(*)::int AS "emails",
-        count(*) FILTER (WHERE NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
-        count(*) FILTER (WHERE ${emails.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
-        count(*) FILTER (WHERE ${emails.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
-        count(*) FILTER (WHERE ${emails.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
+    type Row = { date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number };
+    const counts = (cols: { status: SQL; simulated: SQL; providerId: SQL; outcomes: SQL }) => {
+      const has = (bit: number) => sql`(${cols.outcomes} & ${bit}) <> 0`;
+      return sql`count(*)::int AS "emails",
+        count(*) FILTER (WHERE NOT ${cols.simulated} AND ${cols.status} <> 'suppressed' AND (${cols.providerId} IS NOT NULL OR ${cols.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
+        count(*) FILTER (WHERE ${cols.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
+        count(*) FILTER (WHERE ${cols.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
+        count(*) FILTER (WHERE ${cols.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
         count(*) FILTER (WHERE ${has(OUTCOME.opened)})::int AS "opened", count(*) FILTER (WHERE ${has(OUTCOME.clicked)})::int AS "clicked",
-        count(*) FILTER (WHERE ${emails.status} IN ('rejected', 'rendering_failed') OR ${has(OUTCOME.failed)})::int AS "failed",
-        count(*) FILTER (WHERE ${emails.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
-        count(*) FILTER (WHERE ${emails.simulated})::int AS "simulated"
+        count(*) FILTER (WHERE ${cols.status} IN ('rejected', 'rendering_failed') OR ${has(OUTCOME.failed)})::int AS "failed",
+        count(*) FILTER (WHERE ${cols.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
+        count(*) FILTER (WHERE ${cols.simulated})::int AS "simulated"`;
+    };
+    const total = (row?: Row) => ({ emails: row?.emails ?? 0, accepted: row?.accepted ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complained: row?.complained ?? 0, opened: row?.opened ?? 0, clicked: row?.clicked ?? 0, failed: row?.failed ?? 0, deliveryDelayed: row?.deliveryDelayed ?? 0, simulated: row?.simulated ?? 0 });
+    let rows: Row[], previous: { from: string; to: string; totals: ReturnType<typeof total> } | undefined, streams: { transactional: ReturnType<typeof total>; marketing: ReturnType<typeof total> } | undefined;
+    if (!extras.size) {
+      const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+      rows = (await c.env.db.execute<Row>(sql`
+      SELECT ${date} AS "date", ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
       FROM ${emails}
       WHERE ${filter}
-      GROUP BY 1 ORDER BY 1`);
+      GROUP BY 1 ORDER BY 1`)).rows;
+    } else {
+      // One scan over the window and (with include=previous) the window before it; the chart buckets, the previous
+      // total and the per-stream totals are aggregated from it in the same statement.
+      const previousFrom = new Date(Date.parse(start) - (Date.parse(end) - Date.parse(start))).toISOString();
+      const scanFrom = extras.has('previous') ? previousFrom : start;
+      const result = await c.env.db.execute<Row & { part: string; kind: string | null }>(sql`
+      WITH scan AS (
+        SELECT ${date} AS bucket, ${emails.createdAt} >= ${start}::timestamptz AS cur, ${emails.snapshot}->>'kind' AS kind, ${emails.status} AS status, ${emails.simulated} AS simulated, ${emails.providerId} AS provider_id, ${emails.eventOutcomes} AS outcomes
+        FROM ${emails}
+        WHERE ${and(scoped(emails, a), gte(emails.createdAt, scanFrom), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined)}
+      ), shown AS (SELECT * FROM scan WHERE ${q.stream ? sql`kind = ${q.stream}` : sql`true`})
+      SELECT 'bucket' AS part, bucket AS "date", NULL::text AS kind, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })}
+        FROM shown WHERE cur GROUP BY bucket
+      ${extras.has('previous') ? sql`UNION ALL SELECT 'previous', NULL, NULL, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })} FROM shown WHERE NOT cur` : sql``}
+      ${extras.has('streams') ? sql`UNION ALL SELECT 'stream', NULL, kind, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })} FROM scan WHERE cur AND kind IN ('transactional', 'marketing') GROUP BY kind` : sql``}`);
+      rows = result.rows.filter(row => row.part === 'bucket').sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+      if (extras.has('previous')) previous = { from: previousFrom, to: start, totals: total(result.rows.find(row => row.part === 'previous')) };
+      if (extras.has('streams')) streams = { transactional: total(result.rows.find(row => row.part === 'stream' && row.kind === 'transactional')), marketing: total(result.rows.find(row => row.part === 'stream' && row.kind === 'marketing')) };
+    }
     // Every email belongs to exactly one creation bucket, so totals are the sum of the buckets (no ROLLUP sort).
-    const rows = result.rows;
     const totals = { emails: 0, accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: 0 };
     for (const row of rows) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += row[key];
     const buckets = rows.map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
@@ -863,7 +890,7 @@ function registerMetrics(app: App) {
       }
       daily = [...days.values()];
     }
-    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) };
+    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}), ...(previous ? { previous } : {}), ...(streams ? { streams } : {}) };
     };
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
     // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
@@ -874,7 +901,7 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
+    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, q.include ?? '', window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });

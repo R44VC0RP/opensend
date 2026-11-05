@@ -5020,6 +5020,174 @@
                 "complained"
               ]
             }
+          },
+          "previous": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "totals": {
+                "type": "object",
+                "properties": {
+                  "emails": {
+                    "type": "number"
+                  },
+                  "accepted": {
+                    "type": "number"
+                  },
+                  "delivered": {
+                    "type": "number"
+                  },
+                  "bounced": {
+                    "type": "number"
+                  },
+                  "complained": {
+                    "type": "number"
+                  },
+                  "opened": {
+                    "type": "number"
+                  },
+                  "clicked": {
+                    "type": "number"
+                  },
+                  "failed": {
+                    "type": "number"
+                  },
+                  "deliveryDelayed": {
+                    "type": "number"
+                  },
+                  "simulated": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "emails",
+                  "accepted",
+                  "delivered",
+                  "bounced",
+                  "complained",
+                  "opened",
+                  "clicked",
+                  "failed",
+                  "deliveryDelayed",
+                  "simulated"
+                ]
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "totals"
+            ],
+            "description": "Present with include=previous."
+          },
+          "streams": {
+            "type": "object",
+            "properties": {
+              "transactional": {
+                "type": "object",
+                "properties": {
+                  "emails": {
+                    "type": "number"
+                  },
+                  "accepted": {
+                    "type": "number"
+                  },
+                  "delivered": {
+                    "type": "number"
+                  },
+                  "bounced": {
+                    "type": "number"
+                  },
+                  "complained": {
+                    "type": "number"
+                  },
+                  "opened": {
+                    "type": "number"
+                  },
+                  "clicked": {
+                    "type": "number"
+                  },
+                  "failed": {
+                    "type": "number"
+                  },
+                  "deliveryDelayed": {
+                    "type": "number"
+                  },
+                  "simulated": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "emails",
+                  "accepted",
+                  "delivered",
+                  "bounced",
+                  "complained",
+                  "opened",
+                  "clicked",
+                  "failed",
+                  "deliveryDelayed",
+                  "simulated"
+                ]
+              },
+              "marketing": {
+                "type": "object",
+                "properties": {
+                  "emails": {
+                    "type": "number"
+                  },
+                  "accepted": {
+                    "type": "number"
+                  },
+                  "delivered": {
+                    "type": "number"
+                  },
+                  "bounced": {
+                    "type": "number"
+                  },
+                  "complained": {
+                    "type": "number"
+                  },
+                  "opened": {
+                    "type": "number"
+                  },
+                  "clicked": {
+                    "type": "number"
+                  },
+                  "failed": {
+                    "type": "number"
+                  },
+                  "deliveryDelayed": {
+                    "type": "number"
+                  },
+                  "simulated": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "emails",
+                  "accepted",
+                  "delivered",
+                  "bounced",
+                  "complained",
+                  "opened",
+                  "clicked",
+                  "failed",
+                  "deliveryDelayed",
+                  "simulated"
+                ]
+              }
+            },
+            "required": [
+              "transactional",
+              "marketing"
+            ],
+            "description": "Present with include=streams."
           }
         },
         "required": [
@@ -26329,6 +26497,17 @@
             },
             "required": false,
             "name": "granularity",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^(?:previous|streams)(?:,(?:previous|streams))*$",
+              "description": "Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter)."
+            },
+            "required": false,
+            "description": "Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).",
+            "name": "include",
             "in": "query"
           }
         ],
