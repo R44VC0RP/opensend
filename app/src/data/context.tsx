@@ -10,6 +10,7 @@ import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
 import type { QueryDef } from './queries'
+import { resourceOf, staleAfterWrite } from './invalidation'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
@@ -204,9 +205,8 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
     onSuccess: () => {
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
-      const external = new Set(['regions', 'region-discovery', 'domain', 'domains', 'campaign-options'])
-      void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && (refreshSes || !external.has(String(query.queryKey[3])))}).catch(() => {})
-      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'campaign-options', refetchType: 'none'}).catch(() => {})
+      void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
+      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
     },
   })
 }

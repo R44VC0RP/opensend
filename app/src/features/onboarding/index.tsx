@@ -41,7 +41,7 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
       sync(connection)
       if (connection?.state !== 'ready') return
       // Regions, discovery and limits now come from the new connection.
-      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] !== 'connection' }).catch(() => {})
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[2] !== 'connection' }).catch(() => {})
     },
   })
 }
