@@ -971,7 +971,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               return Response.json({Status:0,Answer:host?[{name,type:15,data:`10 ${host}.`},...(fault==='mixed' && activeMx.has(name)?[{name,type:15,data:'20 other.invalid.'}]:[])]:[]});
             }
             assert.equal(url.searchParams.get('type'),'TXT');
-            lookups++; return Response.json({ Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] });
+            lookups++; return Response.json(answer ? { Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
           });
           const before = calls.length;
           error(await local('GET',discovery,undefined,b.cookie),409,'CONNECTION_MANAGED_REGION');
@@ -1016,26 +1016,48 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(created.verified,false); assert.equal(created.ready,false); assert.equal(lookups,0);
           assert.equal(associations.size,0);
           for (const conflict of [domain,root,`news.${domain}`]) error(await add(a.cookie,conflict),409,'DOMAIN_CLAIMED');
-          const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',permissions:['send'] },b.cookie),201).secret;
+          const key = ok(await local('POST','/v1/api-keys',{ name:'Unrestricted fixture',permissions:['read','send'] },b.cookie),201).secret;
           const send = (from:string) => local('POST','/v1/emails/send',mail({ region,from }),undefined,{ authorization:`Bearer ${key}` });
           error(await send(`hi@sub.${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
           const detail = `/v1/domains/${created.id}`;
           const {operationJobs}=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const {rows:[job]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
-          const check=()=>operationJobs['domain.verify']!(runtime,job.payload,{id:job.id,attempts:1,workspaceId:b.org.id});
+          const check=(poll=0)=>operationJobs['domain.verify']!(runtime,{...job.payload,poll},{id:job.id,attempts:1,workspaceId:b.org.id});
           const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-          await assert.rejects(check(),JobDeferred); assert.equal(lookups,1);
+          const identity=identities.get(`${platform}:${domain}`)!, dkim=identity.DkimAttributes;
+          identity.DkimAttributes={...dkim,Status:'PENDING'}; answer=proof.value;
+          await assert.rejects(check(40),JobDeferred); assert.equal(lookups,0,'Even a real poll must not ask for TXT before DKIM succeeds.');
+
+          const park=()=>pool.query("UPDATE jobs SET created_at=now()-interval '21 seconds',available_at=now()+interval '16 minutes',payload=payload||'{\"poll\":40}'::jsonb WHERE id=$1",[job.id]);
+          await park(); const firstWake=wakes;
+          ok(await local('GET',detail,undefined,undefined,{authorization:`Bearer ${key}`})); assert.equal(wakes,firstWake,'API-key reads must not nudge the runner.');
+          const {getDashboardActor}=await import('./src/google-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const authQueries=queries.mock.callCount()-authStart;
+          const readPending=()=>local('GET',detail,undefined,b.cookie), startPending=queries.mock.callCount();
+          assert.equal(ok(await readPending()).verified,false); const pendingQueries=queries.mock.callCount()-startPending;
+          assert.equal(pendingQueries-authQueries,1); dt.diagnostic(`GET pending domain: 1 domain statement; ${pendingQueries} pg round trips including dashboard auth.`);
+          assert.equal(wakes,firstWake+1);
+          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND available_at<=now() AND payload->>'poll'='40'",[job.id])).rowCount,1,'Wake now without resetting the unattended backoff.');
+          await Promise.all([readPending(),readPending()]); assert.equal(wakes,firstWake+1,'Reads inside the cooldown do not wake again.');
+          await park(); for(const read of await Promise.all([readPending(),readPending(),readPending()])) ok(read);
+          assert.equal(wakes,firstWake+2,'Racing dashboard reads share one wake per claim after the cooldown.');
+
+          identity.DkimAttributes=dkim; answer=''; await pace();
+          await assert.rejects(check(40),e=>e instanceof JobDeferred && Date.parse(e.availableAt)<=Date.now()+16_000 && e.payload?.poll===1);
+          assert.equal(lookups,1,'The first DKIM success checks TXT; NXDOMAIN restarts at the short delay even after 40 polls.');
           await assert.rejects(check(),JobDeferred); assert.equal(lookups,1,'Account pacing must prevent a second SES read.');
-          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+          await pace();
           // A verified domain binds to the tenant only once the tenant job has created it; the verifier waits, never provisions.
           await pool.query("UPDATE provider_connections SET tenant_state='pending' WHERE workspace_id=$1",[b.org.id]);
           const waitStart=calls.length; answer=proof.value; await assert.rejects(check(),JobDeferred); assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false);
           assert.ok(!calls.slice(waitStart).some(n=>n.startsWith('CreateTenant')),'The verifier waits for the tenant job; it never provisions or binds without the tenant.');
           await pool.query("UPDATE provider_connections SET tenant_state='ready' WHERE workspace_id=$1",[b.org.id]); await pace();
           await check(); const readStart=calls.length; // Sending-only setup completes without polling SES for MX.
-          const readQueries=queries.mock.callCount();
+          await park(); const readQueries=queries.mock.callCount(), beforeVerifiedWake=wakes;
           const checked=ok(await local('GET',detail,undefined,b.cookie)); assert.equal(checked.verified,true); assert.equal(checked.ready,true);
-          dt.diagnostic(`GET domain detail: ${queries.mock.callCount()-readQueries} pg round trips including dashboard auth`);
+          const verifiedQueries=queries.mock.callCount()-readQueries; assert.equal(verifiedQueries-authQueries,1); assert.equal(wakes,beforeVerifiedWake);
+          dt.diagnostic(`GET verified domain: 1 domain statement; ${verifiedQueries} pg round trips including dashboard auth; no wake.`);
           const verifyQueries=queries.mock.callCount(); assert.deepEqual(ok(await local('POST',`${detail}/verify`,undefined,b.cookie)),checked);
           dt.diagnostic(`POST domain verify: ${queries.mock.callCount()-verifyQueries} pg round trips including dashboard auth`);
           assert.deepEqual(ok(await local('GET','/v1/domains',undefined,b.cookie)).data[0],checked); assert.equal(calls.length,readStart); assert.equal(lookups,3,"Two completed checks plus the one that waited for the tenant.");
@@ -1075,9 +1097,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             activeMx.add(otherHost);await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Correct MX alone is not proof of ownership.');
             answer=otherProof;await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(await probe(blind),0,'Ownership and MX cannot receive before SES verifies the identity.');
             assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'pending');
-            identity.VerificationStatus='SUCCESS';identity.VerifiedForSendingStatus=true;await pace();await assert.rejects(verifyOther(),JobDeferred);const receiveOnly=ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie));
+            identity.VerificationStatus='SUCCESS';identity.VerifiedForSendingStatus=true;identity.DkimAttributes={...identity.DkimAttributes,Status:'SUCCESS',SigningEnabled:false};await pace();await assert.rejects(verifyOther(),JobDeferred);const receiveOnly=ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie));
             assert.equal(receiveOnly.sending,'pending');assert.equal(receiveOnly.receiving,'verified');assert.equal(receiveOnly.dns.find((r:Json)=>r.purpose==='receiving').status,'verified');
-            // A receive-only claim gets the same grace when its TXT proof disappears, on its own timer.
+            // DKIM regression does not stop an established receive-only claim checking TXT and its own grace.
+            identity.DkimAttributes.Status='PENDING';
             const otherState=async()=>(await pool.query('SELECT sending_state,receiving_state,receiving_lost_since IS NOT NULL AS receiving_lost FROM domain_claims WHERE name=$1',[otherHost])).rows[0];
             answer='';await pace();await assert.rejects(verifyOther(),JobDeferred);assert.equal(ok(await local('GET',`/v1/domains/${other.id}`,undefined,a.cookie)).receiving,'verified');
             assert.deepEqual(await otherState(),{sending_state:'pending',receiving_state:'lost',receiving_lost:true});

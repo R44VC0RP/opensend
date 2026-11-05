@@ -179,13 +179,14 @@ function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
     WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock}`;
 }
-async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheckDomains?: readonly string[]) {
-  const target=hostedDomainSelect(wid,domainId,lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``);
+async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheck?: { domains:readonly string[]; mode:'manual'|'dashboard' }) {
+  const target=hostedDomainSelect(wid,domainId,lock ? sql`FOR UPDATE OF dc` : recheck ? sql`FOR SHARE OF dc` : sql``);
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
-  const allowed = recheckDomains?.length ? sql`WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheckDomains)}::jsonb) p(parent)
-    WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql``;
-  const query = recheckDomains ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target ${allowed}`)}) SELECT * FROM target` : target;
-  return (await db.execute<HostedDomain>(query)).rows[0];
+  const allowed = recheck?.domains.length ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheck.domains)}::jsonb) p(parent)
+    WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql`true`;
+  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
+    SELECT target.*,EXISTS(SELECT 1 FROM queued) AS queued FROM target` : target;
+  return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
 const dnsUnavailable = () => new ApiError(503,'DOMAIN_DNS_UNAVAILABLE','DNS did not return a definitive answer. Verification will retry.',undefined,true);
 async function txtProof(name: string, token: string) {
@@ -330,11 +331,14 @@ function dnsSetupActor(c:Ctx) {
   if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.');
   return a;
 }
-function recheckJob(wid: string, source: SQL, supersede=false) {
+function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'supersede'='manual') {
   // A recovered creation or MAIL FROM change supersedes even a running poll based on an older SES read.
+  // Dashboard reads only advance the due time. Preserve the background poll count and use the job's
+  // existing enqueue timestamp as an atomic per-claim cooldown, shared by every tab and isolate.
   return sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},
     jsonb_build_object('domainId',r.id,'token',r.token) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
-    payload=excluded.payload,created_at=now() ${supersede ? sql`` : sql`WHERE jobs.status<>'running'`}`;
+    payload=${mode==='dashboard' ? sql`jobs.payload` : sql`excluded.payload`},created_at=clock_timestamp() ${mode==='supersede' ? sql`` : sql`WHERE jobs.status<>'running'`}
+    ${mode==='dashboard' ? sql`AND jobs.created_at<=clock_timestamp()-interval '20 seconds'` : sql``} RETURNING id`;
 }
 const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
@@ -363,7 +367,11 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     const shared=row.connection.kind==='shared';
     const identityVerified=identity.VerificationStatus==='SUCCESS';
     const scopedImport=row.claim_scope==='account';
-    const [positive,observation,upgrade]=await Promise.all([shared ? txtProof(`_opensend.${row.name}`,row.token) : identityVerified,
+    // Don't seed the resolver's negative cache before the user has published DNS. Once ownership
+    // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
+    const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
+    const checkHostedTxt=dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
+    const [positive,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,
       scopedImport ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
@@ -385,6 +393,9 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,sendingRevoked:current.identity?.imported && !report.ready,identityVerified,proven:positive});
     });
     if (!outcome || (outcome.sending_state==='verified' && report.mailFromStatus!=='PENDING' && outcome.receiving_state!=='lost')) return; // MX-only upkeep owns receiving changes after sending verifies.
+    // DKIM just propagated. Give a lagging TXT its own short retry sequence instead of inheriting
+    // the hours-long DKIM backoff. A domain abandoned at this step still backs off normally.
+    if (shared && dkimSuccess && row.identity?.ses.DkimAttributes?.Status!=='SUCCESS' && !positive) defer(backoff(0),1);
     // A grace period must be observed again before it can expire.
     if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),poll+1);
   } catch (e) {
@@ -487,7 +498,7 @@ export function registerOperations(app: App) {
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL RETURNING ${row.id}::text AS id,token`;
-      await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,true)}`);
+      await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
       return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
     }
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
@@ -522,7 +533,7 @@ export function registerOperations(app: App) {
         // Changing MAIL FROM is a new fact, not a state change: ownership, sending and routing stay as they are.
         const facts:IdentityFacts={...(current.identity ?? identityOnly(sesFacts(identity))),ses:{...(current.identity?.ses ?? sesFacts(identity)),MailFromAttributes:{MailFromDomain:mailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:'USE_DEFAULT_VALUE'}}};
         await db.execute(sql`WITH saved AS (UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${current.token} AND connection_id=${current.connection.id} RETURNING ${current.id}::text AS id,token)
-          ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,true)}`);
+          ${recheckJob(a.workspaceId,sql`SELECT id,token FROM saved`,'supersede')}`);
         return derivedReadiness({...current,identity:facts});
       }); a.wakeJobs=1; return c.json(report,200);
     }
@@ -570,8 +581,9 @@ export function registerOperations(app: App) {
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read');
     if (c.env.config.multiTenant) {
-      const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,verifyRoute?a.domains:undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
-      if (verifyRoute) a.wakeJobs=1;
+      const mode=verifyRoute ? 'manual' : a.credential==='dashboard' && c.req.method==='GET' ? 'dashboard' : undefined;
+      const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
+      if (row.queued) a.wakeJobs=1;
       return c.json(derivedReadiness(row),200);
     }
     const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name); return c.json(await domainReadiness(c.env, row), 200);
