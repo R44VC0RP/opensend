@@ -86,8 +86,21 @@ variable "database" {
   sensitive = true
 }
 
+variable "domain_connect" {
+  description = "Public half of the Domain Connect signing key (DOMAIN_CONNECT_KEY_ID / DOMAIN_CONNECT_PRIVATE_KEY Worker secrets), published as chunked TXT records at <key_id>.<host> per the Domain Connect spec."
+  type = object({
+    zone_id    = string
+    host       = string
+    key_id     = string
+    public_key = string # base64 DER (SubjectPublicKeyInfo), no PEM armor
+  })
+  default = null
+}
+
 locals {
   prefix = "opensend-mx-${var.environment}"
+  # The spec splits the key into p=1..n TXT records of at most 200 base64 characters.
+  domain_connect_chunks = var.domain_connect == null ? [] : [for i in range(0, length(var.domain_connect.public_key), 200) : substr(var.domain_connect.public_key, i, 200)]
 }
 
 resource "cloudflare_queue" "work" {
@@ -124,6 +137,15 @@ resource "cloudflare_hyperdrive_config" "db" {
   # Leave database connections free for migrations and operators: PlanetScale PS-20 has far fewer
   # than Hyperdrive's default 60, and the first deploy that filled them failed with 53300.
   origin_connection_limit = var.origin_connection_limit
+}
+
+resource "cloudflare_dns_record" "domain_connect_key" {
+  count   = length(local.domain_connect_chunks)
+  zone_id = var.domain_connect.zone_id
+  name    = "${var.domain_connect.key_id}.${var.domain_connect.host}"
+  type    = "TXT"
+  content = "\"p=${count.index + 1},a=RS256,d=${local.domain_connect_chunks[count.index]}\""
+  ttl     = 3600
 }
 
 output "work_queue" {
