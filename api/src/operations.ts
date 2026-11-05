@@ -532,9 +532,10 @@ export function registerOperations(app: App) {
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
   const dnsSetup='/v1/domains/{id}/dns-setup';
+  const dnsGroup=`(${groupIds.join('|')})`;
   app.openapi(createRoute({method:'get',path:dnsSetup,operationId:'getDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
     description:'MX owner/admin dashboard only. Returns a signed provider consent URL for eligible pending records, never changes DNS itself. Inline discovery has a three-second budget; unsupported providers and discovery failures fall back to manual DNS. Receiving is offered only after DNS checks find the target empty.',
-    request:{params:IdParams,query:z.object({groups:z.string().max(64).regex(/^(sending|ownership|receiving|mailfrom)(,(sending|ownership|receiving|mailfrom))*$/).optional().describe('Optional comma-separated subset of pending groups. Defaults to all eligible groups.')})},
+    request:{params:IdParams,query:z.object({groups:z.string().max(64).regex(new RegExp(`^${dnsGroup}(,${dnsGroup})*$`)).optional().describe('Optional comma-separated subset of pending groups. Only one receiving target is eligible: receiving (@) or receivingReply (reply). mailfrom is available only for email.<domain>; other MAIL FROM names use manual DNS.')})},
     responses:{200:response(z.object({provider:z.object({id:z.string(),name:z.string()}).nullable(),applyUrl:z.url().nullable(),groups:z.array(z.enum(groupIds))}).openapi('DomainDnsSetup')),...errors}}),async c=>{
     const a=dnsSetupActor(c), wid=a.workspaceId, id=c.req.valid('param').id;
     const row=await hostedDomain(c.env.db,wid,id) ?? notFound('Domain');

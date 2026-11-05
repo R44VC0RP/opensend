@@ -1096,7 +1096,7 @@ export type DomainDnsSetup = {
         name: string;
     } | null;
     applyUrl: string | null;
-    groups: Array<'sending' | 'ownership' | 'receiving' | 'mailfrom'>;
+    groups: Array<'sending' | 'ownership' | 'receiving' | 'receivingReply' | 'mailfrom'>;
 };
 
 export type WebhookPage = {
@@ -7726,7 +7726,7 @@ export type GetDomainDnsSetupData = {
     };
     query?: {
         /**
-         * Optional comma-separated subset of pending groups. Defaults to all eligible groups.
+         * Optional comma-separated subset of pending groups. Only one receiving target is eligible: receiving (@) or receivingReply (reply). mailfrom is available only for email.<domain>; other MAIL FROM names use manual DNS.
          */
         groups?: string;
     };

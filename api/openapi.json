@@ -4305,6 +4305,7 @@
                 "sending",
                 "ownership",
                 "receiving",
+                "receivingReply",
                 "mailfrom"
               ]
             }
@@ -23238,11 +23239,11 @@
             "schema": {
               "type": "string",
               "maxLength": 64,
-              "pattern": "^(sending|ownership|receiving|mailfrom)(,(sending|ownership|receiving|mailfrom))*$",
-              "description": "Optional comma-separated subset of pending groups. Defaults to all eligible groups."
+              "pattern": "^(sending|ownership|receiving|receivingReply|mailfrom)(,(sending|ownership|receiving|receivingReply|mailfrom))*$",
+              "description": "Optional comma-separated subset of pending groups. Only one receiving target is eligible: receiving (@) or receivingReply (reply). mailfrom is available only for email.<domain>; other MAIL FROM names use manual DNS."
             },
             "required": false,
-            "description": "Optional comma-separated subset of pending groups. Defaults to all eligible groups.",
+            "description": "Optional comma-separated subset of pending groups. Only one receiving target is eligible: receiving (@) or receivingReply (reply). mailfrom is available only for email.<domain>; other MAIL FROM names use manual DNS.",
             "name": "groups",
             "in": "query"
           }

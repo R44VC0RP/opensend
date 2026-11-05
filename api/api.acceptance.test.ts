@@ -850,13 +850,13 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
           const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
-          let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false;
+          let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false, existingMx=false;
           const requests:string[]=[];
           dc.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
             const url=new URL(String(input)); requests.push(url.href);
             if(url.origin==='https://cloudflare-dns.com') {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
-              if(type==='MX') return Response.json({Status:0,Answer:q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
+              if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
               if(q===`_opensend.${name}`) return Response.json({Status:3});
               assert.equal(type,'TXT'); assert.equal(init?.redirect,'error');
               if(q===`_domainconnect.${name}`) return Response.json({Status:3,Authority:[{name:zone,type:6,data:'ns.invalid. hostmaster.invalid. 1 2 3 4 5'}]});
@@ -877,11 +877,19 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const accountIdentity=identities.get(`${platform}:${name}`)!;
           accountIdentity.DkimAttributes={...accountIdentity.DkimAttributes,Status:'PENDING',SigningHostedZone:`dkim.${region}.amazonses.com`};
           const {rows:[vjob]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
-          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-          await assert.rejects(operationJobs['domain.verify']!(runtime,vjob.payload,{id:vjob.id,attempts:1,workspaceId:b.org.id}),JobDeferred);
+          const checkMx=async()=>{
+            await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+            await assert.rejects(operationJobs['domain.verify']!(runtime,vjob.payload,{id:vjob.id,attempts:1,workspaceId:b.org.id}),JobDeferred);
+          };
+          await checkMx();
+          assert.deepEqual((await getSetup('?groups=receiving,receivingReply')).groups,['receiving'],'An empty domain needs only the MX at @.');
+          existingMx=true; await checkMx();
           // Do not let this extra fixture take the next scenario's account-wide SES slot.
           await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
-          const manual=ok(await local('POST',detail+'/mail-from',{mailFromDomain:`bounce.${name}`},b.cookie));
+          const custom=ok(await local('POST',detail+'/mail-from',{mailFromDomain:`bounce.${name}`},b.cookie));
+          assert.equal(custom.dns.filter((r:Json)=>r.purpose==='mail_from' && r.name===`bounce.${name}` && r.status==='pending').length,2);
+          assert.deepEqual((await getSetup('?groups=receiving,receivingReply,mailfrom')).groups,['receivingReply'],'Preserve the existing MX; a non-default MAIL FROM stays manual.');
+          const manual=ok(await local('POST',detail+'/mail-from',{mailFromDomain:`email.${name}`},b.cookie));
           const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
           const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'synthetic-root-'.repeat(4),PUBLIC_URL:origin};
           const pem=privateKey.export({type:'pkcs1',format:'pem'}).toString().replaceAll('\n','\\n');
@@ -895,7 +903,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const authQueries=queries.mock.callCount()-authStart, setupStart=queries.mock.callCount();
           const before=requests.length, offered=await getSetup(), url=new URL(offered.applyUrl), params=url.searchParams;
           const total=queries.mock.callCount()-setupStart; assert.equal(total-authQueries,1); dc.diagnostic(`GET dns-setup: ${total-authQueries} domain statement; ${total} pg round trips including dashboard auth.`);
-          assert.deepEqual(offered.provider,expectedProvider); assert.deepEqual(offered.groups,['sending','ownership','receiving','mailfrom']);
+          assert.deepEqual(offered.provider,expectedProvider); assert.deepEqual(offered.groups,['sending','ownership','receivingReply','mailfrom']);
+          assert.ok(!params.has('receivingHost') && !params.has('bounceHost'),'The signed apply does not accept receiving or MAIL FROM host variables.');
           assert.equal(url.origin+url.pathname,sync+providerPath+'/apply'); assert.equal(params.get('domain'),zone); assert.equal(params.get('host'),'mail');
           assert.equal(params.get('groupId'),offered.groups.join(',')); assert.equal(params.get('key'),'_dck1'); assert.equal([...params.keys()].at(-1),'sig');
           const wire=url.search.slice(1).split('&key=')[0]!, sig=Buffer.from(params.get('sig')!,'base64');
@@ -903,7 +912,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.ok(verifySignature('RSA-SHA256',Buffer.from(sorted.toString()),publicKey,sig)); assert.ok(!verifySignature('RSA-SHA256',Buffer.from(wire.replace('host=mail','host=other')),publicKey,sig));
           const template=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../domain-connect/opensend.mx.mail.json',import.meta.url),'utf8'));
           const expand=(s:string)=>s.replace(/%(\w+)%/g,(_,key:string)=>{assert.ok(params.has(key));return params.get(key)!;});
-          for(const record of template.records) {
+          for(const record of template.records.filter((r:Json)=>offered.groups.includes(r.groupId))) {
             const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
             const type=record.type==='SPFM'?'TXT':record.type, value=record.type==='SPFM'?`v=spf1 ${record.spfRules} ~all`:expand(record.pointsTo ?? record.data);
             assert.ok(manual.dns.some((r:Json)=>r.name===target && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);

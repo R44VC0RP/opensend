@@ -3,7 +3,7 @@ import { z } from '@hono/zod-openapi';
 import type { Config } from './core.js';
 
 const template = '/v2/domainTemplates/providers/opensend.mx/services/mail';
-export const groupIds = ['sending', 'ownership', 'receiving', 'mailfrom'] as const;
+export const groupIds = ['sending', 'ownership', 'receiving', 'receivingReply', 'mailfrom'] as const;
 type Group = typeof groupIds[number];
 type Discovery = { zone: string; name: string; id: string; sync: string };
 
@@ -109,10 +109,11 @@ export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:bo
   const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && r.name===`_opensend.${domain.name}`);
   if(shared && proof) add('ownership',{ownership:proof.value});
   const mx=pending.find(r=>r.purpose==='receiving' && r.value===`inbound-smtp.${domain.region}.amazonaws.com`);
-  if(safeReceiving && mx && (mx.name===domain.name || mx.name===`reply.${domain.name}`)) add('receiving',{receivingHost:mx.name===domain.name?'@':'reply',region:domain.region});
+  if(safeReceiving && mx?.name===domain.name) add('receiving',{region:domain.region});
+  if(safeReceiving && mx?.name===`reply.${domain.name}`) add('receivingReply',{region:domain.region});
   const bounce=pending.find(r=>r.purpose==='mail_from' && r.type==='MX' && r.value===`feedback-smtp.${domain.region}.amazonses.com`);
-  if(bounce && bounce.name.endsWith('.'+domain.name) && pending.some(r=>r.type==='TXT' && r.name===bounce.name && r.value==='v=spf1 include:amazonses.com ~all')) {
-    add('mailfrom',{bounceHost:bounce.name.slice(0,-domain.name.length-1),region:domain.region});
+  if(bounce?.name===`email.${domain.name}` && pending.some(r=>r.type==='TXT' && r.name===bounce.name && r.value==='v=spf1 include:amazonses.com ~all')) {
+    add('mailfrom',{region:domain.region});
   }
   return {groups,vars};
 }
