@@ -3,7 +3,8 @@ import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { useApi, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { ApiError, type InboundAddress, type InboundMessage, type InboundThread, type InboundThreadDetail, type InboundThreadPatch, type InboundThreadView, type MailAddress } from '../../data/types'
 import { date, label, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -284,12 +285,12 @@ export function InboundPage() {
   const [search, setSearch] = useState('')
   const [composing, setComposing] = useState(false)
   const pagination = useCursorPagination()
-  const addressList = useApiQuery(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal))
+  const addressList = useApiDef(queries.inboundAddressOptions())
   const missing = !!addressId && !!addressList.data && !addressList.data.some(address => address.id === addressId)
   const linked = useApiQuery(['inbound-address', addressId ?? null, missing], (api, signal) => addressId && missing ? api.inbound.address(addressId, signal) : Promise.resolve(null))
   const addresses = useMemo<Addresses>(() => new Map([...(addressList.data ?? []), ...(linked.data ? [linked.data] : [])].map(address => [address.id, address])), [addressList.data, linked.data])
   const q = search.trim()
-  const threads = useApiQuery(['inbound-threads', addressId ?? null, view, q, pagination.cursor ?? null], (api, signal) => api.inbound.threads({ addressId, view, q: q || undefined, cursor: pagination.cursor }, signal), { interval: 30_000 })
+  const threads = useApiDef(queries.inboundThreads(addressId, view, q, pagination.cursor), { interval: 30_000, keepPrevious: true })
   const thread = useApiQuery(['inbound-thread', threadId, addressId ?? null], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null))
   function change(changes: Record<string, string | null>) {
     const next = new URLSearchParams(params)

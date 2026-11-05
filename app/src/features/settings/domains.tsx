@@ -2,7 +2,8 @@ import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
-import { useApiMutation, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { receivingStatus } from '../inbound/status'
@@ -31,7 +32,7 @@ export function DomainsPage() {
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
   const page = pageState.regionId === regionId ? pageState.page : 1
-  const domains = useApiQuery(['domains', regionId, page], (api, signal) => api.domains.list({ regionId, page, pageSize: 10 }, signal))
+  const domains = useApiDef(queries.domains(regionId, page), { keepPrevious: previous => previous[1] === regionId })
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true)
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')

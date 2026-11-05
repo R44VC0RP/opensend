@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
-import { useApiMutation, useApiQuery, useApi } from '../../data/context'
+import { useApiMutation, useApiDef, useApiQuery, useApi } from '../../data/context'
+import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
@@ -34,7 +35,7 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
   </div>
 }
 
-export const useWebhooks = (cursor?: string, enabled = true) => useApiQuery(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor), { enabled })
+export const useWebhooks = (cursor?: string, enabled = true) => useApiDef(queries.webhooks(cursor), { enabled, keepPrevious: true })
 export function WebhooksSection() {
   const navigate = useNavigate()
   const pagination = useCursorPagination()

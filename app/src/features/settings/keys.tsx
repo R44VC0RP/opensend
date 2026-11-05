@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SectionHeader, Select } from '../../components/ui'
-import { useApiMutation, useApiQuery, useApi } from '../../data/context'
+import { useApiMutation, useApiDef, useApi } from '../../data/context'
+import { queries } from '../../data/queries'
 import type { AgentTokenSummary, ApiKey, ApiKeyInput, McpConnection, PageRequest } from '../../data/types'
 import { date } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
@@ -15,9 +16,9 @@ export function ApiKeysPage() {
   const [showRevoked, setShowRevoked] = useState(false)
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
-  const keys = useApiQuery(['keys', cursor, showRevoked], (api, signal) => api.keys.list(signal, cursor, showRevoked))
-  const agentTokens = useApiQuery(['agent-tokens', showRevoked], (api, signal) => api.credentials.agentTokens(showRevoked, signal))
-  const mcpConnections = useApiQuery(['mcp-connections'], (api, signal) => api.credentials.mcpConnections(signal))
+  const keys = useApiDef(queries.keys(cursor, showRevoked), { keepPrevious: true })
+  const agentTokens = useApiDef(queries.agentTokens(showRevoked), { keepPrevious: true })
+  const mcpConnections = useApiDef(queries.mcpConnections())
   const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
   const revoke = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
   const revokeAgentToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')

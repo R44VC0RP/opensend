@@ -1,5 +1,6 @@
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { useApiQuery } from '../../data/context'
+import { useApiDef } from '../../data/context'
+import { queries } from '../../data/queries'
 import { campaignEditable, type Campaign } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Input, Pagination, PaginationSkeleton, Select, StatusBadge } from '../../components/ui'
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
@@ -21,7 +22,7 @@ export function CampaignsPage() {
   const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const pageSize = 10
   const request = { search, archived, status: status === 'all' ? undefined : status, page, pageSize }
-  const query = useApiQuery(['campaigns', request], (api, signal) => api.campaigns.list(request, signal), { interval: data => {
+  const query = useApiDef(queries.campaigns(request), { keepPrevious: true, interval: data => {
     const intervals = (data?.items ?? []).map(campaignPollInterval).filter((value): value is number => value !== false)
     return intervals.length ? Math.max(15_000, Math.min(...intervals)) : false
   } })

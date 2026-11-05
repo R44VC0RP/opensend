@@ -1,10 +1,11 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type ChartPoint, type SesDiscovery, type Stream, type TimeRange } from '../../data/types'
+import { campaignEditable, type ChartPoint, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { date, number, percent, label } from '../../lib/format'
 import { OverviewBodySkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
@@ -28,7 +29,7 @@ export function OverviewPage() {
   const navigate = useNavigate()
   // Each refresh runs four created-cohort metrics aggregations; aggregates over hours or days do not need
   // the 3-second polling used for live queues, and a hidden tab should not keep the database busy.
-  const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal), { interval: 60_000 })
+  const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
   // Hosted workspaces have no SES discovery; their connection manages the region.

@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, ConfirmDialog, ErrorState, FieldSkeleton, SectionHeader, SkeletonText, StatusBadge } from '../../components/ui'
-import { useApiMutation, useApiQuery, useSession } from '../../data/context'
+import { useApiMutation, useApiDef, useSession } from '../../data/context'
+import { queries } from '../../data/queries'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import type { ConnectionKind } from '../../data/types'
 
 export function SendingConnection() {
-  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal))
+  const connection = useApiDef(queries.connection())
   const disconnect = useApiMutation(() => connectionApi.remove(), 'Disconnected', true)
   const [confirming, setConfirming] = useState(false)
   const sync = useConnectionCache()

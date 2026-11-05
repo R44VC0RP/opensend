@@ -9,6 +9,7 @@ import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, 
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { chunk } from '../lib/preloadable'
+import type { QueryDef } from './queries'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
 const homeChunk = chunk(() => import('../features/home'))
@@ -181,11 +182,18 @@ export function useApi() {
   return api
 }
 // Polling is opt-in and foreground-only; pass a function to poll only while the data is in progress.
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean }) {
+// keepPrevious keeps the last result on screen while a changed key (page, search, filter) loads, so a list never blanks.
+// Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
+type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
+type Poll<T> = { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
+export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
   const interval = poll?.interval
-  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
+  const keep = poll?.keepPrevious
+  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
+    placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
+export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()
   const client = useQueryClient()

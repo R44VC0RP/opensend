@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useLocation } from 'react-router'
-import { useApiQuery, useSession } from '../data/context'
-import { workspaceApi } from '../data/workspaces'
+import { useApiDef, useSession } from '../data/context'
+import { queries } from '../data/queries'
 import { Select, useToast } from './ui'
 
 // Multi-tenant only. Shown in the dashboard sidebar and the onboarding header.
@@ -9,7 +9,7 @@ export function WorkspaceSwitcher() {
   const session = useSession()
   const toast = useToast()
   const location = useLocation()
-  const workspaces = useApiQuery(['workspaces'], (_api, signal) => workspaceApi.list(signal))
+  const workspaces = useApiDef(queries.workspaces())
   const [switching, setSwitching] = useState(false)
   async function changeWorkspace(id: string) {
     // Detail routes belong to the previous workspace; keep only the section.
