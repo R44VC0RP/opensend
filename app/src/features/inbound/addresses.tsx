@@ -1,11 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, Textarea } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import type { InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
+import type { InboundAddress, InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
+import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { receivingStatus } from './status'
 import '../settings/settings.css'
 import './inbound.css'
@@ -97,7 +98,10 @@ export function InboundAddressesPage() {
   </div>
 }
 
-const aliasList = (value: string) => value.split(/[\s,;]+/).map(item => item.trim().toLowerCase()).filter(Boolean)
+// `base` is the saved address the edit started from, so a just-saved form doesn't wait on the refetch.
+type AddressForm = { base: InboundAddress; displayName: string; aliases: AliasState }
+const formOf = (address: InboundAddress): AddressForm => ({ base: address, displayName: address.displayName ?? '', aliases: aliasState(address.aliases) })
+const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n')
 
 export function InboundAddressDetailPage() {
   const { id = '' } = useParams()
@@ -105,24 +109,24 @@ export function InboundAddressDetailPage() {
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
   const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved')
   const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted')
-  const [input, setInput] = useState<{ displayName: string; aliases: string } | null>(null)
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const current = address.data
-  useEffect(() => { if (current && !input) setInput({ displayName: current.displayName ?? '', aliases: current.aliases.join('\n') }) }, [current, input])
+  const input = edited ?? (current ? formOf(current) : null)
   if (address.error) return <><PageHeader title="Address" backTo="/inbound/addresses" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
-  const dirty = !!current && !!input && (input.displayName.trim() !== (current.displayName ?? '') || aliasList(input.aliases).join('\n') !== current.aliases.join('\n'))
+  const base = input?.base
+  const dirty = !!base && !!input && (input.displayName.trim() !== (base.displayName ?? '') || !sameList(input.aliases.list, base.aliases) || !!input.aliases.draft.trim())
   async function submit(event: FormEvent) {
-    event.preventDefault(); if (!input || !current) return
-    const aliases = aliasList(input.aliases)
-    const next: Record<string, string> = {}
-    if (aliases.some(alias => !EMAIL.test(alias))) next.aliases = 'Enter one valid email address per line.'
-    setErrors(next)
-    if (Object.keys(next).length) return
+    event.preventDefault(); if (!input || !base) return
+    // Text still in the alias box counts: add it, or stop on it so nothing invalid is sent.
+    const aliases = commitAliases(input.aliases, { address: base.address, temporary: !!base.expiresAt })
+    if (!aliases.ok) { setInput({ ...input, aliases: { list: aliases.list, draft: aliases.draft, message: aliases.message } }); document.getElementById('inbound-address-aliases')?.focus(); return }
     const patch: InboundAddressPatch = {}
-    if (input.displayName.trim() !== (current.displayName ?? '')) patch.displayName = input.displayName.trim() || null
-    if (aliases.join('\n') !== current.aliases.join('\n')) patch.aliases = aliases
-    try { await save.mutateAsync(patch); setInput(null) } catch { /* Shown in the form. */ }
+    if (input.displayName.trim() !== (base.displayName ?? '')) patch.displayName = input.displayName.trim() || null
+    if (!sameList(aliases.list, base.aliases)) patch.aliases = aliases.list
+    if (!Object.keys(patch).length) { setInput(null); return }
+    setInput({ ...input, aliases: { list: aliases.list, draft: '', message: null } })
+    try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
     <PageHeader title={current ? current.address : <SkeletonText width={240} lineHeight={28} />} backTo="/inbound/addresses" actions={current && <>
@@ -141,13 +145,11 @@ export function InboundAddressDetailPage() {
       {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address has expired. It no longer receives or sends mail; its history stays readable until you delete it.</Alert>}
       <section className="section section--bordered stack">
         <SectionHeader title="Settings" />
-        {!input ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
+        {input && <form className="stack inbound-settings-form" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
-          <div className="form-grid">
-            <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
-            <Field label="Aliases" htmlFor="inbound-address-aliases" error={errors.aliases || fieldError(save.error, 'aliases')} hint={current.expiresAt ? 'Temporary addresses cannot have aliases.' : 'Other addresses that deliver here, one per line.'}><Textarea id="inbound-address-aliases" rows={3} value={input.aliases} onChange={event => setInput({ ...input, aliases: event.target.value })} disabled={save.isPending || !!current.expiresAt} placeholder={`help@${current.domain}`} /></Field>
-          </div>
-          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setErrors({}) }}>Discard</Button>}</div>
+          <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
+          <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
+          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
       </section>
     </>}
