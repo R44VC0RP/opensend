@@ -1,6 +1,7 @@
 import { ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, Skeleton, SkeletonText, TableSkeleton, type SkeletonColumn } from '../../components/ui'
 import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
+import './domain-records.css'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 export const settingsColumns = {
@@ -12,10 +13,9 @@ export const settingsColumns = {
     { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} /> },
   ],
   domains: [
-    { key: 'name', label: 'Domain', width: '32%' },
-    { key: 'status', label: 'Status', width: '25%', skeleton: twoLines },
+    { key: 'name', label: 'Domain', width: '40%' },
+    { key: 'status', label: 'Status', width: '30%', skeleton: twoLines },
     { key: 'region', label: 'Region' },
-    { key: 'action', label: '', align: 'right' },
   ],
   dns: [
     { key: 'type', label: 'Type', width: 80 },
@@ -95,8 +95,8 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
 export function DomainDetailSkeleton() {
   return <LoadingRegion className="stack" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <dl className="settings-facts settings-account-summary">{['Sending', 'DKIM', 'Custom MAIL FROM', 'Region'].map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
-    <section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><SkeletonText width={420} /></div><ControlSkeleton width={120} /></div><div className="stack settings-discovery-section"><div className="ui-section-header"><div className="domain-group-title"><h3>DKIM</h3><SkeletonText width={220} /></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section>
+    <dl className="settings-facts domain-facts">{['Status', 'Region'].map(term => <div key={term}><dt>{term}</dt><dd><Skeleton width={90} /></dd></div>)}</dl>
+    <div className="domain-sections"><section className="section stack"><div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><SkeletonText width={420} /></div><ControlSkeleton width={120} /></div><div className="stack domain-group"><div className="ui-section-header"><div className="domain-group-title"><h3>Sending</h3><SkeletonText width={220} /></div></div><TableSkeleton columns={settingsColumns.dns} rows={3} /></div></section></div>
   </LoadingRegion>
 }
 
@@ -106,5 +106,5 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'API keys' : 'Domains'} actions={<>{kind === 'keys' && <ControlSkeleton width={116} />}<ControlSkeleton width="calc(10ch + 26px)" /></>} /><TableSkeleton columns={settingsColumns[kind]} rows={3} pagination={kind === 'domains'} /></LoadingRegion>
+  return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'Credentials' : 'Domains'} actions={kind === 'keys' ? <><ControlSkeleton width={104} /><ControlSkeleton width={116} /></> : <ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton columns={settingsColumns[kind]} rows={3} pagination={kind === 'domains'} /></LoadingRegion>
 }

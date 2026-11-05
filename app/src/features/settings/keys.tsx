@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SectionHeader, Select } from '../../components/ui'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
 import type { AgentTokenSummary, ApiKey, ApiKeyInput, McpConnection, PageRequest } from '../../data/types'
 import { date } from '../../lib/format'
@@ -8,6 +8,7 @@ import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
 import { MailboxKeysSection } from './mailbox-keys'
 import { settingsColumns } from './skeletons'
+import './api-keys.css'
 
 export function ApiKeysPage() {
   const api = useApi()
@@ -63,20 +64,21 @@ export function ApiKeysPage() {
     } catch { /* The mutation error is shown in the form. */ }
   }
   return <div className="stack">
-    <PageHeader title="Credentials" actions={<Button variant="primary" onClick={openCreate}>Create API key</Button>} />
-    <section className="section stack"><SectionHeader title="API keys" actions={<Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); pagination.reset()}} />} />
-    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={3} minRows={3} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
+    <PageHeader title="Credentials" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); pagination.reset()}} /><Button variant="primary" onClick={openCreate}>Create API key</Button></>} />
+    <div className="keys-sections">
+    <section className="section stack"><SectionHeader title="API keys" />
+    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={2} minRows={2} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
       { ...settingsColumns.keys[0], render: row => row.name },
       { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
       { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</> },
       { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
       { ...settingsColumns.keys[4], render: row => row.revokedAt ? 'Revoked' : <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
     ]} />}
-    {keys.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
+    {!keys.isPending && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
     </section>
     <MailboxKeysSection showRevoked={showRevoked} />
     <section className="section stack"><SectionHeader title="Agent tokens" />
-      {agentTokens.error ? <ErrorState error={agentTokens.error} onRetry={() => void agentTokens.refetch()} /> : <DataTable loading={agentTokens.isPending} skeletonRows={1} rows={agentTokens.data ?? []} rowKey={row => row.id} empty={<EmptyState title={showRevoked ? 'No agent tokens' : 'No active agent tokens'} />} columns={[
+      {agentTokens.error ? <ErrorState error={agentTokens.error} onRetry={() => void agentTokens.refetch()} /> : <DataTable loading={agentTokens.isPending} skeletonRows={1} minRows={1} rows={agentTokens.data ?? []} rowKey={row => row.id} empty={<EmptyState title={showRevoked ? 'No agent tokens' : 'No active agent tokens'} />} columns={[
         {key: 'purpose', label: 'Purpose', width: '28%', render: row => row.purpose},
         {key: 'permissions', label: 'Permissions', width: '25%', render: row => <>{row.permissions.join(', ')} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</>},
         {key: 'expires', label: 'Expires', width: '17%', render: row => row.revokedAt ? 'Revoked' : Date.parse(row.expiresAt) <= Date.now() ? 'Expired' : date(row.expiresAt)},
@@ -85,13 +87,14 @@ export function ApiKeysPage() {
       ]} />}
     </section>
     <section className="section stack"><SectionHeader title="MCP connections" />
-      {mcpConnections.error ? <ErrorState error={mcpConnections.error} onRetry={() => void mcpConnections.refetch()} /> : <DataTable loading={mcpConnections.isPending} skeletonRows={1} rows={mcpConnections.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No MCP connections" />} columns={[
+      {mcpConnections.error ? <ErrorState error={mcpConnections.error} onRetry={() => void mcpConnections.refetch()} /> : <DataTable className="keys-table--two-line" loading={mcpConnections.isPending} skeletonRows={1} minRows={1} rows={mcpConnections.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No MCP connections" />} columns={[
         {key: 'client', label: 'Client', width: '32%', render: row => <>{row.name || 'MCP client'}<div className="muted">{row.userEmail}</div></>},
         {key: 'access', label: 'Access', width: '38%', render: row => row.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')},
         {key: 'connected', label: 'Connected', render: row => date(row.createdAt)},
         {key: 'actions', label: '', align: 'right', width: 100, render: row => <Button variant="danger" onClick={() => setRevokeConnection(row)}>Revoke</Button>},
       ]} />}
     </section>
+    </div>
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Create API key" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-api-key">Create key</Button></>}>
       <form id="create-api-key" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
