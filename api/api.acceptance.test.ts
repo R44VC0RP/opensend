@@ -1488,7 +1488,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
             const ingest=()=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts:1,workspaceId:wid});
             const first=ingest(); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
-            try { await assert.rejects(ingest(),JobDeferred); } finally {releaseHead(); await first;}
+            const deferredAt=Date.now();
+            try { await assert.rejects(ingest(),e=>e instanceof JobDeferred && Date.parse(e.availableAt)>=deferredAt+1_500 && Date.parse(e.availableAt)<=Date.now()+2_500); } finally {releaseHead(); await first;}
             await ingest();
             assert.equal(oversizedHeads,1,'Even a duplicate ingest job does not revisit the failed receipt.');
           });
@@ -4520,6 +4521,101 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('inbound MIME parsing enforces the 6 MiB byte cap and 30,000-line cap, storing oversized or line-heavy messages raw with SES headers', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const PostalMime = (await import('postal-mime')).default;
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-caps`;
+      const domainId = unique('domain');
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)`, [domainId, scope, REGION]);
+      await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,'example.com',$4,'active','store')`, [unique('mdom'), scope, domainId, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'caps@example.com' }, 'live'), 201);
+      const raw = new Map<string, Uint8Array>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: raw.get(cmd.input.Key!)!.byteLength, ETag: '"fixture"' };
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        assert.ok(cmd instanceof GetObjectCommand);
+        const bytes = raw.get(cmd.input.Key!)!;
+        return { Body: { transformToByteArray: async () => bytes } };
+      });
+      const parseSpy = t.mock.method(PostalMime, 'parse');
+      async function ingest(bytes: Uint8Array, subject: string, messageId: string) {
+        const receiptId = unique('cap'), objectKey = `raw/${receiptId}`;
+        raw.set(objectKey, bytes);
+        const message = {
+          notificationType: 'Received',
+          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: ['Sender <sender@example.net>'], subject, messageId: `<${messageId}>` } },
+          receipt: { timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
+        };
+        assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
+        const { rows: [row] } = await db.query('SELECT id, status, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
+        return row;
+      }
+
+      const header = Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Exact 6 MiB\r\n\r\n');
+      const exact6Mib = Buffer.concat([header, Buffer.alloc(6 * 1024 * 1024 - header.length - 2, 0x61), Buffer.from('\r\n')]);
+      assert.equal(exact6Mib.byteLength, 6 * 1024 * 1024);
+      const parsed6Mib = await ingest(exact6Mib, 'Exact 6 MiB', 'exact-6m@example.net');
+      assert.equal(parsed6Mib.status, 'received');
+      assert.equal(parseSpy.mock.callCount(), 1);
+
+      const over6Mib = Buffer.concat([exact6Mib, Buffer.from('x')]);
+      assert.equal(over6Mib.byteLength, 6 * 1024 * 1024 + 1);
+      const unparsedBytes = await ingest(over6Mib, 'Over 6 MiB SES subject', 'over-6m@example.net');
+      assert.equal(parseSpy.mock.callCount(), 1, 'Messages over 6 MiB must not invoke PostalMime.parse.');
+      assert.equal(unparsedBytes.status, 'unparsed');
+      assert.equal(unparsedBytes.body_truncated, true);
+      assert.equal(unparsedBytes.subject, 'Over 6 MiB SES subject');
+      assert.equal(unparsedBytes.from_address, 'sender@example.net');
+      assert.equal(unparsedBytes.message_id, 'over-6m@example.net');
+      const overDetail = ok(await local('GET', `/v1/inbound/messages/${unparsedBytes.id}?includeDelivery=true`, undefined, 'live'));
+      assert.equal(overDetail.bodyTruncated, true);
+      assert.match(overDetail.rawUrl, /\.eml/);
+
+      const lineHeader = 'From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Exact 30k lines\r\n\r\n';
+      const atLineCap = Buffer.from(lineHeader + 'x\r\n'.repeat(30_000 - 4));
+      const parsedLines = await ingest(atLineCap, 'Exact 30k lines', 'at-30k@example.net');
+      assert.equal(parsedLines.status, 'received');
+      assert.equal(parseSpy.mock.callCount(), 2);
+
+      const overLineCap = Buffer.from(lineHeader + 'x\r\n'.repeat(30_001 - 4));
+      assert.ok(overLineCap.byteLength < 200_000);
+      const unparsedLines = await ingest(overLineCap, 'Over 30k SES subject', 'over-30k@example.net');
+      assert.equal(parseSpy.mock.callCount(), 2, 'Messages over 30,000 lines must skip PostalMime.parse.');
+      assert.equal(unparsedLines.status, 'unparsed');
+      assert.equal(unparsedLines.body_truncated, true);
+      assert.equal(unparsedLines.subject, 'Over 30k SES subject');
+      assert.equal(unparsedLines.message_id, 'over-30k@example.net');
+      assert.match(ok(await local('GET', `/v1/inbound/messages/${unparsedLines.id}?includeDelivery=true`, undefined, 'live')).rawUrl, /\.eml/);
+
+      // Distinct unparsed receipts with identical From/Subject/Message-ID must not deduplicate across receipts,
+      // nor collapse with an empty-body parsed receipt, while retrying the same receipt stays idempotent.
+      const sharedMessageId = 'reused-unparsed@example.net';
+      const firstUnparsed = await ingest(Buffer.from(lineHeader + 'alpha\r\n'.repeat(30_001 - 4)), 'Same unparsed subject', sharedMessageId);
+      const secondUnparsed = await ingest(Buffer.from(lineHeader + 'bravo\r\n'.repeat(30_001 - 4)), 'Same unparsed subject', sharedMessageId);
+      assert.notEqual(firstUnparsed.id, secondUnparsed.id, 'Unparsed messages on distinct receipts must remain separate stored messages.');
+      const emptyParsed = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Same unparsed subject\r\nMessage-ID: <${sharedMessageId}>\r\n\r\n`), 'Same unparsed subject', sharedMessageId);
+      assert.equal(emptyParsed.status, 'received');
+      assert.notEqual(emptyParsed.id, firstUnparsed.id, 'An empty-body parsed message must not deduplicate onto a prior unparsed message.');
+      const { rows: [retryReceipt] } = await db.query('SELECT ses_message_id, raw_key FROM mail_messages WHERE id = $1', [secondUnparsed.id]);
+      await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: retryReceipt.ses_message_id }, { id: unique('job'), workspaceId: scope, attempts: 2 });
+      const { rows: storedShared } = await db.query('SELECT id, raw_key FROM mail_messages WHERE workspace_id = $1 AND message_id = $2 ORDER BY created_at, id', [scope, sharedMessageId]);
+      assert.equal(storedShared.length, 3);
+      assert.equal(new Set(storedShared.map(r => r.raw_key)).size, 3);
+
+      const emptyFirstId = 'empty-first@example.net';
+      const firstEmpty = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Empty then unparsed\r\nMessage-ID: <${emptyFirstId}>\r\n\r\n`), 'Empty then unparsed', emptyFirstId);
+      const laterUnparsed = await ingest(Buffer.from(lineHeader + 'charlie\r\n'.repeat(30_001 - 4)), 'Empty then unparsed', emptyFirstId);
+      assert.equal(firstEmpty.status, 'received');
+      assert.equal(laterUnparsed.status, 'unparsed');
+      assert.notEqual(laterUnparsed.id, firstEmpty.id, 'A later unparsed receipt must not deduplicate onto an earlier empty-body parsed message.');
+    });
+  });
+
   test('forwarded support: query every stored inbound message and reply to the selected message as the public address', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
@@ -4741,6 +4837,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await processJobs(runtime, handlers, 1, 1), 1);
       assert.deepEqual((await db.query('SELECT status FROM jobs WHERE id = $1', [retired])).rows, [{ status: 'completed' }]);
     });
+  });
+
+  test('followDueJobs pads in-place waits past available_at so a 2 s busy-slot deferral completes without stranding on covered', async t => {
+    const [{ nodeRuntime }, { drizzle }, { processJobs, followDueJobs, JobDeferred }, { enqueue }] = await Promise.all([
+      import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/jobs.js'), import('./src/jobs.js'),
+    ]);
+    const session = await fixtureDatabase(t);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
+      S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    // Autocommit temp tables advance now()/clock_timestamp() across sleeps while remaining invisible to the harness runner.
+    await session.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
+    const scoped = { ...instance.runtime, db: drizzle(session) };
+    const ws = unique('follow-due-workspace');
+    let active = false, completed = 0, wakes = 0;
+    const handlers: Record<string, import('./src/core.js').JobHandler> = {
+      'mailbox.ingest': async () => {
+        if (active) throw new JobDeferred(new Date(Date.now() + 2_000).toISOString());
+        active = true;
+        try { await new Promise(resolve => setTimeout(resolve, 40)); completed++; } finally { active = false; }
+      },
+    };
+    const first = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 1 } });
+    const second = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 2 } });
+    const started = Date.now();
+    const outcome = await followDueJobs(scoped, () => processJobs(scoped, handlers, 100, 2), async () => { wakes++; }, 10_000);
+    const elapsed = Date.now() - started;
+    assert.equal(outcome, 'idle');
+    assert.equal(completed, 2);
+    assert.equal(wakes, 0);
+    assert.ok(elapsed >= 2_100, `Expected padded 2.15 s in-place wait; observed ${elapsed}ms.`);
+    const { rows } = await session.query('SELECT id, status, attempts FROM jobs WHERE id = ANY($1) ORDER BY id', [[first, second]]);
+    assert.deepEqual(rows.map(r => ({ status: r.status, attempts: r.attempts })), [{ status: 'completed', attempts: 1 }, { status: 'completed', attempts: 1 }]);
   });
 
   test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {

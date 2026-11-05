@@ -24,7 +24,7 @@ export async function storeIncoming(tx:DbExecutor,m:Incoming,files:(typeof mailA
   ), known AS MATERIALIZED (
     SELECT old.* FROM input x JOIN mail_message_ids i USING(workspace_id,message_id)
     JOIN mail_messages old ON old.id=i.mail_message_id AND old.workspace_id=x.workspace_id AND old.direction='inbound'
-    WHERE old.from_address=x.from_address AND old.subject=x.subject AND old.text IS NOT DISTINCT FROM x.text AND old.html IS NOT DISTINCT FROM x.html
+    WHERE x.status<>'unparsed' AND old.status<>'unparsed' AND old.from_address=x.from_address AND old.subject=x.subject AND old.text IS NOT DISTINCT FROM x.text AND old.html IS NOT DISTINCT FROM x.html
     AND old.attachment_count=x.attachment_count AND ARRAY(SELECT sha256 FROM mail_attachments WHERE message_id=old.id ORDER BY sha256)=ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify(files.map(f=>f.sha256).sort())}::jsonb))
   ), thread AS (
     INSERT INTO mail_threads AS t(id,workspace_id,subject,message_count,last_message_at)
