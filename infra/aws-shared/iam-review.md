@@ -1,9 +1,34 @@
-# MX credential review — shared v6 / unpublished BYO v5
+# MX credential review — corrected shared v6 draft / unpublished BYO v5
 
-**Accepted first-tag risk (shared only).** [Tagged SES identity creation](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html#list_sesv2-operation-CreateEmailIdentity) and first-tagging an existing domain have the same documented IAM context. A holder of the Worker key can mark an unclaimed pool identity and then edit, associate or delete it.
-V6 allows only `opensend:domain-claim` with a v4-UUID-shaped value; setting the tag on an already claimed resource is explicitly denied, and there is no `UntagResource` grant.
+**Accepted first-tag risk (shared only).** [Tagged SES identity creation](https://docs.aws.amazon.com/service-authorization/latest/reference/list_sesv2.html#list_sesv2-operation-CreateEmailIdentity) requires `ses:TagResource`; SES documents no create-only condition for that action. A holder of the Worker key can mark an unclaimed pool identity and then edit, associate or delete it.
+The corrected draft allows only `opensend:domain-claim` with a v4-UUID-shaped value. If the claim is already visible, the requested value must equal it: a same-value write is allowed, replacement is not. There is no `UntagResource` grant.
 
-This decision supersedes the shared first-tag blocker in `ef45146`. V6 is a repository policy, not an installed AWS version. BYO v5 remains the unchanged, unpublished draft; its no-op-only identity tag grant is not a solution for first-tagging a new domain.
+AWS v5 is the restored default. AWS v6 was the failed `bcfb5b5` document; version IDs are immutable. The corrected document on `mx-iam` has **not** been applied or live-tested. The BYO v5 template remains unchanged and unpublished.
+
+## Why the live domain create failed (2026-11-05 UTC)
+
+IAM CloudTrail records v6 becoming default at **22:25:04** and rollback to v5 at **22:26:48**. The proposed 22:35–22:50 Ohio search had no records. Searching by event name, then by the `opensend-mx` username around the actual switch, found:
+
+* **22:25:27, `ses.amazonaws.com`, `CreateEmailIdentity`, `AccessDenied`**, `us-east-2`. The error named the **dependent** `ses:TagResource` action on `identity/iam-check.testing.mx.vogel.dev`, explicitly denied by the `opensend-mx` identity policy. The denied event did not contain request parameters.
+
+* **22:27:01 after rollback**, `CreateEmailIdentity` succeeded for the same name, with `tags` (sole key `opensend:domain-claim`) and `dkimSigningAttributes` **in the create request**. `GetEmailIdentity` was also logged that second; second-resolution timestamps alone do not order them. `ListResourceTenants` and `DeleteEmailIdentity` succeeded at 22:27:02. The other identity reads at 22:23:38 and 22:25:38 were for another domain, not the canary.
+
+**Diagnosis.** The fetched, inactive AWS v6 matches the old branch document. Of its explicit Denies, only `Deny ses:TagResource` when `Null(aws:ResourceTag/opensend:domain-claim) = false` matches this action, ARN and region. SES saw a claim tag during the dependent check. CloudTrail does **not** export its IAM context values; the inference is from the explicit deny, not from a standalone `TagResource` event. The earlier simulator positive supplied only the *request* tag and omitted the *resource* tag. Supplying the same tag in both places reproduces `explicitDeny` on the rolled-back document and returns `allowed` on the correction. A different existing value still returns `implicitDeny`.
+
+**No missing API action found.** `operations.ts:287–295,540–550` creates first and reads on `AlreadyExists`, not as a fresh-create prerequisite. The queued verifier and delete path can also read; `operations.ts:310–324` reads the identity, lists tenant membership and deletes it. There was no separate `TagResource`, tenant-association create, configuration-set assignment, MAIL FROM or DKIM-update event for the canary. The existing matrix already included the dependent action. The fix changes only the tag condition, not the action/resource inventory.
+
+## Mandatory live release check (operator only)
+
+The regular E2E intentionally skips `createDomain` and `deleteDomain` (`api/scripts/e2e.ts:28–29`). Run the following **immediately after the operator activates the corrected document as a new version**, from this checkout. Install the API dependencies beforehand and confirm the `anomaly` profile can read the Ohio identity and IAM versions and restore the previous default. Use the actual new ID, **not the failed v6**. Serialize policy releases and reserve the fixed canary exclusively for this check.
+
+```sh
+# Example ONLY if the new default is v7 and the previous known-good default was v5:
+node infra/aws-shared/check-release.mjs v7 v5
+```
+
+The checker pins the account, policy ARN, Hosted Ohio connection, production HTTPS origin and E2E workspace. It obtains only `OPENSEND_E2E_API_KEY` from `~/.config/opensend-mx/e2e.env` without printing it. It refuses to adopt an existing canary, checks that a fresh `POST /v1/domains` creates `iam-check.testing.mx.vogel.dev` with the SES claim tag, deletes **only the returned ID**, confirms the SES identity is absent, then runs the existing full live E2E. API calls perform the canary mutations; SES inspection uses read-only operator credentials. No DNS records are changed.
+
+Once the candidate is confirmed active, an API/SES assertion, E2E failure or handled interrupt causes a nonzero exit and automatically restores the supplied known-good version, **only if the candidate is still default**. A failed delete with a confirmed run-owned ID is retried through the API after rollback. An ambiguous create without an ID requires inspecting the reserved canary; do not guess an ID or delete by name. A changed default, lost credentials, network loss or a killed process can require manual recovery. Confirm the default with `aws --profile anomaly iam get-policy --policy-arn arn:aws:iam::438095551154:policy/opensend-mx --query Policy.DefaultVersionId`. The checker does not install a candidate, and a control-plane default check alone does not prove IAM propagation.
 
 ## Resources and credentials
 
@@ -28,7 +53,7 @@ Actions have the same name as the operation with the given IAM prefix **unless a
 | P, B | `ses:GetAccount` | `*`; regional quota and readiness, no resource-scoped equivalent. | `dispatcher.ts:72`, `operations.ts:491`, `ses-setup.ts:239` |
 | B | `ses:ListEmailIdentities` | `*`; BYO import/discovery. Pool cron uses `connectionSetup:true` and shared HTTP discovery is rejected. | `ses-setup.ts:247–250,363`, `provider-connections.ts:103,202–206`, `ses-regions.ts:64–75` |
 | P, B | `cloudwatch:GetMetricData` | `*` for classic `AWS/SES` reputation metrics, not an ARN-addressable dataset. The namespace condition for `PutMetricData` does not constrain this read. | `ses-setup.ts:315,326–333`; pool alerts `reputation-alerts.ts:47–55`, `worker.ts:227–234` |
-| P, B | `ses:CreateEmailIdentity` (+ `ses:TagResource` on `I`) | One `opensend:domain-claim` request key, shaped like the database's v4 UUID. Pool permits the first tag; BYO draft only permits restating an existing value. Never `UntagResource`. | `operations.ts:286–295,540–550`; `api/migrations/044_domain_claims.sql:6` |
+| P, B | `ses:CreateEmailIdentity` (+ `ses:TagResource` on `I`) | One `opensend:domain-claim` request key, shaped like the database's v4 UUID. Pool permits the first tag or the identical value; BYO draft only permits restating an existing value. Never `UntagResource`. | `operations.ts:286–295,540–550`; `api/migrations/044_domain_claims.sql:6` |
 | P, B | `ses:GetEmailIdentity` | `I`; conflict/NotFound must be distinguishable during create/recovery, and BYO imports existing untagged domains. This is not an ownership grant. | `operations.ts:292,310,408,589`; BYO `ses-setup.ts:368` |
 | P, B | `ses:DeleteEmailIdentity`, `ses:PutEmailIdentityMailFromAttributes` | `I`, existing claim UUID required. App matches the **actual claim token**, and refuses imported BYO identity mutation. | `operations.ts:310–324,588–591` |
 | P, B | SESv2 `SendEmail` → `ses:SendEmail` (+ `ses:ApplyTrackingConfigurationOverrides`) | Pool **unchanged from v5**: its two account-regions, `identity/*`, `configuration-set/opensend-*`, `ses:TenantName=opensend-?*`, absent `ses:MultiRegionEndpointId`. No additional send-time `ResourceTag` condition. The app selects `T` and `C`. Tracking permission on `*` requires matching open/click values. BYO uses API v2, no tenant/global endpoint; `Content.Raw` uses the same command, not classic `SendRawEmail`/SMTP. | `dispatcher.ts:239–241,293–303,438–444` |
@@ -52,7 +77,7 @@ Actions have the same name as the operation with the given IAM prefix **unless a
 
 ## Shared v5 → v6: complete permission diff
 
-Compared the policy fetched with `iam get-policy-version --version-id v5` with the final document after substituting the real 12-digit account ID. V6 is **6,143 / 6,144 compact JSON characters** (one spare), with **46 named Allow actions**, four fewer than v5 and none added. The table lists the **effective** removed action/resource or request classes, not incidental arithmetical combinations of unrelated ARN types in a statement. “Unused” means unused **by the pool key** on `0b01422` plus `cdf9ee8`, not absent from the customer-role or self-hosted implementations.
+Compared the policy fetched with `iam get-policy-version --version-id v5` with the corrected document after substituting the real 12-digit account ID. The draft is **6,119 / 6,144 compact JSON characters** (25 spare), with **46 named Allow actions**, four fewer than v5 and none added. The table lists the **effective** removed action/resource or request classes, not incidental arithmetical combinations of unrelated ARN types in a statement. “Unused” means unused **by the pool key** on `0b01422` plus `cdf9ee8`, not absent from the customer-role or self-hosted implementations.
 
 | Removed action or scope | Why the pool does not need it |
 |---|---|
@@ -78,13 +103,13 @@ AWS `iam simulate-custom-policy` evaluated every one of the 46 allowed actions, 
 
 | Shared v6 suite | Ohio | Ireland | Total |
 |---|---:|---:|---:|
-| Required positives allowed | 72 / 77 | 72 / 77 | **144 / 154** |
-| Required negatives denied | 109 / 109 | 109 / 109 | **218 / 218** |
+| Required positives allowed | 73 / 78 | 73 / 78 | **146 / 156** |
+| Required negatives denied | 108 / 108 | 108 / 108 | **216 / 216** |
 | Accepted unrelated-domain first tag allowed | 1 / 1 | 1 / 1 | **2 / 2** |
 
-The primary `CreateEmailIdentity` and dependent first `TagResource` both returned `allowed`. Exactly ten required positives returned `implicitDeny`: `ses:SendEmail` on a domain and each of the two sets per region (6), `sns:GetSubscriptionAttributes` on the feedback topic per region (2), and `sns:SetSubscriptionAttributes` there (2). **All ten returned the same `implicitDeny` against the freshly fetched live v5.** SNS was not fixed by copying the ARNs because those exact ARNs already produce that simulator result. Do not replace them with `Resource: "*"` or remove `ses:TenantName` to obtain a green result.
+The primary `CreateEmailIdentity` and dependent `TagResource` returned `allowed` with the resource tag absent **and** with the matching tag present. The two same-value cases previously (incorrectly) counted as required denials are now required positives. Replacing another claim, malformed values, extra keys and untagging are still denied. Exactly ten required positives returned `implicitDeny`: `ses:SendEmail` on a domain and each of the two sets per region (6), `sns:GetSubscriptionAttributes` on the feedback topic per region (2), and `sns:SetSubscriptionAttributes` there (2). **All ten returned the same `implicitDeny` against the v5 control.** Do not replace the topic ARNs with `Resource: "*"` or remove `ses:TenantName` to obtain a green result.
 
-In all, **388 v6 decisions**: 154 positives, 218 negatives, the two accepted first tags and 14 additional live-parity probes. All 24 v5 controls (the ten positive denials plus the 14 probes) matched v6, including subscription UUID ARNs and historical `opensend-*` set/tenant forms. An untagged domain send is a compatibility probe, **not** a claimed v6 protection: v5 never required that tag for sending. Access Analyzer returned **no findings**. No AWS writes, sends, role assumptions or deployments were used for verification.
+In all, **388 corrected-draft decisions**: 156 positives, 216 negatives, the two accepted first tags and 14 additional live-parity probes. All 24 v5 controls matched the draft, including subscription UUID ARNs and historical `opensend-*` set/tenant forms. An untagged domain send is a compatibility probe, **not** a claimed v6 protection: v5 never required that tag for sending. Access Analyzer returned **no findings**. The release check was exercised with local stand-ins for AWS, the API and E2E, including create/delete/E2E failures, wrong defaults, pre-existing identity and concurrent version changes. The corrected document has not passed a live create/delete yet; no AWS writes, sends, role assumptions or deployments were performed in this investigation.
 
 **BYO is unchanged and unpublished.** Its prior simulation was 116/122 required positives allowed and 157/163 negatives denied. Remaining gaps are tagged identity creation, SNS subscription-attribute modeling and six BYO global-endpoint cases. The proposed template passed `ValidateTemplate` and its three resolved variants had zero Access Analyzer findings. The matching `cdf9ee8` runtime previously passed `npm run check` and the full isolated harness (97 passed, 2 skipped, 0 failed); this v6 revision changes no runtime code.
 
