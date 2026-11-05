@@ -857,23 +857,35 @@ function registerMetrics(app: App) {
       WHERE ${filter}
       GROUP BY 1 ORDER BY 1`)).rows;
     } else {
-      // One scan over the window and (with include=previous) the window before it; the chart buckets, the previous
-      // total and the per-stream totals are aggregated from it in the same statement.
+      // One statement that never reads snapshot except through sending_emails_kind_created (workspace, snapshot->>'kind',
+      // created_at); snapshot is TOASTed and detoasting it per row costs seconds. Every email is created as exactly one of
+      // the two kinds, so counts are additive across kinds and the second stream is the total minus the first:
+      //  - an "all" arm groups the window (and the previous window when asked) directly, with no kind predicate;
+      //  - one "kind" arm (the stream filter, or marketing when only the per-stream totals are asked for) uses the index.
+      // Each arm groups by (in the window, creation bucket); rows before the window have no bucket (previous period).
       const previousFrom = new Date(Date.parse(start) - (Date.parse(end) - Date.parse(start))).toISOString();
       const scanFrom = extras.has('previous') ? previousFrom : start;
-      const result = await c.env.db.execute<Row & { part: string; kind: string | null }>(sql`
-      WITH scan AS (
-        SELECT ${date} AS bucket, ${emails.createdAt} >= ${start}::timestamptz AS cur, ${emails.snapshot}->>'kind' AS kind, ${emails.status} AS status, ${emails.simulated} AS simulated, ${emails.providerId} AS provider_id, ${emails.eventOutcomes} AS outcomes
-        FROM ${emails}
-        WHERE ${and(scoped(emails, a), gte(emails.createdAt, scanFrom), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined)}
-      ), shown AS (SELECT * FROM scan WHERE ${q.stream ? sql`kind = ${q.stream}` : sql`true`})
-      SELECT 'bucket' AS part, bucket AS "date", NULL::text AS kind, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })}
-        FROM shown WHERE cur GROUP BY bucket
-      ${extras.has('previous') ? sql`UNION ALL SELECT 'previous', NULL, NULL, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })} FROM shown WHERE NOT cur` : sql``}
-      ${extras.has('streams') ? sql`UNION ALL SELECT 'stream', NULL, kind, ${counts({ status: sql`status`, simulated: sql`simulated`, providerId: sql`provider_id`, outcomes: sql`outcomes` })} FROM scan WHERE cur AND kind IN ('transactional', 'marketing') GROUP BY kind` : sql``}`);
-      rows = result.rows.filter(row => row.part === 'bucket').sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
-      if (extras.has('previous')) previous = { from: previousFrom, to: start, totals: total(result.rows.find(row => row.part === 'previous')) };
-      if (extras.has('streams')) streams = { transactional: total(result.rows.find(row => row.part === 'stream' && row.kind === 'transactional')), marketing: total(result.rows.find(row => row.part === 'stream' && row.kind === 'marketing')) };
+      const kind: 'transactional' | 'marketing' = q.stream ?? 'marketing';
+      const needAll = !q.stream || extras.has('streams'), needKind = !!q.stream || extras.has('streams');
+      const inWindow = sql`${emails.createdAt} >= ${start}::timestamptz`;
+      const bucketOf = sql`CASE WHEN ${inWindow} THEN ${date} END`;
+      const measures = counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` });
+      const within = (from: string) => and(scoped(emails, a), gte(emails.createdAt, from), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined);
+      const arm = (part: 'all' | 'kind', from: string) => sql`SELECT ${part}::text AS part, ${inWindow} AS cur, ${bucketOf} AS "date", ${measures}
+        FROM ${emails} WHERE ${and(within(from), part === 'kind' ? sql`(${emails.snapshot}->>'kind') = ${kind === 'marketing' ? sql`'marketing'::text` : sql`'transactional'::text`}` : undefined)} GROUP BY 2, 3`;
+      const arms = [...(needAll ? [arm('all', q.stream ? start : scanFrom)] : []), ...(needKind ? [arm('kind', q.stream ? scanFrom : start)] : [])];
+      const parts = (await c.env.db.execute<Row & { part: 'all' | 'kind'; cur: boolean }>(arms.length > 1 ? sql`${arms[0]} UNION ALL ${arms[1]}` : arms[0]!)).rows;
+      const sum = (list: Row[]) => list.reduce((acc, row) => { for (const key of Object.keys(acc) as Array<keyof typeof acc>) acc[key] += row[key]; return acc; }, total());
+      const shown = parts.filter(row => row.part === (q.stream ? 'kind' : 'all'));
+      const byDate = new Map<string, Row[]>();
+      for (const row of shown) if (row.cur) byDate.set(row.date, [...(byDate.get(row.date) ?? []), row]);
+      rows = [...byDate].map(([day, list]) => ({ ...sum(list), date: day })).sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+      if (extras.has('previous')) previous = { from: previousFrom, to: start, totals: sum(shown.filter(row => !row.cur)) };
+      if (extras.has('streams')) {
+        const all = sum(parts.filter(row => row.part === 'all' && row.cur)), own = sum(parts.filter(row => row.part === 'kind' && row.cur));
+        const rest = Object.fromEntries(Object.keys(all).map(key => [key, all[key as keyof typeof all] - own[key as keyof typeof own]])) as typeof all;
+        streams = kind === 'marketing' ? { transactional: rest, marketing: own } : { transactional: own, marketing: rest };
+      }
     }
     // Every email belongs to exactly one creation bucket, so totals are the sum of the buckets (no ROLLUP sort).
     const totals = { emails: 0, accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: 0 };
@@ -901,7 +913,7 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, q.include ?? '', window].join('|'), compute);
+    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });
