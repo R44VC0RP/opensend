@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Download } from 'lucide-react'
 import { Field, SectionHeader, Select, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { useSession } from '../../data/context'
@@ -44,10 +45,18 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
   return lines.join('\n')
 }
 
+// A data URL needs no object URL to revoke, so the download can't race the cleanup.
+function downloadText(name: string, text: string) {
+  Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
+}
+
 export function AgentPrompt({ prompt }: { prompt: string }) {
   return <section className="section stack developer-section" aria-label="Agent prompt">
-    <SectionHeader title="Agent prompt" actions={<CopyAction value={prompt} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />} />
-    <p className="muted developer-copy">Paste this into your coding agent. It has this workspace’s real values; the API key stays in your environment.</p>
+    <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions">
+      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText('opensend-agent-prompt.txt', prompt)}><Download size={14} aria-hidden="true" /></button>
+      <CopyAction value={prompt} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
+    </span>} />
+    <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>
     <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code>{prompt}</code></pre>
   </section>
 }

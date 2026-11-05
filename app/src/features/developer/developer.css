@@ -5,9 +5,10 @@
 .developer-url > code::-webkit-scrollbar { display: none; }
 .developer-url > .copy-action { flex-shrink: 0; }
 .developer-url > .cluster { flex-shrink: 0; }
-/* Icon-only copy: small mark, 40px hit area from a pseudo-element, so nothing around it moves. */
-.ui-button.copy-action.developer-copy-icon { position: relative; width: 24px; height: 24px; flex-shrink: 0; color: var(--color-muted); }
-.ui-button.copy-action.developer-copy-icon::before { content: ''; position: absolute; inset: -8px; }
+/* Icon-only actions: small mark, 40px hit area from a pseudo-element, so nothing around it moves. */
+.developer-icon-actions { display: flex; align-items: center; gap: var(--space-16); }
+.ui-button.developer-copy-icon { position: relative; display: inline-grid; place-items: center; padding: 0; width: 24px; height: 24px; flex-shrink: 0; color: var(--color-muted); }
+.ui-button.developer-copy-icon::before { content: ''; position: absolute; inset: -8px; }
 .developer-copy-icon .copy-action__icon svg { width: 14px; height: 14px; }
 .developer-copy-icon[data-copied] { color: var(--color-success); }
 .developer-copy { max-width: 72ch; margin: 0; text-wrap: pretty; }
@@ -19,7 +20,7 @@
 .developer-steps li + li { margin-top: var(--space-12); }
 .developer-steps code { overflow-wrap: anywhere; }
 @media (max-width: 560px) {
-  .ui-button.copy-action.developer-copy-icon::before { inset: -10px; }
+  .ui-button.developer-copy-icon::before { inset: -10px; }
   .developer-access .ui-select-trigger { min-height: 44px; font-size: 16px; }
   .developer-code { padding: var(--space-12); font-size: var(--text-xs); white-space: pre; overflow: auto; }
 }
