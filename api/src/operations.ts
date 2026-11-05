@@ -848,6 +848,7 @@ function registerPublicEvents(app: App) {
     // With a feedback sink (Cloudflare), the verified callback leaves the request path immediately and is
     // ingested in batches by the feedback consumer; nothing here touches the database or the jobs table.
     if (c.env.feedback) {
+      sesFeedbackIdentity(item.message);
       await c.env.feedback.enqueue([item]);
       return c.json({ accepted: true }, 202);
     }
@@ -1038,14 +1039,20 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
+const sesEvents: Record<string, { type: EventType; rawType: string }> = { Send: { type: 'email.sent', rawType: 'send' }, Delivery: { type: 'email.delivered', rawType: 'delivery' }, Bounce: { type: 'email.bounced', rawType: 'bounce' }, Complaint: { type: 'email.complained', rawType: 'complaint' }, DeliveryDelay: { type: 'email.delivery_delayed', rawType: 'delivery_delay' }, Reject: { type: 'email.rejected', rawType: 'reject' }, RenderingFailure: { type: 'email.rendering_failed', rawType: 'rendering_failure' }, Open: { type: 'email.opened', rawType: 'open' }, Click: { type: 'email.clicked', rawType: 'click' } };
+function sesFeedbackIdentity(data: Record<string, any>) {
+  const providerId = data?.mail?.messageId;
+  if (typeof providerId !== 'string' || !providerId) throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
+  const eventType = data.eventType ?? data.notificationType, kind = eventType === 'Rendering Failure' ? 'RenderingFailure' : eventType;
+  if (typeof kind !== 'string' || (kind !== 'Subscription' && !Object.hasOwn(sesEvents,kind))) throw new ApiError(422, 'SES_UNSUPPORTED_EVENT', 'Unsupported SES event type.');
+  return { providerId, kind };
+}
 function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress {
   const data = item.message as Record<string, any>;
-  const kind = data?.eventType ?? data?.notificationType;
-  const providerId = data?.mail?.messageId;
+  const { kind, providerId } = sesFeedbackIdentity(data);
   const type = kind === 'Send' ? 'send' : kind === 'Delivery' ? 'delivery' : 'receipt';
   const simulated = item.topicArn === `urn:opensend:simulated-ses:${item.region}`;
   if (type === 'receipt' && simulated) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
-  if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
   const timestamp = type !== 'receipt' ? data[type]?.timestamp : undefined;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
@@ -1105,8 +1112,8 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
 
 const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const receiptWhere = and(scoped(snsReceipts, job), eq(snsReceipts.topicArn, String(payload.topicArn)), eq(snsReceipts.messageId, String(payload.messageId)));
-  const data = payload.message as Record<string, any>; const providerId = data?.mail?.messageId;
-  if (typeof providerId !== 'string') throw new ApiError(422, 'SES_INVALID_EVENT', 'SES event lacks a mail.messageId.');
+  const data = payload.message as Record<string, any>;
+  const { kind, providerId } = sesFeedbackIdentity(data);
   const tagged = taggedEmailId(data);
   const [input] = await runtime.db.select({ receipt: snsReceipts, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
@@ -1118,7 +1125,6 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const { receipt, email } = input;
   if (!email) throw new ApiError(409, 'SES_EMAIL_NOT_FOUND', 'The SES message is not yet associated with a local email.', undefined, true);
   if (email.simulated !== (payload.topicArn === `urn:opensend:simulated-ses:${payload.region}`)) throw new ApiError(403, 'SES_ENVIRONMENT_MISMATCH', 'Feedback and email simulation modes must match.');
-  const kind = String(data.eventType ?? data.notificationType).replace('Rendering Failure', 'RenderingFailure');
   if (kind === 'Subscription') {
     const preferences = data.subscription?.newTopicPreferences;
     // SES topic defaults are not evidence of app-wide opt-in; never reverse local opt-outs from them.
@@ -1129,8 +1135,7 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
     }
     await runtime.db.update(snsReceipts).set({ processedAt: now() }).where(receiptWhere); return;
   }
-  const mapping: Record<string, { type: EventType; rawType: string }> = { Send: { type: 'email.sent', rawType: 'send' }, Delivery: { type: 'email.delivered', rawType: 'delivery' }, Bounce: { type: 'email.bounced', rawType: 'bounce' }, Complaint: { type: 'email.complained', rawType: 'complaint' }, DeliveryDelay: { type: 'email.delivery_delayed', rawType: 'delivery_delay' }, Reject: { type: 'email.rejected', rawType: 'reject' }, RenderingFailure: { type: 'email.rendering_failed', rawType: 'rendering_failure' }, Open: { type: 'email.opened', rawType: 'open' }, Click: { type: 'email.clicked', rawType: 'click' } };
-  const mapped = mapping[kind]; if (!mapped) throw new ApiError(422, 'SES_UNSUPPORTED_EVENT', 'Unsupported SES event type.');
+  const mapped = sesEvents[kind]!;
   const eventDetail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
   const eventTime = typeof eventDetail.timestamp === 'string' && Number.isFinite(Date.parse(eventDetail.timestamp)) ? new Date(eventDetail.timestamp).toISOString() : receipt.createdAt;
   const eventId = `evt_ses_${await digest(`${payload.topicArn}:${payload.messageId}`)}`;

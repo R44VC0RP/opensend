@@ -6,8 +6,9 @@ export function feedbackSink(queue: Queue<FeedbackItem>): NonNullable<Runtime['f
   return { enqueue: async items => { for (let i = 0; i < items.length; i += 100) await queue.sendBatch(items.slice(i, i + 100).map(body => ({ body }))); } };
 }
 
+const invalidFeedback = new Set(['SES_INVALID_EVENT', 'SES_UNSUPPORTED_EVENT', 'SES_ACCOUNT_MISMATCH', 'SES_ENVIRONMENT_MISMATCH', 'SIMULATED_FEEDBACK_FORBIDDEN', 'SIMULATED_FEEDBACK_UNSUPPORTED']);
 export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry' | 'ack'>, outcome?: { ok: boolean; error?: string }) {
-  if (outcome?.ok) return message.ack();
+  if (outcome?.ok || (outcome?.error && invalidFeedback.has(outcome.error))) return message.ack();
   if (outcome?.error === 'SES_FEEDBACK_UNMATCHED') {
     // Allow one short dispatch/feedback race, not a full retry chain for an unknown message.
     return message.attempts === 1 ? message.retry({ delaySeconds: 15 }) : message.ack();

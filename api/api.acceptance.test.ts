@@ -1316,8 +1316,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(url.origin+'/',host);assert.equal(url.searchParams.get('TopicArn'),arn);confirms++;
             topics.get(arn)!.subs=[{TopicArn:arn,Protocol:'https',Endpoint:`${origin}/v1/events/ses`,SubscriptionArn:arn+':fixture'}];return new Response(null);
           });
-          function envelope(topic:string){
-            const values:Json={Message:'Confirm the synthetic subscription',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'};
+          function envelope(topic:string, message?:Json){
+            const values:Json=message ? {Message:JSON.stringify(message),MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:topic,Type:'Notification'} : {Message:'Confirm the synthetic subscription',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'};
             return {...values,SigningCertURL:certUrl,SignatureVersion:'2',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(values).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64')};
           }
           const receive=(body:Json)=>local('POST','/v1/events/ses',body,undefined,{'content-type':'text/plain; charset=UTF-8'}), signed=envelope(arn);
@@ -1353,6 +1353,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(next?.cursor,'second');assert.equal((await poll()).state,'provisioning');
             await run(next!);await tx.execute(sql`UPDATE jobs SET status='completed' WHERE id=${jobId}`);
             const ready=await poll();assert.deepEqual([ready.state,ready.tenant,ready.awsAccountId,ready.importedDomains],['ready','ready',customer,3]);
+            const enqueued: unknown[]=[];
+            runtime.feedback={enqueue:async items=>{enqueued.push(...items);}};
+            try {
+              error(await receive(envelope(arn,{eventType:'Send',mail:{sendingAccountId:customer,messageId:123}})),422,'SES_INVALID_EVENT');
+              error(await receive(envelope(arn,{eventType:'constructor',mail:{sendingAccountId:customer,messageId:'fixture'}})),422,'SES_UNSUPPORTED_EVENT');
+              assert.equal(enqueued.length,0,'Even signed malformed feedback must not reach the queue.');
+              ok(await receive(envelope(arn,{notificationType:'Rendering Failure',mail:{sendingAccountId:customer,messageId:'fixture'}})),202);
+              assert.equal(enqueued.length,1);
+            } finally {delete runtime.feedback;}
             const reads=calls.length,proofs=assumptions;ok(await receive(signed),202);assert.deepEqual(ok(await verify(a.cookie)),ready);
             assert.deepEqual([calls.length,assumptions,confirms],[reads,proofs,1]);
             // Exercise actual live-send admission, but roll back the queued email before any dispatcher can see it.
@@ -4757,10 +4766,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const [unmatched] = await ingestFeedbackBatch(runtime, [unknown]);
       assert.equal(unmatched?.error, 'SES_FEEDBACK_UNMATCHED');
       const settled: (number | 'ack')[] = [];
-      for (const [attempts, outcome] of [[1,unmatched],[2,unmatched],[2,outcomes[5]],[1,outcomes[0]]] as const) {
+      const live = { ...unknown, topicArn:`arn:aws:sns:${REGION}:111122223333:fixture` };
+      const [invalid, unsupported] = await ingestFeedbackBatch(runtime,[{...live,message:{eventType:'Send',mail:{}}},{...live,message:{eventType:'unknown',mail:{messageId:'fixture'}}}]);
+      assert.deepEqual([invalid?.error,unsupported?.error],['SES_INVALID_EVENT','SES_UNSUPPORTED_EVENT']);
+      for (const [attempts, outcome] of [[1,unmatched],[2,unmatched],[2,outcomes[5]],[1,outcomes[0]],[1,invalid],[1,unsupported],[2,{ok:false,error:'FEEDBACK_PERSIST_FAILED'}]] as const) {
         settleFeedbackMessage({ attempts, ack:()=>settled.push('ack'), retry:opts=>settled.push(opts!.delaySeconds!) }, outcome);
       }
-      assert.deepEqual(settled, [15,'ack',60,'ack']);
+      assert.deepEqual(settled, [15,'ack','ack','ack','ack','ack',60]);
       const persisted = await receipts();
       assert.equal(persisted.length, 4, 'Exactly one receipt per distinct callback; duplicates and rejected items add none.');
       assert.ok(persisted.every(receipt => receipt.processed_at !== null));
