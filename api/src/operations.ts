@@ -22,6 +22,7 @@ import { byoStackTopic } from './provider-connections.js';
 import { awsError } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
+import { realDestination } from './hosted-sending.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
 import { queueReconcile } from './mailbox-setup.js';
 import { mailboxDomains, type MxReport } from './db/mailbox.js';
@@ -1115,7 +1116,8 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const data = payload.message as Record<string, any>;
   const { kind, providerId } = sesFeedbackIdentity(data);
   const tagged = taggedEmailId(data);
-  const [input] = await runtime.db.select({ receipt: snsReceipts, email: {
+  const [input] = await runtime.db.select({ receipt: snsReceipts, hostedFeedback: runtime.config.multiTenant && (kind==='Bounce' || kind==='Complaint')
+    ? sql<boolean>`EXISTS (SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=${String(payload.topicArn)})` : sql<boolean>`false`, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
   } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), tagged
     // Fallback for a lost provider response: see ingestRoutineSesEvents.
@@ -1146,13 +1148,19 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   // SES Auto Validation drops risky recipients before sending and reports each as a Permanent bounce with this subtype.
   // It never left SES, so record it as suppressed (not bounced); the contact is still suppressed below.
   const validationSuppressed = kind === 'Bounce' && eventDetail.bounceSubType === 'EmailValidationSuppressed';
+  const candidates: unknown[] = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
+  const envelope = new Set([...email.to,...email.cc,...email.bcc].map(v => v.toLowerCase()));
+  const recipients = [...new Set(candidates.filter((v): v is string => typeof v === 'string').map(v => v.toLowerCase()).filter(v => envelope.has(v)))];
+  // One SNS notification can identify up to 50 recipients. Scope hashes to this message so they
+  // deduplicate overlapping reports without linking recipients across mail. [] means no real matched recipient;
+  // absent recipient evidence counts as one, just like legacy feedback rows.
+  const recipientHashes = input.hostedFeedback && !email.simulated && !validationSuppressed && candidates.length
+    ? await Promise.all(recipients.filter(realDestination).map(v => digest(`${email.id}\0${v}`))) : undefined;
   await recordEmailEvent(runtime, { workspaceId: job.workspaceId, emailId: email.id, providerId, type: validationSuppressed ? 'validation_suppressed' : mapped.rawType,
-    ...(validationSuppressed ? { errorCode: 'EMAIL_VALIDATION_SUPPRESSED' } : {}), externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime,
+    ...(validationSuppressed ? { errorCode: 'EMAIL_VALIDATION_SUPPRESSED' } : {}), externalId: `${payload.topicArn}:${payload.messageId}`, data: normalized.data, createdAt: eventTime, recipientHashes,
     ...(routine ? { receipt: { topicArn: String(payload.topicArn), messageId: String(payload.messageId) } } : {}),
   });
   if (routine) return;
-  const candidates = kind === 'Bounce' ? (data.bounce?.bouncedRecipients ?? []).map((r: any) => r.emailAddress) : kind === 'Complaint' ? (data.complaint?.complainedRecipients ?? []).map((r: any) => r.emailAddress) : (email.to.length === 1 && !email.cc.length && !email.bcc.length ? email.to : []);
-  const recipients = candidates.filter((value: unknown): value is string => typeof value === 'string').map((value: string) => value.toLowerCase()).filter((value: string) => [...email.to, ...email.cc, ...email.bcc].map(v => v.toLowerCase()).includes(value));
   const suppress = kind === 'Complaint' || (kind === 'Bounce' && eventDetail.bounceType === 'Permanent');
   const observeEngagement = (kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely';
   if (recipients.length && (suppress || observeEngagement)) await runtime.db.transaction(async tx => {

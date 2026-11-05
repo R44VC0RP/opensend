@@ -284,8 +284,8 @@ Detailed email/event/webhook logs expire after 30 days. Active jobs, campaign dr
 ### Security boundaries
 
 Hosted connections admit 100 real recipients per rolling 24 hours in week one, 1,000 in week two, then 10,000 (`HOSTED_SEND_CAP_FIRST_WEEK`, `HOSTED_SEND_CAP_SECOND_WEEK`, `HOSTED_SEND_CAP_MATURE`). Suppressed/simulated sends and SES mailbox-simulator recipients do not consume the cap. A cap pauses campaign release; resume the campaign after capacity returns.
-Hourly Hosted reputation checks pause admission and dispatch (not incoming mail) for ≥10 hard bounces or ≥2 complaints below 200 sends, otherwise >3% hard bounces or >0.05% complaints. Inspect `HOSTED_SENDING_AUTO_PAUSED` and `connection.sendingPause` on `GET /v1/me`.
-After reviewing the cause, an operator with `DATABASE_URL` set can run `node --import tsx scripts/resume-hosted-sending.ts WORKSPACE_ID` from `api/`. Queued mail remains queued; if the last 24 hours are still unhealthy, the next check pauses it again.
+Hourly Hosted reputation checks count the last 24 hours of hard bounces and complaints per destination against 48 hours of accepted recipient volume to allow for delayed feedback. Below 200 recipients, ≥10 hard bounces or ≥2 complaints pause admission and dispatch; otherwise the thresholds are >3% and >0.05%. Inspect `HOSTED_SENDING_AUTO_PAUSED` and `connection.sendingPause` on `GET /v1/me`.
+After reviewing the cause, an operator with `DATABASE_URL` set can run `node --import tsx scripts/resume-hosted-sending.ts WORKSPACE_ID` from `api/`. Queued mail can dispatch again, and only events after the resume count toward another pause.
 
 Non-manage readers receive app unsubscribe capabilities redacted from content and nested event/webhook payloads; raw MIME is withheld. This does not sanitize arbitrary third-party password-reset links—content-read grants belong only with trusted integrations. Campaign substitutions reject executable, unquoted, comment, and foreign-markup contexts and validate completed URLs. SES templates retain their caller-escaping contract.
 

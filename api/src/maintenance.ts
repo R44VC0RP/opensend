@@ -13,18 +13,31 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
 
 export async function checkHostedHealth(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
-  // Count each real message once per outcome. Late feedback counts when it arrives, even
-  // if acceptance was outside the window. Never dilute rates with repeated SES Send events.
-  const result = await runtime.db.execute(pauseHostedSending(sql`WITH outcomes AS (
-    SELECT pc.id,v.email_id,bool_or(v.type IN ('accepted','send')) AS sent,
-      bool_or(v.type='bounce' AND v.data->>'bounceType'='Permanent') AS bounced,bool_or(v.type='complaint') AS complained
-    FROM provider_connections pc JOIN sending_email_events v ON v.workspace_id=pc.workspace_id
+  // Start from the sparse 24-hour feedback index. Multiple notifications about the same
+  // destination count once per outcome; unattributed reports establish at least one, not an extra one.
+  const result = await runtime.db.execute(pauseHostedSending(sql`WITH affected AS (
+    SELECT pc.id,pc.workspace_id,pc.resumed_at,v.email_id,v.type,greatest(1,count(DISTINCT h.hash)) AS recipients
+    FROM sending_email_events v JOIN provider_connections pc USING (workspace_id)
     JOIN sending_emails e ON e.workspace_id=v.workspace_id AND e.id=v.email_id
-    WHERE pc.kind='shared' AND pc.paused_at IS NULL AND v.created_at>now()-interval '24 hours'
-      AND NOT v.simulated AND NOT e.simulated AND e.status<>'suppressed' AND v.type IN ('accepted','send','bounce','complaint')
-      AND ${hostedMail} AND ${realDestinations}>0 GROUP BY pc.id,v.email_id
-  ), counts AS (SELECT id,count(*) FILTER (WHERE sent) AS sends,count(*) FILTER (WHERE bounced) AS bounces,
-    count(*) FILTER (WHERE complained) AS complaints FROM outcomes GROUP BY id)
+    LEFT JOIN LATERAL unnest(v.recipient_hashes) h(hash) ON true
+    WHERE NOT v.simulated AND v.type IN ('bounce','complaint') AND v.created_at>now()-interval '24 hours'
+      AND v.created_at>greatest(now()-interval '24 hours',pc.resumed_at) AND pc.kind='shared' AND pc.paused_at IS NULL
+      AND (v.type='complaint' OR v.data->>'bounceType'='Permanent') AND (v.recipient_hashes IS NULL OR cardinality(v.recipient_hashes)>0)
+      AND NOT e.simulated AND e.status<>'suppressed' AND ${hostedMail} AND ${realDestinations}>0
+    GROUP BY pc.id,pc.workspace_id,pc.resumed_at,v.email_id,v.type
+  ), candidates AS MATERIALIZED (
+    SELECT id,workspace_id,resumed_at,sum(CASE WHEN type='bounce' THEN recipients ELSE 0 END) AS bounces,
+      sum(CASE WHEN type='complaint' THEN recipients ELSE 0 END) AS complaints FROM affected GROUP BY id,workspace_id,resumed_at
+  ), counts AS (
+    SELECT c.*,volume.sends FROM candidates c CROSS JOIN LATERAL (
+      -- Include yesterday's accepted sends for delayed feedback. Acceptance and its SES Send
+      -- callback are one envelope; each real To/Cc/Bcc on it contributed to the SES volume.
+      SELECT coalesce(sum(${realDestinations}),0) AS sends FROM (
+        SELECT DISTINCT v.email_id FROM sending_email_events v WHERE v.workspace_id=c.workspace_id AND NOT v.simulated
+          AND v.type IN ('accepted','send') AND v.created_at>greatest(now()-interval '48 hours',c.resumed_at)
+      ) accepted JOIN sending_emails e ON e.id=accepted.email_id AND e.workspace_id=c.workspace_id
+      WHERE NOT e.simulated AND e.status<>'suppressed' AND ${hostedMail}
+    ) volume)
   SELECT *,CASE WHEN (sends<200 AND bounces>=10) OR (sends>=200 AND bounces>sends*0.03) THEN 'Hosted sending paused: high hard-bounce volume in the last 24 hours.'
     WHEN (sends<200 AND complaints>=2) OR (sends>=200 AND complaints>sends*0.0005) THEN 'Hosted sending paused: high spam-complaint volume in the last 24 hours.' END AS reason FROM counts`));
   for (const row of result.rows) log('warn', { code: 'HOSTED_SENDING_AUTO_PAUSED', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints) });
@@ -36,8 +49,8 @@ export async function checkHostedHealth(runtime: Runtime) {
  * crossing 30 days in the same hour) rolled back the whole run every hour, so nothing was ever retired again.
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
+  try { await checkHostedHealth(runtime); } catch { log('error', { code: 'HOSTED_HEALTH_CHECK_FAILED', message: 'Continuing retention; the next hourly check will retry.' }); }
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
-  await checkHostedHealth(runtime);
   if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.

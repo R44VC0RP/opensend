@@ -4,8 +4,9 @@ import { ApiError, type Config } from './core.js';
 // SES counts destinations, not API calls. Only the exact AWS simulator domain is exempt;
 // a real address mixed into To/Cc/Bcc still consumes a slot.
 const simulatorSuffix = '@simulator.amazonses.com';
+export const realDestination = (address: string) => !address.toLowerCase().endsWith(simulatorSuffix);
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
-  [to].flat().concat(cc, bcc).filter(address => !address.toLowerCase().endsWith(simulatorSuffix)).length;
+  [to].flat().concat(cc, bcc).filter(realDestination).length;
 export const realDestinations = sql`(SELECT count(*)::int FROM jsonb_array_elements_text(e.to_addresses || e.cc_addresses || e.bcc_addresses) dest WHERE lower(dest) NOT LIKE ${'%' + simulatorSuffix})`;
 // A workspace may have switched providers in this window. Dispatched BYO mail has its own
 // SNS topic; queued mail has no topic yet and cannot survive a connection switch.

@@ -156,9 +156,9 @@ export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_st
 // This is a sending hold, not a provisioning failure: claims and inbound routing keep working.
 // `unhealthy` supplies the shared connection id, workspace, counts, and reason from the hourly snapshot.
 export const pauseHostedSending = (unhealthy: SQL) => sql`UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason
-  FROM (${unhealthy}) h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND h.reason IS NOT NULL
+  FROM (${unhealthy}) h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND pc.resumed_at IS NOT DISTINCT FROM h.resumed_at AND h.reason IS NOT NULL
   RETURNING pc.workspace_id,pc.pause_reason,h.sends,h.bounces,h.complaints`;
-export const resumeHostedSending = (wid: string) => sql`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL
+export const resumeHostedSending = (wid: string) => sql`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resumed_at=clock_timestamp()
   WHERE workspace_id=${wid} AND kind='shared' AND paused_at IS NOT NULL RETURNING workspace_id`;
 
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its

@@ -1,10 +1,16 @@
 -- Hosted connections enter ready on creation. Older releases did not store that time;
--- recover it from the provisioning job when present, otherwise start the ramp now.
+-- use durable workspace age for already-ready Hosted tenants. Jobs expire after 30 days.
 ALTER TABLE provider_connections ADD COLUMN created_at timestamptz NOT NULL DEFAULT now(),
-  ADD COLUMN paused_at timestamptz, ADD COLUMN pause_reason text,
+  ADD COLUMN paused_at timestamptz, ADD COLUMN pause_reason text, ADD COLUMN resumed_at timestamptz,
   ADD CHECK ((paused_at IS NULL) = (pause_reason IS NULL) AND (kind='shared' OR paused_at IS NULL));
-UPDATE provider_connections c SET created_at=j.created_at FROM jobs j
-WHERE c.kind='shared' AND j.workspace_id=c.workspace_id AND j.id='tenant.provision:'||c.id;
+UPDATE provider_connections c SET created_at=w.created_at FROM workspaces w
+WHERE c.kind='shared' AND c.tenant_state='ready' AND w.id=c.workspace_id;
+
+-- Private feedback bookkeeping, separate from event data returned by the API and webhooks.
+-- NULL means SES did not identify a recipient (including pre-migration events).
+ALTER TABLE sending_email_events ADD COLUMN recipient_hashes text[];
+CREATE INDEX sending_events_hosted_feedback ON sending_email_events(created_at,workspace_id,email_id)
+  WHERE type IN ('bounce','complaint') AND NOT simulated;
 
 -- Append to both views, keeping every existing column and all receive/setup behavior.
 CREATE OR REPLACE VIEW provider_sending_connections AS

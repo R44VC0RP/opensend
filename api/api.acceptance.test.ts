@@ -4135,7 +4135,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
-          SELECT gen_random_uuid()::text,$1,x,$2,$3,$4,now()-$5::interval FROM unnest($6::text[]) x`,
+          SELECT gen_random_uuid()::text,$1,x,$2,$3,$4,clock_timestamp()-$5::interval FROM unnest($6::text[]) x`,
           [wid,type,data,simulated,age,recipients.slice(start,end).map((r:Json)=>r.id)]);
       };
       await event('bounce',0,9,{bounceType:'Permanent'}); await event('bounce',0,1,{bounceType:'Permanent'}); // duplicate
@@ -4151,27 +4151,97 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const report = await runDispatcher(runtime,{region:REGION, accountId:pool}); assert.equal(report.sent,0); assert.equal(report.claimed,0);
       assert.deepEqual((await db.query('SELECT status,lease_until FROM sending_emails WHERE id=$1',[queued])).rows,[{status:'queued',lease_until:null}]);
       await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await pause(),null);
+      await checkHostedHealth(runtime); assert.equal(await pause(),null,'Reviewed events cannot re-pause the workspace.');
       const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const ses = t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
         assert.ok(cmd instanceof SendEmailCommand); return {MessageId:unique('fake-ses')};
       });
       assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
-      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1 AND type='bounce'`,[wid]);
-      await event('complaint',1,2); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      await event('complaint',1,2); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('complaint',2,3); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       await runtime.db.execute(resumeHostedSending(wid));
       await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
       // At 200 sends, six hard bounces are exactly 3% (not over); seven exceed the rate despite being <10.
-      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated)
-        SELECT gen_random_uuid()::text,$1,id,'accepted',false FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
+      const accept200 = () => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
+        SELECT gen_random_uuid()::text,$1,id,'accepted',false,clock_timestamp() FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
+      await accept200();
       assert.equal((await db.query(`SELECT count(*)::int n FROM sending_email_events WHERE workspace_id=$1`,[wid])).rows[0].n,200);
       await event('bounce',0,6,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await event('bounce',6,7,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.match((await pause()).reason,/hard-bounce/);
       await runtime.db.execute(resumeHostedSending(wid));
-      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1 AND type='bounce'`,[wid]);
+      await accept200();
       await event('complaint',0,1); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
       ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
       error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
+    });
+  });
+  test('MX: multi-recipient SES feedback uses real destinations, yesterday’s volume and the last operator resume', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const { ingestFeedbackBatch } = await import('./src/operations.js');
+      const { checkHostedHealth } = await import('./src/maintenance.js');
+      const { resumeHostedSending } = await import('./src/states.js');
+      const wid=runtime.config.workspaceId, account='111122223333', topicArn=`arn:aws:sns:${REGION}:${account}:feedback`;
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      const bcc=Array.from({length:49},(_,i)=>`bcc${i}@example.net`), simulator='success+fixture@simulator.amazonses.com';
+      // 100 accepted envelopes yesterday: 4,999 real recipients plus one simulator. No sends today.
+      await db.query(`WITH sent AS (INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,feedback_topic_arn,created_at)
+        SELECT 'email_'||md5($1||n),$1,$2,'fixture','support@example.net',jsonb_build_array(CASE WHEN n=1 THEN $5::text ELSE 'primary@example.net' END),'[]',$3,'Fixture','{}',false,'accepted',$1||n,$4,now()-interval '25 hours'
+        FROM generate_series(1,100) n RETURNING *)
+        INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at)
+        SELECT gen_random_uuid()::text,s.workspace_id,s.id,t,false,s.created_at FROM sent s CROSS JOIN unnest(ARRAY['accepted','send']) t`,[wid,REGION,JSON.stringify(bcc),topicArn,simulator]);
+      const feedback = async (kind:'Bounce'|'Complaint', n:number, addresses:string[]) => {
+        const rows=addresses.map(emailAddress=>({emailAddress})),timestamp=new Date().toISOString();
+        const [result]=await ingestFeedbackBatch(runtime,[{region:REGION,topicArn,messageId:unique('sns'),message:{eventType:kind,mail:{messageId:wid+n,sendingAccountId:account},
+          ...(kind==='Bounce'?{bounce:{bounceType:'Permanent',bouncedRecipients:rows,timestamp}}:{complaint:{complainedRecipients:rows,timestamp}})}}]);
+        assert.deepEqual(result,{ok:true});
+      };
+      const check = async () => { await checkHostedHealth(runtime); return ok(await local('GET','/v1/me')).connection.sendingPause; };
+      await feedback('Complaint',1,[bcc[0],bcc[1],simulator]); await feedback('Complaint',1,[bcc[0].toUpperCase()]);
+      assert.equal(await check(),null,'Two distinct complaints / 4,999 real recipients is below 0.05%, even with no sends today.');
+      await feedback('Complaint',1,[bcc[2]]); assert.match((await check()).reason,/complaint/,'Three complaints on one envelope exceed the rate; do not double-count Send callbacks.');
+      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await check(),null);
+      await feedback('Bounce',1,[...bcc.slice(0,9),simulator]); await feedback('Bounce',1,bcc.slice(0,8));
+      assert.equal(await check(),null,'Repeated hashes and a simulator bounce do not turn nine hard bounces into ten.');
+      await feedback('Bounce',2,[bcc[0]]); assert.match((await check()).reason,/hard-bounce/,'The same Bcc address on another email is a separate hard bounce.');
+      const {email_id,recipient_hashes}= (await db.query(`SELECT email_id,recipient_hashes FROM sending_email_events WHERE workspace_id=$1 AND type='bounce' AND cardinality(recipient_hashes)=9`,[wid])).rows[0];
+      assert.ok(recipient_hashes.every((h:string)=>/^[0-9a-f]{64}$/.test(h)));
+      const visible=JSON.stringify([ok(await local('GET',`/v1/emails/${email_id}/events`)),(await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1`,[wid])).rows]);
+      assert.ok(!visible.includes('recipient_hashes') && !visible.includes(bcc[0]) && !recipient_hashes.some((h:string)=>visible.includes(h)));
+    });
+  });
+  test('MX: migration 060 preserves a mature ready workspace’s tier without provisioning-job history', async t => {
+    await simulatedSesFixture(t, async ({runtime,db}) => {
+      const {readFile}=await import('node:fs/promises'), {sql}=await import('drizzle-orm');
+      const {hostedAllowance}=await import('./src/hosted-sending.js');
+      // Replay the actual migration over isolated pre-060 tables; this schema rolls back with the fixture.
+      await db.query(`CREATE SCHEMA upgrade060; SET LOCAL search_path TO upgrade060;
+        CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
+        CREATE TABLE provider_connections AS SELECT id,workspace_id,kind,region,aws_account_id,role_arn,external_id,feedback_topic_arn,tenant_state,state FROM public.provider_connections WITH NO DATA;
+        CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
+        CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated FROM public.sending_email_events WITH NO DATA;
+        CREATE TABLE sending_emails (LIKE public.sending_emails);
+        INSERT INTO workspaces VALUES('mature',now()-interval '45 days');
+        INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('mature','mature','shared','ready','ready');`);
+      await db.query(await readFile(new URL('./migrations/060_hosted_sending_guardrails.sql',import.meta.url),'utf8'));
+      runtime.config.multiTenant=true;
+      const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
+      assert.equal(await getCap('mature'),10000);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
+      assert.equal(await getCap('new'),100);
+    });
+  });
+  test('MX: an hourly health-check timeout does not prevent retention', async t => {
+    await simulatedSesFixture(t,async ({runtime,db})=>{
+      const {cleanup}=await import('./src/maintenance.js');
+      runtime.config.multiTenant=true;
+      const expired=unique('expired');
+      await db.query(`INSERT INTO jobs(id,type,workspace_id,payload,status,created_at) VALUES($1,'tenant.provision',$2,'{}','completed',now()-interval '31 days')`,[expired,runtime.config.workspaceId]);
+      const check=t.mock.method(runtime.db,'execute'); check.mock.mockImplementationOnce(()=>{throw Object.assign(new Error('statement timeout'),{code:'57014'});});
+      await cleanup(runtime);
+      assert.equal((await db.query('SELECT 1 FROM jobs WHERE id=$1',[expired])).rowCount,0);
     });
   });
   test('MX: account shards isolate sends, stored templates, quota and feedback', async t => {
