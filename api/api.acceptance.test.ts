@@ -1673,27 +1673,50 @@ describe('Hosted MCP OAuth and tools', () => {
     return output.response;
   }
 
-  test('hosted MCP accepts omitted-type loopback desktop registration without weakening redirect validation', async t => {
-    const db = await fixtureDatabase(t);
-    for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
-      const client = ok(await registerClient(t, db, { redirect_uris: [redirect] }), 201);
-      assert.equal(client.application_type, 'native');
-      assert.equal(client.token_endpoint_auth_method, 'none');
-      assert.deepEqual(client.redirect_uris, [redirect]);
-    }
-    for (const metadata of [
-      { application_type: 'web', redirect_uris: ['http://127.0.0.1/callback'] },
-      { redirect_uris: ['http://example.com/callback'] },
-      { redirect_uris: ['http://127.0.0.1/callback', 'https://example.com/callback'] },
-      { redirect_uris: ['http://127.0.0.1.evil.example/callback'] },
-      { redirect_uris: ['http://user:password@127.0.0.1/callback'] },
-      { redirect_uris: ['http://127.0.0.1/callback#fragment'] },
-    ]) {
-      const reply = await registerClient(t, db, metadata);
-      assert.equal(reply.status, 400, diagnostic(reply));
-      assert.equal(typeof reply.body.error, 'string', diagnostic(reply));
-      assert.equal(reply.body.client_id, undefined, diagnostic(reply));
-    }
+  test('hosted MCP bounds registration per peer and hour without weakening desktop redirect validation', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
+      const register = (metadata: Json = {}, ip = '192.0.2.1') => registerClient(t, db, metadata, (m,p,k,b) => request(m,p,k,b,{'x-opensend-client-ip':ip}));
+      for (const redirect of ['http://127.0.0.1/callback', 'http://localhost:49152/callback', 'http://[::1]:49152/callback']) {
+        const client = ok(await register({ redirect_uris: [redirect] }), 201);
+        assert.equal(client.application_type, 'native');
+        assert.equal(client.token_endpoint_auth_method, 'none');
+        assert.deepEqual(client.redirect_uris, [redirect]);
+      }
+      for (const metadata of [
+        { application_type: 'web', redirect_uris: ['http://127.0.0.1/callback'] },
+        { redirect_uris: ['http://example.com/callback'] },
+        { redirect_uris: ['http://127.0.0.1/callback', 'https://example.com/callback'] },
+        { redirect_uris: ['http://127.0.0.1.evil.example/callback'] },
+        { redirect_uris: ['http://user:password@127.0.0.1/callback'] },
+        { redirect_uris: ['http://127.0.0.1/callback#fragment'] },
+      ]) {
+        const reply = await register(metadata);
+        assert.equal(reply.status, 400, diagnostic(reply));
+        assert.equal(typeof reply.body.error, 'string', diagnostic(reply));
+        assert.equal(reply.body.client_id, undefined, diagnostic(reply));
+      }
+      ok(await register(), 201); // 10th registration attempt.
+      const limited = await register(); assert.equal(limited.status, 429); assert.ok(limited.headers.get('retry-after'));
+      ok(await register({}, '192.0.2.2'), 201);
+      await db.query("UPDATE api_request_budgets SET window_start=window_start-interval '1 hour' WHERE workspace_id=$1 AND used=11", [runtime.config.workspaceId]);
+      ok(await register(), 201);
+    });
+  });
+
+  test('hourly retention removes only old OAuth registrations without consent, access or refresh tokens', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
+      const { cleanup } = await import('./src/maintenance.js');
+      const ids: string[] = [];
+      for (let i=0; i<5; i++) ids.push(ok(await registerClient(t,db,{},request),201).client_id);
+      const [unused,fresh,consented,access,refresh] = ids;
+      await db.query("UPDATE oauth_client SET created_at=now()-interval '8 days' WHERE client_id=ANY($1) AND client_id<>$2", [ids,fresh]);
+      await db.query("INSERT INTO oauth_consent(id,client_id,scopes,created_at,updated_at) VALUES ($1,$1,'{}',now(),now())", [consented]);
+      await db.query("INSERT INTO oauth_access_token(id,token,client_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,now()+interval '1 hour',now(),'{}')", [access]);
+      await db.query("INSERT INTO oauth_refresh_token(id,token,client_id,user_id,expires_at,created_at,scopes) VALUES ($1,$1,$1,$2,now()+interval '1 hour',now(),'{}')", [refresh,manager!.userId]);
+      await cleanup(runtime);
+      const remaining = (await db.query('SELECT client_id FROM oauth_client WHERE client_id=ANY($1)', [ids])).rows.map(row=>row.client_id);
+      assert.deepEqual(remaining.sort(), ids.filter(id=>id!==unused).sort());
+    });
   });
 
   test('hosted MCP publishes the curated task catalog and composes campaign, contact, email and temporary-token workflows', async t => {

@@ -65,6 +65,21 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   const batch = (table: SQL, where: SQL) => () => sql`WITH gone AS (DELETE FROM ${table} WHERE ctid IN (SELECT ctid FROM ${table} WHERE ${where} LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone`;
   // Never erase contacts, consent, suppression, drafts, idempotency keys or active scheduled work.
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
+  // Do not cascade-delete a consent/token committed as we pick candidates: lock the parent first,
+  // then check its indexed references again in a fresh statement while FK inserts are fenced.
+  const unusedClient = sql`NOT EXISTS (SELECT FROM oauth_consent WHERE client_id=c.client_id)
+    AND NOT EXISTS (SELECT FROM oauth_access_token WHERE client_id=c.client_id)
+    AND NOT EXISTS (SELECT FROM oauth_refresh_token WHERE client_id=c.client_id)`;
+  while (Date.now() < deadline) {
+    const count = await runtime.db.transaction(async tx => {
+      const { rows } = await tx.execute<{id:string}>(sql`SELECT c.id FROM oauth_client c WHERE c.created_at < now()-interval '7 days'
+        AND c.user_id IS NULL AND c.reference_id IS NULL AND c.client_discovery_id IS NULL AND ${unusedClient} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED`);
+      if (!rows.length) return 0;
+      return (await tx.execute(sql`DELETE FROM oauth_client c WHERE c.id=ANY(${sql.param(rows.map(row => row.id))}::text[]) AND ${unusedClient}`)).rowCount ?? 0;
+    });
+    deleted.oauth_client = (deleted.oauth_client ?? 0) + count;
+    if (count < RETENTION_BATCH) break;
+  }
   await drain('agent_tokens', batch(sql`agent_tokens`, sql`expires_at < ${cutoff}`));
   await drain('audience_operation_plans', batch(sql`audience_operation_plans`, sql`expires_at < now() - interval '1 day'`));
   await drain('sending_email_events', batch(sql`sending_email_events`, sql`created_at < ${cutoff}`));

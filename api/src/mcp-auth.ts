@@ -4,7 +4,7 @@ import { APIError } from 'better-auth/api';
 import { createDpopReplayStore, enforceDpopBinding, isDpopBindingError, parseAccessTokenAuthorization, verifyJwsAccessToken } from 'better-auth/oauth2';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, like, ne, sql } from 'drizzle-orm';
-import { actor, ApiError, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
+import { actor, ApiError, digest, errors, IdParams, log, page as pageSchema, PageQuery, response, security } from './core.js';
 import type { Actor, App, DbExecutor, Permission, Runtime } from './core.js';
 import { currentGoogleIdentity, createAuth, isApprovedUser, membershipForApprovedUser, requireDashboardOrigin } from './google-auth.js';
 import { workspaces } from './db/workspaces.js';
@@ -205,6 +205,20 @@ async function protocolRequest(runtime: Runtime, request: Request): Promise<Resp
   if (request.method !== expected) return oauthError(405, 'invalid_request', 'Unsupported HTTP method.');
   try {
     if (url.search.length > 16 * 1024) return oauthError(400, 'invalid_request', 'OAuth request is too large.');
+    if (path === '/oauth2/register') {
+      // Node and Workers overwrite this header with the socket/edge peer, never X-Forwarded-For.
+      const peer = await digest(request.headers.get('x-opensend-client-ip') ?? 'unknown');
+      const { rows: [budget] } = await runtime.db.execute<{used: number; reset_at: string}>(sql`INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used)
+        VALUES (${runtime.config.workspaceId},${`public:oauth-register:${peer}`},date_trunc('hour',now()),1)
+        ON CONFLICT (workspace_id,key_id) DO UPDATE SET
+          used=CASE WHEN excluded.window_start>api_request_budgets.window_start THEN 1 ELSE least(api_request_budgets.used+1,11) END,
+          window_start=greatest(excluded.window_start,api_request_budgets.window_start) RETURNING used,window_start+interval '1 hour' AS reset_at`);
+      if (budget!.used > 10) {
+        const result = oauthError(429, 'slow_down', 'Too many client registrations. Retry after the hourly window resets.');
+        result.headers.set('Retry-After', new Date(budget!.reset_at).toUTCString());
+        return publicCors(result);
+      }
+    }
     if (sessionWrites.has(path)) requireDashboardOrigin(runtime, request.headers);
     const auth = createAuth(runtime, { mcp: true });
     // Init starts immediately (including resource seeding). Observe its failure
