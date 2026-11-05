@@ -12,7 +12,7 @@ function WorkspaceName({ canEdit }: { canEdit: boolean }) {
   const session = useSession()
   const workspaces = useApiQuery(['workspaces'], (_api, signal) => workspaceApi.list(signal))
   const current = workspaces.data?.find(workspace => workspace.id === session?.identity?.workspaceId)
-  return <section id="workspace" className="section stack settings-group">
+  return <section id="workspace" className={`section stack settings-group${canEdit ? ' settings-rule' : ''}`}>
     {workspaces.error ? <><SectionHeader title="Workspace" /><ErrorState error={workspaces.error} onRetry={() => void workspaces.refetch()} /></> : !current ? <div className="stack"><SectionHeader title="Workspace" actions={canEdit && <ControlSkeleton width={58} />} /><FieldSkeleton label="Name" /></div> : <WorkspaceNameForm key={current.id} name={current.name} canEdit={canEdit} />}
   </section>
 }
@@ -37,7 +37,7 @@ function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) 
   // Only owners manage owners; the last owner stays until another is promoted. Your own row is read-only.
   const manageable = (member: WorkspaceMember) => member.userId !== session?.identity?.id && (owner || member.role !== 'owner')
   const lastOwner = (member: WorkspaceMember) => member.role === 'owner' && owners <= 1
-  return <section className="section stack">
+  return <section className="section stack settings-rule">
     <SectionHeader title="Members" actions={<Button onClick={onInvite}>Invite teammate</Button>} />
     <MutationError error={update.error} />
     {members.error ? <ErrorState error={members.error} onRetry={() => void members.refetch()} /> : <DataTable loading={members.isPending} skeletonRows={2} rows={members.data ?? []} rowKey={member => member.id} empty={<EmptyState title="No members" />} columns={[
@@ -54,9 +54,9 @@ function Invitations({ owner }: { owner: boolean }) {
   const invitations = useApiQuery(['workspace-invitations'], (_api, signal) => workspaceApi.invitations(signal))
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
-  return <section className="section stack">
+  return <section className="section stack settings-rule">
     <SectionHeader title="Invitations" />
-    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={1} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={1} empty={<span className="muted">No pending invitations</span>} columns={[
+    {invitations.error ? <ErrorState error={invitations.error} onRetry={() => void invitations.refetch()} /> : <DataTable loading={invitations.isPending} skeletonRows={2} rows={invitations.data ?? []} rowKey={invitation => invitation.id} minRows={2} empty={<EmptyState title="No pending invitations" />} columns={[
       { key: 'email', label: 'Email', width: '40%', render: invitation => <span className="settings-break">{invitation.email}</span> },
       { key: 'role', label: 'Role', width: 160, render: invitation => roleLabel[invitation.role] },
       { key: 'expires', label: 'Expires', render: invitation => date(invitation.expiresAt) },

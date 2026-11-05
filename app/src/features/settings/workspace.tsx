@@ -11,17 +11,17 @@ import { useWebhooks, WebhooksSection } from './webhooks'
 import { WorkspaceSections } from './workspace-members'
 import { roleLabel } from '../../data/workspaces'
 
-function WorkspaceForm({workspace}: {workspace: Workspace}) {
+function WorkspaceForm({workspace, ruled}: {workspace: Workspace; ruled: boolean}) {
   const [name, setName] = useState(workspace.name)
   const save = useApiMutation((api, input: {name: string}) => api.workspace.update(input), 'Saved')
   async function submit(event: FormEvent) {event.preventDefault(); try {await save.mutateAsync({name: name.trim()})} catch { /* inline */ }}
-  return <form id="workspace" className="section stack settings-group" onSubmit={submit}><SectionHeader title="Workspace" actions={<Button type="submit" loading={save.isPending} variant="primary">Save</Button>} /><MutationError error={save.error} /><Field label="Name" htmlFor="workspace-name" error={fieldError(save.error, 'name')}><Input id="workspace-name" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} required /></Field></form>
+  return <form id="workspace" className={`section stack settings-group${ruled ? ' settings-rule' : ''}`} onSubmit={submit}><SectionHeader title="Workspace" actions={<Button type="submit" loading={save.isPending} variant="primary">Save</Button>} /><MutationError error={save.error} /><Field label="Name" htmlFor="workspace-name" error={fieldError(save.error, 'name')}><Input id="workspace-name" maxLength={120} value={name} onChange={event => setName(event.target.value)} disabled={save.isPending} required /></Field></form>
 }
 function SignedInSection() {
   const session = useSession()
   const access = useWorkspaceAccess()
   if (!session?.identity) return null
-  return <section className="section stack settings-group"><SectionHeader title="Signed in" /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl><div><Button onClick={() => session.logout()}>Sign out</Button></div></section>
+  return <section className="section stack settings-group settings-rule"><SectionHeader title="Signed in" actions={<Button onClick={() => session.logout()}>Sign out</Button>} /><dl className="settings-facts"><div><dt>Email</dt><dd>{session.identity.email || '—'}</dd></div><div><dt>{access.multiTenant ? 'Role' : 'Access'}</dt><dd>{access.role ? roleLabel[access.role] : session.identity.permissions.includes('manage') ? 'Administrator' : session.identity.permissions.join(', ')}</dd></div></dl></section>
 }
 // Sending, webhooks and the workspace live on one page; old tab links arrive as #webhooks or #workspace.
 export function SettingsPage() {
@@ -38,12 +38,12 @@ export function SettingsPage() {
   // Start the webhooks request alongside the workspace one instead of after it.
   useWebhooks(undefined, access.canAdminister)
   const {regionId} = useRegion()
-  return <div className="stack settings-ses">
+  return <div className="stack settings-ses settings-page">
     <PageHeader title="Settings" />
     {!access.multiTenant && workspace.isPending ? <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></> : <>
       {access.canAdminister && (access.multiTenant ? <SendingConnection /> : <RegionSetup />)}
       {access.canAdminister && <WebhooksSection />}
-      {access.multiTenant ? <WorkspaceSections /> : workspace.error ? <section id="workspace" className="section stack settings-group"><SectionHeader title="Workspace" /><ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /></section> : workspace.data && <WorkspaceForm key={workspace.data.id} workspace={workspace.data} />}
+      {access.multiTenant ? <WorkspaceSections /> : workspace.error ? <section id="workspace" className={`section stack settings-group${access.canAdminister ? ' settings-rule' : ''}`}><SectionHeader title="Workspace" /><ErrorState error={workspace.error} onRetry={() => void workspace.refetch()} /></section> : workspace.data && <WorkspaceForm key={workspace.data.id} workspace={workspace.data} ruled={access.canAdminister} />}
       <SignedInSection />
     </>}
   </div>
