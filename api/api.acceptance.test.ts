@@ -4091,6 +4091,19 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('request logs identify a rejected field without disclosing an address in its error message', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      const logs: string[] = [];
+      for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => logs.push(line));
+      const email = 'private@example.net';
+      const failure = error(await local('POST', '/v1/audience-query/query', { statement: `SELECT email FROM contacts WHERE email = ${email}` }), 422, 'AUDIENCEQL_INVALID');
+      assert.ok(failure.message.includes(email), 'The detailed API response is unchanged.');
+      const logged = logs.map(line => JSON.parse(line)).find(entry => entry.requestId === failure.requestId && entry.code === failure.code);
+      assert.equal(logged?.field, 'statement'); assert.equal(logged.message, undefined);
+      assert.ok(!logs.some(line => line.includes(email)));
+    });
+  });
+
   test('MX: Hosted admission, campaign release and dispatch share the rolling recipient cap and reputation hold', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { checkHostedHealth } = await import('./src/maintenance.js');

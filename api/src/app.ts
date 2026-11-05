@@ -101,7 +101,12 @@ export function createApp() {
     const known = error instanceof ApiError;
     const invalidJson = error instanceof SyntaxError;
     const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
-    log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, message: responseError.message, errorType: known ? undefined : error.name, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined, stack: known ? undefined : error.stack?.split('\n').slice(1).join('\n') });
+    // Messages and even record-key validation paths can contain caller-supplied addresses.
+    const field = responseError.field && /^[\w.]+(?:, [\w.]+)*$/.test(responseError.field) ? responseError.field : undefined;
+    const unexpected = !known && responseError.status >= 500;
+    log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, field,
+      errorType: unexpected ? error.name : undefined, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined,
+      stack: unexpected ? error.stack?.split('\n').filter(line => /^\s+at /.test(line) && !line.includes('@')).join('\n') : undefined });
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
   });
