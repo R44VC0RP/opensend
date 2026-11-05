@@ -6,6 +6,7 @@ import type { MailboxKey, MailboxKeyInput, MailboxPermission } from '../../data/
 import { date } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from './shared'
 import '../inbound/inbound.css'
+import './api-keys.css'
 
 const permissions: { value: MailboxPermission; label: string; hint: string }[] = [
   { value: 'read', label: 'Read', hint: 'List and read mail, events and attachments.' },
@@ -43,9 +44,11 @@ export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
     } catch { /* Shown in the form. */ }
   }
   return <section className="section stack">
-    <SectionHeader title="Inbound keys" actions={<Button onClick={openCreate}>Create inbound key</Button>} />
-    <p className="muted settings-section-note">For agents that read and send from specific <Link to="/inbound/addresses">inbound addresses</Link>. An inbound key cannot manage domains, addresses or other keys.</p>
-    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={2} minRows={2} rows={keys.data ?? []} rowKey={row => row.id}
+    <div className="keys-head">
+      <SectionHeader title="Inbound keys" actions={<Button onClick={openCreate}>Create inbound key</Button>} />
+      <p className="muted">For agents on chosen <Link to="/inbound/addresses">inbound addresses</Link>. Can't manage domains, addresses or other keys.</p>
+    </div>
+    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable className="keys-table--two-line" loading={keys.isPending} skeletonRows={2} minRows={2} rows={keys.data ?? []} rowKey={row => row.id}
       empty={<EmptyState title={showRevoked ? 'No inbound keys' : 'No active inbound keys'} action={<Button onClick={openCreate}>Create inbound key</Button>} />}
       columns={[
         { key: 'name', label: 'Name', width: '23%', render: row => <>{row.name}<div className="muted">Created {date(row.createdAt)}</div></> },
