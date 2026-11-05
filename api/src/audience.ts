@@ -98,12 +98,14 @@ async function boundedContacts(db: DbExecutor, identity: Actor, conditions: SQL[
 }
 // One INSERT ... SELECT captures membership, consent and only referenced personalization values.
 // Keyset-paging the live audience across transactions would not be a review snapshot.
-export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[]) {
+// The audience's lists and segments, locked for share when the caller snapshots, and the matching conditions over contacts.
+async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean) {
   const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
   const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
-  const lockedLists = await db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id)).for('share');
-  if (lockedLists.length !== listIds.length) notFound('List');
-  const lockedSegments = segmentIds.length ? await db.select().from(segments).where(and(scope(segments, identity), inArray(segments.id, segmentIds))).orderBy(asc(segments.id)).for('share') : [];
+  const listQuery = db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id));
+  if ((await (lock ? listQuery.for('share') : listQuery)).length !== listIds.length) notFound('List');
+  const segmentQuery = db.select().from(segments).where(and(scope(segments, identity), inArray(segments.id, segmentIds))).orderBy(asc(segments.id));
+  const lockedSegments = segmentIds.length ? await (lock ? segmentQuery.for('share') : segmentQuery) : [];
   if (lockedSegments.length !== segmentIds.length) notFound('Segment');
   // Set-based membership (no OFFSET 0 fence) lets the planner hash-join millions of members instead of probing per contact.
   const member = (listId: string) => sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
@@ -111,11 +113,26 @@ export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, 
   if (spec.segmentId) conditions.push(compileRule(lockedSegments.find(row => row.id === spec.segmentId)!.rule));
   for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${member(listId)})`);
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
+  return conditions;
+}
+/** Read-only counts of the live audience (the dashboard's pre-send check); nothing is frozen or locked. */
+export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>) {
+  const conditions = await audienceConditions(db, identity, spec, false);
+  const [row] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`SELECT count(*)::int AS matched,
+      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed')::int AS eligible,
+      count(*) FILTER (WHERE ${contacts.suppressed})::int AS suppressed,
+      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND ${contacts.marketingConsent} <> 'subscribed')::int AS unsubscribed
+    FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
+  return row!;
+}
+export async function snapshotCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, reviewId: string, propertyKeys: string[]) {
+  const conditions = await audienceConditions(db, identity, spec, true);
   // Hyperdrive ends any statement after 60 seconds, so a large audience (up to 2,000,000 contacts) is captured
   // in several bounded statements inside the caller's transaction: matching contacts are staged in 16 contact-ID
   // ranges, ordered once, then inserted in ordinal chunks. Each contact is evaluated exactly once.
   await db.execute(sql`SET LOCAL work_mem = '256MB'`);
-  await db.execute(sql`CREATE TEMP TABLE audience_snapshot (rank integer NOT NULL, id text NOT NULL, recipient jsonb NOT NULL, eligible boolean NOT NULL, suppressed boolean NOT NULL) ON COMMIT DROP`);
+  // A launch that fails after this point and is retried inside the same transaction (tests) must not trip over its own staging tables.
+  await db.execute(sql`DROP TABLE IF EXISTS audience_snapshot, audience_ordered; CREATE TEMP TABLE audience_snapshot (rank integer NOT NULL, id text NOT NULL, recipient jsonb NOT NULL, eligible boolean NOT NULL, suppressed boolean NOT NULL) ON COMMIT DROP`);
   const bounds = ['', ...'123456789abcdef'.split('').map(digit => `con_${digit}`), null];
   let staged = 0;
   for (let index = 0; index < bounds.length - 1; index++) {

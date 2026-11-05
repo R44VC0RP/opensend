@@ -286,16 +286,6 @@ function actionTool(name: string, description: string, actions: Record<string, M
     return { steps: [{ operation, args: next }] };
   }, actionOutputSchema(actions));
 }
-function withoutBodyProperty(source: McpOperation, property: string): McpOperation {
-  const input = structuredClone(source.tool.inputSchema) as ObjectValue;
-  for (const schema of Object.values<ObjectValue>(input.$defs ?? {})) if (schema.properties?.[property]) {
-    delete schema.properties[property];
-    if (Array.isArray(schema.required)) schema.required = schema.required.filter((name: string) => name !== property);
-  }
-  const tool = { ...source.tool, inputSchema: input as Tool['inputSchema'] };
-  const operation = { ...source, tool, validate: validator(tool.inputSchema) };
-  freeze(tool); Object.freeze(operation); return operation;
-}
 function findSchema(source: McpOperation, extra: ObjectValue = {}): Tool['inputSchema'] {
   const schema = structuredClone(source.tool.inputSchema) as ObjectValue;
   schema.properties = { ...(schema.properties ?? {}), ...extra };
@@ -331,7 +321,8 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('deleteTemplate', 'Delete a global campaign template. Campaigns previously created from it remain independent.', 'deleteCampaignTemplate');
   add(actionTool('saveCampaign', 'Create a campaign draft or update its complete revision-protected draft.', { create: need('createCampaign', raw), update: need('updateCampaign', raw) }));
   direct('previewCampaign', 'Render the saved campaign draft as complete HTML and plain text without preparing or sending its audience.', 'previewCampaign');
-  add(actionTool('deliverCampaign', `Test, send, schedule, pause, resume, pace or cancel campaign delivery. Send and schedule snapshot and validate the current revision automatically; supply revision only, plus optional pacing { perDay, autoPause, rateShare } to release at most perDay recipients per rolling 24 hours using at most rateShare (default 0.5) of the SES per-second send rate. Delivery always respects the SES 24-hour quota and auto-pauses on high bounce/complaint rates unless autoPause is false. pause stops releasing new recipients, resume continues, pacing changes perDay/autoPause while sending. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: withoutBodyProperty(need('sendCampaign', raw), 'reviewId'), schedule: withoutBodyProperty(need('scheduleCampaign', raw), 'reviewId'), pause: need('pauseCampaign', raw), resume: need('resumeCampaign', raw), pacing: need('setCampaignPacing', raw), cancel: need('cancelCampaign', raw) }, 'mode'));
+  direct('previewCampaignAudience', 'Count the saved audience right now (matched, eligible, suppressed, unsubscribed) before asking for send confirmation; nothing is frozen or sent.', 'previewCampaignAudience');
+  add(actionTool('deliverCampaign', `Test, send, schedule, pause, resume, pace or cancel campaign delivery. Send and schedule snapshot and validate the current revision automatically; supply revision only, plus optional pacing { perDay, autoPause, rateShare } to release at most perDay recipients per rolling 24 hours using at most rateShare (default 0.5) of the SES per-second send rate. Delivery always respects the SES 24-hour quota and auto-pauses on high bounce/complaint rates unless autoPause is false. pause stops releasing new recipients, resume continues, pacing changes perDay/autoPause while sending. ${EMAIL_SEND_ROUTING} ${EMAIL_SEND_CONFIRMATION}`, { test: need('testCampaign', raw), send: need('sendCampaign', raw), schedule: need('scheduleCampaign', raw), pause: need('pauseCampaign', raw), resume: need('resumeCampaign', raw), pacing: need('setCampaignPacing', raw), cancel: need('cancelCampaign', raw) }, 'mode'));
   direct('archiveCampaign', 'Archive or restore a campaign without deleting its content or history.', 'setCampaignArchived');
   direct('deleteCampaign', 'Permanently delete an eligible campaign.', 'deleteCampaign');
 

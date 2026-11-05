@@ -213,7 +213,7 @@ send so its reset happens while idle):
 - `FEEDBACK_BATCH`: batch size and failures; `SES_FEEDBACK_INGESTED`: processed/deferred/duplicate.
 - Database: `sending_emails` by status for the campaign (any `acceptance_unknown` with
   `INTERRUPTED_PROVIDER_ATTEMPT` means a host reset mid-call); `jobs` should show only
-  `campaign.prepare/expand/finish`.
+  one `campaign.run:<id>` row per active campaign.
 
 Benchmark artifacts live in `api/.benchmark-results/` (gitignored).
 

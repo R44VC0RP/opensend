@@ -46,7 +46,7 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
 
 export function AgentPrompt({ prompt }: { prompt: string }) {
   return <section className="section stack developer-section" aria-label="Agent prompt">
-    <SectionHeader title="Agent prompt" actions={<CopyAction value={prompt} label="Copy agent prompt" />} />
+    <SectionHeader title="Agent prompt" actions={<CopyAction value={prompt} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />} />
     <p className="muted developer-copy">Paste this into your coding agent. It has this workspace’s real values; the API key stays in your environment.</p>
     <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code>{prompt}</code></pre>
   </section>
@@ -73,11 +73,11 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   const label = clients.find(item => item.value === client)!.label
   return <section className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
-    <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" size="sm" /></div>
+    <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
     <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s Google login; no API key or local MCP process is needed.</p>
     <div className="developer-client-bar">
       <Tabs label="MCP client" value={client} onValueChange={setClient} items={clients} />
-      <CopyAction key={`${client}-${access}`} value={snippet} label={`Copy ${label} setup`} />
+      <CopyAction key={`${client}-${access}`} value={snippet} label={`Copy ${label} setup`} variant="ghost" size="sm" compact className="developer-copy-icon" />
     </div>
     {/* Every client's setup is laid out in one cell, so switching tabs never changes the section's height. */}
     <div className="developer-client-panels">{clients.map(({ value, label: name }) => <div key={value} className="stack developer-client-panel" data-active={value === client || undefined} inert={value !== client}>

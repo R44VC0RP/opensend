@@ -25,11 +25,15 @@ export const LOST_GRACE_MS = 2 * 3_600_000;
 export type IdentityFacts = {
   ses: Pick<GetEmailIdentityCommandOutput, 'VerificationStatus' | 'VerifiedForSendingStatus' | 'DkimAttributes' | 'MailFromAttributes'>;
   proven: boolean; mx: MxReport | null; note: string | null;
+  /** Verified by the exclusive BYO account, not an identity managed by the claim's ownership tag. */
+  imported?: true;
 };
 export type ClaimState = { sending_state: SendingState; receiving_state: ReceivingState; receiving_host: string | null; lost_since: string | null; receiving_lost_since: string | null };
 export type ClaimEvidence = {
   /** DKIM signed, ownership proven and SES verified for sending; undefined when SES was not read (MX-only upkeep). */
   sending: boolean | undefined;
+  /** SES directly revoked an imported domain's sending/DKIM capability (no ownership grace on that evidence). */
+  sendingRevoked?: boolean;
   /** The SES identity exists but is not this claim's: terminal until the domain is added again. */
   unavailable?: boolean;
   /** The SES identity itself is gone: no grace, nothing to hold on to. */
@@ -66,7 +70,7 @@ export function transitionClaim(current: ClaimState, e: ClaimEvidence, now = Dat
   if (e.unavailable) sending = 'failed';
   else if (e.sending) sending = 'verified';
   else if (e.sending === undefined) sending = current.sending_state === 'lost' && expired(current.lost_since) ? 'pending' : current.sending_state;
-  else if (e.definitive || !wasHeld) sending = 'pending';
+  else if (e.definitive || e.sendingRevoked || !wasHeld) sending = 'pending';
   else if (current.sending_state === 'verified') sending = 'lost';
   else sending = expired(current.lost_since) ? 'pending' : 'lost';
   // Ownership counts while it is observed or while sending still holds it through its grace.
@@ -106,15 +110,20 @@ export async function applyClaim(db: DbExecutor, claim: ClaimRef, next: ClaimSta
   const status = projectedMailboxStatus(next);
   await db.execute(sql`WITH claim AS (UPDATE domain_claims SET sending_state=${next.sending_state},receiving_state=${next.receiving_state},receiving_host=${next.receiving_host},
       lost_since=${next.lost_since}::timestamptz,receiving_lost_since=${next.receiving_lost_since}::timestamptz,identity=${JSON.stringify(facts)}::jsonb
-      WHERE name=${claim.name} AND token=${claim.token} AND connection_id=${claim.connectionId} RETURNING workspace_id)
+      WHERE name=${claim.name} AND token=${claim.token} AND connection_id=${claim.connectionId} RETURNING workspace_id,claim_scope)
     INSERT INTO mailbox_domains AS m(id,workspace_id,domain_id,name,region,receiving_host,status,enabled_at,mx,checked_at)
-    SELECT ${id('mdom')},workspace_id,${claim.domainId},${claim.name},${claim.region},${suggestedHost},${status},CASE WHEN ${!!next.receiving_host} THEN now() END,${mx ? JSON.stringify(mx) : null}::jsonb,${mx?.checkedAt ?? null}::timestamptz FROM claim
+    SELECT ${id('mdom')},workspace_id,${claim.domainId},${claim.name},${claim.region},${suggestedHost},${status},CASE WHEN ${!!next.receiving_host} THEN now() END,${mx ? JSON.stringify(mx) : null}::jsonb,${mx?.checkedAt ?? null}::timestamptz FROM claim WHERE claim_scope<>'account'
     ON CONFLICT ON CONSTRAINT mailbox_domains_name DO UPDATE SET domain_id=excluded.domain_id,parent_id=NULL,region=excluded.region,receiving_host=excluded.receiving_host,status=excluded.status,last_error=NULL,
       enabled_at=CASE WHEN excluded.enabled_at IS NOT NULL AND m.enabled_at IS NOT NULL AND m.status='active' THEN m.enabled_at ELSE excluded.enabled_at END,
       mx=coalesce(excluded.mx,m.mx),checked_at=coalesce(excluded.checked_at,m.checked_at),updated_at=now()`);
 }
 /** Records SES facts without touching state: the creating request and MAIL FROM changes. */
 export const identityOnly = (ses: IdentityFacts['ses']): IdentityFacts => ({ ses, proven: false, mx: null, note: null });
+/** The importer only passes domains just verified by GetEmailIdentity. Leave receiving off: importing sending
+ * identities is not permission to provision receipt rules for the account's existing domains. */
+export const verifyImportedClaims = (connection: string, domains: {name: string; ses: IdentityFacts['ses']}[]) => sql`UPDATE domain_claims dc SET sending_state=CASE WHEN d.ses->'DkimAttributes' @> '{"SigningEnabled":true,"Status":"SUCCESS"}' THEN 'verified' ELSE 'pending' END,
+  identity=jsonb_build_object('ses',d.ses,'proven',true,'imported',true,'mx',NULL,'note',NULL)
+  FROM jsonb_to_recordset(${JSON.stringify(domains)}::jsonb) d(name text,ses jsonb) WHERE dc.connection_id=${connection} AND dc.name=d.name`;
 /** BYO only: the receipt rule now lists these hosts, so claims waiting on it start routing. */
 export async function activateReceiving(db: DbExecutor, workspaceId: string, connectionId: string, region: string, hosts: string[]) {
   await db.execute(sql`WITH activated AS (UPDATE domain_claims dc SET receiving_state='active' FROM operation_domains d
@@ -143,3 +152,90 @@ export const queueTenantJob = (source: SQL) => sql`INSERT INTO jobs(id,type,work
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
 export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
+
+// Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
+// delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts
+// recipients released from the reservation; none of them is a second status. A launch snapshots the audience and
+// moves draft/failed -> preparing; the one `campaign.run` job validates recipients (preparing), waits for the
+// schedule (scheduled), releases rows into the dispatch queue (sending) and the dispatcher marks the campaign done
+// inline when its last row leaves queued/attempting. paused is entered by the user or the health check and leaves
+// to wherever the cursors say (runningState). failed keeps its error: with nothing released yet it can be edited (-> draft)
+// or launched again from a fresh snapshot; once recipients were released it can only resume from `expanded` on the same
+// snapshot (never a second snapshot, which would send to the released recipients again) or be canceled.
+export const CAMPAIGN_STATES = ['draft', 'preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'] as const;
+export type CampaignState = typeof CAMPAIGN_STATES[number];
+export type RunningState = 'preparing' | 'scheduled' | 'sending';
+export const campaignTransitions: Record<CampaignState, CampaignState[]> = {
+  draft: ['preparing'], failed: ['preparing', 'draft', 'scheduled', 'sending', 'canceled'],
+  preparing: ['scheduled', 'sending', 'paused', 'failed', 'canceled'], scheduled: ['sending', 'paused', 'failed', 'canceled'],
+  sending: ['paused', 'done', 'failed', 'canceled'], paused: ['preparing', 'scheduled', 'sending', 'canceled'], done: [], canceled: [],
+};
+export function assertCampaignTransition(from: CampaignState, to: CampaignState) {
+  if (!campaignTransitions[from].includes(to)) throw new Error(`Invalid campaign transition ${from} -> ${to}`);
+}
+/** States with an outstanding recipient reservation (and a run job that may still act). */
+export const CAMPAIGN_ACTIVE = ['preparing', 'scheduled', 'sending', 'paused'] as const satisfies readonly CampaignState[];
+/** States the run job acts in; paused and the terminal states make it a no-op. */
+export const CAMPAIGN_RUNNING = ['preparing', 'scheduled', 'sending'] as const satisfies readonly RunningState[];
+/** Editable, deletable and launchable from scratch: a draft, or a failed launch that released nothing. */
+export const campaignEditable = (row: { state: CampaignState; expanded: number }) => row.state === 'draft' || (row.state === 'failed' && row.expanded === 0);
+/** A failed launch that already released recipients can only continue from its cursor or be canceled. */
+export const campaignResumable = (row: { state: CampaignState; expanded: number }) => row.state === 'paused' || (row.state === 'failed' && row.expanded > 0);
+export const campaignActive = (c: SQL = sql`c`) => sql`${c}.state IN ('preparing','scheduled','sending','paused')`;
+/** Holds a recipient reservation: active, or failed after releasing some recipients (resumable, so still counted). */
+export const campaignReserved = (c: SQL = sql`c`) => sql`(${campaignActive(c)} OR (${c}.state='failed' AND ${c}.expanded>0))`;
+const editableRow = sql`(state='draft' OR (state='failed' AND expanded=0))`;
+/** Where a launched campaign continues from its cursors: preparing until every recipient is validated, then its schedule, then sending. */
+export function runningState(row: { prepared: number; total: number; scheduledAt: string | null }, now = Date.now()): RunningState {
+  if (row.prepared < row.total) return 'preparing';
+  return row.scheduledAt && Date.parse(row.scheduledAt) > now ? 'scheduled' : 'sending';
+}
+type CampaignRef = { workspaceId: string; id: string };
+const campaignRow = (ref: CampaignRef) => sql`workspace_id=${ref.workspaceId} AND id=${ref.id}`;
+const states = (list: readonly CampaignState[]) => sql.join(list.map(state => sql`${state}`), sql`,`);
+/** One fenced statement: the row moves to `to` only from one of `from`, with `set` as the only other change. Returns the row's id when it moved. */
+export function moveCampaign(ref: CampaignRef, from: readonly CampaignState[], to: CampaignState, set: SQL = sql``, guard: SQL = sql`true`) {
+  for (const state of from) assertCampaignTransition(state, to);
+  return sql`UPDATE sending_campaigns SET state=${to},updated_at=now()${set} WHERE ${campaignRow(ref)} AND state IN (${states(from)}) AND ${guard} RETURNING id`;
+}
+/** Cursor or setting changes that keep the state; fenced on it so a paused or canceled campaign is never advanced. */
+export const progressCampaign = (ref: CampaignRef, state: CampaignState, set: SQL) => sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE ${campaignRow(ref)} AND state=${state} RETURNING id`;
+export type CampaignLaunch = { reviewId: string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null };
+/** draft, or failed with nothing released -> preparing with a fresh snapshot: every cursor and setting starts over; the error of a failed launch is cleared. */
+export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampaign(ref, ['draft', 'failed'], 'preparing', sql`,review_id=${l.reviewId},actor_key_id=${l.actorKeyId},simulated=${l.simulated},total=${l.total},prepared=0,expanded=0,canceled=0,error=NULL,request_id=${l.requestId},
+  scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL`, editableRow);
+/** A new revision: draft, or failed with nothing released -> draft with no snapshot; a failed launch's counters and error go with it. */
+export const reviseCampaign = (ref: CampaignRef, set: SQL) => sql`UPDATE sending_campaigns SET state='draft',updated_at=now(),review_id=NULL,error=NULL,total=0,prepared=0,expanded=0,canceled=0,scheduled_at=NULL${set} WHERE ${campaignRow(ref)} AND ${editableRow} RETURNING *`;
+export const pauseCampaign = (ref: CampaignRef, reason: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'paused', sql`,paused_at=now(),pause_reason=${JSON.stringify(reason)}::jsonb,waiting_reason=NULL,waiting_until=NULL,health_checked_at=now()`);
+/** paused, or failed after releasing some recipients, continues from its cursors on the same snapshot; the failure is cleared. */
+export const resumeCampaign = (ref: CampaignRef, to: RunningState) => moveCampaign(ref, ['paused', 'failed'], to, sql`,paused_at=NULL,pause_reason=NULL,error=NULL,health_checked_at=now()`, sql`(state='paused' OR expanded>0)`);
+export const cancelCampaign = (ref: CampaignRef, error: { code: string; message: string } | null) => moveCampaign(ref, [...CAMPAIGN_ACTIVE, 'failed'], 'canceled', sql`,canceled=canceled+(total-expanded),waiting_reason=NULL,waiting_until=NULL${error ? sql`,error=${JSON.stringify(error)}::jsonb` : sql``}`);
+export const failCampaign = (ref: CampaignRef, error: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'failed', sql`,error=${JSON.stringify(error)}::jsonb,scheduled_at=NULL,waiting_reason=NULL,waiting_until=NULL`);
+/** Preparation advanced to `prepared`; when the whole list is validated the campaign moves to its schedule or straight to sending. */
+export const recordPrepared = (ref: CampaignRef, prepared: number, next: RunningState) => next === 'preparing' ? progressCampaign(ref, 'preparing', sql`,prepared=${prepared}`) : moveCampaign(ref, ['preparing'], next, sql`,prepared=${prepared}`);
+export const startSending = (ref: CampaignRef) => moveCampaign(ref, ['scheduled'], 'sending');
+export const recordExpanded = (ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number) => progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=NULL,waiting_until=NULL`);
+export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
+export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
+/**
+ * sending -> done once every recipient is released and no row is queued or attempting. The dispatcher runs it once
+ * per draining batch over the campaigns it moved rows for (locking only campaign rows, after the row statements, so it
+ * never serializes concurrent shards nor deadlocks with cancel or the run job); the interrupted-attempt sweep appends
+ * it over every sending campaign so a missed edge can never leave one sending with nothing queued. `refs` yields
+ * (workspace_id, campaign_id); `leaving` the ids the same statement is finishing, which its own subqueries cannot see yet.
+ */
+export const finishCampaigns = (refs: SQL, leaving: SQL = sql`SELECT NULL::text AS id WHERE false`) => sql`UPDATE sending_campaigns c SET state='done',updated_at=clock_timestamp()
+  FROM (${refs}) x WHERE c.workspace_id=x.workspace_id AND c.id=x.campaign_id AND c.state='sending' AND c.expanded=c.total
+    AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.campaign_id=c.id AND e.status IN ('queued','attempting') AND NOT EXISTS (SELECT 1 FROM (${leaving}) l WHERE l.id=e.id))`;
+/**
+ * The campaign's one job: keyed by campaign so launch, resume and pacing changes requeue the same row instead of adding
+ * one per step. Every (re)queue carries a fresh `run` token in the payload and the job runner fences its completion on it,
+ * so a worker still holding the retired run of a pause -> resume cannot complete or requeue the new run's row.
+ */
+export const campaignRunJobId = (campaignId: string) => `campaign.run:${campaignId}`;
+export const queueCampaignRun = (ref: CampaignRef, payload: Record<string, unknown>, availableAt: string | null = null) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES (${campaignRunJobId(ref.id)},'campaign.run',${ref.workspaceId},${JSON.stringify({ campaignId: ref.id, ...payload, run: id('run') })}::jsonb,coalesce(${availableAt}::timestamptz,now()))
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL`;
+/** Pause and cancel retire a waiting run; a run in flight sees the new state at its next fenced statement and stops by itself. */
+export const retireCampaignRun = (ref: CampaignRef, reason: string) => sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=${reason} WHERE id=${campaignRunJobId(ref.id)} AND status='pending'`;
+export const wakeCampaignRun = (ref: CampaignRef) => sql`UPDATE jobs SET available_at=now() WHERE id=${campaignRunJobId(ref.id)} AND status='pending'`;

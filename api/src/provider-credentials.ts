@@ -10,7 +10,7 @@ export function platformCredentials(runtime: Runtime) {
   return runtime.config.aws;
 }
 function sts(region: string, credentials: Credentials) {
-  return new STSClient({ region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 2, requestHandler: new FetchHttpHandler({ requestTimeout: 10000 }) });
+  return new STSClient({ region, credentials, ignoreConfiguredEndpointUrls: true, maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 4000 }) });
 }
 export async function caller(region: string, credentials: Credentials) {
   const client = sts(region, credentials);
@@ -25,12 +25,21 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
   const client = sts(region, platform);
   try {
     const input = { RoleArn: roleArn, RoleSessionName: 'OpenSendMX', DurationSeconds: 3600 };
-    const { Credentials: c } = await client.send(new AssumeRoleCommand({ ...input, ExternalId: externalId }));
+    const opts = { abortSignal: AbortSignal.timeout(4000) };
+    const probe = async (ExternalId?: string) => {
+      try { await client.send(new AssumeRoleCommand({ ...input, ExternalId }), opts); }
+      catch (e) { if (e instanceof Error && e.name === 'AccessDenied') return; throw e; }
+      throw new ApiError(409, 'EXTERNAL_ID_REQUIRED', 'The customer role must require its connection external ID.');
+    };
+    // One bounded STS round trip, including the absent and incorrect external-ID checks. Never
+    // grant credentials from an unverified positive response or cache a failed proof.
+    const [result] = await Promise.all([client.send(new AssumeRoleCommand({ ...input, ExternalId: externalId }), opts),
+      ...(verify ? [probe(), probe(crypto.randomUUID())] : [])]);
+    const c = result.Credentials;
     if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken || !c.Expiration) throw new ApiError(503, 'AWS_SESSION_INVALID', 'STS returned incomplete session credentials.');
     if (verify) {
-      // Do not accept a role whose trust policy ignores the workspace-specific external ID.
-      try { await client.send(new AssumeRoleCommand(input)); throw new ApiError(409, 'EXTERNAL_ID_REQUIRED', 'The customer role must require its connection external ID.'); }
-      catch (error) { if (!(error instanceof Error && error.name === 'AccessDenied')) throw error; }
+      const expected = /^arn:aws:iam::(\d{12}):role\/(OpenSendMX-[a-f0-9]{20})$/.exec(roleArn);
+      if (!expected || result.AssumedRoleUser?.Arn !== `arn:aws:sts::${expected[1]}:assumed-role/${expected[2]}/${input.RoleSessionName}`) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer role and account.');
     }
     const value = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration };
     if (sessions.size >= 256) sessions.delete(sessions.keys().next().value!);

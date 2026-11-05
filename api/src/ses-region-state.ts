@@ -4,6 +4,7 @@ import { sesRegions, sesSettings } from './db/ses-regions.js';
 import { mailboxRegions } from './db/mailbox.js';
 import { campaigns, emails } from './db/sending.js';
 import { jobs } from './db/core.js';
+import { CAMPAIGN_ACTIVE } from './states.js';
 import { feedbackTarget, setupResources } from './ses-setup.js';
 
 export const discoveryTarget = (config: Config) => JSON.stringify([config.publicUrl, feedbackTarget(config)]);
@@ -123,7 +124,7 @@ export async function configureRegion(runtime: Runtime, workspaceId: string, reg
     if (input.enabled === false) {
       if (settings.defaultRegion === region || input.makeDefault) throw new ApiError(409, 'REGION_DEFAULT_REQUIRED', 'Choose another default region before disabling this one.');
       const pending = await tx.select({ id: emails.id }).from(emails).where(and(eq(emails.workspaceId, workspaceId), eq(emails.region, region), inArray(emails.status, ['queued', 'attempting', 'acceptance_unknown']))).limit(1);
-      const scheduled = await tx.select({ id: campaigns.id }).from(campaigns).where(and(eq(campaigns.workspaceId, workspaceId), sql`${campaigns.draft}->>'region'=${region}`, inArray(campaigns.status, ['scheduled', 'sending']))).limit(1);
+      const scheduled = await tx.select({ id: campaigns.id }).from(campaigns).where(and(eq(campaigns.workspaceId, workspaceId), sql`${campaigns.draft}->>'region'=${region}`, inArray(campaigns.state, [...CAMPAIGN_ACTIVE]))).limit(1);
       const provisioning = await tx.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.workspaceId, workspaceId), eq(jobs.type, 'ses.provision'), sql`${jobs.payload}->>'region'=${region}`, inArray(jobs.status, ['pending', 'running']))).limit(1);
       if (pending.length || scheduled.length || provisioning.length) throw new ApiError(409, 'REGION_IN_USE', 'This region has queued, in-flight, or uncertain work. Resolve it before disabling the region.');
       enabled = enabled.filter(value => value !== region);

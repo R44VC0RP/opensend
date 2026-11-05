@@ -123,8 +123,8 @@ export function SectionHeader({ title, actions }: { title: ReactNode; actions?: 
 }
 function statusTone(status: string): Tone {
   const value = status.trim().toLowerCase().replaceAll(' ', '_');
-  if (['delivered', 'sent', 'active', 'verified', 'enabled', 'subscribed', 'healthy', 'connected', 'completed', 'success', 'production'].includes(value)) return 'success';
-  if (['pending', 'scheduled', 'sending', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delivery_delayed', 'sandbox', 'probation', 'issue'].includes(value)) return 'warning';
+  if (['delivered', 'sent', 'done', 'active', 'verified', 'enabled', 'subscribed', 'healthy', 'connected', 'completed', 'success', 'production'].includes(value)) return 'success';
+  if (['pending', 'preparing', 'scheduled', 'sending', 'paused', 'queued', 'warning', 'verifying', 'bounced', 'deferred', 'delivery_delayed', 'sandbox', 'probation', 'issue'].includes(value)) return 'warning';
   if (['failed', 'complaint', 'error', 'rejected', 'suppressed', 'shutdown'].includes(value)) return 'danger';
   return 'neutral';
 }

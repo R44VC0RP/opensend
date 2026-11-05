@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
+import { campaignActive } from './states.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -38,14 +39,14 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     ), links AS (
       DELETE FROM sending_attachment_links l USING gone e WHERE l.owner_type = 'email' AND l.owner_id = e.id AND l.workspace_id = e.workspace_id
     ) SELECT count(*)::int AS n FROM gone`);
-  // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a current review
-  // or unfinished delivery, including a failed expansion with an outstanding reservation.
+  // Retire lightweight preparation rows after terminal/obsolete work ages out. Never purge a campaign's current
+  // snapshot or one with an outstanding reservation (including a failed launch).
   await drain('sending_review_recipients', () => sql`WITH expired AS (
       SELECT r.review_id, r.ordinal FROM sending_review_recipients r
       JOIN sending_campaign_reviews v ON v.id = r.review_id
       WHERE v.created_at < ${cutoff}
         AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
-          AND (c.updated_at >= ${cutoff} OR c.status IN ('scheduled','sending') OR c.preparing_review_id = v.id OR (c.status = 'reviewed' AND c.review_id = v.id)))
+          AND (c.updated_at >= ${cutoff} OR ${campaignActive()} OR c.review_id = v.id))
       LIMIT ${RETENTION_BATCH}
     ), gone AS (DELETE FROM sending_review_recipients r USING expired e WHERE r.review_id = e.review_id AND r.ordinal = e.ordinal RETURNING 1)
     SELECT count(*)::int AS n FROM gone`);
@@ -54,7 +55,7 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
       AND v.created_at < ${cutoff}
       AND NOT EXISTS (SELECT 1 FROM sending_review_recipients r WHERE r.review_id = v.id)
       AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.id = v.campaign_id AND c.workspace_id = v.workspace_id
-        AND (c.status IN ('scheduled','sending') OR c.preparing_review_id = v.id OR (c.status = 'reviewed' AND c.review_id = v.id)))`);
+        AND (${campaignActive()} OR c.review_id = v.id))`);
   await drain('operation_delivery_attempts', batch(sql`operation_delivery_attempts`, sql`created_at < ${cutoff}`));
   await drain('operation_deliveries', batch(sql`operation_deliveries`, sql`created_at < ${cutoff} AND status NOT IN ('pending','paused')`));
   await drain('operation_events', batch(sql`operation_events`, sql`created_at < ${cutoff}`));

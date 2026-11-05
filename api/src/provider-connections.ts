@@ -2,23 +2,24 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
-import { awsError, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, type SesDiscovery } from './ses-setup.js';
+import { awsError, discoverSes, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
+import { importByoClaims } from './domain-claims.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
-import { MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
+import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { preparePoolReceiving } from './mailbox-setup.js';
 import { releaseConnectionDomains } from './operations.js';
-import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
+import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const Kind = z.enum(['shared', 'byo']);
 const Create = z.object({ kind: Kind, region: z.string().max(32).regex(regionPattern).optional() }).strict().openapi('CreateConnection');
 const AccountId = z.string().regex(/^\d{12}$/).openapi({ example: '123456789012' });
-const State = z.enum(CONNECTION_STATES).describe('awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.');
+const State = z.enum(CONNECTION_STATES).describe('awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.');
 const Tenant = z.enum(TENANT_STATES).describe('Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.');
-const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
+const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
 export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant }).openapi('ConnectionSummary');
-type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null };
+type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
 
 function owner(c: Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -52,15 +53,15 @@ const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-sout
 const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
-  if (row.kind === 'byo' && row.state !== 'ready') {
+  if (row.kind === 'byo' && (row.state === 'awaiting_role' || row.state === 'failed')) {
     const params = new URLSearchParams({ templateURL: template(runtime), stackName: stackName(row), param_ExternalId: row.external_id!, param_PlatformPrincipalArn: row.platform_principal_arn!, param_ReceiveMail: 'true',
-      param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
+      param_ConnectionId: row.id, param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
   }
-  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl };
+  return { id: row.id, kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, importedDomains: row.imported_domains ?? 0, awsAccountId: row.aws_account_id, roleArn: row.role_arn, templateVersion: row.template_version, quickCreateUrl };
 }
 async function get(runtime: Runtime, wid: string) {
-  return (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
+  return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'>>(sql`SELECT kind, region, state, tenant_state FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
@@ -71,7 +72,8 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean) {
   const blocker = report.blockers.find(b => b.code !== 'SES_DOMAIN_REQUIRED' && (pooled || b.code !== 'SES_SANDBOX'));
   if (report.provisioned && !blocker) return;
   if (blocker?.code === 'SNS_CONFIRMATION_PENDING') throw new ApiError(409, blocker.code, 'Waiting for AWS to confirm the feedback subscription. Retry shortly.', undefined, true);
-  throw new ApiError(409, blocker?.code ?? 'PROVISIONING_INCOMPLETE', blocker?.message ?? 'AWS setup is not confirmed yet. Retry this request.', undefined, true);
+  const retryable=!blocker || ['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code);
+  throw new ApiError(409, blocker?.code ?? 'PROVISIONING_INCOMPLETE', blocker?.message ?? 'AWS setup is not confirmed yet. Retry this request.', undefined, retryable);
 }
 
 // The pool's sending and receiving states are explicit; the lease only fences one setup run per region
@@ -113,37 +115,114 @@ function uniqueAccount(error: unknown) {
   const e = (error as { cause?: unknown })?.cause ?? error;
   return (e as { code?: string })?.code === '23505' && (e as { constraint?: string }).constraint === 'provider_connections_byo_account';
 }
-async function provision(runtime: Runtime, row: Row, account: string, roleArn: string) {
+type Confirmation = { messageId: string; confirm: () => Promise<void> };
+async function wakeByoJob(runtime: Runtime, connectionId: string) {
+  const wake = async (r: Runtime) => { try { await r.wake?.(1); } catch { log('warn',{code:'QUEUE_WAKE_FAILED',connectionId}); } };
+  if (runtime.deferNudge) runtime.deferNudge(wake); else await wake(runtime);
+}
+// This lookup authorizes only signature verification for a SubscriptionConfirmation, never a notification.
+export async function byoStackTopic(runtime: Runtime, arn: string) {
+  const match = /^arn:aws:sns:([a-z0-9-]+):(\d{12}):(opensend-[0-9a-f]{20})-feedback$/.exec(arn);
+  if (!match) return;
+  const [, region, account, prefix] = match;
+  const row = (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE resource_prefix=${prefix} AND region=${region} AND kind='byo'
+    AND (template_version='v4' OR feedback_topic_arn IS NULL) AND (aws_account_id IS NULL OR aws_account_id=${account}) AND split_part(platform_principal_arn,':',5)<>${account}`)).rows[0];
+  if (!row || setupResources(row.id).topicName !== `${prefix}-feedback`) return;
+  return (confirmation: Confirmation) => provision(runtime, row, account!, confirmation);
+}
+async function provision(runtime: Runtime, row: Row, account: string, confirmation?: Confirmation) {
+  const roleArn = `arn:aws:iam::${account}:role/${stackName(row)}`;
+  if (row.platform_principal_arn!.split(':')[4] === account) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'The shared sending account cannot be used as a customer account.');
   if (row.aws_account_id && row.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'Disconnect before choosing a different AWS account.');
-  if (row.state === 'ready') return row;
-  assertConnectionTransition(row.state, 'provisioning');
+  if (confirmation && row.confirmed_message_id === confirmation.messageId && row.state !== 'failed') {
+    // A duplicate can arrive after the worker saw SNS's eventually consistent PendingConfirmation.
+    if (row.state==='provisioning' && (await runtime.db.execute(sql`UPDATE jobs SET available_at=now() WHERE id=${'byo.verify:'+row.id}
+      AND status='pending' AND (last_error='SNS_CONFIRMATION_PENDING' OR payload->>'retryCode'='SNS_CONFIRMATION_PENDING') AND available_at>now()`)).rowCount) await wakeByoJob(runtime,row.id);
+    return row;
+  }
+  if (row.state === 'ready' && !confirmation) return row;
   const credentials = await assume(runtime, row.region, roleArn, row.external_id!, true);
-  if ((await caller(row.region, credentials)).Account !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'STS did not return the expected customer account.');
   const scoped = { ...runtime, config: { ...runtime.config, aws: credentials, awsAccountId: account, sesFeedbackUrl: undefined, workspaceId: row.workspace_id } };
   const lease = new Date(Date.now() + 240_000).toISOString();
   // Reserve the verified BYO account BEFORE creating resources in it. The unique index serializes racing workspaces.
-  try {
-    if (!(await runtime.db.execute(startProvisioning(row.id, account, roleArn, lease))).rowCount) throw busy();
+  // A manually started v4 job can be waiting for this very callback; don't wait on its lease.
+  let join = (row.template_version === 'v4' || !!confirmation) && ['provisioning','ready'].includes(row.state) && row.aws_account_id === account;
+  if (!join) try {
+    assertConnectionTransition(row.state, 'provisioning');
+    if (!(await runtime.db.execute(startProvisioning(row.id, account, roleArn, lease))).rowCount) {
+      const current = await get(runtime,row.workspace_id);
+      if (!current || current.id!==row.id || current.aws_account_id!==account || !['provisioning','ready'].includes(current.state)) throw busy();
+      // The concurrent request already reserved precisely this proven account. Legacy manual
+      // provisioning has one writer; v4 can safely join the callback/queue handoff.
+      if (!confirmation && (current.state==='ready' || current.template_version!=='v4')) return current;
+      row=current; join=true;
+    }
   } catch (e) { if (uniqueAccount(e)) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'This AWS account is already connected to a workspace.'); throw e; }
   const owned = sql`id=${row.id} AND lease_until=${lease}::timestamptz`;
   try {
-    const report = await provisionSes(scoped, { region: row.region, installationId: row.id, connectionSetup: true, registerTopic: async (_account, arn) => {
+    if (confirmation && row.confirmed_message_id !== confirmation.messageId) await confirmation.confirm(); // Only after external-ID proof and exclusive account reservation.
+    if (row.template_version !== 'v4' && !confirmation) {
+      // Legacy stacks contain only a role; their manual fallback still provisions dedicated resources.
+      const report = await provisionSes(scoped, { region: row.region, installationId: row.id, connectionSetup: true, registerTopic: async (_account, arn) => {
         if (!(await runtime.db.execute(sql`UPDATE provider_connections SET feedback_topic_arn=${arn} WHERE ${owned}`)).rowCount) throw busy();
       } });
-    checkProvisioned(report, false);
-    const result = await runtime.db.execute<Row>(sql`WITH ready AS (${finishProvisioning(owned,'ready')} RETURNING *),
-      stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL, report=NULL FROM ready r WHERE d.workspace_id=r.workspace_id),
-      settings AS (UPDATE ses_installation_settings s SET installation_id=CASE WHEN r.kind='byo' THEN r.id ELSE s.installation_id END, default_region=r.region, enabled_regions=jsonb_build_array(r.region) FROM ready r WHERE s.workspace_id=r.workspace_id)
-      SELECT * FROM ready`);
+      checkProvisioned(report, false);
+    }
+    const arn = `arn:aws:sns:${row.region}:${account}:${setupResources(row.id).topicName}`;
+    const result = await runtime.db.execute<Row>(sql`WITH bound AS (UPDATE provider_connections SET feedback_topic_arn=${arn},
+      confirmed_message_id=coalesce(${confirmation?.messageId ?? null},confirmed_message_id),template_version=CASE WHEN ${!!confirmation} THEN 'v4' ELSE template_version END
+      WHERE id=${row.id} AND aws_account_id=${account} AND state IN ('provisioning','ready') RETURNING *),
+      queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'byo.verify:'||id,'byo.verify',workspace_id,jsonb_build_object('connectionId',id) FROM bound WHERE state='provisioning'
+        ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload=excluded.payload WHERE jobs.status IN ('failed','completed') OR
+          (${!!confirmation} AND jobs.status='pending' AND (jobs.last_error='SNS_CONFIRMATION_PENDING' OR jobs.payload->>'retryCode'='SNS_CONFIRMATION_PENDING')))
+      SELECT * FROM bound`);
     if (!result.rows[0]) throw busy();
+    if (result.rows[0].state === 'provisioning') await wakeByoJob(runtime,row.id);
     return result.rows[0];
   } catch (e) {
     // Waiting on AWS (SNS confirmation) is not a failure; the stack stays and verify is retried.
-    const retryable = e instanceof ApiError && e.retryable;
-    await runtime.db.execute(finishProvisioning(owned, retryable ? 'awaiting_role' : 'failed'));
+    if (!join) await runtime.db.execute(finishProvisioning(sql`${owned} AND NOT EXISTS (SELECT 1 FROM jobs WHERE id=${'byo.verify:'+row.id} AND status IN ('running','pending'))`, awsError(e).retryable ? 'awaiting_role' : 'failed'));
     throw e;
   }
 }
+
+// SNS confirmation has a short HTTP delivery deadline. Keep paced SES reads off that request and
+// checkpoint each page. Imported claims cannot authorize sends until the last page commits ready.
+export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
+  if (!runtime.config.multiTenant || typeof payload.connectionId !== 'string') return;
+  const row = (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${job.workspaceId} AND id=${payload.connectionId}`)).rows[0];
+  if (!row || row.id !== payload.connectionId || row.kind !== 'byo' || row.state !== 'provisioning') return;
+  const owned = sql`id=${row.id} AND EXISTS (SELECT 1 FROM jobs WHERE id=${job.id} AND status='running' AND attempts=${job.attempts})`;
+  try {
+    const cursor = typeof payload.cursor === 'string' ? payload.cursor : undefined;
+    const scoped = { ...runtime, config: { ...runtime.config, aws: await assume(runtime, row.region, row.role_arn!, row.external_id!, !cursor), awsAccountId: row.aws_account_id!, workspaceId: row.workspace_id, sesFeedbackUrl: undefined } };
+    if (!cursor) {
+      const report = await discoverSes(scoped, { region: row.region, installationId: row.id, connectionSetup: true });
+      if (report.account && report.account.id !== row.aws_account_id) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'The verified role no longer matches this account.');
+      checkProvisioned(report, false);
+    }
+    const { domains, next } = await verifiedByoDomains(scoped, row.region, cursor);
+    await runtime.db.transaction(async tx => {
+      await getRegionSettings(tx,row.workspace_id,'update'); // Same lock order as disconnect.
+      if (!(await tx.execute(sql`UPDATE provider_connections SET lease_until=now()+interval '4 minutes' WHERE state='provisioning' AND ${owned}`)).rowCount) return;
+      await importByoClaims(tx, row, domains);
+      if (!next) await tx.execute(sql`WITH ready AS (${finishProvisioning(owned,'ready')} RETURNING *),
+        stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL, report=NULL FROM ready r WHERE d.workspace_id=r.workspace_id)
+        UPDATE ses_installation_settings s SET installation_id=r.id,default_region=r.region,enabled_regions=jsonb_build_array(r.region) FROM ready r WHERE s.workspace_id=r.workspace_id`);
+    });
+    if (next) throw new JobDeferred(new Date().toISOString(), { connectionId: row.id, cursor: next });
+  } catch (e) {
+    if (e instanceof JobDeferred) throw e;
+    const error = awsError(e);
+    if (!error.retryable) await runtime.db.execute(finishProvisioning(owned,'failed'));
+    else if (error.code==='SNS_CONFIRMATION_PENDING' || job.attempts>=MAX_ATTEMPTS) {
+      // Poll, don't exhaust attempts or strand a connection on a transient outage. A signed
+      // confirmation advances a pending SNS poll immediately without superseding a running page.
+      throw new JobDeferred(new Date(Date.now()+(error.code==='SNS_CONFIRMATION_PENDING'?15_000:300_000)).toISOString(),{...payload,retryCode:error.code});
+    }
+    throw error;
+  }
+});
 // The one tenant path. CreateTenant is idempotent, so concurrent callers need no lease: both converge on `ready`.
 // Called by createConnection, its retry job, the hourly reconcile and domain verification; never by sending.
 type TenantTarget = Pick<Row, 'id' | 'region' | 'tenant_state'> & { pool_account: string | null };
@@ -217,8 +296,9 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   }
   const principalArn = (await platformIdentity(runtime)).arn;
   // BYO sends from the customer's own account: there is no tenant to wait for.
-  const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state)
-    VALUES (${id('conn')},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v3','awaiting_role','ready')
+  const connectionId = id('conn'), prefix = setupResources(connectionId).topicName.replace(/-feedback$/, '');
+  const result = await runtime.db.execute<Row>(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,external_id,platform_principal_arn,template_version,state,tenant_state,resource_prefix)
+    VALUES (${connectionId},${wid},${kind},${region},${crypto.randomUUID()},${principalArn},'v4','awaiting_role','ready',${prefix})
     ON CONFLICT(workspace_id) DO NOTHING RETURNING *`);
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');
@@ -226,7 +306,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
 }
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
-  app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Poll during BYO setup for awaiting_role, provisioning, ready or failed and the imported domain count. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {
     const row = await get(c.env, owner(c)); return c.json({ connection: row ? view(c.env, row) : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
@@ -240,22 +320,21 @@ export function registerProviderConnections(app: App) {
       return c.json(view(c.env, row), 201);
     } catch (e) { throw awsError(e); }
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/connection/verify', operationId: 'verifyConnection', tags, security, description: 'Verify the external-ID role in the AWS account from the CloudFormation stack output and provision its regional feedback resources. Safe to retry.', request: { body: json(z.object({ awsAccountId: AccountId }).strict()) }, responses: { 200: response(Connection), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/connection/verify', operationId: 'verifyConnection', tags, security, description: 'Manual fallback for automatic BYO stack detection. Prove the role and start verification and verified-domain import. Poll getConnection until ready. Safe to retry.', request: { body: json(z.object({ awsAccountId: AccountId }).strict()) }, responses: { 200: response(Connection), ...errors } }), async c => {
     const wid = owner(c); assertSesConfigured(c.env); template(c.env);
     const row = await get(c.env, wid) ?? notFound('Connection');
     if (row.kind !== 'byo') throw new ApiError(409, 'BYO_CONNECTION_REQUIRED', 'Only bring-your-own connections require verification.');
     const account = c.req.valid('json').awsAccountId;
-    if (row.platform_principal_arn!.split(':')[4] === account) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'The shared sending account cannot be used as a customer account.');
-    try { return c.json(view(c.env, await provision(c.env, row, account, `arn:aws:iam::${account}:role/${stackName(row)}`)), 200); } catch (e) { throw awsError(e); }
+    try { return c.json(view(c.env, await provision(c.env, row, account)), 200); } catch (e) { throw awsError(e); }
   });
-  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. Domains stay claimed by this workspace but stop sending and receiving until they are added again on the next connection. AWS resources are retained. Delete the customer stack in AWS to revoke the role.', responses: { 200: response(z.object({ deleted: z.literal(true) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Disconnect only when no mail or campaign is in flight. Account-scoped BYO imports are forgotten; exclusive domain claims stay reserved but stop sending and receiving. AWS resources are retained. Delete the customer stack in AWS to revoke the role.', responses: { 200: response(z.object({ deleted: z.literal(true) })), ...errors } }), async c => {
     const wid = owner(c);
     try {
       await c.env.db.transaction(async db => {
         await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
         const row = (await db.execute<Row>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}
           AND NOT EXISTS (SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown'))
-          AND NOT EXISTS (SELECT 1 FROM sending_campaigns WHERE workspace_id=${wid} AND status IN ('scheduled','sending')) FOR UPDATE`)).rows[0];
+          AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.workspace_id=${wid} AND ${campaignActive()}) FOR UPDATE`)).rows[0];
         if (!row) {
           if (!(await db.execute(sql`SELECT 1 FROM provider_connections WHERE workspace_id=${wid}`)).rowCount) return notFound('Connection');
           throw new ApiError(409, 'CONNECTION_IN_USE', 'Finish queued work or active setup before disconnecting.');

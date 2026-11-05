@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useApi, useApiMutation, useWorkspaceAccess } from '../../data/context'
-import type { Campaign, CampaignExpansion, CampaignPacingInput } from '../../data/types'
+import { campaignResumable, type Campaign, type CampaignPacingInput } from '../../data/types'
 import { Alert, Button, Checkbox, Input } from '../../components/ui'
 import { date, number, relativeTime, time } from '../../lib/format'
 
@@ -15,36 +15,36 @@ export const minRatePercent = 5
 export const maxRatePercent = 100
 export const ratePercentError = (value: number) => Number.isInteger(value) && value >= minRatePercent && value <= maxRatePercent ? '' : `Enter a whole percent from ${minRatePercent} to ${maxRatePercent}.`
 const ratePercent = (share?: number) => Math.round((share ?? 1) * 100)
-const releasing = (expansion?: CampaignExpansion | null) => expansion?.status === 'pending' || expansion?.status === 'expanding'
+type Progress = Pick<Campaign, 'status' | 'delivery'>
+// Recipients are still being validated or released into the queue.
+const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
-export const sendingHeld = (expansion?: CampaignExpansion | null) => expansion?.status === 'paused' || (releasing(expansion) && Boolean(expansion?.waiting))
+export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
 const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 
 // Poll only while a send can still change; a future schedule waits until it is due.
 // While paused or waiting for the next window, poll slowly unless queued mail is still draining.
-export function campaignPollInterval(campaign?: Pick<Campaign, 'status' | 'scheduledAt' | 'expansion' | 'counts'> | null): number | false {
+export function campaignPollInterval(campaign?: Pick<Campaign, 'status' | 'scheduledAt' | 'delivery' | 'counts'> | null): number | false {
   if (!campaign) return false
   if (campaign.status === 'scheduled') {
     const due = Date.parse(campaign.scheduledAt ?? '') - Date.now()
     return due > liveInterval ? Math.min(due, 2_147_483_647) : liveInterval
   }
-  const expansion = campaign.expansion
-  if (sendingHeld(expansion)) {
+  if (sendingHeld(campaign)) {
     const byStatus = campaign.counts?.byStatus
     if ((byStatus?.queued ?? 0) + (byStatus?.attempting ?? 0) > 0) return liveInterval
-    const until = expansion?.status === 'paused' ? NaN : Date.parse(expansion?.waiting?.until ?? '') - Date.now()
+    const until = campaign.status === 'paused' ? NaN : Date.parse(campaign.delivery?.waiting?.until ?? '') - Date.now()
     return until > 0 && until < heldInterval ? Math.max(liveInterval, until + 1000) : heldInterval
   }
-  if (campaign.status === 'sending') return liveInterval
-  return releasing(expansion) ? liveInterval : false
+  return ['preparing', 'sending'].includes(campaign.status) ? liveInterval : false
 }
 
 export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   if (!campaign.counts) return null
   const { total: materialized, byStatus } = campaign.counts
-  const total = Math.max(materialized, campaign.expansion?.total ?? 0)
-  const canceledBeforeQueue = campaign.expansion?.canceled ?? 0
+  const total = Math.max(materialized, campaign.delivery?.total ?? 0)
+  const canceledBeforeQueue = campaign.delivery?.canceled ?? 0
   const awaitingQueue = Math.max(0, total - materialized - canceledBeforeQueue)
   const queued = byStatus.queued ?? 0
   const processing = byStatus.attempting ?? 0
@@ -58,7 +58,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     ['Simulated', byStatus.simulated],
   ] as const
   return <div className="campaign-audience-summary">
-    {campaign.expansion && !campaign.expansion.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
+    {campaign.delivery && !campaign.delivery.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.delivery.expanded)} / {number(campaign.delivery.total)}</span></div>}
     <div className="campaign-summary-line"><strong>Send progress</strong><span>{number(processed)} / {number(total)} processed</span></div>
     {total > 0 ? <progress className="campaign-progress-bar" aria-label="Campaign send progress" aria-valuetext={`${number(processed)} of ${number(total)} emails processed`} value={processed} max={total} /> : <p className="muted">No email records available.</p>}
     {awaitingQueue > 0 && <div className="campaign-summary-line"><span>Awaiting queue</span><span>{number(awaitingQueue)}</span></div>}
@@ -66,7 +66,7 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
     <div className="campaign-summary-line"><span>Processing</span><span>{number(processing)}</span></div>
     <p className="muted">Processed means no longer queued or processing, including failed and canceled emails. It does not mean delivered.</p>
     {outcomes.filter(([, count]) => count && count > 0).map(([label, count]) => <div className="campaign-summary-line" key={label}><span>{label}</span><span>{number(count)}</span></div>)}
-    {interval === liveInterval ? <p className="muted">Updates every 3 seconds.</p> : interval !== false && sendingHeld(campaign.expansion) && <p className="muted">Updates every minute while sending is held.</p>}
+    {interval === liveInterval ? <p className="muted">Updates every 3 seconds.</p> : interval !== false && sendingHeld(campaign) && <p className="muted">Updates every minute while sending is held.</p>}
   </div>
 }
 
@@ -78,10 +78,11 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const cache = useQueryClient()
   // Pausing, resuming and pacing are delivery controls: owners and admins only.
   const { canAdminister } = useWorkspaceAccess()
-  const expansion = campaign.expansion
+  const expansion = campaign.delivery
   const pacing = expansion?.pacing
-  const paused = expansion?.status === 'paused'
-  const active = releasing(expansion)
+  // A campaign that failed after releasing recipients resumes from its cursor on the same snapshot, like a paused one.
+  const paused = campaignResumable(campaign)
+  const active = releasing(campaign)
   const [limit, setLimit] = useState(() => pacing?.perDay ? String(pacing.perDay) : '')
   const [autoPause, setAutoPause] = useState(pacing?.autoPause ?? true)
   const [share, setShare] = useState(() => String(ratePercent(pacing?.rateShare)))
@@ -126,9 +127,9 @@ export function CampaignPacing({ campaign }: { campaign: Campaign }) {
   const nextSlice = perDay && pacing?.nextWindowAt && (active || paused) ? ` · next slice ${relativeTime(pacing.nextWindowAt)}` : ''
   const rateShare = pacing?.rateShare != null && pacing.rateShare < 1 ? ` · up to ${ratePercent(pacing.rateShare)}% of send rate` : ''
   return <div className="campaign-pacing">
-    {paused && <Alert tone="warning" title="Sending paused">
+    {paused && <Alert tone={campaign.status === 'failed' ? 'danger' : 'warning'} title={campaign.status === 'failed' ? 'Sending failed' : 'Sending paused'}>
       <div className="campaign-pacing-banner">
-        <span>{expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
+        <span>{campaign.status === 'failed' ? 'No new recipients are being released. Resume to continue from where it stopped, or cancel.' : `${expansion.pauseReason?.message ?? 'No new recipients are being released.'} Queued emails still send.`}{expansion.pausedAt && <span className="muted" title={atUtc(expansion.pausedAt)}> Paused {relativeTime(expansion.pausedAt)}.</span>}</span>
         {canAdminister && <Button variant="primary" size="sm" loading={resume.isPending} disabled={busy} onClick={() => void run(() => resume.mutateAsync(campaign.id))}>Resume</Button>}
       </div>
     </Alert>}

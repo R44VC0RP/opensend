@@ -123,9 +123,9 @@ async function campaignFixture(t: TestContext, key: string, audience: Json, extr
     const current = await http('GET', `/v1/campaigns/${created.id}`, key);
     if (current.status === 404) return;
     const state = ok(current);
-    if (['draft', 'reviewed'].includes(state.status)) ok(await http('DELETE', `/v1/campaigns/${created.id}`, key));
-    else if (['scheduled', 'sending'].includes(state.status)) ok(await http('POST', `/v1/campaigns/${created.id}/cancel`, key));
-    // Canceled/completed campaigns and immutable email logs have no deletion API;
+    if (['draft', 'failed'].includes(state.state)) ok(await http('DELETE', `/v1/campaigns/${created.id}`, key));
+    else if (['preparing', 'scheduled', 'sending', 'paused'].includes(state.state)) ok(await http('POST', `/v1/campaigns/${created.id}/cancel`, key));
+    // Canceled/done campaigns and immutable email logs have no deletion API;
     // their retained records are evidence, not mutable fixtures we can erase.
   });
   return created;
@@ -266,7 +266,7 @@ describe('Public contract and authentication', () => {
       '/v1/emails/{id}': ['get'], '/v1/emails/{id}/content': ['get'], '/v1/emails/{id}/events': ['get'],
       '/v1/attachments': ['post'], '/v1/attachments/{id}': ['get', 'delete'],
       '/v1/campaigns': ['get', 'post'], '/v1/campaigns/{id}': ['get', 'patch', 'delete'],
-      '/v1/campaigns/{id}/state': ['get'], '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/reviews': ['post'], '/v1/campaigns/{id}/reviews/{reviewId}': ['get'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
+      '/v1/campaigns/{id}/state': ['get'], '/v1/campaigns/{id}/archive': ['patch'], '/v1/campaigns/{id}/audience': ['get'], '/v1/campaigns/{id}/send': ['post'], '/v1/campaigns/{id}/schedule': ['post'], '/v1/campaigns/{id}/cancel': ['post'],
     };
     for (const [path, methods] of Object.entries(contract)) for (const method of methods) {
       const operation = document.paths[path]?.[method];
@@ -689,14 +689,17 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
         const platformKey = { accessKeyId: 'synthetic-platform', secretAccessKey: 'synthetic-platform-secret' };
         const callerArn = `arn:aws:iam::${platform}:user/synthetic-platform`;
-        let externalIds: string[] = [], assumptions = 0, identityChecks = 0, ohioConfirmationPending = true;
+        let externalIds: string[] = [], assumptions = 0, identityChecks = 0, ohioConfirmationPending = true, laxTrust = false;
+        let holdAssume: (()=>Promise<void>)|undefined;
+        let failImportRead=false, wrongArn=false;
         providerTest.mock.method(STSClient.prototype, 'send', async function(this: InstanceType<typeof STSClient>, command: any) {
           const key = (await this.config.credentials()).accessKeyId;
           if (command.constructor.name === 'GetCallerIdentityCommand') { identityChecks++; return key === platformKey.accessKeyId ? { Account: platform, Arn: callerArn } : { Account: customer, Arn: `arn:aws:sts::${customer}:assumed-role/OpenSendMX/synthetic` }; }
           assert.equal(command.constructor.name, 'AssumeRoleCommand'); assert.equal(key, platformKey.accessKeyId);
-          if (!command.input.ExternalId) throw Object.assign(new Error('Expected missing external ID denial'), { name: 'AccessDenied' });
-          assert.ok(externalIds.includes(command.input.ExternalId)); assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/OpenSendMX-[a-f0-9]{20}$/);
-          assumptions++; return { Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
+          if (!command.input.ExternalId || (!laxTrust && !externalIds.includes(command.input.ExternalId)) || !command.input.RoleArn.startsWith(`arn:aws:iam::${customer}:`)) throw Object.assign(new Error('Synthetic trust policy denial'), { name: 'AccessDenied' });
+          assert.match(command.input.RoleArn, /^arn:aws:iam::222222222222:role\/OpenSendMX-[a-f0-9]{20}$/);
+          const wait=holdAssume;holdAssume=undefined;if(wait) await wait();
+          assumptions++; return { AssumedRoleUser:{Arn:`arn:aws:sts::${wrongArn?platform:customer}:assumed-role/${command.input.RoleArn.split('/')[1]}/${command.input.RoleSessionName}`}, Credentials: { AccessKeyId: 'synthetic-customer', SecretAccessKey: 'synthetic-secret', SessionToken: 'synthetic-temporary', Expiration: new Date(Date.now() + 3600_000) } };
         });
         const calls: string[] = [], sets = new Map<string, Json>(), topics = new Map<string, Json>();
         const identities = new Map<string, Json>(), associations = new Set<string>();
@@ -721,6 +724,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         let loseCreateResponse = false, failTenantOnce = false, dropCreate = false;
         const root = `${unique('claims')}.invalid`, domain = `mail.${root}`, foreign = `existing.${unique('ses')}.invalid`;
+        const importParent=`${unique('import')}.invalid`,imported=`mail.${importParent}`, reserved=`${unique('reserved')}.invalid`;
         const verifiedIdentity = { VerificationStatus:'SUCCESS', VerifiedForSendingStatus:true, DkimAttributes:{ SigningEnabled:true, Status:'SUCCESS', Tokens:['fixture1','fixture2','fixture3'], SigningHostedZone:'dkim.amazonses.com' } };
         identities.set(`${platform}:${foreign}`, verifiedIdentity);
         const missing = () => { throw Object.assign(new Error('Synthetic missing resource'), { name: 'NotFoundException' }); };
@@ -741,7 +745,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             case 'ListResourceTenantsCommand': return {ResourceTenants:[...associations].filter(k=>k.endsWith(`:${i.ResourceArn}`)).map(k=>({TenantName:k.split(':')[0]}))};
             case 'DeleteTenantResourceAssociationCommand': assert.ok(associations.delete(`${i.TenantName}:${i.ResourceArn}`),'Never remove an association that does not exist'); return {};
             case 'DeleteEmailIdentityCommand': assert.ok(identities.delete(`${account}:${i.EmailIdentity}`)); return {};
-            case 'ListEmailIdentitiesCommand': assert.equal(account, customer); return { EmailIdentities:[{ IdentityType:'DOMAIN', IdentityName:domain, SendingEnabled:true, VerificationStatus:'SUCCESS' }, { IdentityType:'DOMAIN', IdentityName:foreign, SendingEnabled:true, VerificationStatus:'SUCCESS' }] };
+            case 'ListEmailIdentitiesCommand': {
+              assert.equal(account, customer);
+              if (failImportRead) throw Object.assign(new Error('synthetic throttle'),{name:'ThrottlingException'});
+              const listed=(name:string)=>({IdentityType:'DOMAIN',IdentityName:name,SendingEnabled:true,VerificationStatus:'SUCCESS'});
+              return i.NextToken ? {EmailIdentities:[listed(imported),listed(`mail.${reserved}`),listed(reserved)]} : {EmailIdentities:[{...listed(domain),VerificationStatus:'PENDING'}, {...listed('me@'+domain),IdentityType:'EMAIL_ADDRESS'}],NextToken:'second'};
+            }
             case 'PutEmailIdentityMailFromAttributesCommand': identities.get(`${account}:${i.EmailIdentity}`)!.MailFromAttributes = { MailFromDomain:i.MailFromDomain, MailFromDomainStatus:'SUCCESS' }; return {};
             case 'GetAccountCommand': return { ProductionAccessEnabled: true, SendingEnabled: true, EnforcementStatus: 'HEALTHY' };
             case 'GetConfigurationSetCommand': return set ?? missing();
@@ -1059,18 +1068,120 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const i=raced.findIndex(r=>r.status===201); ok(await local('DELETE',`/v1/domains/${ok(raced[i]!,201).id}`,undefined,[a,b][i]!.cookie));
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
-        runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v3.yaml';
+        runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v4.yaml';
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
         externalIds = [ac,bc].map(reply => {
           const row = ok(reply, 201); assert.equal(row.state, 'awaiting_role'); assert.equal(row.tenant, 'ready'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
-          assert.equal(row.templateVersion,'v3');assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
+          assert.equal(row.templateVersion,'v4');assert.equal(params.get('param_ConnectionId'),row.id);assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
         });
         assert.notEqual(externalIds[0], externalIds[1]);
         await assert.rejects(pool.query('UPDATE provider_connections SET external_id=$1 WHERE workspace_id=$2', [externalIds[0], b.org.id]), { code: '23505' });
-        assert.deepEqual([ok(await verify(a.cookie))].map(r=>[r.state,r.tenant])[0], ['ready','ready'], 'A verified BYO connection needs no tenant.');
+        await providerTest.test('signed stack confirmation proves the account, resumes paged identity import, and replays without mutations',async bt=>{
+          const row=ok(ac,201),prefix=new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]).get('param_ResourcePrefix')!;
+          const arn=`arn:aws:sns:${region}:${customer}:${prefix}-feedback`, host=`https://sns.${region}.amazonaws.com/`;
+          const tags=[{Key:'opensend:installation-id',Value:row.id},{Key:'opensend:purpose',Value:'ses-feedback'}];
+          const sharedPrefix='opensend-mx',sharedArn=`arn:aws:sns:${region}:${platform}:${sharedPrefix}-feedback`;
+          // Completed stack, not resources created by the app's role. Discovery checks tags, exact
+          // policy, both destinations and the confirmed non-raw HTTPS subscription.
+          const policy=topics.get(sharedArn)!.Attributes.Policy.replaceAll(platform,customer).replaceAll(sharedPrefix,prefix);
+          topics.set(arn,{Attributes:{TopicArn:arn,Owner:customer,Policy:policy},Tags:tags,subs:[]});
+          for(const kind of ['transactional','marketing']) sets.set(`${region}:${prefix}-${kind}`,{Tags:tags,SendingOptions:{SendingEnabled:true},destinations:[{...sets.get(`${region}:${sharedPrefix}-${kind}`)!.destinations[0],Name:prefix+'-events',SnsDestination:{TopicArn:arn}}]});
+          identities.set(`${customer}:${imported}`,{...verifiedIdentity,DkimAttributes:{SigningAttributesOrigin:'EXTERNAL',SigningEnabled:true,Status:'SUCCESS'},MailFromAttributes:{MailFromDomain:`bounce.${imported}`,MailFromDomainStatus:'SUCCESS'}});
+          identities.set(`${customer}:mail.${reserved}`,{...verifiedIdentity,DkimAttributes:{Status:'SUCCESS',SigningEnabled:false}});
+          identities.set(`${customer}:${reserved}`,{...verifiedIdentity,DkimAttributes:{Status:'PENDING',SigningEnabled:true}});
+          await pool.query('INSERT INTO domain_claims(name,workspace_id) VALUES($1,$2)',[reserved,b.org.id]);
+          const certUrl=host+`SimpleNotificationService-${unique('fixture')}.pem`;
+          const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:privateKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+          let confirms=0;const dns=new Map<string,string>();
+          bt.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{
+            if(String(input)===certUrl)return new Response(pem);
+            const url=new URL(String(input));if(url.hostname==='cloudflare-dns.com'){assert.equal(url.searchParams.get('type'),'TXT');const name=url.searchParams.get('name')!;return Response.json({Status:0,Answer:[{name,type:16,data:JSON.stringify(dns.get(name)??'')}]});}
+            assert.equal(url.origin+'/',host);assert.equal(url.searchParams.get('TopicArn'),arn);confirms++;
+            topics.get(arn)!.subs=[{TopicArn:arn,Protocol:'https',Endpoint:`${origin}/v1/events/ses`,SubscriptionArn:arn+':fixture'}];return new Response(null);
+          });
+          function envelope(topic:string){
+            const values:Json={Message:'Confirm the synthetic subscription',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn:topic,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn:topic,Type:'SubscriptionConfirmation'};
+            return {...values,SigningCertURL:certUrl,SignatureVersion:'2',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(values).map(([k,v])=>`${k}\n${v}\n`).join('')),privateKey)).toString('base64')};
+          }
+          const receive=(body:Json)=>local('POST','/v1/events/ses',body,undefined,{'content-type':'text/plain; charset=UTF-8'}), signed=envelope(arn);
+          error(await receive({...signed,Type:'Notification'}),403,'SNS_TOPIC_NOT_ALLOWED');
+          for(const bad of [arn.replace(region,'eu-west-1'),arn.replace(prefix,'opensend-'+ '0'.repeat(20)),arn.replace(customer,platform)])error(await receive(envelope(bad)),403,'SNS_TOPIC_NOT_ALLOWED');
+          error(await receive({...signed,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');assert.equal(assumptions,0);
+          error(await receive(envelope(arn.replace(customer,'333333333333'))),503,'AWS_ACCESS_DENIED');
+          wrongArn=true;error(await receive(signed),409,'AWS_ACCOUNT_MISMATCH');wrongArn=false;
+          laxTrust=true;error(await receive(signed),409,'EXTERNAL_ID_REQUIRED');laxTrust=false;assert.equal(confirms,0);
+          assert.equal(ok(await local('GET',path,undefined,a.cookie)).connection.state,'awaiting_role');
+          const original=runtime.db, start=calls.length;
+          try { await original.transaction(async tx=>{
+            runtime.db=tx; // Keep the separate harness runner from consuming these mocked AWS jobs.
+            // Force the manual request to read awaiting_role first and lose its CAS to SNS.
+            let entered!:()=>void,release!:()=>void;const waiting=new Promise<void>(r=>{entered=r;}),gate=new Promise<void>(r=>{release=r;});holdAssume=async()=>{entered();await gate;};
+            const manual=verify(a.cookie),beforeIdentity=identityChecks;await waiting;
+            try {ok(await receive(signed),202);} finally {release();}assert.equal(ok(await manual).state,'provisioning');
+            assert.equal(identityChecks,beforeIdentity,'AssumeRole ARN proves the account without a second STS round trip.');
+            const poll=async()=>ok(await local('GET',path,undefined,a.cookie)).connection;
+            assert.equal((await poll()).state,'provisioning');
+            const {sql}=await import('drizzle-orm'),{JobDeferred}=await import('./src/jobs.js'),{byoVerifyJob}=await import('./src/provider-connections.js');
+            const jobId='byo.verify:'+row.id;
+            await tx.execute(sql`UPDATE jobs SET available_at=now()+interval '1 hour',last_error='SNS_CONFIRMATION_PENDING' WHERE id=${jobId}`);
+            ok(await receive(signed),202);assert.equal(confirms,1);
+            assert.equal((await tx.execute(sql`SELECT id FROM jobs WHERE id=${jobId} AND available_at<=now()`)).rowCount,1,'A replay wakes pending confirmation backoff.');
+            assert.equal((await tx.execute(sql`UPDATE jobs SET status='running',attempts=1 WHERE id=${jobId} AND status='pending'`)).rowCount,1);
+            const run=(payload:Json)=>byoVerifyJob(runtime,payload,{id:jobId,workspaceId:a.org.id,attempts:1});
+            await tx.execute(sql`UPDATE jobs SET attempts=${MAX_ATTEMPTS} WHERE id=${jobId}`);failImportRead=true;
+            try {await assert.rejects(byoVerifyJob(runtime,{connectionId:row.id},{id:jobId,workspaceId:a.org.id,attempts:MAX_ATTEMPTS}),JobDeferred);} finally {failImportRead=false;}
+            assert.equal((await poll()).state,'provisioning','A transient failure at the retry limit remains recoverable.');
+            await tx.execute(sql`UPDATE jobs SET attempts=1 WHERE id=${jobId}`);
+            let next:Json|undefined;await assert.rejects(run({connectionId:row.id}),e=>{if(!(e instanceof JobDeferred))return false;next=e.payload;return true;});
+            assert.equal(next?.cursor,'second');assert.equal((await poll()).state,'provisioning');
+            await run(next!);await tx.execute(sql`UPDATE jobs SET status='completed' WHERE id=${jobId}`);
+            const ready=await poll();assert.deepEqual([ready.state,ready.tenant,ready.awsAccountId,ready.importedDomains],['ready','ready',customer,3]);
+            const reads=calls.length,proofs=assumptions;ok(await receive(signed),202);assert.deepEqual(ok(await verify(a.cookie)),ready);
+            assert.deepEqual([calls.length,assumptions,confirms],[reads,proofs,1]);
+            // Exercise actual live-send admission, but roll back the queued email before any dispatcher can see it.
+            const rollback=new Error('rollback queued import probe');
+            await assert.rejects(tx.transaction(async save=>{
+              runtime.db=save;
+              const key=ok(await local('POST','/v1/api-keys',{name:'Import probe',permissions:['send']},a.cookie),201).secret;
+              ok(await local('POST','/v1/emails/send',mail({region,from:`hello@${imported}`}),undefined,{authorization:`Bearer ${key}`}),202);
+              for(const name of [reserved,'mail.'+reserved])error(await local('POST','/v1/emails/send',mail({region,from:`hello@${name}`}),undefined,{authorization:`Bearer ${key}`}),403,'SENDER_DOMAIN_NOT_VERIFIED');
+              throw rollback;
+            }),e=>e===rollback);
+          }); } finally { runtime.db=original; }
+          assert.ok(calls.slice(start).every(n=>/^(Get|List)/.test(n)),'No writes to customer AWS resources during verification or import.');
+          const list:Json[]=ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;assert.equal(list.length,3);
+          const signedDomain=list.find(x=>x.name===imported)!;
+          assert.deepEqual([signedDomain.sending,signedDomain.verificationStatus,signedDomain.dkimStatus,signedDomain.mailFromDomain,signedDomain.mailFromStatus],['verified','SUCCESS','SUCCESS','bounce.'+imported,'SUCCESS']);
+          assert.equal((await pool.query('SELECT workspace_id FROM domain_claims WHERE name=$1',[reserved])).rowCount,2,'An exclusive claim and an account-scoped import can have the exact same name.');
+          error(await local('POST',`/v1/domains/${signedDomain.id}/mail-from`,{mailFromDomain:`another.${imported}`},a.cookie),409,'IMPORTED_IDENTITY_READ_ONLY');
+          const {sql}=await import('drizzle-orm'), {operationJobs}=await import('./src/operations.js'),{JobDeferred}=await import('./src/jobs.js');
+          async function canReserve(expected:boolean){
+            const rollback=new Error('rollback workspace B reservations');
+            await assert.rejects(runtime.db.transaction(async tx=>{
+              await tx.execute(sql`UPDATE provider_connections SET state='ready',aws_account_id='333333333333',role_arn='fixture' WHERE workspace_id=${b.org.id}`);
+              for(const name of [importParent,imported,'child.'+imported]) {
+                const r=await tx.execute(sql`SELECT token FROM reserve_domain_claim(${b.org.id},${name},${region},${unique('dom')})`);assert.equal(!!r.rows[0]!.token,expected);
+              }throw rollback;
+            }),e=>e===rollback);
+          }
+          await canReserve(true);
+          async function check(item:Json,correct:boolean){
+            const proof=item.dns.find((r:Json)=>r.name==='_opensend.'+item.name);assert.equal(proof.status,'pending');
+            dns.set(proof.name,correct?proof.value:'wrong');await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
+            return operationJobs['domain.verify']!(runtime,{domainId:item.id,token:proof.value},{id:'domain.verify:'+proof.value,attempts:1,workspaceId:a.org.id});
+          }
+          await check(signedDomain,false);await canReserve(true);
+          assert.equal((await pool.query('SELECT 1 FROM mailbox_domains WHERE workspace_id=$1 AND domain_id=$2',[a.org.id,signedDomain.id])).rowCount,0,'An unproven import is authorized only for sending.');
+          await check(signedDomain,true);await canReserve(false);
+          const collision=list.find(x=>x.name===reserved)!;await assert.rejects(check(collision,true),JobDeferred);
+          await pool.query("DELETE FROM job_schedule WHERE workspace_id='domain.verify:'||$1",[customer]);
+          const scopes=(await pool.query('SELECT name,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,reserved]])).rows;
+          assert.deepEqual(Object.fromEntries(scopes.map(r=>[r.name,r.claim_scope])),{[imported]:'txt',[reserved]:'account'});
+          ok(await local('DELETE',`/v1/domains/${collision.id}`,undefined,a.cookie));assert.ok(identities.has(`${customer}:${reserved}`));
+        });
         const before = calls.length;
         error(await verify(b.cookie), 409, 'AWS_ACCOUNT_IN_USE'); assert.equal(calls.length, before, 'A duplicate customer account cannot mutate provider resources.');
-        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer'); assert.equal(assumptions, 2);
+        assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, 'synthetic-customer');
         assert.equal(ok(await local('GET','/v1/settings/ses',undefined,a.cookie)).region,region);
         identities.set(`${customer}:${foreign}`,verifiedIdentity);
         error(await add(a.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
@@ -1110,9 +1221,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
         });
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
-        assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,2);
+        assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,4);
         const visible = ok(await local('GET','/v1/domains?refresh=false',undefined,a.cookie)).data;
-        assert.deepEqual(visible.map((r:Json)=>[r.name,r.verified]),[[domain,true]]);
+        assert.deepEqual(Object.fromEntries(visible.map((r:Json)=>[r.name,r.verified])),{[domain]:true,[imported]:true,['mail.'+reserved]:false});
         await assert.rejects(getSes(scoped(b.org.id), region).config.credentials(), { code: 'CONNECTION_REQUIRED' });
         // Schedule the fixture in the future so the real background runner cannot drain it before DELETE.
         const queued = unique('fixture-mail');
@@ -1125,6 +1236,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const retained=calls.length;
         ok(await local('DELETE', path, undefined, a.cookie)); ok(await local('DELETE', path, undefined, b.cookie));
         assert.equal(calls.length,retained,'BYO identities stay in the customer account.'); assert.ok(identities.has(`${customer}:${domain}`));
+        assert.deepEqual((await pool.query('SELECT name,connection_id,claim_scope FROM domain_claims WHERE workspace_id=$1 AND name=ANY($2)',[a.org.id,[imported,'mail.'+reserved]])).rows,[{name:imported,connection_id:null,claim_scope:'txt'}]);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)), { connection: null });
         const released=async()=>(await pool.query('SELECT connection_id,sending_state,receiving_state,receiving_host,lost_since,receiving_lost_since,identity FROM domain_claims WHERE workspace_id=$1 AND name=$2',[a.org.id,domain])).rows;
         assert.deepEqual(await released(),[{connection_id:null,sending_state:'pending',receiving_state:'off',receiving_host:null,lost_since:null,receiving_lost_since:null,identity:null}]);
@@ -1316,13 +1428,13 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(initialized.protocolVersion, '2025-11-25');
     assert.equal(initialized.serverInfo.name, 'opensend');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 55);
-    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 24);
+    assert.equal(catalog.tools.length, 56);
+    assert.equal(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint).length, 25);
     const tools = new Map<string, Json>(catalog.tools.map((tool: Json) => [tool.name, tool]));
     assert.deepEqual([...tools.keys()].sort(), [
       'archiveCampaign', 'audienceQuery', 'createAgentToken', 'deleteAttachment', 'deleteCampaign', 'deleteContact', 'deleteList', 'deleteSegment', 'deleteTemplate', 'deleteWebhook',
       'deliverCampaign', 'findCampaigns', 'findContacts', 'findDomains', 'findEmails', 'findLists', 'findSegments', 'findTemplates', 'findWebhooks', 'getAttachment', 'getCampaignStats', 'getContentGuide', 'getContext', 'getMetrics',
-      'importContacts', 'importTemplateImage', 'previewCampaign', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
+      'importContacts', 'importTemplateImage', 'previewCampaign', 'previewCampaignAudience', 'previewTemplate', 'publishTemplate', 'retryWebhookDelivery', 'saveCampaign', 'saveContact', 'saveList', 'saveSegment', 'saveTemplate', 'saveWebhook',
       'listInboundDomains', 'getInboundDomain', 'enableInboundDomain', 'listInboundAddresses', 'getInboundAddress', 'deleteInboundAddress', 'listInboundThreads', 'getInboundThread', 'updateInboundThread', 'listInboundMessages', 'getInboundMessage', 'listInboundEvents', 'saveInboundAddress', 'sendInboundThread',
       'saveDomain', 'sendEmail', 'setListMembers', 'testWebhook', 'uploadAttachment',
     ].sort());
@@ -1416,7 +1528,7 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.equal(unfinished.draft.from, '');
     assert.equal(unfinished.draft.subject, '');
     assert.deepEqual(unfinished.draft.audience, {});
-    assert.equal(unfinished.status, 'draft');
+    assert.equal(unfinished.state, 'draft');
     const editorUrl = new URL(unfinished.url);
     assert.equal(editorUrl.origin, PUBLIC_ORIGIN);
     assert.equal(editorUrl.pathname, `/campaigns/${unfinished.id}/edit`);
@@ -1428,9 +1540,10 @@ describe('Hosted MCP OAuth and tools', () => {
     const savedDraft = await callTool(token, 'saveCampaign', { action: 'update', id: unfinished.id, body: { revision: unfinished.revision, draft: { name: `${draftName}-edited` } }, confirm: true });
     assert.equal(savedDraft.draft.region, unfinished.draft.region);
     assert.equal(savedDraft.revision, 2);
-    error(await http('POST', `/v1/campaigns/${unfinished.id}/reviews`, MANAGER, { revision: 2 }), 422, 'CAMPAIGN_INCOMPLETE');
+    error(await http('GET', `/v1/campaigns/${unfinished.id}/audience`, MANAGER), 422, 'CAMPAIGN_INCOMPLETE');
     error(await http('POST', `/v1/campaigns/${unfinished.id}/test`, MANAGER, { to: address() }), 422, 'CAMPAIGN_RECIPIENT_INVALID');
-    error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2, reviewId: 'missing-review' }), 409, 'STALE_CAMPAIGN_REVIEW');
+    error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2 }), 422, 'CAMPAIGN_INCOMPLETE');
+    error(await http('POST', `/v1/campaigns/${unfinished.id}/send`, MANAGER, { revision: 2, reviewId: 'missing-review' }), 422, 'VALIDATION_FAILED');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: '   ' }), 422, 'VALIDATION_FAILED');
     error(await http('POST', '/v1/campaigns', MANAGER, { name: draftName, from: 'invalid' }), 422, 'VALIDATION_FAILED');
     await callTool(token, 'archiveCampaign', { id: unfinished.id, body: { archived: true }, confirm: true });
@@ -1452,6 +1565,10 @@ describe('Hosted MCP OAuth and tools', () => {
     const campaignPreview = await callTool(token, 'previewCampaign', { id: campaign.id });
     assert.ok(campaignPreview.html.includes(campaign.draft.html.replace(/^<p>|<\/p>$/g, '')));
     assert.equal(typeof campaignPreview.text, 'string');
+    const audienceCounts = await callTool(token, 'previewCampaignAudience', { id: campaign.id });
+    assert.deepEqual(audienceCounts, ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, MANAGER)));
+    assert.equal(audienceCounts.matched, 2);
+    assert.equal(audienceCounts.eligible + audienceCounts.suppressed + audienceCounts.unsubscribed, 2);
     cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, MANAGER, { archived: false })); });
     const archived = await callTool(token, 'archiveCampaign', { id: campaign.id, body: { archived: true }, confirm: true });
     assert.equal(typeof archived.archivedAt, 'string');
@@ -1705,7 +1822,7 @@ describe('Hosted MCP OAuth and tools', () => {
     const db = await fixtureDatabase(t);
     const { token, consentId } = await oauthGrant(t, db, 'opensend:read offline_access');
     const catalog = await rpc(token, 'tools/list');
-    assert.equal(catalog.tools.length, 15);
+    assert.equal(catalog.tools.length, 16);
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
     assert.ok(catalog.tools.every((tool: Json) => tool.annotations.readOnlyHint === true));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'findContacts'));
@@ -2343,44 +2460,47 @@ describe('Private attachment assets and campaign revisions', () => {
     error(await http('GET', `/v1/attachments/${attachment.id}`, key.secret), 404, 'ATTACHMENT_NOT_FOUND');
   });
 
-  test('background campaign reviews preserve immutable recipients and existing schedule/cancel contracts', async t => {
+  test('sending freezes the audience at launch and existing schedule/cancel contracts hold', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-review-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Reviewed name' } });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    const started = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    assert.equal(started.campaignId, campaign.id);
-    assert.equal(started.eligible, 1);
-    const reviewPath = `/v1/campaigns/${campaign.id}/reviews/${started.id}`;
-    const review = await poll(reviewPath, key.secret, row => ['ready', 'failed'].includes(row.status));
-    assert.equal(review.status, 'ready');
-    assert.equal(review.processed, 1);
-    assert.equal(typeof review.contentHash, 'string');
-    ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { firstName: 'Later name' } }));
-    const sent = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { reviewId: review.id, revision: review.revision }), 202);
-    assert.equal(sent.status, 'sending');
+    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    const sent = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
+    assert.equal(sent.state, 'preparing');
     assert.equal(sent.queued, 1);
-    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed');
+    assert.equal(sent.scheduledAt, null);
+    // The audience and personalization are frozen by the send; later contact edits never reach the message.
+    ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { firstName: 'Later name' } }));
+    const done = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done');
+    assert.equal(done.delivery.total, 1);
+    assert.equal(done.delivery.prepared, 1);
+    assert.equal(done.delivery.expanded, 1);
+    assert.equal(done.delivery.error, null);
     const [email] = await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret);
     assert.ok(email);
     const content = ok(await http('GET', `/v1/emails/${email.id}/content`, key.secret));
-    assert.ok(content.html.includes('Reviewed name'), 'Expansion must use reviewed personalization, not later contact edits.');
+    assert.ok(content.html.includes('Reviewed name'), 'Delivery must use the frozen personalization, not later contact edits.');
     assert.ok(!content.html.includes('Later name'));
+    error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret), 409, 'CAMPAIGN_ALREADY_DISPATCHED');
     const later = await campaignFixture(t, key.secret, { listId: list.id });
-    const laterStart = ok(await http('POST', `/v1/campaigns/${later.id}/reviews`, key.secret, { revision: later.revision }), 202);
-    const laterReview = await poll(`/v1/campaigns/${later.id}/reviews/${laterStart.id}`, key.secret, row => row.status === 'ready');
-    const scheduled = ok(await http('POST', `/v1/campaigns/${later.id}/schedule`, key.secret, { reviewId: laterReview.id, revision: laterReview.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
-    assert.equal(scheduled.status, 'scheduled');
+    const scheduled = ok(await http('POST', `/v1/campaigns/${later.id}/schedule`, key.secret, { revision: later.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
+    assert.equal(scheduled.state, 'preparing');
     assert.equal(scheduled.queued, 1);
+    const waiting = await poll(`/v1/campaigns/${later.id}`, key.secret, row => row.state === 'scheduled');
+    assert.equal(waiting.delivery.prepared, 1);
+    assert.equal(waiting.delivery.expanded, 0, 'Future schedules reserve recipients without materializing email rows.');
     const canceled = ok(await http('POST', `/v1/campaigns/${later.id}/cancel`, key.secret));
-    assert.equal(canceled.status, 'canceled');
+    assert.equal(canceled.state, 'canceled');
     assert.equal(canceled.canceled, 1);
     assert.equal((await allPages(`/v1/emails?campaignId=${later.id}`, key.secret)).length, 0);
+    assert.equal(ok(await http('GET', `/v1/campaigns/${later.id}`, key.secret)).delivery.canceled, 1);
+    assert.deepEqual(ok(await http('POST', `/v1/campaigns/${later.id}/cancel`, key.secret)), { id: later.id, state: 'canceled', canceled: 0, inFlight: 0 }, 'Cancel is idempotent.');
   });
 
-  test('campaign send automatically snapshots, validates and dispatches when reviewId is omitted, even after message preview', async t => {
+  test('campaign send snapshots, validates and dispatches; a failed launch is edited or launched again', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('automatic-review-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), properties: { firstName: 'Automatic reader' } });
@@ -2390,56 +2510,62 @@ describe('Private attachment assets and campaign revisions', () => {
     const preview = ok(await http('GET', `/v1/campaigns/${campaign.id}/preview`, key.secret));
     assert.ok(preview.html.includes('Hello'));
     const accepted = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
-    assert.equal(accepted.status, 'sending');
+    assert.equal(accepted.state, 'preparing');
     assert.equal(accepted.queued, 1);
-    const completed = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
-    assert.equal(completed.status, 'completed');
-    assert.equal(completed.expansion.status, 'completed');
+    const completed = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'failed' || row.counts.byStatus.delivered === 1);
+    assert.equal(completed.state, 'done', 'Done means dispatch finished; delivery feedback follows.');
     assert.equal(completed.counts.byStatus.delivered, 1);
     const invalid = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Hello {{missing}}</p>', defaults: {} });
     const invalidAccepted = ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: invalid.revision }), 202);
     assert.equal(invalidAccepted.queued, 1);
-    const failed = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.expansion?.status === 'failed');
-    assert.equal(failed.status, 'draft');
-    assert.equal(failed.expansion.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    const failed = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.delivery.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    assert.equal(failed.delivery.prepared, 0);
     assert.equal(failed.counts.total, 0);
+    assert.equal(failed.url, invalid.url, 'A failed campaign opens in the editor again.');
+    // Launching the same revision again retries from a fresh snapshot; it fails the same way.
+    ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: invalid.revision }), 202);
+    assert.equal((await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => ['done', 'failed'].includes(row.state))).state, 'failed');
     const corrected = ok(await http('PATCH', `/v1/campaigns/${invalid.id}`, key.secret, { revision: invalid.revision, draft: { ...invalid.draft, html: '<p>Corrected automatic message</p>' } }));
+    assert.equal(corrected.state, 'draft');
+    assert.equal(corrected.delivery, null, 'A new revision clears the failed launch.');
     ok(await http('POST', `/v1/campaigns/${invalid.id}/send`, key.secret, { revision: corrected.revision }), 202);
-    const retried = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.status === 'completed' || row.expansion?.status === 'failed');
-    assert.equal(retried.status, 'completed');
+    const retried = await poll(`/v1/campaigns/${invalid.id}`, key.secret, row => row.state === 'failed' || row.counts.byStatus.delivered === 1);
+    assert.equal(retried.state, 'done');
     assert.equal(retried.counts.byStatus.delivered, 1);
     const scheduled = await campaignFixture(t, key.secret, { listId: list.id });
     ok(await http('GET', `/v1/campaigns/${scheduled.id}/preview`, key.secret));
     const scheduledAccepted = ok(await http('POST', `/v1/campaigns/${scheduled.id}/schedule`, key.secret, { revision: scheduled.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
-    assert.equal(scheduledAccepted.status, 'scheduled');
+    assert.equal(scheduledAccepted.state, 'preparing');
     const canceled = ok(await http('POST', `/v1/campaigns/${scheduled.id}/cancel`, key.secret));
-    assert.equal(canceled.status, 'canceled');
+    assert.equal(canceled.state, 'canceled');
     assert.equal(canceled.canceled, 1);
     assert.equal((await allPages(`/v1/emails?campaignId=${scheduled.id}`, key.secret)).length, 0);
   });
 
-  test('background review failures and superseded revisions cannot authorize campaign delivery', async t => {
+  test('a failed launch and a superseded revision cannot deliver; edits are refused while launched', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('async-invalid-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p>Hello {{missing}}</p>', defaults: {} });
-    const started = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const failed = await poll(`/v1/campaigns/${campaign.id}/reviews/${started.id}`, key.secret, row => ['ready', 'failed'].includes(row.status));
-    assert.equal(failed.status, 'failed');
-    assert.equal(failed.error.code, 'MISSING_TEMPLATE_VARIABLE');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { reviewId: started.id, revision: campaign.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 409);
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
+    const failed = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => ['scheduled', 'failed'].includes(row.state));
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.delivery.error.code, 'MISSING_TEMPLATE_VARIABLE');
+    assert.equal(failed.scheduledAt, null, 'A failed launch keeps no schedule.');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision + 1, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 409, 'STALE_CAMPAIGN_REVISION');
     const updated = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, subject: 'Corrected subject', html: '<p>Corrected message</p>' } }));
-    const next = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: updated.revision }), 202);
-    const ready = await poll(`/v1/campaigns/${campaign.id}/reviews/${next.id}`, key.secret, row => ['ready', 'failed'].includes(row.status));
-    assert.equal(ready.status, 'ready');
-    ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: updated.revision, draft: { ...updated.draft, subject: 'Changed after review' } }));
-    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { reviewId: ready.id, revision: ready.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 409);
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: updated.revision, scheduledAt: new Date(Date.now() + 3600000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: updated.revision, draft: { ...updated.draft, subject: 'Changed after launch' } }), 409, 'CAMPAIGN_LOCKED');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: updated.revision }), 409, 'CAMPAIGN_LOCKED');
     assert.equal((await allPages(`/v1/emails?campaignId=${campaign.id}`, key.secret)).length, 0);
   });
 
-  test('durable review, stale revisions, attachment removal, scheduling and cancellation are observable', async t => {
+  test('stale revisions, attachment removal, scheduling and cancellation are observable', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('campaign-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Name {{literal}}', properties: { firstName: '<Ada {{ & Bob>' } });
@@ -2447,52 +2573,49 @@ describe('Private attachment assets and campaign revisions', () => {
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const attachment = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'draft.txt', content: Buffer.from('draft attachment').toString('base64') }), 201);
     const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { attachments: [attachment.id], html: '<p>Hello {{name}} / {{firstName}}</p>' });
-    assert.equal(campaign.status, 'draft');
+    assert.equal(campaign.state, 'draft');
     assert.equal(campaign.revision, 1);
+    assert.equal(campaign.delivery, null);
     error(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret), 409, 'ATTACHMENT_IN_USE');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { firstName: 'Ada\r\nBcc: victim@example.com' } }));
-    const invalidStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const invalidRecipient = await poll(`/v1/campaigns/${campaign.id}/reviews/${invalidStart.id}`, key.secret, row => row.status === 'failed');
-    assert.equal(invalidRecipient.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
-    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).status, 'draft');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
+    const invalidRecipient = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+    assert.equal(invalidRecipient.state, 'failed');
+    assert.equal(invalidRecipient.delivery.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
+    assert.equal(invalidRecipient.counts.total, 0);
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: contact.properties }));
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
-    assert.equal(review.eligible, 1);
-    assert.equal(review.revision, 1);
-    assert.ok(review.contentHash);
     const draft = { ...campaign.draft, subject: 'Revised {{firstName}}', attachments: [] };
     const updated = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: 1, draft }));
     assert.equal(updated.revision, 2);
-    assert.equal(updated.status, 'draft');
-    assert.equal(updated.reviewId, null);
+    assert.equal(updated.state, 'draft');
+    assert.equal(updated.delivery, null);
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: 1, draft }), 409, 'STALE_CAMPAIGN_REVISION');
-    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, reviewId: review.id, scheduledAt: new Date(Date.now() + 60_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 1, scheduledAt: new Date(Date.now() + 60_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVISION');
     error(await http('DELETE', `/v1/attachments/${attachment.id}`, key.secret), 409, 'ATTACHMENT_IN_USE');
-    const currentStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: 2 }), 202);
-    const currentReview = await poll(`/v1/campaigns/${campaign.id}/reviews/${currentStart.id}`, key.secret, row => row.status === 'ready');
-    assert.notEqual(currentReview.contentHash, review.contentHash);
-    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, reviewId: currentReview.id, scheduledAt: new Date(Date.now() - 1000).toISOString() }), 422, 'INVALID_SCHEDULE');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, scheduledAt: new Date(Date.now() - 1000).toISOString() }), 422, 'INVALID_SCHEDULE');
     const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
-    const scheduled = ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, reviewId: currentReview.id, scheduledAt }), 202);
-    assert.equal(scheduled.status, 'scheduled');
+    const scheduled = ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: 2, scheduledAt }), 202);
+    assert.equal(scheduled.state, 'preparing');
     assert.equal(scheduled.queued, 1);
     assert.equal(scheduled.simulated, true);
-    const scheduledCampaign = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
-    assert.equal(scheduledCampaign.expansion.total, 1);
-    assert.equal(scheduledCampaign.expansion.expanded, 0, 'Future schedules reserve recipients without materializing email rows.');
+    assert.equal(Date.parse(scheduled.scheduledAt), Date.parse(scheduledAt));
+    const scheduledCampaign = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    assert.equal(scheduledCampaign.delivery.total, 1);
+    assert.equal(scheduledCampaign.delivery.expanded, 0, 'Future schedules reserve recipients without materializing email rows.');
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: 2, draft }), 409, 'CAMPAIGN_LOCKED');
+    error(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, key.secret, { archived: true }), 409, 'CAMPAIGN_ACTIVE');
     const canceled = ok(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, key.secret));
-    assert.equal(canceled.status, 'canceled');
+    assert.equal(canceled.state, 'canceled');
     assert.equal(canceled.canceled, 1);
     assert.equal(canceled.inFlight, 0);
-    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).status, 'canceled');
+    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).state, 'canceled');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, key.secret, {}), 409, 'CAMPAIGN_NOT_SENDING');
   });
 });
 
 describe('Dashboard API capabilities', () => {
-  test('campaign state is compact, scoped and tracks draft review archive and status changes without sending', async t => {
+  test('campaign state is compact, scoped and tracks draft, archive and delivery changes without sending', async t => {
     const db = await fixtureDatabase(t);
     const key = await keyFixture(t);
     const reader = await keyFixture(t, { permissions: ['read'] });
@@ -2507,9 +2630,9 @@ describe('Dashboard API capabilities', () => {
     });
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
-      await db.query("UPDATE sending_campaigns SET status = 'draft', scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET state = 'draft', review_id = NULL, total = 0, prepared = 0, expanded = 0, canceled = 0, paused_at = NULL, scheduled_at = NULL, archived_at = NULL WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
     });
-    const stateFields = ['id', 'revision', 'updatedAt', 'status', 'reviewId', 'scheduledAt', 'archivedAt'];
+    const stateFields = ['id', 'revision', 'updatedAt', 'state', 'scheduledAt', 'archivedAt'];
     const project = (value: Json) => Object.fromEntries(stateFields.map(field => [field, value[field]]));
     const initial = await http('GET', `${path}/state`, reader.secret);
     assert.deepEqual(ok(initial), project(campaign));
@@ -2526,27 +2649,13 @@ describe('Dashboard API capabilities', () => {
     await db.query("INSERT INTO sending_campaigns (id, workspace_id, draft) VALUES ($1,$2,$3::jsonb)", [foreignId, foreignWorkspace, JSON.stringify(campaign.draft)]);
     error(await http('GET', `/v1/campaigns/${foreignId}/state`, reader.secret), 404, 'NOT_FOUND');
 
-    const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const reviewed = await poll(`${path}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
-    const reviewState = ok(await http('GET', `${path}/state`, reader.secret));
-    assert.deepEqual(reviewState, project(ok(await http('GET', path, reader.secret))));
-    assert.equal(reviewState.revision, campaign.revision);
-    assert.equal(reviewState.status, 'reviewed');
-    assert.equal(reviewState.reviewId, reviewed.id);
-    assert.notDeepEqual(reviewState, initial.body, 'Review changes must be visible even without a draft revision change.');
-    const repeatedStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const reviewedAgain = await poll(`${path}/reviews/${repeatedStart.id}`, key.secret, row => row.status === 'ready');
-    const repeatedReviewState = ok(await http('GET', `${path}/state`, reader.secret));
-    assert.equal(repeatedReviewState.revision, reviewState.revision);
-    assert.equal(repeatedReviewState.status, reviewState.status);
-    assert.equal(repeatedReviewState.reviewId, reviewedAgain.id);
-    assert.notEqual(repeatedReviewState.reviewId, reviewState.reviewId);
     const archived = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true }));
     const archivedState = ok(await http('GET', `${path}/state`, reader.secret));
     assert.deepEqual(archivedState, project(archived));
-    assert.equal(archivedState.revision, repeatedReviewState.revision);
-    assert.equal(archivedState.status, repeatedReviewState.status);
+    assert.equal(archivedState.revision, campaign.revision);
+    assert.equal(archivedState.state, 'draft');
     assert.equal(typeof archivedState.archivedAt, 'string');
+    assert.notDeepEqual(archivedState, initial.body, 'Archive changes must be visible even without a draft revision change.');
     const restored = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
     assert.deepEqual(ok(await http('GET', `${path}/state`, reader.secret)), project(restored));
     assert.equal(restored.archivedAt, null);
@@ -2554,20 +2663,25 @@ describe('Dashboard API capabilities', () => {
     const updatedState = ok(await http('GET', `${path}/state`, reader.secret));
     assert.deepEqual(updatedState, project(updated));
     assert.equal(updatedState.revision, campaign.revision + 1);
-    assert.equal(updatedState.status, 'draft');
-    assert.equal(updatedState.reviewId, null);
+    assert.equal(updatedState.state, 'draft');
 
-    // Seed only state, never emails or dispatch jobs, to exercise each delivery lifecycle value.
+    // Seed only state, never emails or jobs, to exercise each delivery lifecycle value.
     const scheduledAt = new Date(Date.now() + 3_600_000).toISOString();
-    for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 RETURNING id", [status, scheduledAt, campaign.id, list.workspaceId]);
+    const reviewId = unique('state-review');
+    await db.query("INSERT INTO sending_campaign_reviews (id, workspace_id, campaign_id, revision, draft, content_hash) VALUES ($1,$2,$3,$4,$5::jsonb,'synthetic')", [reviewId, list.workspaceId, campaign.id, updated.revision, JSON.stringify(updated.draft)]);
+    cleanup(t, async () => { await db.query('DELETE FROM sending_campaign_reviews WHERE id = $1', [reviewId]); });
+    for (const state of ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled']) {
+      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $5, total = 1, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE 1 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END, scheduled_at = $2, updated_at = updated_at + interval '1 second' WHERE id = $3 AND workspace_id = $4 RETURNING id", [state, scheduledAt, campaign.id, list.workspaceId, reviewId]);
       assert.equal(seeded.rowCount, 1);
-      const state = ok(await http('GET', `${path}/state`, reader.secret));
-      assert.deepEqual(state, project(ok(await http('GET', path, reader.secret))));
-      assert.equal(state.status, status);
-      assert.equal(state.revision, updatedState.revision);
-      assert.equal(Date.parse(state.scheduledAt), Date.parse(scheduledAt));
-      assert.ok(Date.parse(state.updatedAt) > Date.parse(updatedState.updatedAt));
+      const polled = ok(await http('GET', `${path}/state`, reader.secret));
+      const full = ok(await http('GET', path, reader.secret));
+      assert.deepEqual(polled, project(full));
+      assert.equal(polled.state, state);
+      assert.equal(polled.revision, updatedState.revision);
+      assert.equal(Date.parse(polled.scheduledAt), Date.parse(scheduledAt));
+      assert.ok(Date.parse(polled.updatedAt) > Date.parse(updatedState.updatedAt));
+      assert.equal(full.delivery.total, 1);
+      assert.equal(full.url, `${PUBLIC_ORIGIN}/campaigns/${campaign.id}/${state === 'failed' ? 'edit' : 'review'}`);
     }
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
   });
@@ -2616,10 +2730,8 @@ describe('Dashboard API capabilities', () => {
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address(), name: 'Block Reader' });
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
-    const reviewStart = ok(await http('POST', `${path}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`${path}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
-    ok(await http('POST', `${path}/send`, key.secret, { revision: campaign.revision, reviewId: review.id }), 202);
-    await poll(path, key.secret, row => row.status === 'completed');
+    ok(await http('POST', `${path}/send`, key.secret, { revision: campaign.revision }), 202);
+    await poll(path, key.secret, row => row.state === 'done');
     const [message] = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
     const content = ok(await http('GET', `/v1/emails/${message.id}/content`, key.secret));
     assert.ok(content.html.includes('Hello Block Reader') && content.html.includes(`href="https://example.com/${contact.email}"`), 'Rendered email is personalized.');
@@ -2627,7 +2739,7 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.text.startsWith('Hello Block Reader') && content.text.includes('\n\nUnsubscribe: '), 'A plain-text alternative is derived from the blocks.');
   });
 
-  test('campaign archive filters lists, binds pagination and restores unchanged reviewed drafts', async t => {
+  test('campaign archive filters lists, binds pagination and restores failed launches unchanged', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('archive-audience') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
@@ -2636,14 +2748,15 @@ describe('Dashboard API capabilities', () => {
     const marker = unique('archive');
     const reviewed: Json[] = [];
     for (let index = 0; index < 2; index++) {
-      const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { name: `${marker} %_\\literal ${index}` });
+      // A failed launch keeps its frozen snapshot, cursors and error; archiving must preserve all of it.
+      const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { name: `${marker} %_\\literal ${index}`, html: '<p>Hello {{missing}}</p>', defaults: {} });
       cleanup(t, async () => { ok(await http('PATCH', `/v1/campaigns/${campaign.id}/archive`, key.secret, { archived: false })); });
       assert.equal(campaign.archivedAt, null);
       const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: 'Retain this revision' } }));
-      const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: revised.revision }), 202);
-      const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
-      const current = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
-      assert.equal(current.reviewId, review.id);
+      ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: revised.revision }), 202);
+      const current = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+      assert.equal(current.state, 'failed');
+      assert.equal(current.delivery.error.code, 'MISSING_TEMPLATE_VARIABLE');
       reviewed.push(current);
     }
     const visible = await campaignFixture(t, key.secret, { listId: list.id }, { name: `${marker} ZZZliteral` });
@@ -2654,24 +2767,23 @@ describe('Dashboard API capabilities', () => {
       const archived = ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true }));
       assert.equal(typeof archived.archivedAt, 'string');
       assert.ok(Number.isFinite(Date.parse(archived.archivedAt)));
-      assert.deepEqual({ ...archived, archivedAt: before.archivedAt, updatedAt: before.updatedAt }, before, 'Archive must preserve the complete draft, revision, review, status and counts.');
+      assert.deepEqual({ ...archived, archivedAt: before.archivedAt, updatedAt: before.updatedAt }, before, 'Archive must preserve the complete draft, revision, delivery, state and counts.');
       assert.deepEqual(ok(await http('PATCH', `${path}/archive`, key.secret, { archived: true })), archived, 'Repeated archive must keep the original timestamp.');
       assert.deepEqual(ok(await http('GET', path, key.secret)), archived);
       error(await http('PATCH', path, key.secret, { revision: before.revision, draft: before.draft }), 409, 'CAMPAIGN_ARCHIVED');
       error(await http('DELETE', path, key.secret), 409, 'CAMPAIGN_ARCHIVED');
-      error(await http('POST', `${path}/reviews`, key.secret, { revision: before.revision }), 409, 'CAMPAIGN_ARCHIVED');
       // These calls must reject before queueing, including tests that have no campaignId in their email record.
-      error(await http('POST', `${path}/send`, key.secret, { revision: before.revision, reviewId: before.reviewId }), 409, 'CAMPAIGN_ARCHIVED');
-      error(await http('POST', `${path}/schedule`, key.secret, { revision: before.revision, reviewId: before.reviewId, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/send`, key.secret, { revision: before.revision }), 409, 'CAMPAIGN_ARCHIVED');
+      error(await http('POST', `${path}/schedule`, key.secret, { revision: before.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_ARCHIVED');
       error(await http('POST', `${path}/test`, key.secret, { to: contact.email }), 409, 'CAMPAIGN_ARCHIVED');
       assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${before.id}`, key.secret)), []);
       assert.deepEqual(ok(await http('GET', path, key.secret)), archived, 'Rejected writes must leave the archived record intact.');
     }
     assert.deepEqual(page(await http('GET', `/v1/emails?search=${encodeURIComponent(contact.email)}`, key.secret)), [], 'Archived send, schedule and test must not queue any recipient email.');
-    for (const suffix of ['', '&archived=false', '&status=draft', `&region=${REGION}`]) {
+    for (const suffix of ['', '&archived=false', '&state=draft', `&region=${REGION}`]) {
       assert.deepEqual(page(await http('GET', `${activePath}${suffix}`, key.secret)).map(row => row.id), [visible.id]);
     }
-    const query = new URLSearchParams({ search: `${marker} %_\\literal`, status: 'reviewed', region: REGION, archived: 'true', limit: '1' });
+    const query = new URLSearchParams({ search: `${marker} %_\\literal`, state: 'failed', region: REGION, archived: 'true', limit: '1' });
     const first = await http('GET', `/v1/campaigns?${query}`, key.secret);
     assert.equal(page(first).length, 1);
     assert.equal(typeof first.body.nextCursor, 'string');
@@ -2681,13 +2793,13 @@ describe('Dashboard API capabilities', () => {
     assert.equal(second.body.nextCursor, null);
     const summaries = [...first.body.data, ...second.body.data];
     assert.deepEqual(summaries.map((row: Json) => row.id).sort(), reviewed.map(row => row.id).sort());
-    assert.ok(summaries.every((row: Json) => typeof row.archivedAt === 'string' && row.status === 'reviewed' && row.draft.region === REGION && row.draft.html === undefined));
-    for (const [filter, value] of [['archived', 'false'], ['status', 'draft'], ['search', marker], ['region', REGION === 'us-east-1' ? 'us-west-2' : 'us-east-1']]) {
+    assert.ok(summaries.every((row: Json) => typeof row.archivedAt === 'string' && row.state === 'failed' && row.delivery.error.code === 'MISSING_TEMPLATE_VARIABLE' && row.draft.region === REGION && row.draft.html === undefined));
+    for (const [filter, value] of [['archived', 'false'], ['state', 'draft'], ['search', marker], ['region', REGION === 'us-east-1' ? 'us-west-2' : 'us-east-1']]) {
       const changed = new URLSearchParams(query);
       changed.set(filter, value);
       error(await http('GET', `/v1/campaigns?${changed}`, key.secret), 422, 'INVALID_CURSOR');
     }
-    assert.deepEqual(page(await http('GET', `${activePath}&archived=true&status=draft`, key.secret)), []);
+    assert.deepEqual(page(await http('GET', `${activePath}&archived=true&state=draft`, key.secret)), []);
     for (const before of reviewed) {
       const restored = ok(await http('PATCH', `/v1/campaigns/${before.id}/archive`, key.secret, { archived: false }));
       assert.deepEqual({ ...restored, updatedAt: before.updatedAt }, before);
@@ -2709,7 +2821,7 @@ describe('Dashboard API capabilities', () => {
     const path = `/v1/campaigns/${campaign.id}`;
     cleanup(t, async () => {
       ok(await http('PATCH', `${path}/archive`, key.secret, { archived: false }));
-      await db.query("UPDATE sending_campaigns SET status = 'draft' WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
+      await db.query("UPDATE sending_campaigns SET state = 'draft', review_id = NULL, total = 0, prepared = 0, expanded = 0, paused_at = NULL WHERE id = $1 AND workspace_id = $2", [campaign.id, list.workspaceId]);
     });
     for (const body of [{}, { archived: 'true' }, { archived: null }, { archived: 1 }, { archived: true, revision: 1 }]) error(await http('PATCH', `${path}/archive`, key.secret, body), 422);
     for (const value of ['1', 'TRUE', 'all', '']) error(await http('GET', `/v1/campaigns?archived=${value}`, key.secret), 422);
@@ -2743,15 +2855,18 @@ describe('Dashboard API capabilities', () => {
     const content = ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret));
     const history = page(await http('GET', `/v1/emails/${emailId}/events`, key.secret));
     assert.equal(history.length, 1);
+    const reviewId = unique('archive-review');
+    await db.query("INSERT INTO sending_campaign_reviews (id, workspace_id, campaign_id, revision, draft, content_hash) VALUES ($1,$2,$3,$4,$5::jsonb,'synthetic')", [reviewId, list.workspaceId, campaign.id, campaign.revision, JSON.stringify(campaign.draft)]);
+    cleanup(t, async () => { await db.query('DELETE FROM sending_campaign_reviews WHERE id = $1', [reviewId]); });
     // Scoped terminal/active states exercise guards without scheduling or sending email.
-    for (const status of ['scheduled', 'sending', 'completed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET status = $1 WHERE id = $2 AND workspace_id = $3 RETURNING id", [status, campaign.id, list.workspaceId]);
+    for (const state of ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled']) {
+      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $4, total = 1, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE 1 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END WHERE id = $2 AND workspace_id = $3 RETURNING id", [state, campaign.id, list.workspaceId, reviewId]);
       assert.equal(seeded.rowCount, 1);
       const before = ok(await http('GET', path, key.secret));
-      assert.equal(before.status, status);
+      assert.equal(before.state, state);
       assert.equal(before.counts.total, 1);
       assert.equal(before.counts.byStatus.simulated, 1);
-      if (['scheduled', 'sending'].includes(status)) {
+      if (['preparing', 'scheduled', 'sending', 'paused'].includes(state)) {
         error(await http('PATCH', `${path}/archive`, key.secret, { archived: true }), 409, 'CAMPAIGN_ACTIVE');
         assert.deepEqual(ok(await http('GET', path, key.secret)), before);
       } else {
@@ -2768,7 +2883,7 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), [email]);
   });
 
-  test('dashboard campaign metadata survives review revisions and produces escaped immutable snapshots with real status counts', async t => {
+  test('dashboard campaign metadata survives revisions and produces escaped immutable snapshots with real status counts', async t => {
     const key = await keyFixture(t);
     const list = await resource(t, key.secret, '/v1/lists', { name: unique('editor-list') });
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
@@ -2783,19 +2898,14 @@ describe('Dashboard API capabilities', () => {
     assert.equal(persisted.draft.previewText, previewText);
     assert.equal(persisted.draft.html, html, 'Preheader injection belongs to the snapshot, not editable HTML.');
     assert.equal(persisted.counts.total, 0);
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, html: '<table><tr><td>Not a block</td></tr></table>' } }), 422, 'CAMPAIGN_CONTENT_INVALID');
     error(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, fromName: 'Name\r\nBcc: victim@example.com' } }), 422);
-    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)).reviewId, review.id, 'Invalid metadata must not invalidate or mutate the existing revision.');
+    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret)), persisted, 'Invalid metadata must not mutate the existing revision.');
     const revised = ok(await http('PATCH', `/v1/campaigns/${campaign.id}`, key.secret, { revision: campaign.revision, draft: { ...campaign.draft, previewText: `${previewText}!` } }));
-    assert.equal(revised.reviewId, null);
-    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: revised.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVIEW');
-    const finalStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: revised.revision }), 202);
-    const finalReview = await poll(`/v1/campaigns/${campaign.id}/reviews/${finalStart.id}`, key.secret, row => row.status === 'ready');
-    assert.notEqual(finalReview.contentHash, review.contentHash);
-    ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: revised.revision, reviewId: finalReview.id }), 202);
-    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.status === 'completed');
+    assert.equal(revised.revision, campaign.revision + 1);
+    error(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'STALE_CAMPAIGN_REVISION');
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: revised.revision }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1);
     const messages = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
     assert.equal(messages.length, 1);
     assert.equal(messages[0].fromName, fromName);
@@ -2838,7 +2948,8 @@ describe('Dashboard API capabilities', () => {
     const path = `/v1/campaigns/${campaign.id}/stats`;
     const empty = ok(await http('GET', path, live.secret));
     assert.equal(empty.counts.total, 0);
-    assert.equal(empty.expansion, null);
+    assert.equal(empty.state, 'draft');
+    assert.equal(empty.delivery, null);
     assert.ok(Object.values(empty.totals).every(value => value === 0));
     assert.ok(Object.values(empty.rates).every((rate: any) => rate.value === null && rate.denominator === 0));
     error(await http('GET', path), 401);
@@ -2872,8 +2983,7 @@ describe('Dashboard API capabilities', () => {
       await db.query('DELETE FROM operation_events WHERE data->>\'emailId\' = ANY($1::text[])', [ids]);
       await db.query('DELETE FROM sending_email_events WHERE email_id = ANY($1::text[])', [ids]);
       await db.query('DELETE FROM sending_emails WHERE id = ANY($1::text[])', [ids]);
-      await db.query('DELETE FROM sending_campaign_expansions WHERE campaign_id = $1', [campaign.id]);
-      await db.query("UPDATE sending_campaigns SET status = 'draft', archived_at = NULL WHERE id = $1", [campaign.id]);
+      await db.query("UPDATE sending_campaigns SET state = 'draft', review_id = NULL, total = 0, prepared = 0, expanded = 0, canceled = 0, archived_at = NULL WHERE id = $1", [campaign.id]);
     });
     for (const fixture of fixtures) {
       const emailId = unique('stats-email'), workspaceId = fixture.workspaceId ?? 'default';
@@ -2885,10 +2995,9 @@ describe('Dashboard API capabilities', () => {
     }
     // Even corrupt cross-scope feedback for a matching email ID must not be counted.
     await db.query("INSERT INTO sending_email_events (id, workspace_id, email_id, type, simulated) VALUES ($1,$2,$3,'click',false)", [unique('foreign-event'), 'foreign-stats-workspace', ids[6]]);
-    await db.query("UPDATE sending_campaigns SET status = 'completed', archived_at = now() WHERE id = $1", [campaign.id]);
-    await db.query("INSERT INTO sending_campaign_expansions (campaign_id, review_id, workspace_id, actor_key_id, total, expanded, canceled, status) VALUES ($1,$2,'default',$3,13,11,2,'canceled')", [campaign.id, unique('stats-review'), live.id]);
+    await db.query("UPDATE sending_campaigns SET state = 'canceled', review_id = $2, actor_key_id = $3, total = 13, prepared = 13, expanded = 11, canceled = 2, archived_at = now() WHERE id = $1", [campaign.id, unique('stats-review'), live.id]);
     const stats = ok(await http('GET', path, live.secret));
-    assert.equal(stats.status, 'completed');
+    assert.equal(stats.state, 'canceled');
     assert.equal(stats.tracking, true);
     assert.equal(stats.counts.total, 13);
     assert.equal(stats.counts.byStatus.suppressed, 2);
@@ -2896,9 +3005,9 @@ describe('Dashboard API capabilities', () => {
     assert.equal(stats.counts.byStatus.delivered, 2);
     assert.equal(stats.counts.byStatus.complained, 1);
     assert.equal(stats.counts.byStatus.canceled, 1);
-    assert.equal(stats.expansion.total, 13);
-    assert.equal(stats.expansion.expanded, 11);
-    assert.equal(stats.expansion.canceled, 2, 'Unmaterialized cancellations are separate from email counts.');
+    assert.equal(stats.delivery.total, 13);
+    assert.equal(stats.delivery.expanded, 11);
+    assert.equal(stats.delivery.canceled, 2, 'Unmaterialized cancellations are separate from email counts.');
     assert.deepEqual(stats.totals, { accepted: 6, delivered: 3, bounced: 1, complained: 1, opened: 3, clicked: 2, failed: 2, deliveryDelayed: 1, simulated: 1 });
     assert.deepEqual(stats.rates.delivery, { value: 2 / 6, numerator: 2, denominator: 6 });
     assert.deepEqual(stats.rates.bounce, { value: 1 / 6, numerator: 1, denominator: 6 });
@@ -3042,10 +3151,8 @@ describe('Personalization context boundaries', () => {
     const valid = await campaignFixture(t, key.secret, { listId: list.id }, {
       html: '<p><a href="{{url}}">{{name}}</a> <a href="https://example.com:{{port}}/account">{{note}}</a></p><img src="https://example.com/i.png" alt="{{firstName}}"><p>Plain {{name}}: {{firstName}}</p>',
     });
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${valid.id}/reviews`, key.secret, { revision: valid.revision }), 202);
-    const review = await poll(`/v1/campaigns/${valid.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
-    ok(await http('POST', `/v1/campaigns/${valid.id}/send`, key.secret, { revision: valid.revision, reviewId: review.id }), 202);
-    await poll(`/v1/campaigns/${valid.id}`, key.secret, row => row.status === 'completed');
+    ok(await http('POST', `/v1/campaigns/${valid.id}/send`, key.secret, { revision: valid.revision }), 202);
+    await poll(`/v1/campaigns/${valid.id}`, key.secret, row => row.state === 'done');
     const messages = page(await http('GET', `/v1/emails?campaignId=${valid.id}`, key.secret));
     assert.equal(messages.length, 1);
     const content = ok(await http('GET', `/v1/emails/${messages[0].id}/content`, key.secret));
@@ -3057,10 +3164,11 @@ describe('Personalization context boundaries', () => {
     assert.ok(content.html.includes('Plain Name {{literal}}: https://example.com onmouseover=alert(1)</p>'), 'Recipient data containing braces must not be parsed recursively.');
     ok(await http('PATCH', `/v1/contacts/${contact.id}`, key.secret, { properties: { ...contact.properties, url: 'javascript:alert(1)' } }));
     const unsafeUrl = await campaignFixture(t, key.secret, { listId: list.id }, { html: '<p><a href="{{url}}">Quoted but unsafe URL</a></p>' });
-    const unsafeStart = ok(await http('POST', `/v1/campaigns/${unsafeUrl.id}/reviews`, key.secret, { revision: unsafeUrl.revision }), 202);
-    const unsafeReview = await poll(`/v1/campaigns/${unsafeUrl.id}/reviews/${unsafeStart.id}`, key.secret, row => row.status === 'failed');
-    assert.equal(unsafeReview.error.code, 'UNSAFE_HTML_URL');
-    assert.equal(ok(await http('GET', `/v1/campaigns/${unsafeUrl.id}`, key.secret)).status, 'draft');
+    ok(await http('POST', `/v1/campaigns/${unsafeUrl.id}/send`, key.secret, { revision: unsafeUrl.revision }), 202);
+    const unsafeLaunch = await poll(`/v1/campaigns/${unsafeUrl.id}`, key.secret, row => ['done', 'failed'].includes(row.state));
+    assert.equal(unsafeLaunch.state, 'failed');
+    assert.equal(unsafeLaunch.delivery.error.code, 'UNSAFE_HTML_URL');
+    assert.equal(unsafeLaunch.counts.total, 0);
   });
 });
 
@@ -3079,18 +3187,18 @@ describe('Campaign authorization and dispatch credentials', () => {
     error(await http('DELETE', `/v1/campaigns/${campaign.id}`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
     error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
     const unchanged = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
-    assert.equal(unchanged.status, 'draft');
+    assert.equal(unchanged.state, 'draft');
     assert.equal(unchanged.revision, campaign.revision);
     assert.deepEqual(unchanged.draft, campaign.draft);
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, owner.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, owner.secret, row => row.status === 'ready');
     ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, owner.secret, {
-      revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
+      revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString(),
     }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, owner.secret, row => row.state === 'scheduled');
     error(await http('POST', `/v1/campaigns/${campaign.id}/cancel`, restricted.secret), 403, 'SENDER_DOMAIN_FORBIDDEN');
-    assert.equal(ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret)).status, 'scheduled');
+    error(await http('POST', `/v1/campaigns/${campaign.id}/pause`, restricted.secret, {}), 403, 'SENDER_DOMAIN_FORBIDDEN');
     const unchangedScheduled = ok(await http('GET', `/v1/campaigns/${campaign.id}`, owner.secret));
-    assert.equal(unchangedScheduled.expansion.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');
+    assert.equal(unchangedScheduled.state, 'scheduled');
+    assert.equal(unchangedScheduled.delivery.total, 1, 'Unauthorized cancellation must not release the scheduled recipient reservation.');
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, owner.secret)), []);
   });
 
@@ -3105,17 +3213,17 @@ describe('Campaign authorization and dispatch credentials', () => {
     // A persisted test key owns the campaign; a different persisted test key
     // originates the queued job. The bootstrap live identity never schedules it.
     const campaign = await campaignFixture(t, owner.secret, { listId: list.id });
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, origin.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, reader.secret, row => row.status === 'ready');
     const dueAt = Date.now() + 3_000;
     ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, origin.secret, {
-      revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(dueAt).toISOString(),
+      revision: campaign.revision, scheduledAt: new Date(dueAt).toISOString(),
     }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, reader.secret, body => body.state === 'scheduled');
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
     ok(await http('POST', `/v1/api-keys/${origin.id}/revoke`, MANAGER), [200, 204]);
     assert.ok(Date.now() < dueAt, 'Revocation must finish before the scheduled job becomes due; otherwise this scenario cannot prove a dispatch-time credential check.');
-    const blocked = await poll(`/v1/campaigns/${campaign.id}`, reader.secret, body => body.status === 'canceled');
-    assert.equal(blocked.expansion.error.code, 'ORIGIN_KEY_REVOKED');
+    const blocked = await poll(`/v1/campaigns/${campaign.id}`, reader.secret, body => body.state === 'canceled');
+    assert.equal(blocked.delivery.error.code, 'ORIGIN_KEY_REVOKED');
+    assert.equal(blocked.delivery.canceled, 1);
     assert.equal(blocked.counts.total, 0, 'Revoked credentials must be checked before materializing or dispatching email.');
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, reader.secret)), []);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).marketingConsent, 'subscribed', 'This failure must come from revocation, not a consent change.');
@@ -3136,10 +3244,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const source = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: email, kind: 'marketing', html: '<p>Capability source</p>' }), { 'x-forwarded-host': 'attacker.invalid' }), 202);
     const content = ok(await http('GET', `/v1/emails/${source.id}/content`, key.secret));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    const reviewStart = ok(await http('POST', `/v1/campaigns/${campaign.id}/reviews`, key.secret, { revision: campaign.revision }), 202);
-    const review = await poll(`/v1/campaigns/${campaign.id}/reviews/${reviewStart.id}`, key.secret, row => row.status === 'ready');
     const dueAt = Date.now() + 5_000;
-    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, reviewId: review.id, scheduledAt: new Date(dueAt).toISOString() }, { 'x-forwarded-host': 'attacker.invalid' }), 202);
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(dueAt).toISOString() }, { 'x-forwarded-host': 'attacker.invalid' }), 202);
     assert.deepEqual(page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret)), []);
     const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
     assert.ok(match, 'Marketing message must contain its configured unsubscribe URL.');
@@ -4030,7 +4136,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // processJobs drains the whole installation; isolate this queue from the harness runner.
       await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
       const seen = new Set<string>();
-      const types = ['campaign.prepare', 'operation.webhook', 'operation.simulatedFeedback'];
+      const types = ['campaign.run', 'operation.webhook', 'operation.simulatedFeedback'];
       const handlers: Record<string, import('./src/core.js').JobHandler> = { 'email.dispatch': jobHandlers['email.dispatch']! };
       for (const type of types) {
         handlers[type] = async () => { seen.add(type); };
@@ -4123,16 +4229,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('simulated-campaign'), from: 'sender@example.com', subject: 'Static synthetic campaign', html: '<p>No real email.</p>', audience: { listId: list.id } }), 201);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 1);
-      await run('campaign.prepare');
-      await run('campaign.expand');
+      // One run prepares, moves to sending and releases the recipient; the dispatcher finishes the campaign inline.
+      await run('campaign.run');
+      const released = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(released.state, 'sending');
+      assert.deepEqual([released.delivery.prepared, released.delivery.expanded], [1, 1]);
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 0, 'A released campaign needs no further run.');
       await run('email.dispatch');
       const [campaignEmail] = page(await local('GET', `/v1/emails?campaignId=${campaign.id}`));
       assert.equal(campaignEmail!.status, 'accepted');
       assert.match(campaignEmail!.providerId, /^sim_/);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'done', 'The last row leaving the queue completes the campaign in the same statement.');
       await run('operation.simulatedFeedback');
-      await run('campaign.finish');
       const completed = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(completed.status, 'completed');
+      assert.equal(completed.state, 'done');
       assert.equal(completed.counts.byStatus.delivered, 1);
 
       error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: REGION, template: { name: 'not-rendered-by-simulator', data: {} } }), 422, 'SIMULATED_TEMPLATE_UNSUPPORTED');
@@ -4154,17 +4264,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.liveEnabled = !simulated;
       const campaign = ok(await local('POST', '/v1/campaigns', {name: unique('mode-fence'), from:'sender@example.com', subject:'Fixture', html:'<p>Fixture</p>', audience:{listId:list.id}}), 201);
       const path = `/v1/campaigns/${campaign.id}`, revision = campaign.revision;
-      // Exercise both launch paths: automatic preparation and an explicitly selected review.
-      const review = simulated ? null : ok(await local('POST', `${path}/reviews`, {revision}), 202);
-      if (review) await run('campaign.prepare');
-      assert.equal(ok(await local('POST', `${path}/send`, {revision, reviewId:review?.id}), 202).simulated, simulated);
-      if (!review) await run('campaign.prepare');
+      assert.equal(ok(await local('POST', `${path}/send`, {revision}), 202).simulated, simulated);
       runtime.config.liveEnabled = simulated;
-      await run('campaign.expand');
+      await run('campaign.run');
       const result = ok(await local('GET', path));
-      assert.equal(result.expansion.status, 'failed');
-      assert.equal(result.expansion.error.code, 'SES_MODE_CHANGED');
-      assert.equal(result.expansion.expanded, 0); assert.equal(result.counts.total, 0);
+      assert.equal(result.state, 'failed');
+      assert.equal(result.delivery.error.code, 'SES_MODE_CHANGED');
+      assert.equal(result.delivery.prepared, 0); assert.equal(result.delivery.expanded, 0); assert.equal(result.counts.total, 0);
     });
   });
 
@@ -4226,8 +4332,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('consent-simulator'), from: 'sender@example.com', subject: 'Shared consent', html: '<p>Synthetic only.</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
-      await run('campaign.prepare');
-      await run('campaign.expand');
+      await run('campaign.run');
       const direct = ok(await local('POST', '/v1/emails/send', mail({ to: contact.email, kind: 'marketing' })), 202);
       ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { ...consentBody, status: 'unsubscribed', occurredAt: new Date().toISOString() }));
       await run('email.dispatch');
@@ -4259,20 +4364,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);
       ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(contact => contact.id) }));
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('static-validation'), from: 'sender@example.com', subject: 'Unpersonalized subject', html: '<p>Unpersonalized content.</p>', audience: { listId: list.id } }), 201);
-      const review = ok(await local('POST', `/v1/campaigns/${campaign.id}/reviews`, { revision: campaign.revision }), 202);
-      assert.equal(review.eligible, 2);
-      const frozen = (await db.query('SELECT ordinal, recipient FROM sending_review_recipients WHERE review_id = $1 ORDER BY ordinal', [review.id])).rows;
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 2);
+      const reviewId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].review_id;
+      const frozen = (await db.query('SELECT ordinal, recipient FROM sending_review_recipients WHERE review_id = $1 ORDER BY ordinal', [reviewId])).rows;
       assert.equal(frozen[0].recipient.email, contacts.find(contact => contact.id === ordered[0].id)!.email);
       assert.equal(frozen[1].ordinal, 2);
       assert.equal(frozen[1].recipient.id, invalidContactId);
       assert.equal(frozen[1].recipient.email, invalidAddress);
-      await run('campaign.prepare');
-      const failed = ok(await local('GET', `/v1/campaigns/${campaign.id}/reviews/${review.id}`));
-      assert.equal(failed.status, 'failed');
-      assert.equal(failed.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
-      assert.equal(failed.processed, 0, 'The failing preparation chunk must not commit its first valid recipient.');
-      assert.match(failed.error.message, /CAMPAIGN_RECIPIENT_INVALID/, 'Background failures expose a sanitized error summary, not contact identities.');
-      error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, reviewId: review.id }), 409);
+      await run('campaign.run');
+      const failed = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(failed.state, 'failed');
+      assert.equal(failed.delivery.error.code, 'CAMPAIGN_RECIPIENT_INVALID');
+      assert.equal(failed.delivery.prepared, 0, 'The failing preparation chunk must not commit its first valid recipient.');
+      assert.match(failed.delivery.error.message, /CAMPAIGN_RECIPIENT_INVALID/, 'Background failures expose a sanitized error summary, not contact identities.');
+      error(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}), 409, 'CAMPAIGN_NOT_SENDING');
       assert.equal(page(await local('GET', `/v1/emails?campaignId=${campaign.id}`)).length, 0);
       assert.equal((await jobs('email.dispatch')).length, 0);
     });
@@ -4442,6 +4547,266 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('launching and completing a 2,000-recipient campaign is bounded in statements and job rows', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { jobHandlers } = await import('./src/sending.js');
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { JobDeferred } = await import('./src/jobs.js');
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('bench') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'bench-' || n || '@example.com', 'subscribed' FROM generate_series(1, 2000) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [ws, list.id]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('bench'), from: 'sender@example.com', subject: 'Bench', html: '<p>Bench</p>', audience: { listId: list.id } }), 201);
+      const queries = t.mock.method(db, 'query');
+      let start = queries.mock.callCount();
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 2000);
+      const launch = queries.mock.callCount() - start;
+      let jobStatements = 0, dispatchStatements = 0, jobRuns = 0, dispatchRuns = 0;
+      const jobRows = async () => (await db.query("SELECT * FROM jobs WHERE workspace_id = $1 AND type LIKE 'campaign.%' ORDER BY id", [ws])).rows;
+      for (let i = 0; i < 200; i++) {
+        for (const job of (await jobRows()).filter(job => job.status === 'pending')) {
+          await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = $1", [job.id]);
+          start = queries.mock.callCount(); jobRuns++;
+          try { await jobHandlers[job.type]!(runtime, job.payload, { id: job.id, attempts: job.attempts + 1, workspaceId: ws }); }
+          catch (error) {
+            if (!(error instanceof JobDeferred)) throw error;
+            jobStatements += queries.mock.callCount() - start;
+            await db.query("UPDATE jobs SET status = 'pending', attempts = attempts - 1, available_at = $2, payload = coalesce($3::jsonb, payload) WHERE id = $1", [job.id, error.availableAt, error.payload ? JSON.stringify(error.payload) : null]);
+            continue;
+          }
+          jobStatements += queries.mock.callCount() - start;
+          await db.query("UPDATE jobs SET status = 'completed' WHERE id = $1", [job.id]);
+        }
+        if ((await db.query('SELECT state FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].state === 'done') break;
+        if ((await db.query("SELECT 1 FROM sending_emails WHERE campaign_id = $1 AND status = 'queued' LIMIT 1", [campaign.id])).rowCount) {
+          start = queries.mock.callCount(); dispatchRuns++;
+          await dispatchDue(runtime, REGION);
+          dispatchStatements += queries.mock.callCount() - start;
+        }
+      }
+      queries.mock.restore();
+      const final = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(final.state, 'done');
+      assert.equal(final.counts.byStatus.accepted, 2000);
+      assert.deepEqual([final.delivery.prepared, final.delivery.expanded], [2000, 2000]);
+      assert.equal((await jobRows()).length, 1, 'A campaign has exactly one job row for its whole life.');
+      t.diagnostic(`2,000-recipient campaign: launch ${launch} statements; ${jobRuns} job runs ${jobStatements} statements; ${dispatchRuns} dispatcher runs ${dispatchStatements} statements; total ${launch + jobStatements + dispatchStatements}`);
+      assert.ok(launch <= 40, `Launch took ${launch} statements.`);
+      assert.ok(jobStatements <= 60, `The run job took ${jobStatements} statements.`);
+    });
+  });
+
+  test('a run that exhausts its retries leaves the campaign failed, and a sending campaign with nothing queued is finished by the sweep', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const { MAX_ATTEMPTS } = await import('./src/jobs.js');
+      const { jobHandlers } = await import('./src/sending.js');
+      const { dispatchPartitions } = await import('./src/dispatch.js');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('stuck') }), 201);
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'acceptance-fixture', policyVersion: 'v1', evidence: 'Synthetic reserved-domain fixture.', occurredAt: new Date().toISOString() }));
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('stuck'), from: 'sender@example.com', subject: 'Stuck', html: '<p>Stuck</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      const [job] = await jobs('campaign.run');
+      assert.equal(job!.id, `campaign.run:${campaign.id}`);
+      // A transient failure on an early attempt retries; the same failure on the last attempt must not leave the
+      // campaign preparing forever (the previous prepare job did exactly that after MAX_ATTEMPTS).
+      const db0 = runtime.db;
+      const failOnce = () => { let failed = false; runtime.db = new Proxy(db0, { get: (target, key) => key === 'transaction' && !failed ? (() => { failed = true; throw new Error('synthetic database outage'); }) : Reflect.get(target, key) }); };
+      failOnce();
+      await assert.rejects(jobHandlers['campaign.run']!(runtime, job!.payload, { id: job!.id, attempts: 1, workspaceId: runtime.config.workspaceId }), { code: 'CAMPAIGN_RUN_FAILED', retryable: true });
+      runtime.db = db0;
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'preparing', 'A retryable failure keeps the campaign where it was.');
+      failOnce();
+      await jobHandlers['campaign.run']!(runtime, job!.payload, { id: job!.id, attempts: MAX_ATTEMPTS, workspaceId: runtime.config.workspaceId });
+      runtime.db = db0;
+      const failed = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(failed.state, 'failed');
+      assert.equal(failed.delivery.error.code, 'CAMPAIGN_DEPENDENCY_FAILED');
+      assert.equal(failed.counts.total, 0);
+      // Launch again from failed: one run prepares and releases; the recipient is dispatched and the campaign is done.
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'done');
+      // A campaign left sending with every recipient released and no row queued (a missed completion edge) is finished
+      // by the minute sweep that also recovers interrupted attempts.
+      await db.query("UPDATE sending_campaigns SET state = 'sending' WHERE id = $1", [campaign.id]);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'sending');
+      await dispatchPartitions(runtime, true);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'done');
+      // The sweep never finishes a campaign that still has queued rows or unreleased recipients.
+      await db.query("UPDATE sending_campaigns SET state = 'sending', expanded = 0 WHERE id = $1", [campaign.id]);
+      await dispatchPartitions(runtime, true);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).state, 'sending');
+    });
+  });
+
+  test('a campaign that fails after releasing recipients cannot be relaunched, edited or deleted; it resumes on the same snapshot or is canceled', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('mid-send') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_' || md5($1 || n::text), $1, 'mid-' || n || '@example.com', 'subscribed' FROM generate_series(1, 500) AS n`, [ws]);
+      await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [ws, list.id]);
+      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2", [ws, REGION]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('mid-send'), from: 'sender@example.com', subject: 'Mid-send failure', html: '<p>Released once.</p>', audience: { listId: list.id } }), 201);
+      const path = `/v1/campaigns/${campaign.id}`;
+      assert.equal(ok(await local('POST', `${path}/send`, { revision: campaign.revision }), 202).queued, 500);
+      // The 400-row buffer floor releases 400 of 500; the run then fails for good (the same write failCampaign makes).
+      await run('campaign.run');
+      const { rows: [launched] } = await db.query('SELECT review_id, expanded FROM sending_campaigns WHERE id = $1', [campaign.id]);
+      assert.equal(launched.expanded, 400);
+      await db.query(`UPDATE sending_campaigns SET state = 'failed', error = '{"code":"CAMPAIGN_DEPENDENCY_FAILED","message":"synthetic"}' WHERE id = $1 AND state = 'sending'`, [campaign.id]);
+      await db.query("UPDATE jobs SET status = 'failed' WHERE id = $1", [`campaign.run:${campaign.id}`]);
+      const failed = ok(await local('GET', path));
+      assert.equal(failed.state, 'failed');
+      assert.equal(failed.delivery.expanded, 400);
+      assert.equal(failed.url, `${PUBLIC_ORIGIN}/campaigns/${campaign.id}/review`, 'A failed campaign that released recipients opens in review, not the editor.');
+      // Nothing may create a second snapshot for recipients who already got the message.
+      error(await local('PATCH', path, { revision: campaign.revision, draft: { ...campaign.draft, subject: 'Edited after release' } }), 409, 'CAMPAIGN_LOCKED');
+      error(await local('DELETE', path), 409, 'CAMPAIGN_LOCKED');
+      error(await local('POST', `${path}/send`, { revision: campaign.revision }), 409, 'CAMPAIGN_LOCKED');
+      error(await local('POST', `${path}/schedule`, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 409, 'CAMPAIGN_LOCKED');
+      error(await local('PATCH', `${path}/archive`, { archived: true }), 409, 'CAMPAIGN_ACTIVE');
+      error(await local('POST', `${path}/pause`, {}), 409, 'CAMPAIGN_NOT_PAUSABLE');
+      error(await local('POST', `${path}/pacing`, { perDay: 1000 }), 409, 'CAMPAIGN_NOT_SENDING');
+      // Its unreleased recipients still count against the workspace reservation (2,000,000 per originating credential).
+      await db.query("UPDATE sending_campaigns SET total = 2000000, prepared = 2000000 WHERE id = $1", [campaign.id]);
+      const other = ok(await local('POST', '/v1/campaigns', { name: unique('capacity'), from: 'sender@example.com', subject: 'Capacity', html: '<p>Capacity</p>', audience: { listId: list.id } }), 201);
+      error(await local('POST', `/v1/campaigns/${other.id}/send`, { revision: other.revision }), 429, 'CAMPAIGN_PENDING_LIMIT_EXCEEDED');
+      await db.query("UPDATE sending_campaigns SET total = 500, prepared = 500 WHERE id = $1", [campaign.id]);
+      // Resume continues from the cursor on the same snapshot: the remaining 100 go out, never the first 400 again.
+      const resumed = ok(await local('POST', `${path}/resume`, {}));
+      assert.equal(resumed.state, 'sending');
+      assert.equal(resumed.delivery.error, null);
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 1);
+      await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+        ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, checked_at = clock_timestamp()`, [ws, REGION]);
+      await run('campaign.run');
+      const released = ok(await local('GET', path));
+      assert.equal(released.delivery.expanded, 500);
+      assert.equal(released.counts.total, 500, 'Resuming releases only the remaining recipients.');
+      assert.equal((await db.query('SELECT count(DISTINCT review_id)::int AS n, count(DISTINCT review_ordinal)::int AS ordinals FROM sending_emails WHERE campaign_id = $1', [campaign.id])).rows[0].n, 1);
+      assert.equal((await db.query('SELECT review_id FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].review_id, launched.review_id, 'The snapshot never changes after a release.');
+      await run('email.dispatch');
+      assert.equal(ok(await local('GET', path)).state, 'done');
+      // A failed campaign with released recipients can also be canceled: the rest is released from the reservation.
+      const second = ok(await local('POST', '/v1/campaigns', { name: unique('mid-cancel'), from: 'sender@example.com', subject: 'Mid-send cancel', html: '<p>Canceled.</p>', audience: { listId: list.id } }), 201);
+      await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2", [ws, REGION]);
+      ok(await local('POST', `/v1/campaigns/${second.id}/send`, { revision: second.revision }), 202);
+      await run('campaign.run');
+      await db.query(`UPDATE sending_campaigns SET state = 'failed', error = '{"code":"CAMPAIGN_DEPENDENCY_FAILED","message":"synthetic"}' WHERE id = $1 AND state = 'sending'`, [second.id]);
+      const canceled = ok(await local('POST', `/v1/campaigns/${second.id}/cancel`));
+      assert.equal(canceled.state, 'canceled');
+      assert.equal(canceled.canceled, 500, '400 queued rows plus 100 unreleased recipients.');
+      assert.equal(ok(await local('GET', `/v1/campaigns/${second.id}`)).delivery.canceled, 100);
+    });
+  });
+
+  test('a worker still holding a retired campaign run cannot complete or requeue the row a resume now owns', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { processJobs } = await import('./src/jobs.js');
+      const { queueCampaignRun, retireCampaignRun, campaignRunJobId } = await import('./src/states.js');
+      // processJobs drains the whole installation; isolate this queue from the harness runner.
+      await db.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL) ON COMMIT DROP');
+      const ref = { workspaceId: runtime.config.workspaceId, id: unique('campaign-aba') }, jobId = campaignRunJobId(ref.id);
+      const row = async () => (await db.query('SELECT status, attempts, payload FROM jobs WHERE id = $1', [jobId])).rows[0];
+      await runtime.db.execute(queueCampaignRun(ref, {}));
+      const first = (await row()).payload.run;
+      assert.equal(typeof first, 'string');
+      let seen: string | undefined;
+      // While the first run is in flight, a pause retires it and a resume requeues the same row, which another worker claims.
+      const stale = async (_runtime: unknown, payload: Record<string, unknown>) => {
+        seen = payload.run as string;
+        await runtime.db.execute(retireCampaignRun(ref, 'CAMPAIGN_PAUSED'));
+        await runtime.db.execute(queueCampaignRun(ref, {}));
+        await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = now() + interval '3 minutes' WHERE id = $1", [jobId]);
+      };
+      assert.equal(await processJobs(runtime, { 'campaign.run': stale }, 1, 1), 1);
+      assert.equal(seen, first);
+      const after = await row();
+      assert.equal(after.status, 'running', 'The stale worker must not complete the row the new run owns.');
+      assert.equal(after.attempts, 1);
+      assert.notEqual(after.payload.run, first);
+      // The same holds for a stale deferral and a stale failure.
+      const { JobDeferred } = await import('./src/jobs.js');
+      await db.query("UPDATE jobs SET status = 'pending', attempts = 0 WHERE id = $1", [jobId]);
+      for (const outcome of [() => { throw new JobDeferred(new Date(Date.now() + 60_000).toISOString(), { campaignId: ref.id, run: 'stale' }); }, () => { throw new Error('stale failure'); }]) {
+        const current = (await row()).payload.run;
+        const handler = async (_runtime: unknown, payload: Record<string, unknown>) => {
+          await runtime.db.execute(queueCampaignRun(ref, {}));
+          await db.query("UPDATE jobs SET status = 'running', attempts = attempts + 1, lease_until = now() + interval '3 minutes' WHERE id = $1", [jobId]);
+          void payload; outcome();
+        };
+        assert.equal(await processJobs(runtime, { 'campaign.run': handler }, 1, 1), 1);
+        const next = await row();
+        assert.equal(next.status, 'running');
+        assert.notEqual(next.payload.run, current);
+        assert.notEqual(next.payload.run, 'stale');
+        await db.query("UPDATE jobs SET status = 'pending', attempts = 0 WHERE id = $1", [jobId]);
+      }
+    });
+  });
+
+  test('four dispatcher shards on separate connections drain one campaign concurrently without serializing on its row', async t => {
+    const db = await fixtureDatabase(t);
+    const key = await keyFixture(t);
+    const [{ nodeRuntime }, { jobHandlers }, { runDispatcher }, pg] = await Promise.all([import('./src/adapters/node.js'), import('./src/sending.js'), import('./src/dispatcher.js'), import('pg')]);
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('shards') });
+    const ws = list.workspaceId, tag = unique('shard');
+    cleanup(t, async () => {
+      await db.query("DELETE FROM sending_email_events WHERE email_id IN (SELECT id FROM sending_emails WHERE workspace_id = $1 AND campaign_id IN (SELECT id FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2))", [ws, tag]);
+      await db.query("DELETE FROM operation_events WHERE workspace_id = $1 AND data->>'emailId' IN (SELECT id FROM sending_emails WHERE workspace_id = $1 AND campaign_id IN (SELECT id FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2))", [ws, tag]);
+      await db.query("DELETE FROM sending_emails WHERE workspace_id = $1 AND campaign_id IN (SELECT id FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2)", [ws, tag]);
+      await db.query("DELETE FROM jobs WHERE id IN (SELECT 'campaign.run:' || id FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2)", [ws, tag]);
+      await db.query("DELETE FROM sending_campaign_reviews WHERE workspace_id = $1 AND campaign_id IN (SELECT id FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2)", [ws, tag]);
+      await db.query("DELETE FROM sending_campaigns WHERE workspace_id = $1 AND draft->>'name' = $2", [ws, tag]);
+      await db.query("DELETE FROM audience_list_members WHERE workspace_id = $1 AND list_id = $2", [ws, list.id]);
+      await db.query("DELETE FROM audience_contacts WHERE workspace_id = $1 AND email LIKE $2", [ws, `${tag}-%@example.com`]);
+    });
+    await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || $2 || n::text), $1, $2 || '-' || n || '@example.com', 'subscribed' FROM generate_series(1, 2000) AS n`, [ws, tag]);
+    await db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1 AND email LIKE $3`, [ws, list.id, `${tag}-%@example.com`]);
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { name: tag, subject: 'Shard bench', html: '<p>Shard bench</p>' });
+    // Schedule an hour out: the harness runner validates every recipient and then waits, so this test owns the release.
+    ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'scheduled');
+    // Wait until the runner's run has parked itself on the schedule, so no other process releases rows.
+    for (const deadline = Date.now() + 10_000; ; ) {
+      const { rows: [job] } = await db.query("SELECT status, available_at FROM jobs WHERE id = $1", [`campaign.run:${campaign.id}`]);
+      if (job?.status === 'pending' && Date.parse(job.available_at) > Date.now() + 1_800_000) break;
+      assert.ok(Date.now() < deadline, `The scheduled run must be parked: ${JSON.stringify(job)}`);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const env = { ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL, ENABLE_LIVE_SES: 'false' };
+    const runtimes = Array.from({ length: 5 }, () => nodeRuntime(env));
+    cleanup(t, async () => { await Promise.all(runtimes.map(instance => instance.close())); });
+    for (const { runtime } of runtimes) { runtime.config.workspaceId = ws; runtime.config.simulatedSes.latencyMs = 5; }
+    await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
+      ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, checked_at = clock_timestamp()`, [ws, REGION]);
+    assert.equal((await db.query("UPDATE sending_campaigns SET state = 'sending', scheduled_at = NULL WHERE id = $1 AND state = 'scheduled'", [campaign.id])).rowCount, 1);
+    await jobHandlers['campaign.run']!(runtimes[4]!.runtime, { campaignId: campaign.id }, { id: `campaign.run:${campaign.id}`, attempts: 1, workspaceId: ws });
+    const released = ok(await http('GET', `/v1/campaigns/${campaign.id}`, key.secret));
+    assert.equal(released.delivery.expanded, 2000);
+    // Count every statement the four shards issue on their own pools; the harness runner competes for the same rows.
+    const queries = t.mock.method(pg.default.Pool.prototype, 'query');
+    const started = Date.now();
+    const reports = await Promise.all(runtimes.slice(0, 4).map(({ runtime }, index) => runDispatcher(runtime, { region: REGION, lanes: 1, shard: { index, count: 4 } })));
+    const wall = Date.now() - started;
+    const statements = queries.mock.callCount(); queries.mock.restore();
+    const claimed = reports.reduce((sum, report) => sum + report.claimed, 0), busiest = Math.max(...reports.map(report => report.durationMs)), summed = reports.reduce((sum, report) => sum + report.durationMs, 0);
+    const final = await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done');
+    // The harness runner's feedback moves accepted rows on to sent/delivered while this runs.
+    assert.equal((final.counts.byStatus.accepted ?? 0) + (final.counts.byStatus.sent ?? 0) + (final.counts.byStatus.delivered ?? 0), 2000);
+    assert.equal(final.counts.total, 2000);
+    t.diagnostic(`4 shards on one 2,000-recipient campaign: ${statements} statements for ${claimed} claimed (${(statements / claimed).toFixed(2)} per email); per shard ${reports.map(report => `${report.claimed} rows/${report.durationMs}ms`).join(', ')}; wall ${wall}ms vs ${summed}ms summed`);
+    assert.ok(reports.every(report => report.claimed > 0), 'Every shard must take a share of the campaign.');
+    assert.ok(statements / claimed < 0.6, `Shards must not add per-email statements: ${(statements / claimed).toFixed(2)}.`);
+    assert.ok(wall < 0.75 * summed, `Shards must overlap, not serialize: wall ${wall}ms vs ${summed}ms summed.`);
+    assert.ok(busiest > 0);
+  });
+
   test('the campaign dispatch buffer scales with the cached regional rate and never creates per-email jobs', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('refill-buffer') }), 201);
@@ -4453,14 +4818,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1`, [runtime.config.workspaceId, list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('refill-buffer'), from: 'sender@example.com', subject: 'Synthetic refill capacity', html: '<p>Synthetic buffer acceptance only.</p>', audience: { listId: list.id } }), 201);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202).queued, 500);
-      await run('campaign.prepare');
-      // Without a cached regional rate the buffer is the 400-row floor: one chunk fills it and the continuation waits.
+      // Without a cached regional rate the buffer is the 400-row floor: one run prepares, fills it and waits in place.
       await db.query("DELETE FROM sending_region_limits WHERE workspace_id = $1 AND region = $2", [runtime.config.workspaceId, REGION]);
-      await run('campaign.expand');
+      await run('campaign.run');
       const floor = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
+      assert.equal(floor.state, 'sending');
       assert.equal(floor.counts.total, 400);
       assert.equal(floor.counts.byStatus.queued, 400);
-      assert.equal(floor.expansion.expanded, 400);
+      assert.equal(floor.delivery.prepared, 500);
+      assert.equal(floor.delivery.expanded, 400);
       assert.equal((await jobs('email.dispatch')).length, 0, 'Expansion materializes rows, never per-email dispatch jobs.');
       for (const rate of [20, null]) {
         if (rate === null) {
@@ -4471,11 +4837,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
             DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION, rate]);
         }
         const before = Date.now();
-        await run('campaign.expand');
+        await run('campaign.run');
         const after = Date.now();
-        const deferred = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
-        assert.equal(deferred.length, 1, 'Full capacity must retain exactly one expansion continuation.');
-        assert.equal(deferred[0]!.payload.cursor, 400);
+        const deferred = (await jobs('campaign.run')).filter(job => job.status === 'pending');
+        assert.equal(deferred.length, 1, 'Full capacity keeps exactly the campaign’s one job row, waiting in place.');
+        assert.equal(deferred[0]!.id, `campaign.run:${campaign.id}`);
         const dueAt = new Date(deferred[0]!.available_at).getTime();
         // A full 400-row buffer rechecks once it could drain to half: 200 rows at 20/s is 10 s; an unknown rate waits 5 s.
         const wait = rate === null ? 5000 : 10000;
@@ -4483,24 +4849,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(deferred[0]!.attempts, 0, 'A deferral must not consume a job attempt.');
         const full = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
         assert.equal(full.counts.total, 400, 'Deferral must not materialize more immutable emails.');
-        assert.equal(full.expansion.expanded, 400);
+        assert.equal(full.delivery.expanded, 400);
       }
       // A high cached rate widens the buffer (ten seconds of sends), so the remaining recipients materialize at once.
       await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at)
         VALUES ($1, $2, 5000, clock_timestamp()) ON CONFLICT ON CONSTRAINT sending_region_limits_pkey
         DO UPDATE SET max_send_rate = excluded.max_send_rate, checked_at = excluded.checked_at`, [runtime.config.workspaceId, REGION]);
-      await run('campaign.expand');
+      await run('campaign.run');
       const widened = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(widened.counts.total, 500);
       assert.equal(widened.counts.byStatus.queued, 500);
-      assert.equal(widened.expansion.expanded, 500);
-      assert.equal(widened.expansion.status, 'completed');
-      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      assert.equal(widened.delivery.expanded, 500);
+      assert.equal(widened.state, 'sending', 'Every recipient is released; the dispatcher finishes the campaign.');
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 0);
       assert.equal((await jobs('email.dispatch')).length, 0);
       // The dispatcher drains the whole buffer in batches; every row reaches the simulated provider exactly once.
       await run('email.dispatch');
       const dispatched = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(dispatched.counts.byStatus.accepted, 500);
+      assert.equal(dispatched.state, 'done');
       assert.equal((await db.query("SELECT count(*)::int AS count FROM sending_email_events WHERE workspace_id = $1 AND type = 'dispatch_attempt'", [runtime.config.workspaceId])).rows[0].count, 500);
       assert.equal((await db.query("SELECT count(*)::int AS count FROM sending_emails WHERE workspace_id = $1 AND lease_until IS NOT NULL", [runtime.config.workspaceId])).rows[0].count, 0, 'Leases are released by the claim.');
     });
@@ -4521,82 +4888,89 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('paced'), from: 'sender@example.com', subject: 'Synthetic paced send', html: '<p>Synthetic pacing acceptance only.</p>', audience: { listId: list.id, priority: { property: 'plan', values: ['active'] } } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 99 } }), 422);
       assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { perDay: 1100, rateShare: 1 } }), 202).queued, 1400);
-      await run('campaign.prepare');
       const firstOrdinals = (await db.query(`SELECT r.recipient->>'email' AS email FROM sending_review_recipients r JOIN sending_campaigns c ON c.review_id = r.review_id WHERE c.id = $1 ORDER BY r.ordinal LIMIT 350`, [campaign.id])).rows;
       assert.ok(firstOrdinals.every(row => Number(row.email.match(/\d+/)![0]) % 4 === 0), 'Priority contacts are reviewed and released first.');
 
-      // Window 1 releases exactly the daily cap; the next run waits in place for the next window.
-      await run('campaign.expand');
+      // One run prepares and releases exactly the daily cap, then waits in place for the next window.
+      await run('campaign.run');
       let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1100);
-      assert.equal(view.expansion.pacing.perDay, 1100);
-      assert.equal(view.expansion.pacing.windowExpanded, 1100);
-      assert.equal(Date.parse(view.expansion.pacing.nextWindowAt) - Date.parse(view.expansion.pacing.windowStartedAt), 86_400_000);
-      await run('campaign.expand');
+      assert.equal(view.state, 'sending');
+      assert.equal(view.delivery.prepared, 1400);
+      assert.equal(view.delivery.expanded, 1100);
+      assert.equal(view.delivery.pacing.perDay, 1100);
+      assert.equal(view.delivery.pacing.windowExpanded, 1100);
+      assert.equal(Date.parse(view.delivery.pacing.nextWindowAt) - Date.parse(view.delivery.pacing.windowStartedAt), 86_400_000);
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1100, 'The daily cap holds within the window.');
-      assert.equal(view.expansion.waiting.reason, 'pacing_window');
-      let pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
-      assert.equal(pending.length, 1, 'Waiting for the window keeps exactly one continuation row.');
-      assert.ok(Math.abs(Date.parse(pending[0]!.available_at) - Date.parse(view.expansion.pacing.nextWindowAt)) < 1000, 'The continuation is due when the next window opens.');
+      assert.equal(view.delivery.expanded, 1100, 'The daily cap holds within the window.');
+      assert.equal(view.delivery.waiting.reason, 'pacing_window');
+      let pending = (await jobs('campaign.run')).filter(job => job.status === 'pending');
+      assert.equal(pending.length, 1, 'Waiting for the window keeps exactly the campaign’s one job row.');
+      assert.ok(Math.abs(Date.parse(pending[0]!.available_at) - Date.parse(view.delivery.pacing.nextWindowAt)) < 1000, 'The run is due when the next window opens.');
       assert.equal(pending[0]!.attempts, 0);
 
       // Bounces above 2% of at least 1,000 accepted emails pause the campaign before the next window opens.
       await db.query(`UPDATE sending_emails SET status = CASE WHEN review_ordinal <= 50 THEN 'bounced' ELSE 'delivered' END, provider_id = 'sim_' || id WHERE campaign_id = $1`, [campaign.id]);
       // Simulate the next day: the window has elapsed and so has the last 30-minute health check.
-      await db.query(`UPDATE sending_campaign_expansions SET window_started_at = window_started_at - interval '25 hours', health_checked_at = health_checked_at - interval '25 hours' WHERE campaign_id = $1`, [campaign.id]);
+      await db.query(`UPDATE sending_campaigns SET window_started_at = window_started_at - interval '25 hours', health_checked_at = health_checked_at - interval '25 hours' WHERE id = $1`, [campaign.id]);
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
-      await run('campaign.expand');
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.status, 'paused');
-      assert.equal(view.expansion.pauseReason.code, 'BOUNCE_RATE_HIGH');
-      assert.equal(view.expansion.expanded, 1100, 'An automatic pause releases nothing more.');
-      assert.equal(view.status, 'sending');
-      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      assert.equal(view.state, 'paused');
+      assert.equal(view.delivery.pauseReason.code, 'BOUNCE_RATE_HIGH');
+      assert.equal(typeof view.delivery.pausedAt, 'string');
+      assert.equal(view.delivery.expanded, 1100, 'An automatic pause releases nothing more.');
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 0);
       error(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}), 409, 'CAMPAIGN_NOT_PAUSABLE');
 
       // Resume continues from the same position in a new window (the health check waits 30 minutes).
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
-      assert.equal(view.expansion.status, 'expanding');
-      assert.equal(view.expansion.pauseReason, null);
+      assert.equal(view.state, 'sending');
+      assert.equal(view.delivery.pauseReason, null);
+      assert.equal(view.delivery.pausedAt, null);
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 1, 'Resume requeues the campaign’s one job row.');
       error(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}), 409, 'CAMPAIGN_NOT_PAUSED');
-      // Manual pause completes the pending continuation; pacing changes keep autoPause when omitted.
+      // Manual pause retires the waiting run; pacing changes keep autoPause when omitted.
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pause`, {}));
-      assert.equal(view.expansion.pauseReason.code, 'PAUSED_BY_USER');
-      assert.equal((await jobs('campaign.expand')).filter(job => job.status === 'pending').length, 0);
+      assert.equal(view.state, 'paused');
+      assert.equal(view.delivery.pauseReason.code, 'PAUSED_BY_USER');
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 0);
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 200 }));
-      assert.equal(view.expansion.pacing.perDay, 200);
-      assert.equal(view.expansion.pacing.autoPause, true);
+      assert.equal(view.delivery.pacing.perDay, 200);
+      assert.equal(view.delivery.pacing.autoPause, true);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
       // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
       await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
-      await run('campaign.expand');
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
+      assert.equal(view.delivery.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
       await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
       await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
-      await run('campaign.expand');
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1200, 'Nothing is released into the reserved SES quota.');
-      assert.equal(view.expansion.waiting.reason, 'ses_daily_quota');
-      // With quota available, the rest of the new 200/day window (100 already released) goes out.
+      assert.equal(view.delivery.expanded, 1200, 'Nothing is released into the reserved SES quota.');
+      assert.equal(view.delivery.waiting.reason, 'ses_daily_quota');
+      // With quota available, the rest of the new 200/day window (100 already released) goes out, and the run then waits for the next window.
       await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
-      pending = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+      pending = (await jobs('campaign.run')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
-      await run('campaign.expand');
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1300);
-      assert.equal(view.expansion.pacing.windowExpanded, 200);
-      assert.equal(view.expansion.waiting, null);
+      assert.equal(view.delivery.expanded, 1300);
+      assert.equal(view.delivery.pacing.windowExpanded, 200);
+      assert.equal(view.delivery.waiting.reason, 'pacing_window');
       // Raising the cap mid-window lets the rest go now; cancel still works for paced campaigns.
-      ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 1000, autoPause: false }));
-      await run('campaign.expand');
+      view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: 1000, autoPause: false }));
+      assert.equal(view.delivery.waiting, null);
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 1400);
-      assert.equal(view.expansion.status, 'completed');
-      assert.equal(view.expansion.pacing.autoPause, false);
+      assert.equal(view.delivery.expanded, 1400);
+      assert.equal(view.state, 'sending');
+      assert.equal(view.delivery.pacing.autoPause, false);
+      assert.equal((await jobs('campaign.run')).filter(job => job.status === 'pending').length, 0);
+      assert.equal(ok(await local('POST', `/v1/campaigns/${campaign.id}/cancel`)).state, 'canceled');
     });
   });
 
@@ -4613,34 +4987,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('shared'), from: 'sender@example.com', subject: 'Synthetic shared rate', html: '<p>Synthetic rate share acceptance only.</p>', audience: { listId: list.id } }), 201);
       error(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: { rateShare: 0.01 } }), 422);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision, pacing: {} }), 202);
-      await run('campaign.prepare');
       // Default share 0.5 of 20/s is 10/s; the first release is five seconds of that share.
       const before = Date.now();
-      await run('campaign.expand');
+      await run('campaign.run');
       let view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.pacing.rateShare, 0.5);
-      assert.equal(view.expansion.pacing.perDay, null);
-      assert.equal(view.expansion.expanded, 50);
-      let [next] = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
-      assert.ok(typeof next!.payload.releasedAt === 'string', 'The continuation remembers when it last released.');
+      assert.equal(view.delivery.pacing.rateShare, 0.5);
+      assert.equal(view.delivery.pacing.perDay, null);
+      assert.equal(view.delivery.expanded, 50);
+      let [next] = (await jobs('campaign.run')).filter(job => job.status === 'pending');
+      assert.ok(typeof next!.payload.releasedAt === 'string', 'The waiting run remembers when it last released.');
       const due = Date.parse(next!.available_at) - before;
       assert.ok(due >= 4000 && due <= 7000, `The next release waits until 50 rows are paid for at 10/s; observed ${due}ms.`);
       // Running again immediately releases nothing: the share has not accrued yet.
-      await run('campaign.expand');
-      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).expansion.expanded, 50);
+      await run('campaign.run');
+      assert.equal(ok(await local('GET', `/v1/campaigns/${campaign.id}`)).delivery.expanded, 50);
       // After a long wait, at most twenty seconds of the share (200 rows) is released, not the backlog of a minute.
-      [next] = (await jobs('campaign.expand')).filter(job => job.status === 'pending');
+      [next] = (await jobs('campaign.run')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET payload = jsonb_set(payload, '{releasedAt}', to_jsonb($2::text)) WHERE id = $1`, [next!.id, new Date(Date.now() - 60_000).toISOString()]);
-      await run('campaign.expand');
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 250);
+      assert.equal(view.delivery.expanded, 250);
       // Raising the share to the full rate keeps other settings; only the dispatch buffer (400 queued) limits it now.
       view = ok(await local('POST', `/v1/campaigns/${campaign.id}/pacing`, { perDay: null, rateShare: 1 }));
-      assert.equal(view.expansion.pacing.rateShare, 1);
-      assert.equal(view.expansion.pacing.autoPause, true);
-      await run('campaign.expand');
+      assert.equal(view.delivery.pacing.rateShare, 1);
+      assert.equal(view.delivery.pacing.autoPause, true);
+      await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
-      assert.equal(view.expansion.expanded, 400);
+      assert.equal(view.delivery.expanded, 400);
     });
   });
 

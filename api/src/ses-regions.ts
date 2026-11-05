@@ -39,7 +39,7 @@ async function saveDiscovery(runtime: Runtime, report: SesDiscovery, jobId?: str
       .where(and(regionWhere(workspaceId, report.region), jobId ? eq(sesRegions.provisionJobId, jobId) : undefined,
         sql`(${sesRegions.lastDiscoveredAt} IS NULL OR ${sesRegions.lastDiscoveredAt} <= ${report.checkedAt}::timestamptz)`)).returning({ region: sesRegions.region });
     if (!updated.length) return;
-    if (connection) return; // Discovery is observational. Only our tagged CreateEmailIdentity can establish an MX claim.
+    if (connection) return; // Discovery is observational; only BYO onboarding imports account identities.
     for (const domain of report.domains) await tx.insert(domains).values({ id: id('domain'), workspaceId, region: report.region, name: domain.name }).onConflictDoNothing();
   });
 }

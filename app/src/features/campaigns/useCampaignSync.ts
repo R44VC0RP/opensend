@@ -2,13 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useApi } from '../../data/context'
 import type { Campaign } from '../../data/types'
 
-export function campaignVersion(campaign: Pick<Campaign, 'id' | 'revision' | 'updatedAt' | 'status' | 'reviewId' | 'scheduledAt' | 'archivedAt'>) {
+export function campaignVersion(campaign: Pick<Campaign, 'id' | 'revision' | 'updatedAt' | 'status' | 'scheduledAt' | 'archivedAt'>) {
   return JSON.stringify([
     campaign.id,
     campaign.revision ?? 1,
     Date.parse(campaign.updatedAt),
     campaign.status,
-    campaign.reviewId ?? null,
     campaign.scheduledAt ? Date.parse(campaign.scheduledAt) : null,
     campaign.archivedAt ? Date.parse(campaign.archivedAt) : null,
   ])

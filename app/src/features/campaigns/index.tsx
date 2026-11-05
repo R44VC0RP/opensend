@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { useRegionCatalog } from '../../data/regions'
-import type { Campaign, CampaignInput, CampaignReview as ReviewResult, SendCampaignInput } from '../../data/types'
+import { campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
 import {
   Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState,
   Field, Input, PageHeader, SectionHeader, Select, SkeletonText,
@@ -61,7 +61,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   useEffect(() => {
     if (query.data) console.info('[OpenSend timing] campaign content ready', { navigationMs: Number(performance.now().toFixed(1)), revision: query.data.revision })
   }, [query.data])
-  if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && ['draft', 'reviewed'].includes(query.data.status)))) opened.current = query.data
+  if (opened.current === undefined && query.data !== undefined && (query.data === null || (!query.data.archivedAt && campaignEditable(query.data)))) opened.current = query.data
   // Once opened, background refetches must never unmount an unsaved working copy.
   if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
@@ -71,9 +71,9 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
     <Alert tone="info">This campaign is archived. Restore it to edit or send it.</Alert>
     <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
   </>
-  if (query.data && !['draft', 'reviewed'].includes(query.data.status)) return <>
+  if (query.data && !campaignEditable(query.data)) return <>
     <PageHeader title={query.data.name} backTo="/campaigns" />
-    <Alert tone="info">This campaign is {query.data.status} and cannot be edited.</Alert>
+    <Alert tone="info">{campaignResumable(query.data) && query.data.status === 'failed' ? 'This campaign failed after releasing some recipients. Resume or cancel it from its review page; it cannot be edited or sent again from scratch.' : `This campaign is ${query.data.status} and cannot be edited.`}</Alert>
     <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
   </>
   return null
@@ -179,7 +179,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
   const sync = useCampaignSync(accepted, receiveRemote)
   const current = remote ?? accepted
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
-  const readOnly = unavailable || Boolean(current && (current.archivedAt || !['draft', 'reviewed'].includes(current.status)))
+  const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
   const controlsDisabled = preparing || attachmentsBusy || composerBusy || loadingLatest || readOnly
   const replyToValidation = replyToError(replyToText)
   const saveDisabled = options.isPending || options.isError || !composerReady || readOnly || Boolean(remote) || Boolean(replyToValidation)
@@ -368,18 +368,12 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
   const guard = useRef(false)
   const { canAdminister } = useWorkspaceAccess()
 
-  const draft = !campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status)
+  const draft = !campaign.archivedAt && campaignEditable(campaign)
   const readinessError = campaignReadinessError(campaign)
-  const reviewPolling = useRef<AbortController | null>(null)
-  const [reviewProgress, setReviewProgress] = useState<{ processed: number; eligible: number } | null>(null)
-  useEffect(() => () => { reviewPolling.current?.abort() }, [campaign.id, campaign.revision])
+  // A live count of the saved audience; the send freezes its own snapshot.
   const audience = useApiMutation(async api => {
     if (readinessError) throw new Error(readinessError)
-    reviewPolling.current?.abort()
-    const controller = new AbortController()
-    reviewPolling.current = controller
-    setReviewProgress(null)
-    return api.review ? api.review(campaign.id, campaign.revision!, { signal: controller.signal, onProgress: setReviewProgress }) : {...await api.campaigns.audience({listId: campaign.listId, segmentId: campaign.segmentId}), id: 'demo', revision: campaign.revision ?? 1} as ReviewResult
+    return api.campaigns.audience({ id: campaign.id, listId: campaign.listId, segmentId: campaign.segmentId })
   })
   const perDay = Number(pace.perDay.trim().replaceAll(',', ''))
   const paceError = pace.limit ? perDayError(perDay) : ''
@@ -396,7 +390,7 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     if (audience.data && audience.data.eligible < 1) { setError('Choose an audience with at least one eligible contact before sending.'); return }
     if (paceError) { setError(`Daily limit: ${paceError}`); return }
     if (shareError) { setError(`Send rate: ${shareError}`); return }
-    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', ...(audience.data ? { reviewId: audience.data.id } : {}), revision: audience.data?.revision ?? campaign.revision }
+    const input: SendCampaignInput = { id: campaign.id, mode, timezone: 'UTC', revision: campaign.revision }
     // Defaults (no daily limit, auto-pause on, full send rate) need no pacing object.
     if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
     if (mode === 'schedule') {
@@ -412,19 +406,19 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${result.status}${'queued' in result ? ` · ${number(result.queued)} recipient intents accepted` : ''}${'simulated' in result && result.simulated ? ' · simulated' : ''}`); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${'queued' in result ? `${result.state} · ${number(result.queued)} recipient intents accepted` : result.status}${'simulated' in result && result.simulated ? ' · simulated' : ''}`); setConfirmation(null) }
     catch (cause) { setError(message(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
   return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!['draft', 'reviewed'].includes(campaign.status) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.expansion?.status === 'paused' ? 'paused' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
     {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
-    {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.expansion?.error && <Alert tone="danger">{campaign.expansion.error.message} [{campaign.expansion.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
+    {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.delivery?.error && <Alert tone="danger">{campaign.delivery.error.message} [{campaign.delivery.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
         <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
-        {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">{reviewProgress ? `Validating recipients: ${number(reviewProgress.processed)} / ${number(reviewProgress.eligible)}` : 'Preparing recipient count…'}</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
+        {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">Counting recipients…</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
             <div className="campaign-summary-line"><span>Matched contacts</span><span>{number(audience.data.matched)}</span></div>
@@ -434,11 +428,11 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
           <Button disabled={sendMutation.isPending} onClick={() => audience.mutate(undefined)}>Refresh recipient count</Button>
           {audience.data.eligible === 0 && <Alert tone="warning">No eligible recipients.</Alert>}
         </> : <>
-          <CampaignPacing key={`${campaign.id}:${campaign.expansion?.pacing?.perDay ?? ''}:${campaign.expansion?.pacing?.autoPause ?? ''}:${campaign.expansion?.pacing?.rateShare ?? ''}`} campaign={campaign} />
+          <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
           {campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary">
           <div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div>
-          {campaign.expansion && !campaign.expansion.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.expansion.expanded)} / {number(campaign.expansion.total)}</span></div>}
-          {['sent', 'completed'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
+          {campaign.delivery && !campaign.delivery.pacing?.perDay && <div className="campaign-summary-line"><span>Added to send queue</span><span>{number(campaign.delivery.expanded)} / {number(campaign.delivery.total)}</span></div>}
+          {['sent', 'done'].includes(campaign.status) && <><div className="campaign-summary-line"><span>Delivered</span><span>{number(campaign.delivered)}</span></div><div className="campaign-summary-line"><span>Bounced</span><span>{number(campaign.bounced)}</span></div><div className="campaign-summary-line"><span>Complaints</span><span>{number(campaign.complaints)}</span></div></>}
         </div>}
         </>}
       </section>

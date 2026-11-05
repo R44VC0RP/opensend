@@ -1,18 +1,25 @@
 .developer-section { max-width: 840px; gap: var(--space-16); }
-.developer-url { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding: var(--space-8) var(--space-12); background: var(--color-canvas); border-radius: var(--radius-sm); min-width: 0; }
-.developer-url > code { min-width: 0; overflow-wrap: anywhere; }
+.developer-url { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 28px; }
+/* One mono line; long values scroll instead of wrapping. */
+.developer-url > code { min-width: 0; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+.developer-url > code::-webkit-scrollbar { display: none; }
+.developer-url > .copy-action { flex-shrink: 0; }
 .developer-url > .cluster { flex-shrink: 0; }
-.developer-section .ui-icon-button { min-width: 40px; min-height: 40px; }
+/* Icon-only copy: small mark, 40px hit area from a pseudo-element, so nothing around it moves. */
+.ui-button.copy-action.developer-copy-icon { position: relative; width: 24px; height: 24px; flex-shrink: 0; color: var(--color-muted); }
+.ui-button.copy-action.developer-copy-icon::before { content: ''; position: absolute; inset: -8px; }
+.developer-copy-icon .copy-action__icon svg { width: 14px; height: 14px; }
+.developer-copy-icon[data-copied] { color: var(--color-success); }
 .developer-copy { max-width: 72ch; margin: 0; text-wrap: pretty; }
 .developer-access { max-width: 420px; }
 .developer-access .ui-select-trigger { min-height: 40px; height: auto; }
 .developer-access .ui-select-trigger > span:first-child { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
-.developer-code { margin: 0; padding: var(--space-16); background: var(--color-canvas); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.developer-code { margin: 0; padding: var(--space-12) var(--space-16); background: var(--color-layer-1); border-radius: var(--radius-sm); font-size: var(--text-sm); line-height: var(--leading-sm); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .developer-steps { margin: 0; padding-inline-start: var(--space-24); max-width: 72ch; }
 .developer-steps li + li { margin-top: var(--space-12); }
 .developer-steps code { overflow-wrap: anywhere; }
 @media (max-width: 560px) {
-  .developer-section .ui-icon-button { min-width: 44px; min-height: 44px; }
+  .ui-button.copy-action.developer-copy-icon::before { inset: -10px; }
   .developer-access .ui-select-trigger { min-height: 44px; font-size: 16px; }
   .developer-code { padding: var(--space-12); font-size: var(--text-xs); white-space: pre; overflow: auto; }
 }

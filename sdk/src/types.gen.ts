@@ -31,7 +31,7 @@ export type ConnectionSummary = {
     kind: 'shared' | 'byo';
     region: string;
     /**
-     * awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.
+     * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
     state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
     /**
@@ -525,18 +525,19 @@ export type DeletedSendingResource = {
 };
 
 export type Campaign = {
-    expansion?: CampaignExpansion;
     id: string;
     /**
-     * Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review.
      */
     url: string;
     revision: number;
     draft: CampaignDraft;
     sourceTemplateId: string | null;
     sourceTemplateRevision: number | null;
-    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
-    reviewId: string | null;
+    /**
+     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     */
+    state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
     archivedAt: string | null;
     createdAt: string;
@@ -563,14 +564,56 @@ export type Campaign = {
             simulated?: number;
         };
     };
+    delivery: CampaignDelivery;
 };
 
-export type CampaignExpansion = {
-    status: 'pending' | 'expanding' | 'paused' | 'completed' | 'failed' | 'canceled';
+/**
+ * Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.
+ */
+export type CampaignDraft = {
+    name: string;
+    from?: string | '';
+    fromName?: string;
     /**
-     * Fixed reviewed recipient count reserved at send or schedule.
+     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
+     */
+    previewText?: string;
+    replyTo?: Array<string>;
+    region: string;
+    subject?: string | '';
+    attachments?: Array<string>;
+    tracking?: boolean;
+    audience?: {
+        listId?: string;
+        segmentId?: string;
+        excludeListIds?: Array<string>;
+        excludeSegmentIds?: Array<string>;
+        /**
+         * Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.
+         */
+        priority?: {
+            property: string;
+            values: Array<string>;
+        };
+    };
+    defaults?: {
+        [key: string]: string | number | boolean | null;
+    };
+    html?: string;
+};
+
+/**
+ * The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.
+ */
+export type CampaignDelivery = {
+    /**
+     * Fixed recipient count frozen at send or schedule.
      */
     total: number;
+    /**
+     * Recipients whose message was validated.
+     */
+    prepared: number;
     /**
      * Recipients materialized as immutable email records.
      */
@@ -579,6 +622,9 @@ export type CampaignExpansion = {
      * Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.
      */
     canceled: number;
+    /**
+     * Why the campaign failed or was canceled by the system.
+     */
     error: {
         code: string;
         message: string;
@@ -619,41 +665,6 @@ export type CampaignExpansion = {
         until: string;
     } | null;
 } | null;
-
-/**
- * Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.
- */
-export type CampaignDraft = {
-    name: string;
-    from?: string | '';
-    fromName?: string;
-    /**
-     * Optional preheader text. Inserted as escaped hidden text into each outgoing HTML snapshot; draft HTML is unchanged. When set, supply HTML without its own duplicate preheader.
-     */
-    previewText?: string;
-    replyTo?: Array<string>;
-    region: string;
-    subject?: string | '';
-    attachments?: Array<string>;
-    tracking?: boolean;
-    audience?: {
-        listId?: string;
-        segmentId?: string;
-        excludeListIds?: Array<string>;
-        excludeSegmentIds?: Array<string>;
-        /**
-         * Send order: contacts whose property equals an earlier value are reviewed and released first; everyone else follows. Useful with paced sending, e.g. { property: "plan", values: ["active", "former"] }.
-         */
-        priority?: {
-            property: string;
-            values: Array<string>;
-        };
-    };
-    defaults?: {
-        [key: string]: string | number | boolean | null;
-    };
-    html?: string;
-};
 
 export type CreateCampaignInput = {
     name: string;
@@ -698,20 +709,21 @@ export type CreateCampaignInput = {
 };
 
 /**
- * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.
+ * Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.
  */
 export type CampaignSummary = {
-    expansion?: CampaignExpansion;
     id: string;
     /**
-     * Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review.
+     * Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review.
      */
     url: string;
     revision: number;
     sourceTemplateId: string | null;
     sourceTemplateRevision: number | null;
-    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
-    reviewId: string | null;
+    /**
+     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     */
+    state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
     archivedAt: string | null;
     createdAt: string;
@@ -738,6 +750,7 @@ export type CampaignSummary = {
             simulated?: number;
         };
     };
+    delivery: CampaignDelivery;
     draft: CampaignDraftSummary;
 };
 
@@ -758,12 +771,15 @@ export type CampaignDraftSummary = {
 };
 
 /**
- * Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.
+ * Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery.
  */
 export type CampaignStats = {
     id: string;
     name: string;
-    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+    /**
+     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     */
+    state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     tracking: boolean;
     /**
      * Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts.
@@ -787,7 +803,7 @@ export type CampaignStats = {
             simulated?: number;
         };
     };
-    expansion: CampaignExpansion;
+    delivery: CampaignDelivery;
     /**
      * Lifetime distinct email counts from current state and stored events; outcomes overlap. Accepted excludes simulated mail; other outcomes include simulated events for simulated mail. Opens and clicks include bots and privacy proxies. Failed means rejected or rendering failed; suppressed, canceled and uncertain mail remain in counts.byStatus.
      */
@@ -874,6 +890,16 @@ export type CampaignPreview = {
     text: string;
 };
 
+/**
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ */
+export type CampaignAudienceCounts = {
+    matched: number;
+    eligible: number;
+    suppressed: number;
+    unsubscribed: number;
+};
+
 export type CampaignPreviewImage = {
     /**
      * Canonical base64 PNG screenshot.
@@ -883,14 +909,16 @@ export type CampaignPreviewImage = {
 };
 
 /**
- * Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.
+ * Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.
  */
 export type CampaignState = {
     id: string;
     revision: number;
     updatedAt: string;
-    status: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
-    reviewId: string | null;
+    /**
+     * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+     */
+    state: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
     scheduledAt: string | null;
     archivedAt: string | null;
 };
@@ -947,44 +975,15 @@ export type CampaignTestInput = {
     };
 };
 
-/**
- * A durable audience snapshot and bounded preparation. Only ready reviews may be sent. Counts are fixed at creation; live consent is checked again at dispatch.
- */
-export type CampaignReviewPreparation = {
-    matched: number;
-    eligible: number;
-    suppressed: number;
-    unsubscribed: number;
-    id: string;
-    campaignId: string;
-    revision: number;
-    contentHash: string | null;
-    createdAt: string;
-    status: 'pending' | 'processing' | 'ready' | 'failed';
-    processed: number;
-    error: {
-        code: string;
-        message: string;
-    } | null;
-};
-
-export type CampaignRevisionInput = {
-    revision: number;
-};
-
 export type CampaignQueued = {
     id: string;
-    status: 'scheduled' | 'sending';
+    state: 'preparing';
     queued: number;
     scheduledAt: string | null;
     simulated: boolean;
 };
 
 export type CampaignSendInput = {
-    /**
-     * Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.
-     */
-    reviewId?: string;
     revision: number;
     pacing?: CampaignPacing;
 };
@@ -1005,10 +1004,6 @@ export type CampaignPacing = {
 };
 
 export type CampaignScheduleInput = {
-    /**
-     * Optional completed review. Omit to snapshot and validate the current revision automatically before delivery.
-     */
-    reviewId?: string;
     revision: number;
     pacing?: CampaignPacing;
     scheduledAt: string;
@@ -1016,7 +1011,7 @@ export type CampaignScheduleInput = {
 
 export type CampaignCanceled = {
     id: string;
-    status: 'canceled';
+    state: 'canceled';
     canceled: number;
     inFlight: number;
 };
@@ -2014,13 +2009,17 @@ export type ProviderConnection = {
     kind: 'shared' | 'byo';
     region: string;
     /**
-     * awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again.
+     * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
     state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
     /**
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
     tenant: 'pending' | 'ready' | 'failed';
+    /**
+     * Number of currently claimed domains imported from this BYO account.
+     */
+    importedDomains: number;
     awsAccountId: string | null;
     roleArn: string | null;
     templateVersion: string | null;
@@ -6102,7 +6101,10 @@ export type ListCampaignsData = {
         cursor?: string;
         limit?: number;
         region?: string;
-        status?: 'draft' | 'reviewed' | 'scheduled' | 'sending' | 'completed' | 'canceled';
+        /**
+         * draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.
+         */
+        state?: 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled';
         /**
          * False lists active campaigns; true lists archived campaigns only.
          */
@@ -6612,6 +6614,69 @@ export type PreviewCampaignResponses = {
 
 export type PreviewCampaignResponse = PreviewCampaignResponses[keyof PreviewCampaignResponses];
 
+export type PreviewCampaignAudienceData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/campaigns/{id}/audience';
+};
+
+export type PreviewCampaignAudienceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PreviewCampaignAudienceError = PreviewCampaignAudienceErrors[keyof PreviewCampaignAudienceErrors];
+
+export type PreviewCampaignAudienceResponses = {
+    /**
+     * Success
+     */
+    200: CampaignAudienceCounts;
+};
+
+export type PreviewCampaignAudienceResponse = PreviewCampaignAudienceResponses[keyof PreviewCampaignAudienceResponses];
+
 export type RenderCampaignPreviewImageData = {
     body?: never;
     path: {
@@ -6869,139 +6934,6 @@ export type TestCampaignResponses = {
 };
 
 export type TestCampaignResponse = TestCampaignResponses[keyof TestCampaignResponses];
-
-export type StartCampaignReviewData = {
-    body: CampaignRevisionInput;
-    headers?: {
-        /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
-         */
-        'Idempotency-Key'?: string;
-    };
-    path: {
-        id: string;
-    };
-    query?: never;
-    url: '/v1/campaigns/{id}/reviews';
-};
-
-export type StartCampaignReviewErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type StartCampaignReviewError = StartCampaignReviewErrors[keyof StartCampaignReviewErrors];
-
-export type StartCampaignReviewResponses = {
-    /**
-     * Success
-     */
-    202: CampaignReviewPreparation;
-};
-
-export type StartCampaignReviewResponse = StartCampaignReviewResponses[keyof StartCampaignReviewResponses];
-
-export type GetCampaignReviewData = {
-    body?: never;
-    path: {
-        id: string;
-        reviewId: string;
-    };
-    query?: never;
-    url: '/v1/campaigns/{id}/reviews/{reviewId}';
-};
-
-export type GetCampaignReviewErrors = {
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    400: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    401: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    403: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    404: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    409: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    413: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    422: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    429: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    500: ApiError;
-    /**
-     * Request failed; use error.code and requestId to diagnose.
-     */
-    503: ApiError;
-};
-
-export type GetCampaignReviewError = GetCampaignReviewErrors[keyof GetCampaignReviewErrors];
-
-export type GetCampaignReviewResponses = {
-    /**
-     * Success
-     */
-    200: CampaignReviewPreparation;
-};
-
-export type GetCampaignReviewResponse = GetCampaignReviewResponses[keyof GetCampaignReviewResponses];
 
 export type SendCampaignData = {
     body: CampaignSendInput;

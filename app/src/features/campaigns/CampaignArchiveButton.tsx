@@ -1,11 +1,11 @@
 import { Archive, ArchiveRestore } from 'lucide-react'
 import { useApiMutation } from '../../data/context'
-import type { Campaign } from '../../data/types'
+import { campaignActive, type Campaign } from '../../data/types'
 import { Button, IconButton, useToast } from '../../components/ui'
 
 export function CampaignArchiveButton({ campaign, compact = false, onSuccess }: { campaign: Campaign; compact?: boolean; onSuccess?: () => void }) {
   const archived = Boolean(campaign.archivedAt)
-  const active = !archived && ['scheduled', 'sending'].includes(campaign.status)
+  const active = !archived && campaignActive(campaign)
   const toast = useToast()
   const mutation = useApiMutation((api, value: boolean) => api.campaigns.setArchived({ id: campaign.id, archived: value }), archived ? 'Campaign restored' : 'Campaign archived')
   const label = archived ? 'Restore campaign' : 'Archive campaign'

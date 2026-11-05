@@ -1,4 +1,4 @@
-import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
+import { ApiError, type OpenSendApi, type PageRequest, type PageResult, type Campaign, type CampaignState, type Contact, type AudienceList, type Segment, type Domain, type Webhook, type WebhookDelivery, type MailboxDomain, type MailboxKey, type MailboxWebhookDelivery, type ReceivedEmail, type ReceivedEmailDetail, type InboundAddress, type InboundAddressState, type InboundMessage, type InboundMessageDetail, type InboundThread, type InboundThreadDetail, type InboundWebhook, type Email, type RegionCatalog, type SesDiscovery, type RegionProvisionReceipt, type Workspace, type Identity } from './types'
 
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
@@ -44,7 +44,7 @@ const unsupported = (message: string): never => { throw new ApiError(message, 'U
 const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, consent: { source: '', at: null }, suppressionReason: r.suppressionReason ?? undefined } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json): Segment => ({ ...r, rule: r.rule, match: r.rule?.operator === 'or' ? 'any' : 'all', rules: [], matched: undefined, eligible: undefined } as unknown as Segment)
-const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.status, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, reviewId: r.reviewId, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', replyTo: r.draft.replyTo ?? [], subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], timezone: 'UTC', recipients: r.expansion?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
+const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.state, delivery: r.delivery ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', replyTo: r.draft.replyTo ?? [], subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], timezone: 'UTC', recipients: r.delivery?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
 const mapCampaignSummary = (r: Json): Campaign => ({...mapCampaign(r), draft: undefined, attachments: undefined})
 const mapEmailEvent = (r: Json) => ({id: r.id, type: r.type, at: r.createdAt, description: r.type, diagnostic: typeof r.data?.diagnostic === 'string' ? r.data.diagnostic : undefined})
 const mapEmail = (r: Json): Email => ({ ...r, id: r.id, from: r.from, subject: r.subject, status: r.status, to: r.to.join(', '), regionId: r.region, stream: r.kind, sentAt: r.createdAt, html: '', events: [] })
@@ -146,8 +146,8 @@ export function createLiveApi(): OpenSendApi {
       get: async (id, signal) => { const path = `/emails/${idPath(id)}`; const [row, content, events] = await Promise.all([call(path, 'GET', undefined, signal), call(`${path}/content`, 'GET', undefined, signal), call(`${path}/events?limit=100`, 'GET', undefined, signal)]); return { ...mapEmail(row), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor } }
     },
     campaigns: {
-      list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, status: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,
-      state: (id, signal) => call(`/campaigns/${idPath(id)}/state`, 'GET', undefined, signal),
+      list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, state: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,
+      state: async (id, signal) => { const r = await call<Record<string, any>>(`/campaigns/${idPath(id)}/state`, 'GET', undefined, signal); return { ...r, status: r.state } as CampaignState },
       preview: (id, signal) => call(`/campaigns/${idPath(id)}/preview`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),
       save: async (input, signal) => {
@@ -158,33 +158,16 @@ export function createLiveApi(): OpenSendApi {
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
         return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },
-      audience: async () => unsupported('Save the draft, then generate its recipient review. No audience is inferred from partial contact lists.'),
+      audience: async (input, signal) => ({ ...await call(`/campaigns/${idPath(input.id)}/audience`, 'GET', undefined, signal), contacts: [] }),
       send: async (input, signal) => {
         if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
-        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {...(input.reviewId ? {reviewId: input.reviewId} : {}), revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {})}, signal)
+        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {})}, signal)
         return receipt as import('./types').CampaignSendReceipt
       },
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
       resume: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/resume`, 'POST', {}, signal)),
       setPacing: async (id, input, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pacing`, 'POST', {perDay: input.perDay, ...(input.autoPause === undefined ? {} : {autoPause: input.autoPause}), ...(input.rateShare === undefined ? {} : {rateShare: input.rateShare})}, signal)),
       test: async (input, signal) => { const result = await call(`/campaigns/${idPath(input.id)}/test`, 'POST', {to: input.to}, signal); return {accepted: result.status === 'queued', id: result.id, status: result.status, simulated: result.simulated} }
-    },
-    review: async (id, revision, options = {}) => {
-      const path = `/campaigns/${idPath(id)}/reviews`
-      let preparation = await call(path, 'POST', { revision }, options.signal)
-      while (true) {
-        options.signal?.throwIfAborted()
-        options.onProgress?.({ processed: preparation.processed, eligible: preparation.eligible })
-        if (preparation.status === 'failed') throw new ApiError(preparation.error?.message ?? 'Campaign review failed. Generate a new review to retry.', preparation.error?.code ?? 'CAMPAIGN_REVIEW_FAILED')
-        if (preparation.status === 'ready') return { id: preparation.id, campaignId: preparation.campaignId, revision: preparation.revision, contentHash: preparation.contentHash, createdAt: preparation.createdAt, matched: preparation.matched, eligible: preparation.eligible, suppressed: preparation.suppressed, unsubscribed: preparation.unsubscribed, contacts: [] }
-        await new Promise<void>((resolve, reject) => {
-          const abort = () => { window.clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(new DOMException('Review polling was stopped.', 'AbortError')) }
-          const timer = window.setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve() }, 1500)
-          if (options.signal?.aborted) abort()
-          else options.signal?.addEventListener('abort', abort, { once: true })
-        })
-        preparation = await call(`${path}/${idPath(preparation.id)}`, 'GET', undefined, options.signal)
-      }
     },
     attachments: {
       get: (id, signal) => call<any>(`/attachments/${idPath(id)}`, 'GET', undefined, signal),

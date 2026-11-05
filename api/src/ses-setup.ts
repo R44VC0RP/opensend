@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
 import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand } from '@aws-sdk/client-sesv2';
-import { SESv2Client, GetAccountCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
+import { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
@@ -11,6 +11,8 @@ import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { ApiError, assertSesConfigured, log } from './core.js';
 import type { Config, Runtime } from './core.js';
+import { domainName } from './domain-claims.js';
+import type { IdentityFacts } from './states.js';
 
 const flag = z.boolean().nullable();
 const issue = z.object({ code: z.string(), message: z.string() });
@@ -351,6 +353,26 @@ export async function readReputation(cw: CloudWatchClient, signal: AbortSignal):
 
 /** AWS reads only. A resource is missing only after AWS explicitly reports NotFound. */
 export async function discoverSes(runtime: Runtime, options: SesSetupOptions): Promise<SesDiscovery> { return (await inspect(runtime, options)).report; }
+
+/** One durable page at a time, using the assumed role and the normal regional control-plane pace.
+ * No discovery limit: an account with many identities continues at the next token in a fresh job turn. */
+export async function verifiedByoDomains(runtime: Runtime, region: string, cursor?: string) {
+  const context = setupContext(), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
+  const domains: {name: string; ses: IdentityFacts['ses']}[] = [];
+  try {
+    const page = await c.ses.send(new ListEmailIdentitiesCommand({ PageSize: 10, NextToken: cursor }), opts);
+    for (const identity of page.EmailIdentities ?? []) {
+      const name = domainName.safeParse(identity.IdentityName);
+      if (identity.IdentityType !== 'DOMAIN' || identity.VerificationStatus !== 'SUCCESS' || !name.success) continue;
+      try {
+        const { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } = await c.ses.send(new GetEmailIdentityCommand({ EmailIdentity: name.data }), opts);
+        if (VerificationStatus === 'SUCCESS' && VerifiedForSendingStatus) domains.push({ name: name.data, ses: { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } });
+      } catch (e) { if (!missing(e)) throw e; } // Deleted between listing and reading.
+    }
+    if (cursor && page.NextToken === cursor) throw new ApiError(503, 'SES_PAGINATION_STALLED', 'SES did not advance the identity listing.', undefined, true);
+    return { domains, next: page.NextToken };
+  } finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
+}
 
 export function assertProvisionable(runtime: Runtime): void {
   feedbackUrl(runtime.config);

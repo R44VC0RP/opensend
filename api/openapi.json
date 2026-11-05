@@ -125,7 +125,7 @@
               "ready",
               "failed"
             ],
-            "description": "awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again."
+            "description": "awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again."
           },
           "tenant": {
             "type": "string",
@@ -2327,16 +2327,13 @@
       "Campaign": {
         "type": "object",
         "properties": {
-          "expansion": {
-            "$ref": "#/components/schemas/CampaignExpansion"
-          },
           "id": {
             "type": "string"
           },
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review."
+            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review."
           },
           "revision": {
             "type": "integer"
@@ -2356,22 +2353,19 @@
               "null"
             ]
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
               "draft",
-              "reviewed",
+              "preparing",
               "scheduled",
               "sending",
-              "completed",
+              "paused",
+              "done",
+              "failed",
               "canceled"
-            ]
-          },
-          "reviewId": {
-            "type": [
-              "string",
-              "null"
-            ]
+            ],
+            "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal."
           },
           "scheduledAt": {
             "type": [
@@ -2465,6 +2459,9 @@
               "byStatus"
             ],
             "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/CampaignDelivery"
           }
         },
         "required": [
@@ -2474,165 +2471,13 @@
           "draft",
           "sourceTemplateId",
           "sourceTemplateRevision",
-          "status",
-          "reviewId",
+          "state",
           "scheduledAt",
           "archivedAt",
           "createdAt",
           "updatedAt",
-          "counts"
-        ]
-      },
-      "CampaignExpansion": {
-        "type": [
-          "object",
-          "null"
-        ],
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "expanding",
-              "paused",
-              "completed",
-              "failed",
-              "canceled"
-            ]
-          },
-          "total": {
-            "type": "integer",
-            "description": "Fixed reviewed recipient count reserved at send or schedule."
-          },
-          "expanded": {
-            "type": "integer",
-            "description": "Recipients materialized as immutable email records."
-          },
-          "canceled": {
-            "type": "integer",
-            "description": "Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled."
-          },
-          "error": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ]
-          },
-          "pacing": {
-            "type": "object",
-            "properties": {
-              "perDay": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "description": "Maximum recipients released per rolling 24-hour window; null means no daily cap."
-              },
-              "autoPause": {
-                "type": "boolean",
-                "description": "Pause automatically when bounce or complaint rates exceed safe thresholds."
-              },
-              "rateShare": {
-                "type": "number",
-                "description": "Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate."
-              },
-              "windowStartedAt": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "windowExpanded": {
-                "type": "integer",
-                "description": "Recipients released in the current 24-hour window."
-              },
-              "nextWindowAt": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "When the next 24-hour window opens, when a daily cap is set."
-              }
-            },
-            "required": [
-              "perDay",
-              "autoPause",
-              "rateShare",
-              "windowStartedAt",
-              "windowExpanded",
-              "nextWindowAt"
-            ]
-          },
-          "pausedAt": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "pauseReason": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ]
-          },
-          "waiting": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "pacing_window",
-                  "ses_daily_quota"
-                ]
-              },
-              "until": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "reason",
-              "until"
-            ],
-            "description": "Why releasing recipients is currently held, and the best estimate of until when."
-          }
-        },
-        "required": [
-          "status",
-          "total",
-          "expanded",
-          "canceled",
-          "error",
-          "pacing",
-          "pausedAt",
-          "pauseReason",
-          "waiting"
+          "counts",
+          "delivery"
         ]
       },
       "CampaignDraft": {
@@ -2803,6 +2648,153 @@
         ],
         "additionalProperties": false,
         "description": "Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs."
+      },
+      "CampaignDelivery": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "description": "Fixed recipient count frozen at send or schedule."
+          },
+          "prepared": {
+            "type": "integer",
+            "description": "Recipients whose message was validated."
+          },
+          "expanded": {
+            "type": "integer",
+            "description": "Recipients materialized as immutable email records."
+          },
+          "canceled": {
+            "type": "integer",
+            "description": "Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled."
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "description": "Why the campaign failed or was canceled by the system."
+          },
+          "pacing": {
+            "type": "object",
+            "properties": {
+              "perDay": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Maximum recipients released per rolling 24-hour window; null means no daily cap."
+              },
+              "autoPause": {
+                "type": "boolean",
+                "description": "Pause automatically when bounce or complaint rates exceed safe thresholds."
+              },
+              "rateShare": {
+                "type": "number",
+                "description": "Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate."
+              },
+              "windowStartedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "windowExpanded": {
+                "type": "integer",
+                "description": "Recipients released in the current 24-hour window."
+              },
+              "nextWindowAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "When the next 24-hour window opens, when a daily cap is set."
+              }
+            },
+            "required": [
+              "perDay",
+              "autoPause",
+              "rateShare",
+              "windowStartedAt",
+              "windowExpanded",
+              "nextWindowAt"
+            ]
+          },
+          "pausedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pauseReason": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "waiting": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "pacing_window",
+                  "ses_daily_quota"
+                ]
+              },
+              "until": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason",
+              "until"
+            ],
+            "description": "Why releasing recipients is currently held, and the best estimate of until when."
+          }
+        },
+        "required": [
+          "total",
+          "prepared",
+          "expanded",
+          "canceled",
+          "error",
+          "pacing",
+          "pausedAt",
+          "pauseReason",
+          "waiting"
+        ],
+        "description": "The current launch: null until the campaign is sent or scheduled, and cleared by a new revision."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -2981,16 +2973,13 @@
       "CampaignSummary": {
         "type": "object",
         "properties": {
-          "expansion": {
-            "$ref": "#/components/schemas/CampaignExpansion"
-          },
           "id": {
             "type": "string"
           },
           "url": {
             "type": "string",
             "format": "uri",
-            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; noneditable campaigns open in review."
+            "description": "Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review."
           },
           "revision": {
             "type": "integer"
@@ -3007,22 +2996,19 @@
               "null"
             ]
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
               "draft",
-              "reviewed",
+              "preparing",
               "scheduled",
               "sending",
-              "completed",
+              "paused",
+              "done",
+              "failed",
               "canceled"
-            ]
-          },
-          "reviewId": {
-            "type": [
-              "string",
-              "null"
-            ]
+            ],
+            "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal."
           },
           "scheduledAt": {
             "type": [
@@ -3117,6 +3103,9 @@
             ],
             "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
           },
+          "delivery": {
+            "$ref": "#/components/schemas/CampaignDelivery"
+          },
           "draft": {
             "$ref": "#/components/schemas/CampaignDraftSummary"
           }
@@ -3127,16 +3116,16 @@
           "revision",
           "sourceTemplateId",
           "sourceTemplateRevision",
-          "status",
-          "reviewId",
+          "state",
           "scheduledAt",
           "archivedAt",
           "createdAt",
           "updatedAt",
           "counts",
+          "delivery",
           "draft"
         ],
-        "description": "Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing, reviewing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted."
+        "description": "Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted."
       },
       "CampaignDraftSummary": {
         "type": "object",
@@ -3225,16 +3214,19 @@
           "name": {
             "type": "string"
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
               "draft",
-              "reviewed",
+              "preparing",
               "scheduled",
               "sending",
-              "completed",
+              "paused",
+              "done",
+              "failed",
               "canceled"
-            ]
+            ],
+            "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal."
           },
           "tracking": {
             "type": "boolean"
@@ -3314,8 +3306,8 @@
             ],
             "description": "Counts of immutable campaign email records grouped by their current status, not cumulative provider events or delivery rates. Drafts with no queued emails have zero counts."
           },
-          "expansion": {
-            "$ref": "#/components/schemas/CampaignExpansion"
+          "delivery": {
+            "$ref": "#/components/schemas/CampaignDelivery"
           },
           "totals": {
             "type": "object",
@@ -3512,14 +3504,14 @@
         "required": [
           "id",
           "name",
-          "status",
+          "state",
           "tracking",
           "counts",
-          "expansion",
+          "delivery",
           "totals",
           "rates"
         ],
-        "description": "Lifetime campaign statistics, with no date cutoff or pagination. Completed means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery."
+        "description": "Lifetime campaign statistics, with no date cutoff or pagination. Done means dispatch finished, not delivery finished. Feedback is asynchronous; missing engagement does not prove nobody read or clicked. Simulated outcomes are never evidence of real delivery."
       },
       "CampaignContentGuide": {
         "type": "object",
@@ -3555,6 +3547,30 @@
           "text"
         ]
       },
+      "CampaignAudienceCounts": {
+        "type": "object",
+        "properties": {
+          "matched": {
+            "type": "integer"
+          },
+          "eligible": {
+            "type": "integer"
+          },
+          "suppressed": {
+            "type": "integer"
+          },
+          "unsubscribed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "matched",
+          "eligible",
+          "suppressed",
+          "unsubscribed"
+        ],
+        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
+      },
       "CampaignPreviewImage": {
         "type": "object",
         "properties": {
@@ -3586,22 +3602,19 @@
           "updatedAt": {
             "type": "string"
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
               "draft",
-              "reviewed",
+              "preparing",
               "scheduled",
               "sending",
-              "completed",
+              "paused",
+              "done",
+              "failed",
               "canceled"
-            ]
-          },
-          "reviewId": {
-            "type": [
-              "string",
-              "null"
-            ]
+            ],
+            "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal."
           },
           "scheduledAt": {
             "type": [
@@ -3620,12 +3633,11 @@
           "id",
           "revision",
           "updatedAt",
-          "status",
-          "reviewId",
+          "state",
           "scheduledAt",
           "archivedAt"
         ],
-        "description": "Compact state for draft sync polling. Compare all fields, not only revision: reviews, archival and delivery status can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts."
+        "description": "Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts."
       },
       "CampaignUpdateInput": {
         "type": "object",
@@ -3858,119 +3870,16 @@
         ],
         "additionalProperties": false
       },
-      "CampaignReviewPreparation": {
-        "type": "object",
-        "properties": {
-          "matched": {
-            "type": "integer"
-          },
-          "eligible": {
-            "type": "integer"
-          },
-          "suppressed": {
-            "type": "integer"
-          },
-          "unsubscribed": {
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "campaignId": {
-            "type": "string"
-          },
-          "revision": {
-            "type": "integer"
-          },
-          "contentHash": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "createdAt": {
-            "type": "string"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "processing",
-              "ready",
-              "failed"
-            ]
-          },
-          "processed": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "code": {
-                    "type": "string"
-                  },
-                  "message": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "code",
-                  "message"
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "matched",
-          "eligible",
-          "suppressed",
-          "unsubscribed",
-          "id",
-          "campaignId",
-          "revision",
-          "contentHash",
-          "createdAt",
-          "status",
-          "processed",
-          "error"
-        ],
-        "description": "A durable audience snapshot and bounded preparation. Only ready reviews may be sent. Counts are fixed at creation; live consent is checked again at dispatch."
-      },
-      "CampaignRevisionInput": {
-        "type": "object",
-        "properties": {
-          "revision": {
-            "type": "integer",
-            "exclusiveMinimum": 0
-          }
-        },
-        "required": [
-          "revision"
-        ],
-        "additionalProperties": false
-      },
       "CampaignQueued": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string"
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
-              "scheduled",
-              "sending"
+              "preparing"
             ]
           },
           "queued": {
@@ -3988,7 +3897,7 @@
         },
         "required": [
           "id",
-          "status",
+          "state",
           "queued",
           "scheduledAt",
           "simulated"
@@ -3997,11 +3906,6 @@
       "CampaignSendInput": {
         "type": "object",
         "properties": {
-          "reviewId": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Optional completed review. Omit to snapshot and validate the current revision automatically before delivery."
-          },
           "revision": {
             "type": "integer",
             "exclusiveMinimum": 0
@@ -4044,11 +3948,6 @@
       "CampaignScheduleInput": {
         "type": "object",
         "properties": {
-          "reviewId": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Optional completed review. Omit to snapshot and validate the current revision automatically before delivery."
-          },
           "revision": {
             "type": "integer",
             "exclusiveMinimum": 0
@@ -4073,7 +3972,7 @@
           "id": {
             "type": "string"
           },
-          "status": {
+          "state": {
             "type": "string",
             "enum": [
               "canceled"
@@ -4088,7 +3987,7 @@
         },
         "required": [
           "id",
-          "status",
+          "state",
           "canceled",
           "inFlight"
         ]
@@ -8117,7 +8016,7 @@
               "ready",
               "failed"
             ],
-            "description": "awaiting_role: BYO stack not verified yet. provisioning: AWS resources being created. ready: sending allowed once the tenant is ready. failed: the last provisioning attempt failed; verify again."
+            "description": "awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again."
           },
           "tenant": {
             "type": "string",
@@ -8127,6 +8026,11 @@
               "failed"
             ],
             "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
+          },
+          "importedDomains": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of currently claimed domains imported from this BYO account."
           },
           "awsAccountId": {
             "type": [
@@ -8160,6 +8064,7 @@
           "region",
           "state",
           "tenant",
+          "importedDomains",
           "awsAccountId",
           "roleArn",
           "templateVersion",
@@ -19347,15 +19252,19 @@
               "type": "string",
               "enum": [
                 "draft",
-                "reviewed",
+                "preparing",
                 "scheduled",
                 "sending",
-                "completed",
+                "paused",
+                "done",
+                "failed",
                 "canceled"
-              ]
+              ],
+              "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal."
             },
             "required": false,
-            "name": "status",
+            "description": "draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.",
+            "name": "state",
             "in": "query"
           },
           {
@@ -19684,7 +19593,7 @@
       },
       "patch": {
         "operationId": "updateCampaign",
-        "description": "Replace the whole draft at the current revision. Read the campaign first: html is block HTML that people may have edited in the dashboard composer, so send the complete updated html rather than a fragment. Rejected content names the unsupported tag or attribute.",
+        "description": "Replace the whole draft at the current revision. Read the campaign first: html is block HTML that people may have edited in the dashboard composer, so send the complete updated html rather than a fragment. Rejected content names the unsupported tag or attribute. A failed campaign becomes a draft again.",
         "tags": [
           "Campaigns"
         ],
@@ -20003,7 +19912,7 @@
     "/v1/campaigns/{id}/stats": {
       "get": {
         "operationId": "getCampaignStats",
-        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Completed means dispatch finished; asynchronous feedback can still change totals.",
+        "description": "Lifetime campaign delivery and unique open/click statistics, progress, tracking setting and rates with numeric numerators/denominators. Counts distinct emails across all stored feedback, not event occurrences. Delivery/bounce/complaint rates use accepted emails; open/click rates use delivered emails. Both rate counts exclude simulated emails. Rates are fractions, null for zero denominators; engagement rates are also null with tracking disabled. Delivered means receiving-server acceptance, not inbox placement. Engagement includes bots/privacy proxies. Done means dispatch finished; asynchronous feedback can still change totals.",
         "tags": [
           "Campaigns"
         ],
@@ -20456,6 +20365,162 @@
         ]
       }
     },
+    "/v1/campaigns/{id}/audience": {
+      "get": {
+        "operationId": "previewCampaignAudience",
+        "description": "Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.",
+        "tags": [
+          "Campaigns"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CampaignAudienceCounts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { previewCampaignAudience } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await previewCampaignAudience({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/audience' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
+          }
+        ]
+      }
+    },
     "/v1/campaigns/{id}/preview-image": {
       "get": {
         "operationId": "renderCampaignPreviewImage",
@@ -20615,7 +20680,7 @@
     "/v1/campaigns/{id}/state": {
       "get": {
         "operationId": "getCampaignState",
-        "description": "Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: review, archive and status changes need not increment the draft revision. Omits draft content and delivery counts.",
+        "description": "Compact authenticated state for draft sync polling; fetch the full campaign with getCampaign when state changes. Compare all returned fields, not only revision: archive and delivery changes need not increment the draft revision. Omits draft content and delivery counts.",
         "tags": [
           "Campaigns"
         ],
@@ -20771,7 +20836,7 @@
     "/v1/campaigns/{id}/archive": {
       "patch": {
         "operationId": "setCampaignArchived",
-        "description": "Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery status and history. Scheduled or sending campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, reviewed, tested or sent until restored.",
+        "description": "Archive a campaign to hide it from default lists, or restore it. Preserves its content, revision, delivery state and history. Preparing, scheduled, sending or paused campaigns must finish or be canceled before archiving. Archived campaigns cannot be edited, tested or sent until restored.",
         "tags": [
           "Campaigns"
         ],
@@ -21113,356 +21178,10 @@
         ]
       }
     },
-    "/v1/campaigns/{id}/reviews": {
-      "post": {
-        "operationId": "startCampaignReview",
-        "description": "Start durable preparation for up to 2,000,000 matching contacts. Captures one fixed audience snapshot, then validates every message in bounded jobs. Poll getCampaignReview until ready before asking for send confirmation.",
-        "tags": [
-          "Campaigns"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "dashboardSession": []
-          },
-          {
-            "secureDashboardSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 200,
-              "pattern": "^[\\x21-\\x7E]+$",
-              "example": "order-4821-receipt",
-              "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice."
-            },
-            "required": false,
-            "description": "Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again; a concurrent duplicate waits for the first request and returns its result. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path, and are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.",
-            "name": "Idempotency-Key",
-            "in": "header"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CampaignRevisionInput"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CampaignReviewPreparation"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        },
-        "x-codeSamples": [
-          {
-            "lang": "TypeScript",
-            "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { startCampaignReview } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await startCampaignReview({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {\n    \"revision\": 1\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
-          },
-          {
-            "lang": "Shell",
-            "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/reviews' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1\n}'"
-          }
-        ]
-      }
-    },
-    "/v1/campaigns/{id}/reviews/{reviewId}": {
-      "get": {
-        "operationId": "getCampaignReview",
-        "description": "Read fixed audience counts and durable preparation progress. A ready review is usable only while it remains the campaign’s current review and revision.",
-        "tags": [
-          "Campaigns"
-        ],
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "dashboardSession": []
-          },
-          {
-            "secureDashboardSession": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120
-            },
-            "required": true,
-            "name": "reviewId",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Success",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CampaignReviewPreparation"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Request failed; use error.code and requestId to diagnose.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        },
-        "x-codeSamples": [
-          {
-            "lang": "TypeScript",
-            "label": "TypeScript SDK",
-            "source": "import { createClient } from 'opensend-js/client';\nimport { getCampaignReview } from 'opensend-js';\n\nconst client = createClient({\n  baseUrl: 'https://opensend.anoma.ly',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.OPENSEND_API_KEY\n    : undefined,\n});\n\nconst result = await getCampaignReview({\n  client,\n  path: {\n    \"id\": \"resource_123\",\n    \"reviewId\": \"review_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
-          },
-          {
-            "lang": "Shell",
-            "label": "cURL",
-            "source": "curl --request GET \\\n  --url 'https://opensend.anoma.ly/v1/campaigns/resource_123/reviews/review_123' \\\n  --header \"Authorization: Bearer $OPENSEND_API_KEY\""
-          }
-        ]
-      }
-    },
     "/v1/campaigns/{id}/send": {
       "post": {
         "operationId": "sendCampaign",
-        "description": "Accept the current revision for durable background delivery. Omit reviewId to snapshot and validate the complete audience automatically before any provider attempt; supply an existing completed reviewId to reuse it. The 202 count is accepted recipient intents, not SES acceptance or delivery.",
+        "description": "Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state.",
         "tags": [
           "Campaigns"
         ],
@@ -21642,7 +21361,7 @@
     "/v1/campaigns/{id}/schedule": {
       "post": {
         "operationId": "scheduleCampaign",
-        "description": "Accept the current revision for durable scheduled delivery. Omit reviewId to snapshot and validate automatically; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.",
+        "description": "Accept the current revision for durable scheduled delivery. The audience is frozen and validated now; no recipient is materialized or sent before scheduledAt. The 202 count is accepted recipient intents.",
         "tags": [
           "Campaigns"
         ],
@@ -21822,6 +21541,7 @@
     "/v1/campaigns/{id}/cancel": {
       "post": {
         "operationId": "cancelCampaign",
+        "description": "Stop a preparing, scheduled, sending, paused or failed campaign: unreleased recipients are never materialized and queued mail is canceled; mail already attempting or accepted is reported as inFlight.",
         "tags": [
           "Campaigns"
         ],
@@ -22159,7 +21879,7 @@
     "/v1/campaigns/{id}/resume": {
       "post": {
         "operationId": "resumeCampaign",
-        "description": "Continue releasing recipients from where a paused campaign stopped. After an automatic pause, the next health check runs 30 minutes later.",
+        "description": "Continue releasing recipients from where a paused campaign stopped, or where a campaign that failed after releasing some recipients stopped (it continues on the same frozen snapshot, never a new one). After an automatic pause, the next health check runs 30 minutes later.",
         "tags": [
           "Campaigns"
         ],
@@ -34677,7 +34397,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Get the current MX workspace connection or null. Owner/admin dashboard only.",
+        "description": "Get the current MX workspace connection or null. Poll during BYO setup for awaiting_role, provisioning, ready or failed and the imported domain count. Owner/admin dashboard only.",
         "responses": {
           "200": {
             "description": "Success",
@@ -34980,7 +34700,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Disconnect only when there is no queued, in-flight, or uncertain mail and no scheduled or sending campaigns. Domains stay claimed by this workspace but stop sending and receiving until they are added again on the next connection. AWS resources are retained. Delete the customer stack in AWS to revoke the role.",
+        "description": "Disconnect only when no mail or campaign is in flight. Account-scoped BYO imports are forgotten; exclusive domain claims stay reserved but stop sending and receiving. AWS resources are retained. Delete the customer stack in AWS to revoke the role.",
         "responses": {
           "200": {
             "description": "Success",
@@ -35273,7 +34993,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Verify the external-ID role in the AWS account from the CloudFormation stack output and provision its regional feedback resources. Safe to retry.",
+        "description": "Manual fallback for automatic BYO stack detection. Prove the role and start verification and verified-domain import. Poll getConnection until ready. Safe to retry.",
         "requestBody": {
           "required": true,
           "content": {

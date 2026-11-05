@@ -606,7 +606,7 @@ export function createMockApi(): OpenSendApi {
       preview: (campaignId, signal) => run(signal, false, s => { const campaign = find(s.campaigns, campaignId, 'Campaign'); return { html: campaign.html, text: campaign.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() } }),
       state: (campaignId, signal) => run(signal, false, s => {
         const campaign = find(s.campaigns, campaignId, 'Campaign')
-        return { id: campaign.id, revision: campaign.revision ?? 1, updatedAt: campaign.updatedAt, status: campaign.status, reviewId: campaign.reviewId ?? null, scheduledAt: campaign.scheduledAt, archivedAt: campaign.archivedAt ?? null }
+        return { id: campaign.id, revision: campaign.revision ?? 1, updatedAt: campaign.updatedAt, status: campaign.status, scheduledAt: campaign.scheduledAt, archivedAt: campaign.archivedAt ?? null }
       }),
       setArchived: (input, signal) => run(signal, true, s => {
         const campaign = find(s.campaigns, input.id, 'Campaign')

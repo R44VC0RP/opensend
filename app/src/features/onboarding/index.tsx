@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, ArrowUpRight, Check, Send } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, ErrorState, Field, Input, SectionHeader } from '../../components/ui'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Send, X } from 'lucide-react'
+import { Alert, Button, ErrorState, Field, Input, SectionHeader, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
@@ -11,7 +11,7 @@ import { connectionApi, retryableConnectionErrors, useConnectionCache } from '..
 import { agentStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DomainRecords, useDomain } from '../settings/domain-records'
 import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../developer/agent-setup'
-import { ApiError, type ConnectionKind, type ProviderConnection } from '../../data/types'
+import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -67,75 +67,134 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
   </div>
 }
 
-type View = 'loading' | 'choose' | 'domain' | 'records' | 'agent' | 'admin' | 'error'
-const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, domain: 2, records: 3, agent: 4 }
+type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'admin' | 'error'
+const viewRank: Record<View, number> = { loading: 0, admin: 0, error: 0, choose: 1, connect: 2, domain: 3, imported: 3, records: 4, agent: 5 }
+const hostedSteps = ['Choose', 'Add domain', 'Connect your agent']
+const awsSteps = ['Choose', 'Connect AWS', 'Add domain', 'Connect your agent']
 // The loader and a failed load sit in step 1, so the indicator is already in place when the choice appears.
-const viewStep: Partial<Record<View, number>> = { loading: 1, error: 1, choose: 1, domain: 2, records: 2, agent: 3 }
+function stepOf(view: View, aws: boolean, choosingDomain: boolean) {
+  if (view === 'loading' && choosingDomain) return aws ? 3 : 2
+  const steps: Partial<Record<View, number>> = { loading: 1, error: 1, choose: 1, connect: 2, domain: 2, imported: 2, records: 2, agent: 3 }
+  const step = steps[view]
+  return step && aws && step >= 2 && view !== 'connect' ? step + 1 : step
+}
 const rise = (index: number) => ({ '--i': index }) as CSSProperties
+// Older APIs return no count; a list is accepted too.
+function importedCount(connection: ProviderConnection | null | undefined) {
+  const value = (connection as { importedDomains?: unknown } | null | undefined)?.importedDomains
+  return typeof value === 'number' ? value : Array.isArray(value) ? value.length : 0
+}
+// Connected stays on screen this long before Add domain takes over.
+const CONNECTED_HOLD_MS = 1400
 
 // One component owns every step, so the domain form keeps its input from the choice through a ready connection.
 function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
+  const api = useApi()
+  const client = useQueryClient()
+  const toast = useToast()
   const identity = useSession()?.identity
   const workspaceId = identity?.workspaceId ?? ''
   const sending = stage.step === 'sending'
-  const connection = useApiQuery(['connection'], (_api, signal) => connectionApi.get(signal), { enabled: sending })
+  const choosingDomain = stage.step === 'domain' && !stage.domainId
   const sync = useConnectionCache()
-  // The chosen option shows the domain form at once, while the connection request finishes.
+  // The chosen option shows its next step at once, while the connection request finishes.
   const [picked, setPicked] = useState<ConnectionKind | null>(null)
+  // A connection being deleted (Back, or Hosted instead) is ignored until the delete lands.
+  const [dropped, setDropped] = useState<string | null>(null)
+  // BYO: connecting, then a short Connected moment, then Add domain.
+  const [awsPhase, setAwsPhase] = useState<'idle' | 'connecting' | 'connected' | 'done'>('idle')
+  // Imported domains can be skipped to add another one.
+  const [addAnother, setAddAnother] = useState(false)
   const [draft, setDraft] = useState('')
   const [queued, setQueued] = useState(false)
+  // Polls every 3 s while a BYO setup waits on AWS (only while the page is visible) and on focus.
+  const connection = useQuery({
+    queryKey: ['opensend', api.mode, 'connection'],
+    queryFn: ({ signal }) => connectionApi.get(signal),
+    enabled: sending || choosingDomain,
+    refetchInterval: query => sending && picked !== 'shared' && query.state.data?.kind === 'byo' && query.state.data.state !== 'ready' ? 3000 : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: query => sending && query.state.data?.kind === 'byo' ? 'always' : false,
+  })
   const shared = useConnectionMutation(() => connectionApi.create({ kind: 'shared' }))
   const byo = useConnectionMutation(() => connectionApi.create({ kind: 'byo' }))
-  // Setup finished elsewhere (another tab or admin): lift the gate.
-  useEffect(() => { if (connection.data?.state === 'ready') sync(connection.data) }, [connection.data]) // eslint-disable-line react-hooks/exhaustive-deps
+  const current = connection.data && connection.data.id !== dropped ? connection.data : null
+  // Ready from a poll (auto-verify), another tab or an admin: continue to Add domain.
+  useEffect(() => {
+    if (!sending || current?.state !== 'ready' || (picked === 'shared' && current.kind === 'byo')) return
+    setDomainStep(workspaceId, '')
+    sync(current)
+  }, [current?.state, current?.id]) // eslint-disable-line react-hooks/exhaustive-deps
   function choose(kind: ConnectionKind) {
     shared.reset(); byo.reset()
     setPicked(kind)
-    if (kind === 'shared') { shared.mutate(undefined, { onError: () => setPicked(null) }); return }
-    // Open the tab inside the click so it isn't blocked; it gets the CloudFormation link once the setup exists.
-    const tab = window.open('about:blank', '_blank')
-    byo.mutate(undefined, {
-      onSuccess: created => { if (tab && created?.quickCreateUrl) { tab.opener = null; tab.location.href = created.quickCreateUrl } else tab?.close() },
-      onError: () => { tab?.close(); setPicked(null) },
-    })
+    if (kind === 'shared') shared.mutate(undefined, { onError: () => setPicked(null) })
+    else byo.mutate(undefined, { onError: () => setPicked(null) })
   }
-  const reset = () => { setPicked(null); setQueued(false); setAwsShown(false) }
-  // A bring-your-own card stays in place once it has appeared, and shows Connected when AWS is ready.
-  const [awsShown, setAwsShown] = useState(false)
-  const current = connection.data
-  const pendingAws = sending && current?.kind === 'byo' && current.state !== 'ready' ? current : null
+  // Deletes the pending BYO connection without waiting for it, so leaving is instant.
+  function leaveAws(next: ConnectionKind | null) {
+    const pending = current
+    setDropped(pending?.id ?? null)
+    setAwsPhase('idle')
+    shared.reset(); byo.reset()
+    setPicked(next)
+    if (pending?.state === 'provisioning' || pending?.state === 'failed') toast('If you created the OpenSend stack in AWS, you can delete it there.', 'info')
+    void client.cancelQueries({ queryKey: ['opensend', api.mode, 'connection'] })
+    void (async () => {
+      try { if (pending) await connectionApi.remove() }
+      catch (error) { if (!(error instanceof ApiError && error.status === 404)) { toast(message(error), 'error'); setDropped(null); setPicked(pending ? 'byo' : null); return } }
+      sync(null)
+      if (next === 'shared') shared.mutate(undefined, { onError: () => setPicked(null) })
+    })()
+  }
+  const flow: ConnectionKind | null = sending ? picked ?? current?.kind ?? null : identity?.connection?.kind ?? null
+  const ready = stage.step !== 'sending' && stage.step !== 'setup-required'
+  if (sending && flow === 'byo' && awsPhase === 'idle') setAwsPhase('connecting')
+  if (sending && flow !== 'byo' && awsPhase === 'connecting') setAwsPhase('idle')
+  if (awsPhase === 'connecting' && (ready || current?.state === 'ready')) setAwsPhase('connected')
+  useEffect(() => {
+    if (awsPhase !== 'connected') return
+    const timer = setTimeout(() => setAwsPhase('done'), CONNECTED_HOLD_MS)
+    return () => clearTimeout(timer)
+  }, [awsPhase])
+  const connectionState: ConnectionState | 'creating' = awsPhase === 'connected' ? 'ready' : current?.kind === 'byo' ? current.state : 'creating'
+  const imported = importedCount(connection.data)
+  const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
+    ready={stage.step === 'domain'} region={identity?.connection?.region ?? ''}
+    onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)} />
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
   else if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={() => setDomainStep(workspaceId, null)} /> }
   else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
-  else if (sending && !pendingAws && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
-  else if (sending && !pendingAws && !picked && connection.isPending) { view = 'loading'; content = <BootLoader inline /> }
-  else if (sending && !pendingAws && !picked) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
-  else {
-    const aws = !!pendingAws || (sending && picked === 'byo')
-    if (aws && !awsShown) setAwsShown(true)
-    view = 'domain'
-    content = <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
-      ready={stage.step === 'domain'} region={identity?.connection?.region ?? ''}
-      onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)}
-      aws={aws || awsShown ? <ConnectAws connection={pendingAws} connected={!aws} onReset={reset} /> : null} />
+  else if (awsPhase === 'connecting' || awsPhase === 'connected') {
+    view = 'connect'
+    content = <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(null)} onHosted={() => leaveAws('shared')} />
   }
+  else if (sending && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
+  else if ((sending && !picked && connection.isPending) || (choosingDomain && flow === 'byo' && connection.isPending)) { view = 'loading'; content = <BootLoader inline /> }
+  else if (sending && !flow) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
+  else if (choosingDomain && flow === 'byo' && imported > 0 && !addAnother) {
+    view = 'imported'
+    content = <ImportedDomains count={imported} onContinue={id => setDomainStep(workspaceId, agentStep(id))} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
+  }
+  else { view = 'domain'; content = domainForm() }
   // Steps slide in the direction of travel; the first paint and the loader stay still.
   const [frame, setFrame] = useState<{ view: View; previous: View | null }>({ view, previous: null })
   if (frame.view !== view) setFrame({ view, previous: frame.view })
   const previous = frame.view === view ? frame.previous : frame.view
-  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || view === 'error' || !viewStep[view] ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
+  const motion = previous === null || view === 'loading' ? undefined : previous === 'loading' || view === 'error' || view === 'admin' ? 'fade' : viewRank[view] >= viewRank[previous] ? 'forward' : 'back'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
-  const step = viewStep[view]
+  const aws = flow === 'byo'
+  const step = stepOf(view, aws, choosingDomain)
   return <>
-    {step && <StepIndicator current={step} />}
+    {/* Keyed by flow: switching between 3 and 4 steps mounts a new indicator instead of moving the old one. */}
+    {step && <StepIndicator key={aws ? 'aws' : 'hosted'} steps={aws ? awsSteps : hostedSteps} current={step} />}
     <div key={view} className="onboarding-step" data-motion={motion}>{content}</div>
   </>
 }
 
-const steps = ['Choose', 'Add domain', 'Connect your agent']
 // Persists across steps, so its marks and connecting lines animate as setup moves forward.
-function StepIndicator({ current }: { current: number }) {
+function StepIndicator({ steps, current }: { steps: string[]; current: number }) {
   return <ol className="onboarding-progress" aria-label="Setup progress">
     {steps.map((label, index) => {
       const state = index + 1 < current ? 'done' : index + 1 === current ? 'current' : 'upcoming'
@@ -147,15 +206,6 @@ function StepIndicator({ current }: { current: number }) {
     })}
     <li className="onboarding-progress-caption" aria-hidden="true">Step {current} of {steps.length} · {steps[current - 1]}</li>
   </ol>
-}
-
-function StartOver({ onReset }: { onReset: () => void }) {
-  const [open, setOpen] = useState(false)
-  const remove = useConnectionMutation(async () => { await connectionApi.remove(); return null })
-  return <>
-    <Button variant="ghost" size="sm" onClick={() => setOpen(true)}>Start over</Button>
-    <ConfirmDialog open={open} onOpenChange={setOpen} title="Start over?" description="The current CloudFormation link stops working. If you already created the stack, delete it in AWS." confirmLabel="Start over" pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(undefined); onReset() }} />
-  </>
 }
 
 function AdminSetupRequired() {
@@ -194,8 +244,8 @@ function ChooseSending({ onChoose, error }: { onChoose: (kind: ConnectionKind) =
       <button type="button" className="onboarding-option onb-rise" style={rise(2)} onClick={() => onChoose('byo')}>
         <span className="onboarding-option-icon onboarding-option-icon--aws" aria-hidden="true"><AwsLogo /></span>
         <span className="onboarding-option-title">Your AWS account</span>
-        <span className="onboarding-option-body">Use your own AWS account. Setup opens AWS in a new tab.</span>
-        <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Open AWS<ArrowUpRight size={16} aria-hidden /></span></span>
+        <span className="onboarding-option-body">Send through SES in your own account. A short AWS setup connects it.</span>
+        <span className="onboarding-option-foot"><span className="onboarding-option-price">You pay AWS directly</span><span className="onboarding-option-go">Continue<ArrowRight size={16} aria-hidden /></span></span>
       </button>
     </div>
     {error ? <Alert tone="danger">{connectionError(error)}</Alert> : null}
@@ -220,9 +270,48 @@ function verifyError(error: unknown, region: string) {
   }
 }
 
-// Compact status above the domain form while a bring-your-own setup waits for its CloudFormation stack.
-// Once AWS is connected the card keeps its size and swaps to a confirmation, so nothing below moves.
-function ConnectAws({ connection, connected, onReset }: { connection: ProviderConnection | null; connected: boolean; onReset: () => void }) {
+const connectStates: { key: ConnectionState | 'creating'; title: string; detail: string }[] = [
+  { key: 'creating', title: 'Preparing…', detail: 'Getting your AWS link ready.' },
+  { key: 'awaiting_role', title: 'Waiting for AWS…', detail: 'Create the stack in the AWS tab. This page updates on its own.' },
+  { key: 'provisioning', title: 'Setting up…', detail: 'AWS confirmed the stack. Creating the sending resources in your account.' },
+  { key: 'ready', title: 'Connected', detail: 'Your AWS account is ready. Taking you to the next step…' },
+  { key: 'failed', title: 'Setup didn’t finish', detail: 'Check the stack in AWS, then try again or enter your account ID below.' },
+]
+
+// BYO step 2: one task. Open AWS, watch the live status, leave any time.
+function ConnectAwsStep({ state, connection, onBack, onHosted }: { state: ConnectionState | 'creating'; connection: ProviderConnection | null; onBack: () => void; onHosted: () => void }) {
+  const [trouble, setTrouble] = useState(false)
+  const link = connection?.quickCreateUrl
+  const connected = state === 'ready'
+  const active = connectStates.find(item => item.key === state) ?? connectStates[0]
+  return <div className="onboarding onboarding--narrow">
+    <div className="onboarding-intro onb-rise" style={rise(0)}>
+      <button type="button" className="onboarding-back" onClick={onBack} disabled={connected}><ArrowLeft size={14} aria-hidden />Back</button>
+      <h1 className="onboarding-title">Connect your AWS account</h1>
+      <p className="onboarding-lead">A CloudFormation stack gives OpenSend a role in your account. It takes about two minutes, and this page continues on its own.</p>
+    </div>
+    <div className="onboarding-connect-actions onb-rise" style={rise(1)} inert={connected}>
+      {link ? <a className="ui-button ui-button--primary ui-button--md" href={link} target="_blank" rel="noopener noreferrer">Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></a>
+        : <Button variant="primary" loading>Open AWS to create the stack<ArrowUpRight size={16} aria-hidden /></Button>}
+      <Button variant="ghost" onClick={onHosted}>Use Hosted mail instead</Button>
+    </div>
+    {/* Every status is laid out in one cell, so moving from Waiting to Connected never changes the height. */}
+    <div className="onboarding-connect-status onb-rise" style={rise(2)} data-state={state}>
+      <span className="onboarding-connect-mark" aria-hidden="true"><span className="onboarding-connect-dot" /><Check size={14} strokeWidth={3} /><X size={14} strokeWidth={3} /></span>
+      <div className="onboarding-slot">
+        {connectStates.map(item => <p key={item.key} data-active={item.key === state || undefined} aria-hidden={item.key !== state || undefined}><strong>{item.title}</strong><span>{item.key === 'ready' && connection?.awsAccountId ? `Account ${connection.awsAccountId} is ready. Taking you to the next step…` : item.detail}</span></p>)}
+      </div>
+      <span className="sr-only" role="status">{active.title}</span>
+    </div>
+    <div className="onboarding-trouble onb-rise" style={rise(3)} inert={connected}>
+      <button type="button" className="onboarding-disclosure" aria-expanded={trouble} aria-controls="onboarding-aws-trouble" onClick={() => setTrouble(open => !open)}><ChevronRight size={14} aria-hidden />Having trouble? Enter your AWS account ID</button>
+      {trouble && !connected && <div id="onboarding-aws-trouble" className="onboarding-trouble-body"><VerifyAccount connection={connection} /></div>}
+    </div>
+  </div>
+}
+
+// Fallback until auto-verify is everywhere: verify the role by its AWS account ID.
+function VerifyAccount({ connection }: { connection: ProviderConnection | null }) {
   const [account, setAccount] = useState('')
   const [accountError, setAccountError] = useState('')
   const verify = useConnectionMutation((id: string) => retrying(() => connectionApi.verify(id)))
@@ -233,38 +322,43 @@ function ConnectAws({ connection, connected, onReset }: { connection: ProviderCo
     setAccountError('')
     try { await verify.mutateAsync(id) } catch { /* Shown inline. */ }
   }
-  const link = connection?.quickCreateUrl
-  const canStartOver = !!connection && !verify.isPending
-  return <section className="onboarding-aws onboarding-slot" data-connected={connected || undefined} aria-labelledby="onboarding-aws-title">
-    <div className="onboarding-aws-pending" data-active={!connected || undefined} inert={connected}>
-      <div className="onboarding-aws-status">
-        <p id="onboarding-aws-title" role="status"><span className="onboarding-aws-dot" aria-hidden="true" /><strong>Connect your AWS account</strong><span className="muted">{verify.isPending ? 'Checking the role…' : 'Waiting for the stack in AWS'}</span></p>
-        <div className="cluster">
-          {link ? <a className="ui-button ui-button--ghost ui-button--sm" href={link} target="_blank" rel="noopener noreferrer">Open AWS again <ArrowUpRight size={16} aria-hidden /></a> : <Button variant="ghost" size="sm" disabled>Open AWS again <ArrowUpRight size={16} aria-hidden /></Button>}
-          <span className="onboarding-reserve" data-hidden={!canStartOver || undefined} inert={!canStartOver}><StartOver onReset={onReset} /></span>
-        </div>
-      </div>
-      <form className="onboarding-inline-form" onSubmit={submit} noValidate>
-        <div className="onboarding-field onboarding-field--aws">
-          <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="Once the stack shows CREATE_COMPLETE. It’s the 12 digits in the AWS console’s account menu.">
-            <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
-          </Field>
-        </div>
-        <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
-      </form>
+  return <form className="onboarding-inline-form" onSubmit={submit} noValidate>
+    <div className="onboarding-field onboarding-field--aws">
+      <Field label="AWS account ID" htmlFor="onboarding-aws-account" error={accountError || (verify.error ? verifyError(verify.error, connection?.region ?? 'your region') : undefined)} hint="Once the stack shows CREATE_COMPLETE. It’s the 12 digits in the AWS console’s account menu.">
+        <Input id="onboarding-aws-account" inputMode="numeric" autoComplete="off" autoFocus value={account} onChange={event => setAccount(event.target.value)} placeholder="123456789012" maxLength={14} disabled={verify.isPending} />
+      </Field>
     </div>
-    <div className="onboarding-aws-connected" data-active={connected || undefined} inert={!connected}>
-      <span className="onboarding-aws-check" aria-hidden="true"><Check size={18} strokeWidth={2.5} /></span>
-      <div><strong>AWS account connected</strong><p>{verify.data?.awsAccountId ? `Account ${verify.data.awsAccountId}. ` : ''}Add your domain below.</p></div>
+    <Button type="submit" loading={verify.isPending} disabled={!connection}>Verify</Button>
+  </form>
+}
+
+// BYO with verified domains already in SES: they're done; continue, or add another.
+function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count: number; onContinue: (id: string) => void; onAddAnother: () => void; fallback: ReactNode }) {
+  const domains = useApiQuery(['domains', 'onboarding-imported'], (api, signal) => api.domains.list({ page: 1, pageSize: 20 }, signal))
+  if (domains.isPending) return <BootLoader inline />
+  const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified')
+  if (domains.error || verified.length === 0) return fallback
+  const shown = Math.max(count, verified.length)
+  return <div className="onboarding onboarding--narrow">
+    <div className="onboarding-intro onb-rise" style={rise(0)}>
+      <h1 className="onboarding-title">Your domains are ready</h1>
+      <p className="onboarding-lead">We imported {shown} verified {shown === 1 ? 'domain' : 'domains'} from your AWS account. You can send from {shown === 1 ? 'it' : 'them'} now.</p>
     </div>
-  </section>
+    <ul className="onboarding-imported onb-rise" style={rise(1)}>
+      {verified.map(domain => <li key={domain.id}><code>{domain.name}</code><LiveStatus state="verified" plain /></li>)}
+    </ul>
+    <div className="onboarding-connect-actions onb-rise" style={rise(2)}>
+      <Button variant="primary" onClick={() => onContinue(verified[0].id)}>Continue<ArrowRight size={16} aria-hidden /></Button>
+      <Button variant="ghost" onClick={onAddAnother}>Add another domain</Button>
+    </div>
+  </div>
 }
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
-type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; region: string; onAdded: (id: string) => void; onFinish: () => void; aws: ReactNode }
+type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; region: string; onAdded: (id: string) => void; onFinish: () => void }
 // Before the connection is ready, a valid domain waits and is added as soon as it is.
-function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region, onAdded, onFinish, aws }: AddDomainProps) {
+function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region, onAdded, onFinish }: AddDomainProps) {
   const api = useApi()
   const client = useQueryClient()
   const create = useApiMutation((api, name: string) => api.domains.create({ regionId: region, name }), undefined, true)
@@ -286,12 +380,11 @@ function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region
       <h1 className="onboarding-title">Add your domain</h1>
       <p className="onboarding-lead">Use a domain you own. Next, you’ll add a few DNS records.</p>
     </div>
-    {aws && <div className="onb-rise" style={rise(1)}>{aws}</div>}
     <form className="onboarding-inline-form onb-rise" style={rise(2)} onSubmit={event => { event.preventDefault(); void add() }} noValidate>
       <div className="onboarding-field onboarding-field--domain">
         {/* The hint line is always there: the live preview, the queued note or an error take turns in it. */}
-        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued ? `${value} is added as soon as your AWS account is connected.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
-          <Input id="onboarding-domain" autoFocus={!aws} autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
+        <Field label="Domain" htmlFor="onboarding-domain" error={invalid || (create.error ? message(create.error) : undefined)} hint={queued ? `${value} is added as soon as sending is ready.` : <>You’ll send as <code className="onboarding-preview">hello@{domainPattern.test(value) ? value : 'acme.com'}</code></>}>
+          <Input id="onboarding-domain" autoFocus autoComplete="off" autoCapitalize="none" spellCheck={false} value={draft} onChange={event => { onDraftChange(event.target.value); onQueuedChange(false) }} placeholder="acme.com" disabled={create.isPending} />
         </Field>
       </div>
       <Button type="submit" variant="primary" loading={create.isPending}>Add domain<ArrowRight size={16} aria-hidden /></Button>
@@ -359,17 +452,13 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">
         <SectionHeader title="API key" />
-        {/* The key replaces the button in a slot sized for both, so the cards below never move. */}
-        <div className="onboarding-slot">
-          <div className="stack" data-active={!secret || undefined} inert={!!secret}>
-            <p className={create.error ? 'developer-copy onboarding-error' : 'muted developer-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : 'Full access to send and manage this workspace, for every domain.'}</p>
-            <div><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
-          </div>
-          <div className="stack onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}>
-            <div className="developer-url"><code>{secret ?? keyPlaceholder}</code><CopyAction value={secret ?? ''} label="Copy API key" size="sm" /></div>
-            <p className="muted developer-copy" role="status">Shown once. Store it as <code>OPENSEND_API_KEY</code> in your project’s environment.</p>
-          </div>
+        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? message(create.error) : <>Store it as <code>OPENSEND_API_KEY</code> in your project’s environment. It’s shown once.</>}</p>
+        {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
+        <div className="onboarding-slot onboarding-key">
+          <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} onClick={() => void createKey()}>Create API key</Button></div>
+          <div className="developer-url onboarding-reveal" data-active={secret ? true : undefined} inert={!secret}><code>{secret ?? keyPlaceholder}</code><CopyAction value={secret ?? ''} label="Copy API key" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
         </div>
+        <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>
       <div className="onb-rise" style={rise(2)}><AgentPrompt prompt={prompt} /></div>
       <div className="onb-rise" style={rise(3)}><McpSetup /></div>

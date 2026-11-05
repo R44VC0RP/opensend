@@ -2,9 +2,9 @@ import { getTableColumns, sql } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, checkedDispatchAttachments, finishEmailCampaign, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, queueSimulatedFeedback, rank, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
-import type { TenantState } from './states.js';
+import { finishCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import type { ReadyConnection } from './provider-credentials.js';
@@ -18,7 +18,7 @@ import { screenSnapshot } from './screen.js';
 // so the hot path costs three database statements per batch rather than ten per email.
 
 export type Mail = typeof emails.$inferSelect;
-type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; status: string | null; contentHash: string | null; recipient: ReviewedRecipient };
+type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; tenantName?: string; feedbackTopic?: string };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
@@ -213,7 +213,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       LEFT JOIN ses_installation_settings s USING (workspace_id)
       ${mx ? sql`JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : !isSimulatedSes(runtime) ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
     ) SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,
-      r.draft AS review_draft, r.rendered AS review_rendered, r.status AS review_status, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
+      r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id
@@ -221,7 +221,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
   return result.rows.map(row => {
-    const { review_draft, review_rendered, review_status, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, ...fields } = row;
+    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState }) | null;
     const ready = regionReady && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
@@ -241,7 +241,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
-    return { mail, owner: ready ? owner! : null, review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], status: review_status as string | null, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    return { mail, owner: ready ? owner! : null, review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
 
@@ -323,7 +323,15 @@ async function rejectPreflight(runtime: Runtime, a: Actor, mail: Mail, error: un
   // Screen rejections are an expected policy outcome, not a dispatcher fault.
   if (error instanceof ScreenRejected) log('warn', { code, emailId: mail.id, spam: error.screen.spam, model: error.screen.model });
   else log('error', { code, emailId: mail.id, message: error instanceof ApiError ? error.message : 'Unexpected dispatch preflight failure.' });
-  await finishEmailCampaign(runtime, a, mail);
+  if (mail.campaignId) await finishSettledCampaigns(runtime, [{ workspace_id: mail.workspaceId, campaign_id: mail.campaignId }]);
+}
+
+type CampaignRef = { workspace_id: string; campaign_id: string };
+// One statement moves every listed campaign whose last row has left the queue to done. It takes only the campaign
+// rows (never email locks), after the statement that moved the rows, so it cannot deadlock with cancel or the run job.
+async function finishSettledCampaigns(runtime: Runtime, refs: CampaignRef[]) {
+  if (!refs.length) return;
+  await runtime.db.execute(finishCampaigns(sql`SELECT workspace_id, campaign_id FROM jsonb_to_recordset(${JSON.stringify(refs)}::jsonb) AS r(workspace_id text, campaign_id text)`));
 }
 
 // OAuth grant decoding, original scopes and client/resource policy stay in the MCP verifier.
@@ -341,6 +349,8 @@ async function originDecisions(prepared: Prepared[], db: DbExecutor) {
 // One statement elects every row in the group: key revocation under FOR SHARE, consent locks, campaign
 // cancellation, unsubscribe tokens and attempt events. Rows flip queued → attempting here, so the group
 // is kept to the provider in-flight width: a platform reset can only strand what was actually mid-call.
+// Campaign rows are shared-locked before their email rows (cancel and the run job take the campaign row
+// first too); the campaign itself is never written here, so concurrent shards never serialize on it.
 async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<string, boolean>, db: DbExecutor = runtime.db): Promise<Map<string, EmailStatus>> {
   const input = prepared.map(item => ({
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
@@ -357,7 +367,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
       SELECT id, workspace_id, permissions, domains FROM api_keys WHERE revoked_at IS NULL
         AND (workspace_id, id) IN (SELECT workspace_id, actor_key_id FROM input) FOR SHARE
     ), campaign_state AS MATERIALIZED (
-      SELECT id, workspace_id, status FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
+      SELECT id, workspace_id, state FROM sending_campaigns WHERE (workspace_id, id) IN (SELECT workspace_id, campaign_id FROM input WHERE campaign_id IS NOT NULL) FOR SHARE
     ), dest AS (
       SELECT x.id AS email_id, x.workspace_id, d.value AS email FROM input x, jsonb_array_elements_text(x.destinations) d
     ), consent AS MATERIALIZED (
@@ -377,7 +387,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
               SELECT 1 FROM jsonb_array_elements_text(k.domains) d WHERE split_part(x.sender, '@', 2) = lower(d.value)
                 OR right(split_part(x.sender, '@', 2), length(d.value) + 1) = '.' || lower(d.value)))) END
           ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${prepared[0]!.mail.region}`, sql`split_part(x.sender, '@', 2)`,runtime)}` : sql``} AS origin_ok,
-        (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.status <> 'canceled')) AS campaign_allowed,
+        (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.state <> 'canceled')) AS campaign_allowed,
         NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (workspace_id, email)
           WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed
       FROM input x
@@ -405,14 +415,6 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
       FROM claimed c JOIN input x ON x.id = c.id WHERE c.status = 'suppressed' ON CONFLICT DO NOTHING
     ) SELECT id, status FROM claimed`);
   return new Map(claimed.rows.map(row => [row.id, row.status]));
-}
-
-// Scheduled campaigns become "sending" on their first claim; a plain UPDATE avoids the shared-lock
-// upgrade that concurrent shards would otherwise deadlock on.
-async function activateCampaigns(runtime: Runtime, campaigns: { workspace_id: string; id: string }[]) {
-  await runtime.db.execute(sql`UPDATE sending_campaigns SET status = 'sending', updated_at = clock_timestamp()
-    WHERE status = 'scheduled' AND (workspace_id, id) IN
-      (SELECT workspace_id, id FROM jsonb_to_recordset(${JSON.stringify(campaigns)}::jsonb) x(workspace_id text, id text))`);
 }
 
 function redactDenial(runtime: Runtime, failure: { name?: string; message?: string; $metadata?: { httpStatusCode?: number; requestId?: string } }) {
@@ -530,7 +532,9 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
   }
 }
 
-type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; activated: Set<string>; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+// `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
+// statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
+type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
@@ -574,12 +578,6 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.owner.a, item.mail, error); }
   })));
   if (!prepared.length) return { processed: leased.length, blocked: false };
-  const campaigns = new Map<string, string>();
-  for (const { mail } of prepared) if (mail.campaignId && mail.scheduledAt && !lane.activated.has(mail.campaignId)) campaigns.set(mail.campaignId, mail.workspaceId);
-  if (campaigns.size) {
-    await phase('activate', () => activateCampaigns(base, [...campaigns].map(([id, workspace_id]) => ({ id, workspace_id }))));
-    for (const id of campaigns.keys()) lane.activated.add(id);
-  }
   const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
   for (const group of chunk(prepared, options.sendConcurrency)) {
@@ -591,8 +589,10 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     const attempting = group.filter(item => statuses.get(item.mail.id) === 'attempting');
     const lost = group.filter(item => !statuses.has(item.mail.id));
     counters.skipped += group.length - attempting.length;
-    for (const item of group) if (statuses.get(item.mail.id) === 'canceled' || statuses.get(item.mail.id) === 'suppressed') await finishEmailCampaign(item.owner.runtime, item.owner.a, { ...item.mail, status: statuses.get(item.mail.id)! });
     if (lost.length) log('warn', { code: 'DISPATCH_CLAIM_LOST', count: lost.length, message: 'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
+    // A campaign row settled by the claim itself (canceled or suppressed) may have been the campaign's last; check now.
+    const settled = group.filter(item => item.mail.campaignId && ['canceled', 'suppressed'].includes(statuses.get(item.mail.id) ?? ''));
+    if (settled.length) await phase('finish', () => finishSettledCampaigns(base, [...new Map(settled.map(item => [item.mail.campaignId!, { workspace_id: item.mail.workspaceId, campaign_id: item.mail.campaignId! }])).values()]));
     if (!attempting.length) continue;
     // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
     // rate rather than one burst per group; a throttled response brakes every lane on this shard.
@@ -604,14 +604,19 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
       return outcome;
     }))));
     pendingRecords.push(phase('record', () => recordOutcomes(base, outcomes)).then(async () => {
-      for (const [i, outcome] of outcomes.entries()) {
+      for (const outcome of outcomes) {
         if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
-        if (!outcome.mail.reviewId) await finishEmailCampaign(attempting[i]!.owner.runtime, attempting[i]!.owner.a, { ...outcome.mail, status: statusForEvent[outcome.type] ?? outcome.mail.status });
+        if (outcome.mail.campaignId && outcome.type !== 'provider_throttled') lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
       }
     }));
   }
   await Promise.all(pendingRecords);
   return { processed: leased.length, blocked: false };
+}
+async function flushFinishing(runtime: Runtime, lane: Lane) {
+  if (!lane.finishing.size) return;
+  const refs = [...lane.finishing.values()]; lane.finishing.clear();
+  await lane.phase('finish', () => finishSettledCampaigns(runtime, refs));
 }
 
 /**
@@ -628,7 +633,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
-  const lane: Lane = { deferred: [], gate, pacing, activated: new Set(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const lane: Lane = { deferred: [], gate, pacing, finishing: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
   const lease = () => phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId));
   const first = await lease();
   const lanes = first.length === lane.options.batchSize ? Math.max(1, options.lanes ?? 2) : 1;
@@ -640,12 +645,14 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       counters.batches++;
       if (exhausted) blocked = true;
       if (processed) await options.onGate?.(gate);
-      if (blocked || batch.length < lane.options.batchSize) return;
-      if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; return; }
+      // A short batch means the queue is draining: settle completed campaigns before this lane stops.
+      if (blocked || batch.length < lane.options.batchSize) { await flushFinishing(runtime, lane); return; }
+      if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; await flushFinishing(runtime, lane); return; }
       batch = await lease();
     }
   }));
   for (const result of results) if (result.status === 'rejected') throw result.reason;
+  await flushFinishing(runtime, lane);
   if (blocked) counters.idle = true;
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.

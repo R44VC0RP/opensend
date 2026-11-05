@@ -71,7 +71,9 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
-    const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'));
+    // A job row that is requeued under the same id (campaign runs) carries a fresh payload.run token; fencing on it keeps
+    // a worker that still holds the retired run from completing or requeueing the row the new run now owns.
+    const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
     const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
     try {
       const handler = handlers[job.type];
@@ -118,9 +120,8 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
         SELECT j.id FROM jobs j WHERE ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
           AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
-          CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN j.type IN ('campaign.prepare','campaign.expand','campaign.finish') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
-          CASE WHEN j.type = 'campaign.finish' THEN 0
-            WHEN j.type IN ('campaign.prepare','campaign.expand') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
+          CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
+          CASE WHEN starts_with(j.type, 'campaign.') THEN 1 WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery') THEN 2 WHEN j.type IN ('operation.publish','operation.publishBatch') THEN 3 ELSE 4 END,
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM regular

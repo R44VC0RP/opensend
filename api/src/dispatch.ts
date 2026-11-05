@@ -10,7 +10,8 @@ import { reputationAlertJobs } from './reputation-alerts.js';
 import { mailboxSetupJobs } from './mailbox-setup.js';
 import { mailboxIngestJobs } from './mailbox-ingest.js';
 import { mailboxEventJobs } from './mailbox-events.js';
-import { tenantJob } from './provider-connections.js';
+import { byoVerifyJob, tenantJob } from './provider-connections.js';
+import { finishCampaigns } from './states.js';
 const mailboxJobs = { ...mailboxSetupJobs, ...mailboxIngestJobs, ...mailboxEventJobs };
 const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   if (typeof payload.key !== 'string') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Attachment deletion job is missing its object key.');
@@ -19,11 +20,12 @@ const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   catch { throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true); }
 };
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
-export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
+export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'byo.verify': byoVerifyJob, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
 type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo' };
 export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
   // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may
-  // already have reached SES: record uncertainty atomically; never put it back on the send queue.
+  // already have reached SES: record uncertainty atomically; never put it back on the send queue. The same
+  // sweep completes any sending campaign whose last row left the queue without finishing it inline.
   const recovery = recoverInterrupted ? sql`WITH stale AS (
     UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
     WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, simulated, dispatch_version
@@ -31,7 +33,7 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
     INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
     SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
       simulated, '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb FROM stale ON CONFLICT DO NOTHING
-  )` : sql``;
+  ), finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
     SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c

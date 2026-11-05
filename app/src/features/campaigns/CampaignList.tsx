@@ -1,6 +1,6 @@
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { useApiQuery } from '../../data/context'
-import type { Campaign } from '../../data/types'
+import { campaignEditable, type Campaign } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, Input, PageHeader, Pagination, PaginationSkeleton, Tabs, StatusBadge } from '../../components/ui'
 import { date, number, percent, shortDateTime, time } from '../../lib/format'
 import { campaignColumns } from './skeletons'
@@ -8,14 +8,14 @@ import { CampaignArchiveButton } from './CampaignArchiveButton'
 import { campaignPollInterval } from './CampaignProgress'
 import './campaigns.css'
 
-const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(campaign.id)}/${!campaign.archivedAt && ['draft', 'reviewed'].includes(campaign.status) ? 'edit' : 'review'}`
+const campaignPath = (campaign: Campaign) => `/campaigns/${encodeURIComponent(campaign.id)}/${!campaign.archivedAt && campaignEditable(campaign) ? 'edit' : 'review'}`
 
 export function CampaignsPage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
   const search = params.get('search') || ''
-  const status = !archived && ['draft', 'reviewed', 'scheduled', 'sending', 'completed', 'canceled'].includes(params.get('status') || '') ? params.get('status')! : 'all'
+  const status = !archived && ['draft', 'preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'].includes(params.get('status') || '') ? params.get('status')! : 'all'
   const requestedPage = Number(params.get('page'))
   const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const pageSize = 10
@@ -41,16 +41,16 @@ export function CampaignsPage() {
     <PageHeader title="Campaigns" actions={<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />
     <Tabs value={archived ? 'archived' : status} onValueChange={selectTab} items={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
-      { value: 'reviewed', label: 'Reviewed' }, { value: 'sending', label: 'Sending' }, { value: 'completed', label: 'Completed' }, { value: 'canceled', label: 'Canceled' },
+      { value: 'sending', label: 'Sending' }, { value: 'paused', label: 'Paused' }, { value: 'done', label: 'Done' }, { value: 'failed', label: 'Failed' }, { value: 'canceled', label: 'Canceled' },
       { value: 'archived', label: 'Archived' },
     ]} />
     <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" value={search} onChange={event => filter('search', event.target.value)} /></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(campaignPath(row))} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
         { ...campaignColumns[0], render: row => <div className="campaign-row-name"><Link to={campaignPath(row)} onClick={event => event.stopPropagation()}>{row.name}</Link>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted">{row.subject}</span>}</div> },
-        { ...campaignColumns[1], render: row => <StatusBadge status={row.expansion?.status === 'paused' ? 'paused' : row.status} /> },
+        { ...campaignColumns[1], render: row => <StatusBadge status={row.status} /> },
         { ...campaignColumns[2], render: row => number(row.recipients) },
-        { ...campaignColumns[3], render: row => ['sent', 'completed'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
+        { ...campaignColumns[3], render: row => ['sent', 'done'].includes(row.status) && row.recipients > 0 ? percent(row.delivered / row.recipients) : '—' },
         { ...campaignColumns[4], render: row => { const at = row.scheduledAt || row.updatedAt; return <span className="muted campaign-activity" title={`${date(at)} · ${time(at)} UTC`}>{shortDateTime(at)}</span> } },
         { ...campaignColumns[5], render: row => <CampaignArchiveButton campaign={row} compact onSuccess={() => filter('page', '')} /> },
       ]} />
