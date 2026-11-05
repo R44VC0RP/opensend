@@ -169,6 +169,14 @@ Pushes to `main` deploy through [`.github/workflows/deploy.yml`](../.github/work
 
 The XML-builder alias in Wrangler selects the AWS SDK's non-browser parser: Workers do not provide `DOMParser`. Outbound certificate, confirmation, and webhook requests use manual redirect handling and reject non-success responses without following redirects.
 
+### Live E2E
+
+From `api/` on Node 24, run `npm ci` then `npm run e2e` with `OPENSEND_E2E_API_KEY` in the environment. With a local env file, run `node --env-file="$HOME/.config/opensend-mx/e2e.env" --import tsx scripts/e2e.ts`. `OPENSEND_E2E_URL` defaults to `https://opensend.mx`. Use only the read/send/manage key restricted to `e2e.opensend.mx`; do not widen it to turn a 403 green. Deploy MX (push or manual dispatch on `opensend-mx`) runs the same gate after `/health`, using the `mx` environment’s `MX_E2E_API_KEY`. No schedule or notifications.
+
+Each run sends to [run-tagged SES simulator addresses](https://docs.aws.amazon.com/ses/latest/dg/send-an-email-from-console.html#send-email-simulator-considerations) and its own two temporary MX addresses. The paused webhook sends **only** an explicit synthetic test to `https://httpbin.org/status/204`, not customer events or secrets. The API records HTTP attempts, not request headers: this checks the signing/delivery path, not independent receiver-side HMAC verification. Cleanup targets only returned IDs. MX retains immutable email/inbound history, idempotency and consent/suppression records; completed campaigns can be archived but not deleted. The upload is used in a disposable draft so its bytes can be deleted.
+
+`e2e-report.json` contains the commit, timings, failures with request IDs, and every OpenAPI operation either attempted, explicitly skipped with a reason, or not reached. Failed steps, cleanup errors and unaccounted operations fail the check. CI uploads the report even on failure and lists each step in the Actions summary. Domain-restricted denials on required flows are reported as failures, not skips. Budget: about four minutes including cleanup.
+
 ## SDK and MCP
 
 - `/openapi.json` comes from the actual Zod route schemas; stable operation IDs define generated SDK methods. `npm run sdk` exports the contract, generates `../sdk/src`, and compiles it. Do not edit generated code. See [SDK usage](../sdk/README.md).

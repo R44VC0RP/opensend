@@ -9,3 +9,4 @@ openapi-ts-error-*
 iam-policy-personal.json
 scripts/*.local.mjs
 .benchmark-results/
+e2e-report.json
