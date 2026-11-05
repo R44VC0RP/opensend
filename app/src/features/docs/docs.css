@@ -8,51 +8,65 @@
 .docs-layout { display: grid; grid-template-columns: 292px minmax(0, 1fr); min-height: calc(100vh - 58px); }
 .docs-sidebar { position: sticky; top: 58px; height: calc(100vh - 58px); overflow: auto; padding: 20px 16px 40px 24px; border-right: 1px solid var(--color-border); }
 .docs-sidebar > .ui-input { position: sticky; z-index: 2; top: 0; background: var(--color-surface); }
-.docs-sidebar nav { display: flex; flex-direction: column; gap: 22px; margin-top: 22px; }
-.docs-nav-group h2 { margin: 0 8px 7px; color: var(--color-muted); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); font-weight: 500; }
+.docs-sidebar nav { display: flex; flex-direction: column; gap: var(--space-24); margin-top: var(--space-20); }
+.docs-nav-empty { margin: 0; padding-inline: var(--space-8); font-size: var(--text-sm); }
+.docs-nav-group h2 { margin: 0 8px var(--space-8); color: var(--color-muted); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); font-weight: 500; }
 .docs-nav-group a { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 8px; align-items: center; min-height: 32px; padding: 5px 8px; border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-sm); line-height: 1.25; text-decoration: none; }
 .docs-nav-group a:hover, .docs-nav-group a[data-active] { background: var(--color-active-bg); color: var(--color-text); }
 .docs-nav-group [data-method], .docs-endpoint [data-method] { font-family: 'OpenTUI Mono', monospace; font-size: 10px; font-weight: 600; }
 [data-method='get'] { color: var(--color-info); } [data-method='post'] { color: var(--color-success); } [data-method='patch'], [data-method='put'] { color: var(--color-warning); } [data-method='delete'] { color: var(--color-danger); }
 .docs-main { min-width: 0; padding: 48px clamp(28px, 7vw, 96px) 80px; }
 .docs-operation { width: min(100%, 940px); margin-inline: auto; }
-.docs-operation-header { display: flex; flex-direction: column; gap: 16px; padding-bottom: 32px; border-bottom: 1px solid var(--color-border); }
+.docs-operation-header { display: flex; flex-direction: column; gap: var(--space-8); padding-bottom: var(--space-24); }
+/* One hairline between sections, never doubled by a list's own last row. */
+.docs-operation > * + * { border-top: 1px solid var(--color-border-muted); }
 .docs-operation-header h1 { margin: 0; font-size: 26px; line-height: 1.2; }
 .docs-operation-header > p { max-width: 72ch; margin: 0; color: var(--color-muted); line-height: 1.55; }
-.docs-endpoint { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.docs-endpoint { display: flex; align-items: center; gap: var(--space-12); min-width: 0; min-height: 28px; }
 .docs-endpoint > span { flex-shrink: 0; }
 .docs-endpoint > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.docs-section { display: flex; flex-direction: column; gap: 14px; padding-block: 30px; border-bottom: 1px solid var(--color-border); }
-.docs-section > h2, .docs-section-heading h2 { margin: 0; font-size: var(--text-lg); }
-.docs-section-heading { display: flex; align-items: center; justify-content: space-between; }
-.docs-section .ui-tabs { align-self: flex-start; }
-.docs-code { max-height: 520px; overflow: auto; margin: 0; padding: 18px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-canvas); font-family: 'OpenTUI Mono', monospace; font-size: 12px; line-height: 1.65; tab-size: 2; }
-.docs-schema { display: flex; flex-direction: column; gap: 10px; }
+.docs-section { display: flex; flex-direction: column; gap: var(--space-12); padding-block: var(--space-24); }
+.docs-operation > .docs-section:last-child { padding-bottom: 0; }
+.docs-section > p { max-width: 72ch; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.docs-section > h2 { margin: 0; font-size: var(--text-lg); }
+.docs-section > .docs-section-heading { display: flex; gap: var(--space-8); align-items: baseline; }
+.docs-section-heading > span, .docs-overview-groups section > h3 span { color: var(--color-muted); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); font-weight: 400; }
+.docs-example-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); min-width: 0; }
+.docs-example-bar > :first-child { min-width: 0; }
+.docs-example-panels { display: grid; min-width: 0; }
+.docs-example-panels > .docs-code { grid-area: 1 / 1; align-self: start; }
+.docs-example-panels > .docs-code:not([data-active]) { visibility: hidden; }
+.docs-code { max-height: 520px; overflow: auto; margin: 0; padding: var(--space-12) var(--space-16); border-radius: var(--radius-sm); background: var(--color-layer-1); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); line-height: var(--leading-sm); tab-size: 2; }
+.docs-schema { display: flex; flex-direction: column; gap: var(--space-8); }
 .docs-schema-name { align-self: flex-start; color: var(--color-muted); }
 .docs-schema > p, .docs-schema-inline p { max-width: 76ch; margin: 0; line-height: 1.5; }
-.docs-field-list { border-top: 1px solid var(--color-border); }
-.docs-field { padding-block: 13px; border-bottom: 1px solid var(--color-border); }
-.docs-field > div { display: flex; align-items: baseline; gap: 10px; }
-.docs-field p { max-width: 74ch; margin: 6px 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.45; }
+.docs-field-list { border-top: 1px solid var(--color-border-muted); }
+.docs-field { padding-block: var(--space-12); }
+.docs-field + .docs-field { border-top: 1px solid var(--color-border-muted); }
+.docs-field > div { display: flex; align-items: baseline; gap: var(--space-8); }
+.docs-field p { max-width: 74ch; margin: var(--space-4) 0 0; color: var(--color-muted); font-size: var(--text-sm); line-height: 1.45; }
 .docs-required { color: var(--color-danger); font-size: var(--text-xs); }
 .docs-type { margin-left: auto; color: var(--color-muted); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); }
-.docs-responses { border-top: 1px solid var(--color-border); }
-.docs-responses details { padding-block: 12px; border-bottom: 1px solid var(--color-border); }
-.docs-responses summary { display: flex; cursor: pointer; gap: 14px; align-items: baseline; }
+.docs-responses { border-top: 1px solid var(--color-border-muted); }
+.docs-responses details { padding-block: var(--space-12); }
+.docs-responses details + details { border-top: 1px solid var(--color-border-muted); }
+.docs-responses summary { display: flex; cursor: pointer; gap: var(--space-12); align-items: baseline; }
 .docs-responses summary code { min-width: 36px; }
-.docs-responses details > .docs-schema, .docs-responses details > .docs-schema-inline { margin: 16px 0 4px 50px; }
-.docs-install { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-canvas); }
-.docs-overview .docs-section > p { max-width: 72ch; margin: 0; line-height: 1.5; }
-.docs-resource-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--color-border); }
-.docs-resource-list a { display: flex; flex-direction: column; gap: 4px; padding: 15px 12px; border-bottom: 1px solid var(--color-border); color: inherit; text-decoration: none; }
-.docs-resource-list a:nth-child(odd) { border-right: 1px solid var(--color-border); }
-.docs-resource-list a:hover strong { text-decoration: underline; text-underline-offset: 3px; }
-.docs-resource-list span { color: var(--color-muted); font-size: var(--text-sm); line-height: 1.4; }
-.docs-overview-groups { display: grid; gap: 26px; }
-.docs-overview-groups section > h3 { display: flex; gap: 8px; align-items: baseline; margin: 0 0 8px; font-size: var(--text-md); }
-.docs-overview-groups section > h3 span { color: var(--color-muted); font-family: 'OpenTUI Mono', monospace; font-size: var(--text-xs); font-weight: 400; }
-.docs-overview-groups section > div { border-top: 1px solid var(--color-border); }
-.docs-overview-groups section a { display: grid; grid-template-columns: 44px minmax(150px, .7fr) minmax(220px, 1fr); gap: 10px; align-items: baseline; padding: 10px 8px; border-bottom: 1px solid var(--color-border); color: inherit; text-decoration: none; }
+.docs-responses details > .docs-schema, .docs-responses details > .docs-schema-inline { margin: var(--space-16) 0 var(--space-4) 48px; }
+.docs-install { display: flex; align-items: center; gap: var(--space-8); min-width: 0; min-height: 28px; }
+.docs-install > code { min-width: 0; overflow-x: auto; white-space: nowrap; }
+.docs-resource-list { border-top: 1px solid var(--color-border-muted); }
+.docs-resource-list a { display: grid; grid-template-columns: minmax(150px, .3fr) minmax(0, 1fr); gap: var(--space-4) var(--space-12); align-items: baseline; padding: var(--space-12) var(--space-8); color: inherit; text-decoration: none; }
+.docs-resource-list a + a { border-top: 1px solid var(--color-border-muted); }
+.docs-resource-list a:hover { background: var(--color-active-bg); }
+.docs-resource-list strong { font-weight: var(--font-weight-bold); }
+.docs-resource-list span { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.docs-overview-groups { display: grid; gap: var(--space-24); }
+.docs-overview-groups > section { display: grid; gap: var(--space-8); }
+.docs-overview-groups section > h3 { display: flex; gap: var(--space-8); align-items: baseline; margin: 0; font-size: var(--text-md); }
+.docs-overview-groups section > div { border-top: 1px solid var(--color-border-muted); }
+.docs-overview-groups section a { display: grid; grid-template-columns: 44px minmax(150px, .7fr) minmax(220px, 1fr); gap: var(--space-12); align-items: baseline; padding: 10px var(--space-8); color: inherit; text-decoration: none; }
+.docs-overview-groups section a + a { border-top: 1px solid var(--color-border-muted); }
 .docs-overview-groups section a:hover { background: var(--color-active-bg); }
 .docs-overview-groups section a > span:first-child { font-family: 'OpenTUI Mono', monospace; font-size: 10px; font-weight: 600; }
 .docs-overview-groups section a code { overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
@@ -66,16 +80,15 @@
   .docs-main { padding: 28px 16px 56px; }
   .docs-operation-header h1 { font-size: 22px; }
   .docs-endpoint { gap: 8px; }
-  .docs-code { margin-inline: -16px; border-inline: 0; border-radius: 0; }
   .docs-responses details > .docs-schema, .docs-responses details > .docs-schema-inline { margin-left: 0; }
-  .docs-resource-list { grid-template-columns: minmax(0, 1fr); }
-  .docs-resource-list a:nth-child(odd) { border-right: 0; }
-  .docs-overview-groups section a { grid-template-columns: 40px minmax(0, 1fr); }
+  .docs-resource-list a { grid-template-columns: minmax(0, 1fr); }
+  .docs-overview-groups section a { grid-template-columns: 40px minmax(0, 1fr); row-gap: var(--space-4); }
   .docs-overview-groups section a code { grid-column: 2; }
 }
 .docs-overview [id] { scroll-margin-top: 74px; }
-.docs-overview .developer-section { max-width: none; margin: 0; padding-block: 30px; border-bottom: 1px solid var(--color-border); gap: 14px; }
-.docs-overview .developer-section > .ui-section-header { margin: 0; }
+.docs-overview .developer-section { max-width: none; margin: 0; padding-block: var(--space-24); gap: var(--space-12); }
+.docs-overview .developer-section > .ui-section-header { margin: 0; min-height: 24px; }
+.docs-overview .developer-copy { font-size: var(--text-sm); line-height: var(--leading-sm); }
 .docs-overview .developer-section > .ui-section-header h2 { font-size: var(--text-lg); line-height: var(--leading-lg); }
 /* A fixed height, so the workspace's prompt arriving after the page never moves what follows. */
-.docs-overview .developer-code--wrap { box-sizing: content-box; height: 16lh; overflow: auto; }
+.docs-overview #agent-prompt .developer-code { box-sizing: content-box; height: 16lh; overflow: auto; }
