@@ -22,7 +22,7 @@ export function ContactTable({ contacts, lists = [], members = false, loading = 
   return <DataTable tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} columns={columns.map(column => ({ ...column, render: (row: Contact) => {
     if (column.key === 'email') return <Link className="audience-cell-text" title={row.email} to={`/audience/contacts/${row.id}`}>{row.email}</Link>
     if (column.key === 'status') return <StatusBadge status={row.status} />
-    if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || 'None'}>{row.suppressionReason || 'None'}</span>
+    if (column.key === 'suppression') return <span className="audience-cell-text" title={row.suppressionReason || undefined}>{row.suppressionReason || '—'}</span>
     if (column.key === 'name') return <span className="audience-cell-text" title={row.name}>{row.name || '—'}</span>
     if (column.key === 'lists') {
       if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
