@@ -141,13 +141,13 @@ export function createLiveApi(): OpenSendApi {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
       const params = new URLSearchParams({ region: input.regionId, from: start.toISOString(), to: end.toISOString() })
       if (input.stream) params.set('stream', input.stream)
-      const previousParams = new URLSearchParams(params); previousParams.set('to', start.toISOString()); previousParams.set('from', new Date(start.getTime() - (end.getTime() - start.getTime())).toISOString())
       const hourly = input.range !== '30d'
-      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day')
-      const [metrics, campaigns, previous, transactional, marketing] = await Promise.all([
+      // One request returns the chart buckets, the previous period's totals and each stream's totals.
+      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day'); chartParams.set('include', 'previous,streams')
+      const [metrics, campaigns] = await Promise.all([
         call(`/metrics?${chartParams}`, 'GET', undefined, signal), page('/campaigns', {pageSize: 4}, mapCampaignSummary, {region: input.regionId}, signal),
-        call(`/metrics?${previousParams}`, 'GET', undefined, signal), ...(['transactional', 'marketing'] as const).map(stream => {const q = new URLSearchParams(params); q.set('stream', stream); return call(`/metrics?${q}`, 'GET', undefined, signal)}),
       ])
+      if (!metrics.previous || !metrics.streams) throw new ApiError('The API did not return the previous period and stream totals.', 'INVALID_RESPONSE')
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
       const buckets = hourly ? metrics.hourly : metrics.daily
@@ -160,7 +160,7 @@ export function createLiveApi(): OpenSendApi {
         const at = new Date(bucket).toISOString(), row = series.get(bucket)
         points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
       }
-      return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: previous.totals.emails, points, streams: [{name: 'transactional', sent: transactional.totals.emails}, {name: 'marketing', sent: marketing.totals.emails}], recentCampaigns: campaigns.items }
+      return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points, streams: [{name: 'transactional', sent: metrics.streams.transactional.emails}, {name: 'marketing', sent: metrics.streams.marketing.emails}], recentCampaigns: campaigns.items }
     } },
     emails: {
       list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),

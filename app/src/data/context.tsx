@@ -8,12 +8,14 @@ import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
-import { preloadable } from '../lib/preloadable'
+import { chunk } from '../lib/preloadable'
+import type { QueryDef } from './queries'
+import { resourceOf, staleAfterWrite } from './invalidation'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
-const homePage = preloadable(() => import('../features/home'), m => m.HomePage)
-export const loadHome = homePage.preload
-const HomePage = homePage.Component
+const homeChunk = chunk(() => import('../features/home'))
+export const loadHome = homeChunk.preload
+const HomePage = homeChunk.page(m => m.HomePage)
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
@@ -181,11 +183,18 @@ export function useApi() {
   return api
 }
 // Polling is opt-in and foreground-only; pass a function to poll only while the data is in progress.
-export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean }) {
+// keepPrevious keeps the last result on screen while a changed key (page, search, filter) loads, so a list never blanks.
+// Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
+type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
+type Poll<T> = { interval?: number | ((data: T | undefined) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
+export function useApiQuery<T>(key: readonly unknown[], read: (api: OpenSendApi, signal: AbortSignal) => Promise<T>, poll?: Poll<T>) {
   const api = useApi()
   const interval = poll?.interval
-  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false })
+  const keep = poll?.keepPrevious
+  return useQuery({ queryKey: ['opensend', api.mode, ...key], queryFn: ({ signal }) => read(api, signal), enabled: poll?.enabled, refetchInterval: typeof interval === 'function' ? query => interval(query.state.data) : interval ?? false, refetchIntervalInBackground: false,
+    placeholderData: keep ? (previous, previousQuery) => keep === true || (previousQuery && keep(previousQuery.queryKey.slice(2))) ? previous : undefined : undefined })
 }
+export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
 export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true) {
   const api = useApi()
   const client = useQueryClient()
@@ -196,9 +205,8 @@ export function useApiMutation<TInput, TResult>(write: (api: OpenSendApi, input:
     onSuccess: () => {
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
-      const external = new Set(['regions', 'region-discovery', 'domain', 'domains', 'campaign-options'])
-      void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && (refreshSes || !external.has(String(query.queryKey[3])))}).catch(() => {})
-      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'campaign-options', refetchType: 'none'}).catch(() => {})
+      void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
+      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'opensend' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
     },
   })
 }

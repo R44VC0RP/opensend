@@ -1,10 +1,12 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
+import { useRouteIntent } from '../../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type ChartPoint, type SesDiscovery, type Stream, type TimeRange } from '../../data/types'
+import { campaignEditable, type ChartPoint, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { date, number, percent, label } from '../../lib/format'
 import { OverviewBodySkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
@@ -26,9 +28,10 @@ export function OverviewPage() {
     })
   }
   const navigate = useNavigate()
-  // Each refresh runs four created-cohort metrics aggregations; aggregates over hours or days do not need
+  const intent = useRouteIntent()
+  // Each refresh runs one created-cohort metrics aggregation (chart, previous period and streams in a single request); aggregates over hours or days do not need
   // the 3-second polling used for live queues, and a hidden tab should not keep the database busy.
-  const query = useApiQuery(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream as Stream }, signal), { interval: 60_000 })
+  const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
   // Hosted workspaces have no SES discovery; their connection manages the region.
@@ -45,8 +48,8 @@ export function OverviewPage() {
         <Metric title="Complaints" value={percent(data.sent ? data.complaints / data.sent : 0)} note={`${number(data.complaints)} ${data.complaints === 1 ? 'email' : 'emails'}`} tone="danger" />
       </div>
       <section className="chart-section" aria-label="Sending activity"><SectionHeader title={live ? `Emails created per ${range === '30d' ? 'day' : 'hour'}` : `Email activity per ${range === '30d' ? 'day' : 'hour'}`} actions={<div className="chart-legend"><span><i className="legend-sent" />{live ? 'Created' : 'Sent'}</span><span><i className="legend-bounces" />Bounces</span><span><i className="legend-complaints" />Complaints</span><span>UTC</span></div>} />{data.sent ? <ActivityChart key={range} points={data.points} createdOnly={live} range={range} /> : <EmptyState title="No emails in this period" />}</section>
-      <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')}>View all <ArrowUpRight size={16} /></Button>} /><DataTable minRows={4} rows={data.recentCampaigns} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <div><span>{row.name}</span><div className="muted cell-caption">{['sent', 'done'].includes(row.status) ? '' : `${label(row.status)} · `}{date(row.updatedAt)}</div></div> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? <span className="text-success">{percent(row.recipients ? row.delivered / row.recipients : 0)}</span> : <span className="muted">—</span>, align: 'right' }]} empty={<EmptyState title="No campaigns yet" action={<Button onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} /></section>
-      <section className="sending-streams"><SectionHeader title="Sending streams" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/logs')}>View logs <ArrowUpRight size={16} /></Button>} />{data.streams.map(item => <div className="stream-row" key={item.name}><div className="cluster between"><span>{label(item.name)}</span><span>{number(item.sent)}</span></div><div className={`stream-track stream-track--${item.name}`}><span style={{ width: `${data.streams.reduce((sum, stream) => sum + stream.sent, 0) ? item.sent / data.streams.reduce((sum, stream) => sum + stream.sent, 0) * 100 : 0}%` }} /></div></div>)}</section></div>
+      <div className="dashboard-bottom"><section><SectionHeader title="Recent campaigns" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/campaigns')} {...intent('/campaigns')}>View all <ArrowUpRight size={16} /></Button>} /><DataTable minRows={4} rows={data.recentCampaigns} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`)} columns={[{ ...recentCampaignColumns[0], render: row => <div><span>{row.name}</span><div className="muted cell-caption">{['sent', 'done'].includes(row.status) ? '' : `${label(row.status)} · `}{date(row.updatedAt)}</div></div> }, { ...recentCampaignColumns[1], render: row => number(row.recipients), align: 'right' }, { ...recentCampaignColumns[2], render: row => ['sent', 'done'].includes(row.status) ? <span className="text-success">{percent(row.recipients ? row.delivered / row.recipients : 0)}</span> : <span className="muted">—</span>, align: 'right' }]} empty={<EmptyState title="No campaigns yet" action={<Button onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} /></section>
+      <section className="sending-streams"><SectionHeader title="Sending streams" actions={<Button variant="ghost" size="sm" onClick={() => navigate('/logs')} {...intent('/logs')}>View logs <ArrowUpRight size={16} /></Button>} />{data.streams.map(item => <div className="stream-row" key={item.name}><div className="cluster between"><span>{label(item.name)}</span><span>{number(item.sent)}</span></div><div className={`stream-track stream-track--${item.name}`}><span style={{ width: `${data.streams.reduce((sum, stream) => sum + stream.sent, 0) ? item.sent / data.streams.reduce((sum, stream) => sum + stream.sent, 0) * 100 : 0}%` }} /></div></div>)}</section></div>
     </div>}
   </>
 }

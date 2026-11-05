@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
-import { useApiMutation, useApiQuery } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery } from '../../data/context'
+import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
 import { date, time } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from '../settings/shared'
@@ -45,7 +46,7 @@ function WebhookFields({ input, onChange, addresses, errors, apiError, disabled 
 export function InboundWebhooksPage() {
   const navigate = useNavigate()
   const webhooks = useApiQuery(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal))
-  const addresses = useApiQuery(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal))
+  const addresses = useApiDef(queries.inboundAddressOptions())
   const create = useApiMutation((api, input: InboundWebhookInput) => api.inbound.createWebhook(input), 'Webhook created')
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState<InboundWebhookInput>(blank)
@@ -84,7 +85,7 @@ export function InboundWebhookDetailPage() {
   const navigate = useNavigate()
   const webhook = useApiQuery(['inbound-webhook', id], (api, signal) => api.inbound.webhook(id, signal))
   const deliveries = useApiQuery(['inbound-webhook-deliveries', id], (api, signal) => api.inbound.webhookDeliveries(id, undefined, signal))
-  const addresses = useApiQuery(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal))
+  const addresses = useApiDef(queries.inboundAddressOptions())
   const save = useApiMutation((api, patch: Parameters<typeof api.inbound.updateWebhook>[1]) => api.inbound.updateWebhook(id, patch), 'Webhook saved')
   const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id))
   const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted')

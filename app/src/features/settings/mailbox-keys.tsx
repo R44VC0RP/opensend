@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, SectionHeader, Select } from '../../components/ui'
-import { useApiMutation, useApiQuery } from '../../data/context'
+import { useApiDef, useApiMutation } from '../../data/context'
+import { queries } from '../../data/queries'
 import type { MailboxKey, MailboxKeyInput, MailboxPermission } from '../../data/types'
 import { date } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from './shared'
@@ -16,8 +17,8 @@ const permissions: { value: MailboxPermission; label: string; hint: string }[] =
 
 /** Keys an agent uses to work only with chosen inbound addresses. Admin actions (domains, addresses, keys) stay with API keys. */
 export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
-  const keys = useApiQuery(['mailbox-keys', showRevoked], (api, signal) => api.mailboxes.keys(showRevoked, signal))
-  const mailboxes = useApiQuery(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal))
+  const keys = useApiDef(queries.mailboxKeys(showRevoked), { keepPrevious: true })
+  const mailboxes = useApiDef(queries.inboundAddressOptions())
   const create = useApiMutation((api, input: MailboxKeyInput) => api.mailboxes.createKey(input), 'Inbound key created')
   const revoke = useApiMutation((api, id: string) => api.mailboxes.revokeKey(id), 'Inbound key revoked')
   const [open, setOpen] = useState(false)

@@ -857,6 +857,35 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
         const discovery = `/v1/regions/${region}/discovery`;
+        await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
+          const own=new URL(runtime.config.publicUrl).hostname, start=calls.length;
+          const blocked=['com','xn--p1ai',' CO.UK ','com.au','github.io','customer.github.io','mail.vercel.app','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com',own,'in.'+own,own.split('.').slice(1).join('.')];
+          for (const name of blocked) error(await add(b.cookie,name),422,'DOMAIN_NOT_ALLOWED');
+          assert.equal(calls.length,start);
+          assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=ANY($1)',[blocked.map(s=>s.trim().toLowerCase())])).rowCount,0);
+          const allowed=ok(await add(b.cookie,unique('customer')+'.co.uk'),201);
+          ok(await local('DELETE',`/v1/domains/${allowed.id}`,undefined,b.cookie));
+        });
+        await providerTest.test('MX serializes workspace claim limits across unrelated DNS names',async()=>{
+          const prefix=unique('quota'),wid=b.org.id;
+          await pool.query(`INSERT INTO domain_claims(name,workspace_id) SELECT $1||n||'.invalid',$2 FROM generate_series(1,9) n`,[prefix,wid]);
+          const names=[prefix+'a.invalid',prefix+'b.invalid'],start=calls.length;
+          try {
+            const race=await Promise.all(names.map(name=>add(b.cookie,name)));
+            assert.deepEqual(race.map(r=>r.status).sort(),[201,409]);error(race.find(r=>r.status===409)!,409,'DOMAIN_LIMIT_REACHED');
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            const last=ok(race.find(r=>r.status===201)!,201);
+            assert.equal(ok(await add(b.cookie,last.name),201).id,last.id,'Idempotent retries do not consume quota.');
+            // Only one unproven claim remains; the next rejection must be the independent total limit.
+            await pool.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1 AND name LIKE $2 AND name<>$3`,[wid,prefix+'%',last.name]);
+            await pool.query(`INSERT INTO domain_claims(name,workspace_id,ever_proven) SELECT $1||n||'.invalid',$2,true FROM generate_series(10,99) n`,[prefix,wid]);
+            error(await add(b.cookie,names.find(n=>n!==last.name)!),409,'DOMAIN_LIMIT_REACHED');
+            assert.deepEqual(calls.slice(start),['CreateEmailIdentityCommand']);
+            ok(await local('DELETE',`/v1/domains/${last.id}`,undefined,b.cookie));
+            const replacement=ok(await add(b.cookie,names.find(n=>n!==last.name)!),201);
+            ok(await local('DELETE',`/v1/domains/${replacement.id}`,undefined,b.cookie));
+          } finally { await pool.query('DELETE FROM domain_claims WHERE workspace_id=$1 AND name LIKE $2',[wid,prefix+'%']); }
+        });
         await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
@@ -1050,7 +1079,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(ok(await readPending()).verified,false); const pendingQueries=queries.mock.callCount()-startPending;
           assert.equal(pendingQueries-authQueries,1); dt.diagnostic(`GET pending domain: 1 domain statement; ${pendingQueries} pg round trips including dashboard auth.`);
           assert.equal(wakes,firstWake+1);
-          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND available_at<=now() AND payload->>'poll'='40'",[job.id])).rowCount,1,'Wake now without resetting the unattended backoff.');
+          const nudged=(await pool.query("SELECT payload FROM jobs WHERE id=$1 AND available_at<=now() AND payload->>'poll'='40'",[job.id])).rows[0];
+          assert.ok(nudged,'Wake now without resetting the unattended backoff.');
+          await pace();await assert.rejects(operationJobs['domain.verify']!(runtime,nudged.payload,{id:job.id,attempts:1,workspaceId:b.org.id}),
+            e=>e instanceof JobDeferred && e.payload?.poll===40 && !e.payload.dashboard,'An early dashboard check must not advance the background poll count.');
           await Promise.all([readPending(),readPending()]); assert.equal(wakes,firstWake+1,'Reads inside the cooldown do not wake again.');
           await park(); for(const read of await Promise.all([readPending(),readPending(),readPending()])) ok(read);
           assert.equal(wakes,firstWake+2,'Racing dashboard reads share one wake per claim after the cooldown.');
@@ -1177,6 +1209,44 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             await expireGrace();await pace();await assert.rejects(check(),JobDeferred);
             const revoked=ok(await local('GET',detail,undefined,b.cookie));assert.equal(revoked.sending,'pending');assert.equal(revoked.receiving,'pending');
             assert.deepEqual(await claimState(),{sending_state:'pending',receiving_state:'off',receiving_host:null,lost:false,receiving_lost:false});
+            await it.test('Hourly expiry frees never-proven claims and their jobs, not foreign identities or formerly proven claims',async()=>{
+              const {cleanup}=await import('./src/maintenance.js');
+              const create=async()=>ok(await add(b.cookie,unique('expiry')+'.invalid'),201);
+              const expired=await create(),foreignTag=await create(),recent=await create();
+              const getToken=(x:Json)=>x.dns.find((d:Json)=>d.name==='_opensend.'+x.name).value;
+              const token=getToken(expired);
+              identities.get(`${platform}:${foreignTag.name}`)!.Tags=[{Key:'opensend:domain-claim',Value:randomUUID()}];
+              await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=ANY($1)",[[expired.name,foreignTag.name,domain]]);
+              await pool.query("UPDATE domain_claims SET created_at=now()-interval '71 hours' WHERE name=$1",[recent.name]);
+              await pool.query("UPDATE jobs SET status='running',lease_until=now()+interval '1 hour' WHERE id=$1",['domain.verify:'+token]);
+              await pool.query("INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES ($1,'domain.mx',$2,'{}',now()+interval '1 hour')",['domain.mx:'+token,b.org.id]);
+              const start=calls.length;
+              await operationJobs['domain.verify']!(runtime,{domainId:expired.id,token},{id:'domain.verify:'+token,attempts:1,workspaceId:b.org.id});
+              error(await add(b.cookie,expired.name),409,'DOMAIN_CLAIM_EXPIRED');
+              assert.equal(calls.length,start,'Expired polls and retries stop before consuming a shared SES slot.');
+              await cleanup(runtime);
+              assert.deepEqual((await pool.query('SELECT name FROM domain_claims WHERE name=ANY($1) ORDER BY name',[[expired.name,foreignTag.name,recent.name,domain]])).rows.map(r=>r.name),[recent.name,domain].sort());
+              assert.equal((await pool.query('SELECT 1 FROM jobs WHERE id=ANY($1)',[['domain.verify:'+token,'domain.mx:'+token]])).rowCount,0);
+              error(await local('GET',`/v1/domains/${expired.id}`,undefined,b.cookie),404);
+              assert.ok(!identities.has(`${platform}:${expired.name}`));
+              for (const name of [domain,recent.name,foreignTag.name]) assert.ok(identities.has(`${platform}:${name}`));
+              // Drive the unattended schedule with a poll count already in the old 24-hour backoff.
+              // TXT appears just after the hour-71 poll, while SES still reports pending DKIM.
+              const recentIdentity=identities.get(`${platform}:${recent.name}`)!;recentIdentity.DkimAttributes={...recentIdentity.DkimAttributes,Status:'PENDING'};
+              const recentToken=getToken(recent),recentCheck=(poll:number)=>operationJobs['domain.verify']!(runtime,{domainId:recent.id,token:recentToken,poll},{id:'domain.verify:'+recentToken,attempts:1,workspaceId:b.org.id});
+              const age=async(seconds:number)=>(await pool.query("UPDATE domain_claims SET created_at=clock_timestamp()-$2*interval '1 second' WHERE token=$1 RETURNING created_at+interval '72 hours' AS deadline",[recentToken,seconds])).rows[0].deadline.getTime();
+              answer='';await age(70*3600+900);await pace();const startPoll=Date.now();
+              await assert.rejects(recentCheck(84),e=>e instanceof JobDeferred && e.payload?.poll===85 && Date.parse(e.availableAt)>=startPoll+3600_000 && Date.parse(e.availableAt)<=Date.now()+3600_000);
+              const expires=await age(71*3600+900);await pace();
+              await assert.rejects(recentCheck(85),e=>e instanceof JobDeferred && e.payload?.poll===86 && Date.parse(e.availableAt)===expires-30_000);
+              answer=recentToken;await age(72*3600-30);await pace();await assert.rejects(recentCheck(86),JobDeferred);
+              await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=$1",[recent.name]);
+              await cleanup(runtime);assert.ok(identities.has(`${platform}:${recent.name}`));
+              assert.equal(ok(await local('GET',`/v1/domains/${recent.id}`,undefined,b.cookie)).sending,'pending');answer='';
+              const reclaimed=ok(await add(a.cookie,expired.name),201);assert.notEqual(getToken(reclaimed),token);
+              ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
+              ok(await local('DELETE',`/v1/domains/${recent.id}`,undefined,b.cookie));
+            });
             assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),0,'Hourly MX alone cannot re-authorize lost ownership.');
             answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
             activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
@@ -1332,6 +1402,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(ok(await local('GET','/v1/settings/ses',undefined,a.cookie)).region,region);
         identities.set(`${customer}:${foreign}`,verifiedIdentity);
         error(await add(a.cookie,foreign),409,'DOMAIN_UNAVAILABLE');
+        await providerTest.test('Expiry releases an unproven BYO claim without touching its customer identity',async()=>{
+          const byo=ok(await add(a.cookie,unique('byo-expiry')+'.invalid'),201),start=calls.length;
+          await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=$1",[byo.name]);
+          await (await import('./src/maintenance.js')).cleanup(runtime);
+          assert.equal(calls.length,start);assert.ok(identities.has(`${customer}:${byo.name}`));
+          error(await local('GET',`/v1/domains/${byo.id}`,undefined,a.cookie),404);
+          identities.delete(`${customer}:${byo.name}`);
+        });
         const byoDomain=ok(await add(a.cookie,domain),201); assert.deepEqual(byoDomain.dns.map((r:Json)=>r.purpose),['sending','sending','sending','receiving']);
         const {rows:[j]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[byoDomain.id]);
         await providerTest.test('BYO inbound uses its assumed role and per-domain rule, never the platform catch-all',async bt=>{
@@ -3240,6 +3318,15 @@ describe('Dashboard API capabilities', () => {
     assert.ok(before.totals.emails >= 3);
     assert.equal(before.totals.accepted, 0, 'Simulated mail is not provider acceptance.');
     assert.equal(before.daily.reduce((sum: number, day: Json) => sum + day.count, 0), before.totals.emails);
+    // include=previous,streams returns, in one statement, exactly what the separate window, previous-window and per-stream requests return.
+    const extras = ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, region: REGION, stream: 'transactional', include: 'previous,streams' })}`, key.secret));
+    assert.deepEqual(extras.totals, before.totals);
+    assert.deepEqual(extras.daily, before.daily);
+    const previousFrom = new Date(Date.parse(from) - (Date.parse(to) - Date.parse(from))).toISOString();
+    assert.deepEqual(extras.previous, { from: previousFrom, to: from, totals: ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from: previousFrom, to: from, region: REGION, stream: 'transactional' })}`, key.secret)).totals });
+    for (const kind of ['transactional', 'marketing']) assert.deepEqual(extras.streams[kind], ok(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, region: REGION, stream: kind })}`, key.secret)).totals);
+    assert.equal(ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret)).previous, undefined, 'Without include the response is unchanged.');
+    error(await http('GET', `/v1/metrics?${new URLSearchParams({ from, to, include: 'bogus' })}`, key.secret), 422);
     const matched = await db.query('SELECT id FROM sending_emails WHERE id = $1 AND workspace_id = $2 AND actor_key_id = $3', [ids[0], contact.workspaceId, key.id]);
     assert.equal(matched.rowCount, 1, 'Only an exact HTTP-created scoped email can receive synthetic replay source events.');
     const events = [unique('cohort-click'), unique('cohort-click-replay')];

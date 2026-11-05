@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Button, ConfirmDialog, ControlSkeleton, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, FieldSkeleton, Input, SectionHeader, Select } from '../../components/ui'
-import { useApiMutation, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { useApiMutation, useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
+import { queries } from '../../data/queries'
 import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../../data/types'
 import { roleLabel, workspaceApi } from '../../data/workspaces'
 import { date } from '../../lib/format'
@@ -10,7 +11,7 @@ const roleOptions = (owner: boolean) => (owner ? ['owner', 'admin', 'member'] as
 
 function WorkspaceName({ canEdit }: { canEdit: boolean }) {
   const session = useSession()
-  const workspaces = useApiQuery(['workspaces'], (_api, signal) => workspaceApi.list(signal))
+  const workspaces = useApiDef(queries.workspaces())
   const current = workspaces.data?.find(workspace => workspace.id === session?.identity?.workspaceId)
   return <section id="workspace" className={`section stack settings-group${canEdit ? ' settings-rule' : ''}`}>
     {workspaces.error ? <><SectionHeader title="Workspace" /><ErrorState error={workspaces.error} onRetry={() => void workspaces.refetch()} /></> : !current ? <div className="stack"><SectionHeader title="Workspace" actions={canEdit && <ControlSkeleton width={58} />} /><FieldSkeleton label="Name" /></div> : <WorkspaceNameForm key={current.id} name={current.name} canEdit={canEdit} />}
@@ -29,7 +30,7 @@ function WorkspaceNameForm({ name: initial, canEdit }: { name: string; canEdit: 
 
 function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) {
   const session = useSession()
-  const members = useApiQuery(['workspace-members'], (_api, signal) => workspaceApi.members(signal))
+  const members = useApiDef(queries.workspaceMembers())
   const update = useApiMutation((_api, input: { id: string; role: WorkspaceRole }) => workspaceApi.updateMember(input.id, input.role), 'Role updated')
   const remove = useApiMutation((_api, id: string) => workspaceApi.removeMember(id), 'Member removed')
   const [removing, setRemoving] = useState<WorkspaceMember | null>(null)
@@ -51,7 +52,7 @@ function Members({ owner, onInvite }: { owner: boolean; onInvite: () => void }) 
 }
 
 function Invitations({ owner }: { owner: boolean }) {
-  const invitations = useApiQuery(['workspace-invitations'], (_api, signal) => workspaceApi.invitations(signal))
+  const invitations = useApiDef(queries.workspaceInvitations())
   const revoke = useApiMutation((_api, id: string) => workspaceApi.revokeInvitation(id), 'Invitation revoked')
   const [revoking, setRevoking] = useState<WorkspaceInvitation | null>(null)
   return <section className="section stack settings-rule">

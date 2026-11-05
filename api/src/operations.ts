@@ -14,7 +14,7 @@ import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
-import { domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
+import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
@@ -169,11 +169,12 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'opensend:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean };
+type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
+    dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
@@ -184,7 +185,7 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheck?.domains.length ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheck.domains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql`true`;
-  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
+  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
     SELECT target.*,EXISTS(SELECT 1 FROM queued) AS queued FROM target` : target;
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
@@ -292,6 +293,14 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
     return existing;
   }
 }
+// A retried/reconnected creation or a verifier can recover an old claim right at its deadline.
+// Recheck and hold the row across Create so recovery cannot recreate the identity after expiry cleanup.
+function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
+  return runtime.db.transaction(async db=>{
+    const current=await hostedDomain(db,wid,domainId,true);
+    if (current && current.token===token && !current.expired) return ensureIdentity(client,current.name,token);
+  });
+}
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
 // domain deletion and by disconnecting a shared connection, so a later reconnect never meets its own ghost.
 async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDomain,'name'|'region'|'token'|'connection'>) {
@@ -321,9 +330,36 @@ export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid
   }
   await db.execute(sql`WITH ${releaseConnectionClaims(wid,sql`SELECT ${connection.id}::text AS id`)} SELECT 1`);
 }
-async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string}) {
+async function releaseClaim(db:DbExecutor,wid:string,row:{token:string}) {
   await db.execute(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND token=${row.token} RETURNING name,token), ${releasedClaimCleanup(wid)}
-    DELETE FROM operation_domains WHERE workspace_id=${wid} AND id=${row.id} AND name IN (SELECT name FROM released)`);
+    DELETE FROM operation_domains WHERE workspace_id=${wid} AND name IN (SELECT name FROM released)`);
+}
+/** Each release holds one lock through the tag check, SES deletion and database cleanup. On SES
+ * failure retain the claim for the next sweep, without letting it block other expired names. */
+export async function expireDomainClaims(runtime:Runtime,deadline:number) {
+  let cursor:{created:string;token:string}|undefined, released=0;
+  while (Date.now()<deadline) {
+    const after=cursor ? sql`AND (dc.created_at,dc.token)>(${cursor.created}::timestamptz,${cursor.token}::uuid)` : sql``;
+    let selected=false;
+    try {
+      const found=await runtime.db.transaction(async db=>{
+        const row=(await db.execute<{workspace_id:string;name:string;token:string;created:string;connection:(HostedDomain['connection'] & {region:string})|null}>(sql`
+          SELECT dc.workspace_id,dc.name,dc.token,dc.created_at::text AS created,to_jsonb(pc) AS connection FROM domain_claims dc
+          LEFT JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
+          WHERE domain_claim_expired(dc) ${after} ORDER BY dc.created_at,dc.token LIMIT 1 FOR UPDATE OF dc SKIP LOCKED`)).rows[0];
+        if (!row) return false;
+        cursor=row; selected=true;
+        if (row.connection?.kind==='shared') await deleteClaimIdentity(runtime,row.workspace_id,{...row,region:row.connection.region,connection:row.connection});
+        await releaseClaim(db,row.workspace_id,row); return true;
+      });
+      if (!found) break;
+      released++;
+    } catch (e) {
+      if (!selected || !(e instanceof ApiError)) throw e;
+      log('warn',{code:'DOMAIN_EXPIRY_RETRY',reason:e.code});
+    }
+  }
+  return released;
 }
 function dnsSetupActor(c:Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -336,19 +372,28 @@ function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'superse
   // Dashboard reads only advance the due time. Preserve the background poll count and use the job's
   // existing enqueue timestamp as an atomic per-claim cooldown, shared by every tab and isolate.
   return sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},
-    jsonb_build_object('domainId',r.id,'token',r.token) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
-    payload=${mode==='dashboard' ? sql`jobs.payload` : sql`excluded.payload`},created_at=clock_timestamp() ${mode==='supersede' ? sql`` : sql`WHERE jobs.status<>'running'`}
+    jsonb_build_object('domainId',r.id,'token',r.token${mode==='dashboard' ? sql`,'dashboard',true` : sql``}) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
+    payload=${mode==='dashboard' ? sql`CASE WHEN jobs.status='pending' AND jobs.available_at<=now() THEN jobs.payload ELSE jobs.payload||'{"dashboard":true}'::jsonb END` : sql`excluded.payload`},created_at=clock_timestamp() ${mode==='supersede' ? sql`` : sql`WHERE jobs.status<>'running'`}
     ${mode==='dashboard' ? sql`AND jobs.created_at<=clock_timestamp()-interval '20 seconds'` : sql``} RETURNING id`;
 }
 const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
-  if (!row || row.token!==payload.token) return; // Deleted, reclaimed or disconnected.
-  // Polling never gives up: hourly for about three days, then every six hours for three more, then daily,
-  // paced per account below, so records added weeks later still verify on their own. FAILED means DOMAIN_UNAVAILABLE only.
+  if (!row || row.token!==payload.token || row.expired) return; // Deleted, reclaimed, disconnected or awaiting expiry cleanup.
+  // Only previously proven claims keep polling beyond 72 hours (including recovery after lost proof).
   const poll=Number(payload.poll ?? 0);
+  const {dashboard,...background}=payload, nextPoll=dashboard===true && !row.ever_proven ? poll : poll+1;
   const backoff=(n:number)=>n<5 ? [15000,30000,120000,600000,1800000][n]! : n<72 ? 3600_000 : n<84 ? 6*3600_000 : 24*3600_000;
-  const defer=(ms:number, next=poll) => { throw new JobDeferred(new Date(Date.now()+ms).toISOString(),{...payload,poll:next}); };
+  const defer=(ms:number,next?:number) => {
+    const now=Date.now();
+    if (!row.ever_proven) {
+      const remaining=new Date(row.created_at).getTime()+72*3600_000-now;
+      ms=Math.min(ms,3600_000);
+      if (remaining>60_000 && ms>=remaining) ms=remaining-30_000;
+    }
+    // Lane contention isn't an observation. Consume the dashboard nudge only after an actual check.
+    throw new JobDeferred(new Date(now+ms).toISOString(),next===undefined ? payload : {...background,poll:next});
+  };
   const scoped={...runtime,config:{...runtime.config,workspaceId:job.workspaceId,regions:[row.region]}};
   try {
     // Reserve the next GetEmailIdentity across workers, not per workspace or per invocation.
@@ -362,7 +407,11 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
     catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity) throw e; }
     // The claim exists but the creating request never reached SES: the job owns the identity from here (ensureIdentity proves ownership itself).
-    if (!identity) identity={...await ensureIdentity(client,row.name,row.token),VerificationStatus:'PENDING',$metadata:{}};
+    if (!identity) {
+      const recovered=await recoverIdentity(runtime,job.workspaceId,row.id,row.token,client);
+      if (!recovered) return;
+      identity={...recovered,VerificationStatus:'PENDING',$metadata:{}};
+    }
     else if (!(row.connection.kind==='byo' && row.identity?.imported) && !ownsIdentity(identity,row.token)) throw unavailableDomain();
     const shared=row.connection.kind==='shared';
     const identityVerified=identity.VerificationStatus==='SUCCESS';
@@ -370,17 +419,21 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // Don't seed the resolver's negative cache before the user has published DNS. Once ownership
     // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
-    const checkHostedTxt=dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
+    const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
     const [positive,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,
       scopedImport ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
-    if (shared && report.ready && row.connection.tenant_state!=='ready') { log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),poll+1); }
+    if (shared && report.ready && row.connection.tenant_state!=='ready') {
+      // Platform setup delay is not a failure to prove ownership.
+      await runtime.db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE dc.token=${row.token} AND dc.connection_id=${row.connection.id} AND NOT dc.ever_proven AND NOT domain_claim_expired(dc)`);
+      log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),nextPoll);
+    }
     const outcome=await runtime.db.transaction(async db=>{
       if (upgrade) await db.execute(sql`SELECT promote_imported_claim(${job.workspaceId},${row.name},${row.token},${row.connection.id})`);
       // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
       const current=await hostedDomain(db,job.workspaceId,row.id,true);
-      if (!current || current.token!==row.token) return null;
+      if (!current || current.token!==row.token || current.expired) return null;
       const mailFrom=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomainStatus ?? null;
       if (current.receiving_host!==row.receiving_host || mailFrom(current.identity)!==mailFrom(row.identity) || (mailFromStatus(current.identity)==='PENDING' &&
         (mailFromStatus(row.identity)!=='PENDING' || mailFrom(current.identity)!==report.mailFromDomain))) {
@@ -397,7 +450,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // the hours-long DKIM backoff. A domain abandoned at this step still backs off normally.
     if (shared && dkimSuccess && row.identity?.ses.DkimAttributes?.Status!=='SUCCESS' && !positive) defer(backoff(0),1);
     // A grace period must be observed again before it can expire.
-    if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),poll+1);
+    if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),nextPoll);
   } catch (e) {
     if (e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) {
       await runtime.db.transaction(async db=>{
@@ -410,10 +463,10 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       if (e.code==='DOMAIN_UNAVAILABLE') return;
     } else if (e instanceof ApiError && e.code==='DOMAIN_DNS_UNAVAILABLE') {
       // Transport failures never count as evidence against a working domain.
-      throw new JobDeferred(new Date(Date.now()+Math.min(3_600_000,30_000*2**Math.min(poll,7))).toISOString(),{...payload,poll:poll+1});
+      defer(Math.min(3_600_000,30_000*2**Math.min(poll,7)),nextPoll);
     } else if (!(e instanceof ApiError) || !e.retryable) throw e;
   }
-  defer(backoff(poll),poll+1);
+  defer(backoff(poll),nextPoll);
 };
 const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
@@ -481,26 +534,31 @@ export function registerOperations(app: App) {
     }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string().optional().describe('Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name); assertSesConfigured(c.env);
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);
     if (c.env.config.multiTenant) {
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
-      let identity: Partial<GetEmailIdentityCommandOutput>;
-      try { identity=await ensureIdentity(getSes(runtime,row.region,claim.connection),row.name,claim.token); }
+      let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
+      try {
+        const client=getSes(runtime,row.region,claim.connection);
+        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token));
+      }
       catch(e) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
+      if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL RETURNING ${row.id}::text AS id,token`;
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
       return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
     }
+    assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }
@@ -823,32 +881,71 @@ function unsubscribePage(title: string, body: string) {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}body,body *{letter-spacing:-0.01em}</style><body style="font-family:Inter,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
 }
 function registerMetrics(app: App) {
-  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day') }).openapi('MetricsQuery');
+  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day'), include: z.string().regex(/^(?:previous|streams)(?:,(?:previous|streams))*$/).optional().describe('Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).') }).openapi('MetricsQuery');
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
-  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() }), daily: z.array(bucket), hourly: z.array(bucket).optional() }).openapi('Metrics');
+  const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
+  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
   app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
     const compute = async () => {
-    const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+    const extras = new Set((q.include ?? '').split(',').filter(Boolean));
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     // Outcomes come from the per-email flags kept by the operation_events trigger (migration 031): the same
     // union of public events the old per-query event aggregation produced, without re-reading the events.
-    const has = (bit: number) => sql`(${emails.eventOutcomes} & ${bit}) <> 0`;
-    const result = await c.env.db.execute<{ date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number }>(sql`
-      SELECT ${date} AS "date", count(*)::int AS "emails",
-        count(*) FILTER (WHERE NOT ${emails.simulated} AND ${emails.status} <> 'suppressed' AND (${emails.providerId} IS NOT NULL OR ${emails.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
-        count(*) FILTER (WHERE ${emails.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
-        count(*) FILTER (WHERE ${emails.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
-        count(*) FILTER (WHERE ${emails.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
+    type Row = { date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number };
+    const counts = (cols: { status: SQL; simulated: SQL; providerId: SQL; outcomes: SQL }) => {
+      const has = (bit: number) => sql`(${cols.outcomes} & ${bit}) <> 0`;
+      return sql`count(*)::int AS "emails",
+        count(*) FILTER (WHERE NOT ${cols.simulated} AND ${cols.status} <> 'suppressed' AND (${cols.providerId} IS NOT NULL OR ${cols.status} IN ('accepted', 'sent', 'delivered', 'bounced', 'complained', 'delayed') OR ${has(OUTCOME.accepted)}))::int AS "accepted",
+        count(*) FILTER (WHERE ${cols.status} = 'delivered' OR ${has(OUTCOME.delivered)})::int AS "delivered",
+        count(*) FILTER (WHERE ${cols.status} = 'bounced' OR ${has(OUTCOME.bounced)})::int AS "bounced",
+        count(*) FILTER (WHERE ${cols.status} = 'complained' OR ${has(OUTCOME.complained)})::int AS "complained",
         count(*) FILTER (WHERE ${has(OUTCOME.opened)})::int AS "opened", count(*) FILTER (WHERE ${has(OUTCOME.clicked)})::int AS "clicked",
-        count(*) FILTER (WHERE ${emails.status} IN ('rejected', 'rendering_failed') OR ${has(OUTCOME.failed)})::int AS "failed",
-        count(*) FILTER (WHERE ${emails.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
-        count(*) FILTER (WHERE ${emails.simulated})::int AS "simulated"
+        count(*) FILTER (WHERE ${cols.status} IN ('rejected', 'rendering_failed') OR ${has(OUTCOME.failed)})::int AS "failed",
+        count(*) FILTER (WHERE ${cols.status} = 'delayed' OR ${has(OUTCOME.delayed)})::int AS "deliveryDelayed",
+        count(*) FILTER (WHERE ${cols.simulated})::int AS "simulated"`;
+    };
+    const total = (row?: Row) => ({ emails: row?.emails ?? 0, accepted: row?.accepted ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complained: row?.complained ?? 0, opened: row?.opened ?? 0, clicked: row?.clicked ?? 0, failed: row?.failed ?? 0, deliveryDelayed: row?.deliveryDelayed ?? 0, simulated: row?.simulated ?? 0 });
+    let rows: Row[], previous: { from: string; to: string; totals: ReturnType<typeof total> } | undefined, streams: { transactional: ReturnType<typeof total>; marketing: ReturnType<typeof total> } | undefined;
+    if (!extras.size) {
+      const filter = and(scoped(emails, a), gte(emails.createdAt, start), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined, q.stream ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+      rows = (await c.env.db.execute<Row>(sql`
+      SELECT ${date} AS "date", ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
       FROM ${emails}
       WHERE ${filter}
-      GROUP BY 1 ORDER BY 1`);
+      GROUP BY 1 ORDER BY 1`)).rows;
+    } else {
+      // One statement that never reads snapshot except through sending_emails_kind_created (workspace, snapshot->>'kind',
+      // created_at); snapshot is TOASTed and detoasting it per row costs seconds. Every email is created as exactly one of
+      // the two kinds, so counts are additive across kinds and the second stream is the total minus the first:
+      //  - an "all" arm groups the window (and the previous window when asked) directly, with no kind predicate;
+      //  - one "kind" arm (the stream filter, or marketing when only the per-stream totals are asked for) uses the index.
+      // Each arm groups by (in the window, creation bucket); rows before the window have no bucket (previous period).
+      const previousFrom = new Date(Date.parse(start) - (Date.parse(end) - Date.parse(start))).toISOString();
+      const scanFrom = extras.has('previous') ? previousFrom : start;
+      const kind: 'transactional' | 'marketing' = q.stream ?? 'marketing';
+      const needAll = !q.stream || extras.has('streams'), needKind = !!q.stream || extras.has('streams');
+      const inWindow = sql`${emails.createdAt} >= ${start}::timestamptz`;
+      const bucketOf = sql`CASE WHEN ${inWindow} THEN ${date} END`;
+      const measures = counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` });
+      const within = (from: string) => and(scoped(emails, a), gte(emails.createdAt, from), lt(emails.createdAt, end), q.region ? eq(emails.region, q.region) : undefined);
+      const arm = (part: 'all' | 'kind', from: string) => sql`SELECT ${part}::text AS part, ${inWindow} AS cur, ${bucketOf} AS "date", ${measures}
+        FROM ${emails} WHERE ${and(within(from), part === 'kind' ? sql`(${emails.snapshot}->>'kind') = ${kind === 'marketing' ? sql`'marketing'::text` : sql`'transactional'::text`}` : undefined)} GROUP BY 2, 3`;
+      const arms = [...(needAll ? [arm('all', q.stream ? start : scanFrom)] : []), ...(needKind ? [arm('kind', q.stream ? scanFrom : start)] : [])];
+      const parts = (await c.env.db.execute<Row & { part: 'all' | 'kind'; cur: boolean }>(arms.length > 1 ? sql`${arms[0]} UNION ALL ${arms[1]}` : arms[0]!)).rows;
+      const sum = (list: Row[]) => list.reduce((acc, row) => { for (const key of Object.keys(acc) as Array<keyof typeof acc>) acc[key] += row[key]; return acc; }, total());
+      const shown = parts.filter(row => row.part === (q.stream ? 'kind' : 'all'));
+      const byDate = new Map<string, Row[]>();
+      for (const row of shown) if (row.cur) byDate.set(row.date, [...(byDate.get(row.date) ?? []), row]);
+      rows = [...byDate].map(([day, list]) => ({ ...sum(list), date: day })).sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+      if (extras.has('previous')) previous = { from: previousFrom, to: start, totals: sum(shown.filter(row => !row.cur)) };
+      if (extras.has('streams')) {
+        const all = sum(parts.filter(row => row.part === 'all' && row.cur)), own = sum(parts.filter(row => row.part === 'kind' && row.cur));
+        const rest = Object.fromEntries(Object.keys(all).map(key => [key, all[key as keyof typeof all] - own[key as keyof typeof own]])) as typeof all;
+        streams = kind === 'marketing' ? { transactional: rest, marketing: own } : { transactional: own, marketing: rest };
+      }
+    }
     // Every email belongs to exactly one creation bucket, so totals are the sum of the buckets (no ROLLUP sort).
-    const rows = result.rows;
     const totals = { emails: 0, accepted: 0, delivered: 0, bounced: 0, complained: 0, opened: 0, clicked: 0, failed: 0, deliveryDelayed: 0, simulated: 0 };
     for (const row of rows) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += row[key];
     const buckets = rows.map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
@@ -863,7 +960,7 @@ function registerMetrics(app: App) {
       }
       daily = [...days.values()];
     }
-    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}) };
+    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}), ...(previous ? { previous } : {}), ...(streams ? { streams } : {}) };
     };
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
     // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
@@ -874,7 +971,7 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, window].join('|'), compute);
+    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
     return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
   });

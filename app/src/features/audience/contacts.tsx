@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { Plus } from 'lucide-react'
-import { useApiMutation, useApiQuery, useRegion, useApi } from '../../data/context'
+import { useApiMutation, useApiDef, useApiQuery, useRegion, useApi } from '../../data/context'
+import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ContactStatus, ConsentInput } from '../../data/types'
 import { Alert, Button, Checkbox, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { activityColumns, AudienceRouteSkeleton } from './skeletons'
@@ -11,7 +12,7 @@ import { AudienceHeader } from './header'
 import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
 
 export function ContactsPage() {
-  const { pageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize, tableRef } = useAdaptivePageSize(5, 20, 'contacts')
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [listId, setListId] = useState('')
@@ -23,7 +24,7 @@ export function ContactsPage() {
   useEffect(() => setPage(1), [pageSize])
   const lists = useAudienceLists(listSearch, listCursor)
   const params = { page, pageSize, search, status, listId }
-  const query = useApiQuery(['contacts', params], (api, signal) => api.contacts.list(params, signal))
+  const query = useApiDef(queries.contacts(params), { keepPrevious: true })
   return <div className="audience-page">
     <AudienceHeader actions={<><Button onClick={() => setImporting(true)}>Import contacts</Button><Button variant="primary" onClick={() => setAdd(true)}><Plus size={16} />Add contact</Button></>} />
     <div className="data-toolbar"><div className="cluster"><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /><Select className="audience-status-filter" aria-label="Filter by consent" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={[{ value: '', label: 'All contacts' }, ...statusOptions]} /><Input className="audience-list-search" aria-label="Find list filter" placeholder="Find list by name" value={listSearch} onChange={event => {setListSearch(event.target.value); setListCursor(undefined)}} />{lists.isPending ? <LoadingRegion label="Loading list filter"><ControlSkeleton width={170} /></LoadingRegion> : <Select className="audience-list-filter" aria-label="Filter by list" value={listId} onValueChange={value => { setListId(value); setPage(1) }} options={[{ value: '', label: 'All lists' }, ...(listId && !(lists.data ?? []).some(list => list.id === listId) ? [{value: listId, label: listId}] : []), ...(lists.data || []).map(list => ({ value: list.id, label: `${list.name} · ${list.id}` }))]} />}</div></div>

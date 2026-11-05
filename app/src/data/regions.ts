@@ -4,7 +4,7 @@ import { useApi, useSession } from './context'
 import { ApiError, type OpenSendApi, type RegionCatalog, type RegionCatalogEntry, type SesDiscovery } from './types'
 
 export const regionCatalogKey = (api: OpenSendApi) => ['opensend', api.mode, 'regions'] as const
-export const regionDiscoveryKey = (api: OpenSendApi, region: string) => ['opensend', api.mode, 'live', 'region-discovery', region] as const
+export const regionDiscoveryKey = (api: OpenSendApi, region: string) => ['opensend', api.mode, 'region-discovery', region] as const
 export const regionJobActive = (entry?: RegionCatalogEntry) => entry?.discoveryStatus === 'discovering' || entry?.provisionStatus === 'pending' || entry?.provisionStatus === 'running'
 
 export function useRegionAccess() {

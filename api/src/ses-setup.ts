@@ -11,7 +11,7 @@ import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { ApiError, assertSesConfigured, log } from './core.js';
 import type { Config, Runtime } from './core.js';
-import { domainName } from './domain-claims.js';
+import { claimNameAllowed, domainName } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
 
 const flag = z.boolean().nullable();
@@ -363,7 +363,7 @@ export async function verifiedByoDomains(runtime: Runtime, region: string, curso
     const page = await c.ses.send(new ListEmailIdentitiesCommand({ PageSize: 10, NextToken: cursor }), opts);
     for (const identity of page.EmailIdentities ?? []) {
       const name = domainName.safeParse(identity.IdentityName);
-      if (identity.IdentityType !== 'DOMAIN' || identity.VerificationStatus !== 'SUCCESS' || !name.success) continue;
+      if (identity.IdentityType !== 'DOMAIN' || identity.VerificationStatus !== 'SUCCESS' || !name.success || !claimNameAllowed(name.data,runtime.config.publicUrl)) continue;
       try {
         const { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } = await c.ses.send(new GetEmailIdentityCommand({ EmailIdentity: name.data }), opts);
         if (VerificationStatus === 'SUCCESS' && VerifiedForSendingStatus) domains.push({ name: name.data, ses: { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } });

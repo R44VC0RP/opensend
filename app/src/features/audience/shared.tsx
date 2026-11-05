@@ -1,4 +1,5 @@
-import { useApiQuery } from '../../data/context'
+import { useApiDef } from '../../data/context'
+import { queries } from '../../data/queries'
 import { ApiError, type AudienceList, type Contact } from '../../data/types'
 import { Alert, DataTable, SkeletonText, StatusBadge } from '../../components/ui'
 import { Link } from 'react-router'
@@ -12,10 +13,7 @@ export const statusOptions = [{ value: 'subscribed', label: 'Subscribed' }, { va
 export function fieldError(error: unknown, field: string) { return error instanceof ApiError ? error.fields[field] : undefined }
 export function MutationError({ error }: { error: unknown }) { return error ? <Alert tone="danger">{error instanceof Error ? error.message : 'The request could not be completed.'}</Alert> : null }
 export function useAudienceLists(search = '', cursor?: string) {
-  return useApiQuery(['lists', 'options', { pageSize: 100, search, cursor }], async (api, signal) => {
-    const page = await api.lists.list({pageSize: 100, search, cursor, counts: false}, signal)
-    return Object.assign(page.items, {nextCursor: page.nextCursor ?? null})
-  })
+  return useApiDef(queries.audienceLists(search, cursor), { keepPrevious: true })
 }
 export function ContactTable({ contacts, lists = [], members = false, loading = false, minRows = pageSize, listsLoading = false, tableRef }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void }) {
   const columns = members ? memberColumns : contactColumns

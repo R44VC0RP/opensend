@@ -1257,6 +1257,54 @@ export type Metrics = {
         bounced: number;
         complained: number;
     }>;
+    /**
+     * Present with include=previous.
+     */
+    previous?: {
+        from: string;
+        to: string;
+        totals: {
+            emails: number;
+            accepted: number;
+            delivered: number;
+            bounced: number;
+            complained: number;
+            opened: number;
+            clicked: number;
+            failed: number;
+            deliveryDelayed: number;
+            simulated: number;
+        };
+    };
+    /**
+     * Present with include=streams.
+     */
+    streams?: {
+        transactional: {
+            emails: number;
+            accepted: number;
+            delivered: number;
+            bounced: number;
+            complained: number;
+            opened: number;
+            clicked: number;
+            failed: number;
+            deliveryDelayed: number;
+            simulated: number;
+        };
+        marketing: {
+            emails: number;
+            accepted: number;
+            delivered: number;
+            bounced: number;
+            complained: number;
+            opened: number;
+            clicked: number;
+            failed: number;
+            deliveryDelayed: number;
+            simulated: number;
+        };
+    };
 };
 
 export type RegionCatalog = {
@@ -8943,6 +8991,10 @@ export type GetMetricsData = {
         to?: string;
         stream?: 'transactional' | 'marketing';
         granularity?: 'day' | 'hour';
+        /**
+         * Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).
+         */
+        include?: string;
     };
     url: '/v1/metrics';
 };
