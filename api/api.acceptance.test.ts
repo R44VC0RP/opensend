@@ -4298,7 +4298,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
 
   test('attachment and template uploads share one validator: any content, SES banned extensions refused', async t => {
-    await simulatedSesFixture(t, async ({ runtime, local }) => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, db }) => {
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
       runtime.storage = {
         async put(key, body, contentType) { objects.set(key, { body, contentType }); },
@@ -4320,6 +4320,29 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for (const filename of ['unsafe.exe', 'macro.ps1', 'UPPER.JS', 'archive.tar.lnk', 'trailing.exe.', 'trailing.exe . ']) error(await local('POST', path, { filename, content: Buffer.from('unsafe').toString('base64') }), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
         error(await local('POST', path, { filename: 'empty.txt', content: '' }), 422);
       }
+      // Paid preview/import operations share a minute budget across sessions and API keys.
+      let renders = 0, imports = 0;
+      runtime.renderHtmlImage = async () => { renders++; return { data: Uint8Array.of(1), mimeType: 'image/png' }; };
+      runtime.importPublicImage = async () => { imports++; return { data: Uint8Array.of(2), contentType: 'image/png' }; };
+      const template = ok(await local('POST', '/v1/templates', { name: 'Preview' }), 201);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Preview' }), 201);
+      const previews = [`/v1/templates/${template.id}/preview-image`, `/v1/campaigns/${campaign.id}/preview-image`];
+      const key = async (permission: string) => ok(await local('POST', '/v1/api-keys', { name: 'Preview', permissions: [permission] }), 201);
+      const reader = await key('read'), sender = await key('send');
+      for (const path of previews) error(await request('GET', path, reader.secret), 403, 'PERMISSION_DENIED');
+      const importImage = () => local('POST', '/v1/template-assets/import', { url: 'https://example.com/logo.png' });
+      ok(await importImage(), 201);
+      for (let i = 0; i < 29; i++) ok(await request('GET', previews[i % 2]!, sender.secret));
+      for (const reply of [await importImage(), await local('GET', previews[0]!), await local('GET', previews[1]!)]) {
+        assert.equal(error(reply, 429, 'RENDER_RATE_LIMITED').retryable, true);
+        assert.equal(reply.headers.get('retry-after'), '60');
+      }
+      assert.equal(renders, 29); assert.equal(imports, 1, 'Denied requests never reach the renderer or downloader.');
+      const other = await key('manage');
+      await db.query("UPDATE api_keys SET workspace_id='default' WHERE id=$1", [other.id]);
+      ok(await request('POST', '/v1/template-assets/import', other.secret, { url: 'https://example.com/other.png' }), 201);
+      await db.query("UPDATE api_request_budgets SET window_start=window_start - interval '1 minute' WHERE workspace_id=$1 AND key_id='render:images'", [runtime.config.workspaceId]);
+      ok(await request('GET', previews[0]!, sender.secret));
     });
   });
 

@@ -5,7 +5,7 @@ import { parse, type DefaultTreeAdapterMap } from 'parse5';
 import { apiKeys } from './db/core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { GetEmailTemplateCommand, TestRenderEmailTemplateCommand, type Attachment } from '@aws-sdk/client-sesv2';
-import { actor, ApiError, digest, errors, getSes, isSimulatedSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, ApiError, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, IdParams, json, log, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, timed, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { AudienceSpec, countCampaignAudience, snapshotCampaignAudience } from './audience.js';
 import { getMcpGrantActor } from './mcp-auth.js';
@@ -908,6 +908,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview-image', operationId: 'renderCampaignPreviewImage', description: 'Renders the saved campaign draft as a full-page, 720 px wide PNG for visual review. Inline CID images are embedded; remote HTTPS images are loaded by the isolated renderer.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreviewImage), ...errors } }), async c => {
     const a = actor(c, 'send'), row = await findCampaign(c.env.db, a, c.req.valid('param').id);
     if (!c.env.renderHtmlImage) throw new ApiError(503, 'PREVIEW_RENDERING_UNAVAILABLE', 'Visual campaign preview rendering is not configured.', undefined, true);
+    await chargeRenderBudget(c, a.workspaceId);
     const rendered = renderCampaignContent(c.env, row.draft, false);
     let html = rendered.html ?? '';
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId);
