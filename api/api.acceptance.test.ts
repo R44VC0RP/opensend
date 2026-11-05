@@ -1923,6 +1923,18 @@ describe('Hosted MCP OAuth and tools', () => {
       });
       const rpc = async (token: string, method: string, params: Json) => ok(await local('POST','/mcp',{ jsonrpc:'2.0', id:1, method, params },'live',{ ...rpcHeaders, authorization:`Bearer ${token}` })).result;
       const call = async (name: string, args: Json) => (await rpc(manager.token,'tools/call',{ name, arguments:args })).structuredContent;
+      const template = ok(await local('POST','/v1/templates',{name:'Preview scope fixture'}),201);
+      ok(await local('PATCH',`/v1/templates/${template.id}`,{revision:template.revision,draft:{...template.draft,html:'<p>Scope fixture</p>'}}));
+      let renders=0;
+      runtime.renderHtmlImage=async()=>{renders++;return {data:Uint8Array.of(1),mimeType:'image/png'};};
+      for (const [grant,visual] of [[reader,false],[manager,true]] as const) {
+        const preview=await rpc(grant.token,'tools/call',{name:'previewTemplate',arguments:{id:template.id}});
+        assert.equal(preview.isError,false);const body=preview.structuredContent.response;
+        assert.match(body.html,/Scope fixture/);assert.equal(body.text,'Scope fixture');
+        assert.equal(body.visualPreview?.mimeType,visual?'image/png':undefined);
+        assert.deepEqual(preview.content.map((entry:Json)=>entry.type),visual?['text','image']:['text']);
+        assert.equal(renders,visual?1:0);
+      }
       const enable = (extra: Json = {}) => call('enableInboundDomain',{ id:domain, confirm:true, ...extra });
       const state = async (id: string) => (await call('getInboundDomain',{ id })).response.status;
       assert.ok(!(await rpc(reader.token,'tools/list',{})).tools.some((tool: Json) => tool.name.endsWith('InboundDomain') || tool.name === 'listInboundDomains'));

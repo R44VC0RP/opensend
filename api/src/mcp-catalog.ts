@@ -5,7 +5,7 @@ import type { App } from './core.js';
 type ObjectValue = Record<string, any>;
 export interface McpStepResult { status: number; requestId: string | null; response: any; image?: { data: string; mimeType: string }; }
 export interface McpPlan { steps: readonly { operation: McpOperation; args: ObjectValue }[]; parallel?: boolean; combine?: (results: McpStepResult[]) => McpStepResult; }
-export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue) => McpPlan; }
+export interface McpOperation { readonly tool: Tool; readonly method: string; readonly path: string; readonly queryParameters: readonly string[]; readonly singlePath?: string; readonly write: boolean; readonly inbound?: boolean; readonly requiresConfirmation?: (args: ObjectValue) => boolean; readonly validate: (value: unknown) => boolean; readonly validateOutput: (value: unknown) => boolean; readonly plan?: (args: ObjectValue, allowWrites: boolean) => McpPlan; }
 const EXCLUDED = new Set(['createApiKey', 'revealWebhookSecret', 'rotateWebhookSecret', 'receiveSesSnsEvent']);
 const EMAIL_SEND_TOOLS = new Set(['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendCampaign', 'scheduleCampaign']);
 export const EMAIL_SEND_ROUTING = 'Use sendEmail for one-off sends to 50 or fewer people total across the requested send. Use campaigns for shared announcements or outreach to more than 50 people; do not split the audience into transactional batches or repeated sends to bypass this rule. Individual receipts, password resets and other event-triggered emails remain transactional regardless of total volume.';
@@ -224,7 +224,7 @@ const templatePreviewOutput: NonNullable<Tool['outputSchema']> = {
   type: 'object', anyOf: [
     { type: 'object', properties: { status: { type: 'integer' }, requestId: { type: ['string', 'null'] }, response: { type: 'object', properties: {
       html: { type: 'string' }, text: { type: 'string' }, revision: { type: 'integer' }, published: { type: 'boolean' }, visualPreview: { type: 'object', properties: { mimeType: { type: 'string', const: 'image/png' } }, required: ['mimeType'], additionalProperties: false },
-    }, required: ['html', 'text', 'revision', 'published', 'visualPreview'], additionalProperties: false } }, required: ['status', 'requestId', 'response'], additionalProperties: false },
+    }, required: ['html', 'text', 'revision', 'published'], additionalProperties: false } }, required: ['status', 'requestId', 'response'], additionalProperties: false },
     structuredClone((genericOutput as ObjectValue).anyOf[1]),
   ],
 };
@@ -257,7 +257,7 @@ function actionSchema(actions: Record<string, McpOperation>, field = 'action', r
   }
   return { type: 'object', properties, required: [field], oneOf: branches, ...(Object.keys(defs).length ? { $defs: defs } : {}) };
 }
-function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: (args: ObjectValue) => McpPlan, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput, requiresConfirmation?: (args: ObjectValue) => boolean): McpOperation {
+function custom(name: string, description: string, input: Tool['inputSchema'], write: boolean, plan: NonNullable<McpOperation['plan']>, outputSchema: NonNullable<Tool['outputSchema']> = genericOutput, requiresConfirmation?: (args: ObjectValue) => boolean): McpOperation {
   const output = structuredClone(outputSchema);
   const tool: Tool = { name, description, inputSchema: input, outputSchema: output, annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } };
   const operation: McpOperation = { tool, method: 'custom', path: '/v1/custom', queryParameters: [], write, ...(requiresConfirmation ? { requiresConfirmation } : {}), validate: validator(input), validateOutput: validator(output), plan };
@@ -311,7 +311,7 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   templateFindSchema.dependentSchemas = { id: { properties: Object.fromEntries(templateList.queryParameters.map(parameter => [parameter, false])) } };
   add(custom('findTemplates', 'List and filter global campaign templates, or supply id alone to retrieve the complete draft and published revision with asset IDs.', templateFindSchema as Tool['inputSchema'], false, args => typeof args.id === 'string' ? { steps: [{ operation: templateDetail, args: { id: args.id } }], combine: ([value]) => ({ ...value, response: { data: [value.response], nextCursor: null } }) } : { steps: [{ operation: templateList, args }] }, pageOutput()));
   const previewTemplate = need('previewCampaignTemplate', raw), previewTemplateImage = need('renderCampaignTemplatePreviewImage', raw);
-  add(custom('previewTemplate', 'Return rendered HTML, plain text and a PNG image of a template draft or published revision. Use this instead of browser automation to verify template appearance and images.', previewTemplate.tool.inputSchema, false, args => ({
+  add(custom('previewTemplate', 'Return rendered HTML and plain text of a template draft or published revision. Send or manage permission also includes a PNG image for visual verification.', previewTemplate.tool.inputSchema, false, (args, allowWrites) => !allowWrites ? { steps: [{ operation: previewTemplate, args }] } : ({
     steps: [{ operation: previewTemplate, args }, { operation: previewTemplateImage, args }], parallel: true,
     combine: ([preview, visual]) => ({ ...preview, response: { ...preview.response, visualPreview: { mimeType: visual.response.mimeType } }, image: { data: visual.response.data, mimeType: visual.response.mimeType } }),
   }), templatePreviewOutput));

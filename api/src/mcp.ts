@@ -83,7 +83,7 @@ async function serve(app: App, request: Request, runtime: Runtime, actor: Actor,
       if (confirmationRequired && (!allowWrites || args.confirm !== true)) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
       if (!op.validate(args)) fail('INVALID_ARGUMENTS', 'Arguments do not match the tool input schema. No API request was made.');
       if (op.plan) {
-        const plan = op.plan(args);
+        const plan = op.plan(args, allowWrites);
         const run = (step: (typeof plan.steps)[number]) => invoke(step.operation, step.args);
         const values: McpStepResult[] = [];
         if (plan.parallel) values.push(...await Promise.all(plan.steps.map(run)));
