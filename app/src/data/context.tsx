@@ -1,4 +1,4 @@
-import { createContext, lazy, Suspense, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
@@ -8,10 +8,12 @@ import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
+import { preloadable } from '../lib/preloadable'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
-const loadHome = () => import('../features/home')
-const HomePage = lazy(() => loadHome().then(m => ({ default: m.HomePage })))
+const homePage = preloadable(() => import('../features/home'), m => m.HomePage)
+export const loadHome = homePage.preload
+const HomePage = homePage.Component
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)

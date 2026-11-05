@@ -112,6 +112,8 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     queryKey: ['opensend', api.mode, 'connection'],
     queryFn: ({ signal }) => connectionApi.get(signal),
     enabled: sending || choosingDomain,
+    // /v1/me already says there is no connection yet, so the choice shows without another request.
+    initialData: sending && identity?.connection === null ? null : undefined,
     refetchInterval: query => sending && picked !== 'shared' && query.state.data?.kind === 'byo' && query.state.data.state !== 'ready' ? 3000 : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: query => sending && query.state.data?.kind === 'byo' ? 'always' : false,

@@ -3,18 +3,21 @@ import { Navigate, Route, Routes, Link, useLocation, useParams, type Params } fr
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
 import { Button, EmptyState } from './components/ui'
-import { useOnboardingStage, useSession } from './data/context'
+import { loadHome, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
-const loadOnboarding = () => import('./features/onboarding')
-const loadOverview = () => import('./features/overview')
+import { preloadable } from './lib/preloadable'
+const onboarding = preloadable(() => import('./features/onboarding'), m => m.OnboardingPage)
+const overview = preloadable(() => import('./features/overview'), m => m.OverviewPage)
+const loadOnboarding = onboarding.preload
+const loadOverview = overview.preload
 const loadLogs = () => import('./features/logs')
 const loadCampaigns = () => import('./features/campaigns')
 const loadAudience = () => import('./features/audience')
 const loadSettings = () => import('./features/settings')
 const loadDocs = () => import('./features/docs')
 const loadInbound = () => import('./features/inbound')
-const OverviewPage = lazy(() => loadOverview().then(m => ({ default: m.OverviewPage })))
+const OverviewPage = overview.Component
 const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
 const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
 const ReceivedEmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.ReceivedEmailDetailPage })))
@@ -44,12 +47,12 @@ const LegacyMailboxesRedirect = lazy(() => loadInbound().then(m => ({ default: m
 const LegacyMailboxRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxRedirect })))
 const LegacyMailboxWebhooksRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhooksRedirect })))
 const LegacyMailboxWebhookRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhookRedirect })))
-const OnboardingPage = lazy(() => loadOnboarding().then(m => ({ default: m.OnboardingPage })))
+const OnboardingPage = onboarding.Component
 
 // Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
 const initialPath = window.location.pathname
 if (initialPath === '/onboarding') void loadOnboarding()
-else if (!dashboardLikelyReady(selectedWorkspace())) { /* /v1/me decides between onboarding and the dashboard. */ }
+else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') void loadHome() /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
 else if (initialPath === '/') void loadOverview()
 else if (initialPath.startsWith('/logs')) void loadLogs()
 else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) void loadCampaigns()
