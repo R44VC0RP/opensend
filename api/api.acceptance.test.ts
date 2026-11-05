@@ -1068,7 +1068,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(ok(await readPending()).verified,false); const pendingQueries=queries.mock.callCount()-startPending;
           assert.equal(pendingQueries-authQueries,1); dt.diagnostic(`GET pending domain: 1 domain statement; ${pendingQueries} pg round trips including dashboard auth.`);
           assert.equal(wakes,firstWake+1);
-          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND available_at<=now() AND payload->>'poll'='40'",[job.id])).rowCount,1,'Wake now without resetting the unattended backoff.');
+          const nudged=(await pool.query("SELECT payload FROM jobs WHERE id=$1 AND available_at<=now() AND payload->>'poll'='40'",[job.id])).rows[0];
+          assert.ok(nudged,'Wake now without resetting the unattended backoff.');
+          await pace();await assert.rejects(operationJobs['domain.verify']!(runtime,nudged.payload,{id:job.id,attempts:1,workspaceId:b.org.id}),
+            e=>e instanceof JobDeferred && e.payload?.poll===40 && !e.payload.dashboard,'An early dashboard check must not advance the background poll count.');
           await Promise.all([readPending(),readPending()]); assert.equal(wakes,firstWake+1,'Reads inside the cooldown do not wake again.');
           await park(); for(const read of await Promise.all([readPending(),readPending(),readPending()])) ok(read);
           assert.equal(wakes,firstWake+2,'Racing dashboard reads share one wake per claim after the cooldown.');
@@ -1216,10 +1219,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               error(await local('GET',`/v1/domains/${expired.id}`,undefined,b.cookie),404);
               assert.ok(!identities.has(`${platform}:${expired.name}`));
               for (const name of [domain,recent.name,foreignTag.name]) assert.ok(identities.has(`${platform}:${name}`));
-              // Before the deadline, TXT alone proves ownership even when SES still reports pending DKIM.
+              // Drive the unattended schedule with a poll count already in the old 24-hour backoff.
+              // TXT appears just after the hour-71 poll, while SES still reports pending DKIM.
               const recentIdentity=identities.get(`${platform}:${recent.name}`)!;recentIdentity.DkimAttributes={...recentIdentity.DkimAttributes,Status:'PENDING'};
-              answer=getToken(recent);await pace();
-              await assert.rejects(operationJobs['domain.verify']!(runtime,{domainId:recent.id,token:answer},{id:'domain.verify:'+answer,attempts:1,workspaceId:b.org.id}),JobDeferred);
+              const recentToken=getToken(recent),recentCheck=(poll:number)=>operationJobs['domain.verify']!(runtime,{domainId:recent.id,token:recentToken,poll},{id:'domain.verify:'+recentToken,attempts:1,workspaceId:b.org.id});
+              const age=async(seconds:number)=>(await pool.query("UPDATE domain_claims SET created_at=clock_timestamp()-$2*interval '1 second' WHERE token=$1 RETURNING created_at+interval '72 hours' AS deadline",[recentToken,seconds])).rows[0].deadline.getTime();
+              answer='';await age(70*3600+900);await pace();const startPoll=Date.now();
+              await assert.rejects(recentCheck(84),e=>e instanceof JobDeferred && e.payload?.poll===85 && Date.parse(e.availableAt)>=startPoll+3600_000 && Date.parse(e.availableAt)<=Date.now()+3600_000);
+              const expires=await age(71*3600+900);await pace();
+              await assert.rejects(recentCheck(85),e=>e instanceof JobDeferred && e.payload?.poll===86 && Date.parse(e.availableAt)===expires-30_000);
+              answer=recentToken;await age(72*3600-30);await pace();await assert.rejects(recentCheck(86),JobDeferred);
               await pool.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE name=$1",[recent.name]);
               await cleanup(runtime);assert.ok(identities.has(`${platform}:${recent.name}`));
               assert.equal(ok(await local('GET',`/v1/domains/${recent.id}`,undefined,b.cookie)).sending,'pending');answer='';

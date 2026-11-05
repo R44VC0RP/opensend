@@ -169,12 +169,12 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'opensend:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean };
+type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
-    domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
+    dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
@@ -372,8 +372,8 @@ function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'superse
   // Dashboard reads only advance the due time. Preserve the background poll count and use the job's
   // existing enqueue timestamp as an atomic per-claim cooldown, shared by every tab and isolate.
   return sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||r.token,'domain.verify',${wid},
-    jsonb_build_object('domainId',r.id,'token',r.token) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
-    payload=${mode==='dashboard' ? sql`jobs.payload` : sql`excluded.payload`},created_at=clock_timestamp() ${mode==='supersede' ? sql`` : sql`WHERE jobs.status<>'running'`}
+    jsonb_build_object('domainId',r.id,'token',r.token${mode==='dashboard' ? sql`,'dashboard',true` : sql``}) FROM (${source}) r ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),lease_until=NULL,last_error=NULL,
+    payload=${mode==='dashboard' ? sql`CASE WHEN jobs.status='pending' AND jobs.available_at<=now() THEN jobs.payload ELSE jobs.payload||'{"dashboard":true}'::jsonb END` : sql`excluded.payload`},created_at=clock_timestamp() ${mode==='supersede' ? sql`` : sql`WHERE jobs.status<>'running'`}
     ${mode==='dashboard' ? sql`AND jobs.created_at<=clock_timestamp()-interval '20 seconds'` : sql``} RETURNING id`;
 }
 const domainVerify: JobHandler = async (runtime,payload,job) => {
@@ -382,8 +382,18 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (!row || row.token!==payload.token || row.expired) return; // Deleted, reclaimed, disconnected or awaiting expiry cleanup.
   // Only previously proven claims keep polling beyond 72 hours (including recovery after lost proof).
   const poll=Number(payload.poll ?? 0);
+  const {dashboard,...background}=payload, nextPoll=dashboard===true && !row.ever_proven ? poll : poll+1;
   const backoff=(n:number)=>n<5 ? [15000,30000,120000,600000,1800000][n]! : n<72 ? 3600_000 : n<84 ? 6*3600_000 : 24*3600_000;
-  const defer=(ms:number, next=poll) => { throw new JobDeferred(new Date(Date.now()+ms).toISOString(),{...payload,poll:next}); };
+  const defer=(ms:number,next?:number) => {
+    const now=Date.now();
+    if (!row.ever_proven) {
+      const remaining=new Date(row.created_at).getTime()+72*3600_000-now;
+      ms=Math.min(ms,3600_000);
+      if (remaining>60_000 && ms>=remaining) ms=remaining-30_000;
+    }
+    // Lane contention isn't an observation. Consume the dashboard nudge only after an actual check.
+    throw new JobDeferred(new Date(now+ms).toISOString(),next===undefined ? payload : {...background,poll:next});
+  };
   const scoped={...runtime,config:{...runtime.config,workspaceId:job.workspaceId,regions:[row.region]}};
   try {
     // Reserve the next GetEmailIdentity across workers, not per workspace or per invocation.
@@ -417,7 +427,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     if (shared && report.ready && row.connection.tenant_state!=='ready') {
       // Platform setup delay is not a failure to prove ownership.
       await runtime.db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE dc.token=${row.token} AND dc.connection_id=${row.connection.id} AND NOT dc.ever_proven AND NOT domain_claim_expired(dc)`);
-      log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),poll+1);
+      log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),nextPoll);
     }
     const outcome=await runtime.db.transaction(async db=>{
       if (upgrade) await db.execute(sql`SELECT promote_imported_claim(${job.workspaceId},${row.name},${row.token},${row.connection.id})`);
@@ -440,7 +450,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // the hours-long DKIM backoff. A domain abandoned at this step still backs off normally.
     if (shared && dkimSuccess && row.identity?.ses.DkimAttributes?.Status!=='SUCCESS' && !positive) defer(backoff(0),1);
     // A grace period must be observed again before it can expire.
-    if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),poll+1);
+    if (outcome.sending_state==='lost' || outcome.receiving_state==='lost') defer(Math.min(backoff(poll),LOST_GRACE_MS),nextPoll);
   } catch (e) {
     if (e instanceof ApiError && ['SES_IDENTITY_NOT_FOUND','DOMAIN_UNAVAILABLE'].includes(e.code)) {
       await runtime.db.transaction(async db=>{
@@ -453,10 +463,10 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       if (e.code==='DOMAIN_UNAVAILABLE') return;
     } else if (e instanceof ApiError && e.code==='DOMAIN_DNS_UNAVAILABLE') {
       // Transport failures never count as evidence against a working domain.
-      throw new JobDeferred(new Date(Date.now()+Math.min(3_600_000,30_000*2**Math.min(poll,7))).toISOString(),{...payload,poll:poll+1});
+      defer(Math.min(3_600_000,30_000*2**Math.min(poll,7)),nextPoll);
     } else if (!(e instanceof ApiError) || !e.retryable) throw e;
   }
-  defer(backoff(poll),poll+1);
+  defer(backoff(poll),nextPoll);
 };
 const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
