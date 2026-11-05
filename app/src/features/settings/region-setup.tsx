@@ -60,7 +60,7 @@ export function RegionSetup() {
     try { await enable(newRegion.trim().toLowerCase()) } catch { /* Shown inside the dialog. */ }
   }
   return <>
-    <section className="section stack">
+    <section id="sending" className="section stack settings-group">
       <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button variant="primary" disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}

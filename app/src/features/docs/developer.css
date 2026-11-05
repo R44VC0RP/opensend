@@ -30,3 +30,4 @@
 .developer-client-panels { display: grid; min-width: 0; }
 .developer-client-panel { grid-area: 1 / 1; min-width: 0; }
 .developer-client-panel:not([data-active]) { visibility: hidden; }
+.developer-icon-actions[data-pending] { visibility: hidden; }

@@ -3,16 +3,16 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiMutation, useApiQuery, useRegion } from '../../data/context'
 import type { CampaignTemplate, CampaignTemplateDraft } from '../../data/types'
-import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, StatusBadge, Tabs, useToast } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, time } from '../../lib/format'
-import { CampaignAttachments, type CampaignAttachmentsRef } from '../campaigns/CampaignAttachments'
-import type { EmailComposerRef } from '../campaigns/EmailComposer'
-import { ComposerSkeleton } from '../campaigns/skeletons'
-import '../campaigns/campaigns.css'
-import './templates.css'
+import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
+import type { EmailComposerRef } from './EmailComposer'
+import { ComposerSkeleton, templateColumns } from './skeletons'
+import { CampaignsHeader } from './header'
+import './campaigns.css'
 
-const loadEmailComposer = () => import('../campaigns/EmailComposer').then(module => ({ default: module.EmailComposer }))
+const loadEmailComposer = () => import('./EmailComposer').then(module => ({ default: module.EmailComposer }))
 const EmailComposer = lazy(loadEmailComposer)
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.'
 
@@ -32,7 +32,7 @@ export function TemplatesPage() {
   const [name, setName] = useState('')
   async function createTemplate() {
     if (!name.trim()) return
-    try { const result = await create.mutateAsync(name.trim()); navigate(`/templates/${encodeURIComponent(result.id)}`) }
+    try { const result = await create.mutateAsync(name.trim()); navigate(`/campaigns/templates/${encodeURIComponent(result.id)}`) }
     catch (error) { toast(errorMessage(error), 'error') }
   }
   async function createCampaign(template: {id: string; name: string}) {
@@ -40,15 +40,14 @@ export function TemplatesPage() {
     catch (error) { toast(errorMessage(error), 'error') }
   }
   return <>
-    <PageHeader title="Templates" actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
-    <Tabs value={archived ? 'archived' : 'active'} onValueChange={value => setParams(value === 'archived' ? { archived: 'true' } : {})} items={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} />
-    <div className="data-toolbar"><Input className="template-search" type="search" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /></div>
+    <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
+    <div className="data-toolbar"><div className="cluster"><Input className="template-search" type="search" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /><Select aria-label="Filter templates" value={archived ? 'archived' : 'active'} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); value === 'archived' ? next.set('archived', 'true') : next.delete('archived'); next.delete('page'); return next })} options={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/templates/${encodeURIComponent(row.id)}`)} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
-        {key: 'name', label: 'Template', render: row => <div className="campaign-row-name"><Link to={`/templates/${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject || row.description || 'No subject yet'}</span></div>},
-        {key: 'status', label: 'Status', width: 120, render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
-        {key: 'updated', label: 'Updated', width: 190, render: row => <span className="muted">{date(row.updatedAt)} · {time(row.updatedAt)} UTC</span>},
-        {key: 'action', label: '', width: 150, align: 'right' as const, render: row => row.published && !archived ? <Button size="sm" variant="secondary" disabled={instantiate.isPending || !regionId} onClick={() => void createCampaign(row)}>Create campaign</Button> : null},
+      <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/templates/${encodeURIComponent(row.id)}`)} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
+        {...templateColumns[0], render: row => <div className="campaign-row-name"><Link to={`/campaigns/templates/${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject || row.description || 'No subject yet'}</span></div>},
+        {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
+        {...templateColumns[2], render: row => <span className="muted">{date(row.updatedAt)} · {time(row.updatedAt)} UTC</span>},
+        {...templateColumns[3], render: row => row.published && !archived ? <Button size="sm" variant="secondary" disabled={instantiate.isPending || !regionId} onClick={() => void createCampaign(row)}>Create campaign</Button> : null},
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
     </>}
@@ -122,7 +121,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     catch (cause) { toast(errorMessage(cause), 'error') }
   }
   return <div className="campaign-compose-page template-compose-page">
-    <PageHeader title={draft.name || 'Template'} backTo="/templates" actions={<>
+    <PageHeader title={draft.name || 'Template'} backTo="/campaigns/templates" actions={<>
       <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} role="status"><span className="campaign-sync-dot" aria-hidden="true" /><span>{saving ? 'Saving…' : error ? 'Save failed' : dirty ? 'Unsaved changes' : 'Saved'}</span></div>
       <Button variant="ghost" disabled={saving || dirty || !draft.html} onClick={() => setPreviewOpen(true)}>Preview</Button>
       {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}
@@ -143,7 +142,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['opensend', api.mode, 'template', template.id], exact: true}); await refreshLists(); navigate('/templates') }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete template?" description="Campaigns already created from this template will not change." confirmLabel="Delete template" danger onConfirm={async () => { await api.templates.remove(template.id); cache.removeQueries({queryKey: ['opensend', api.mode, 'template', template.id], exact: true}); await refreshLists(); navigate('/campaigns/templates') }} />
   </div>
 }
 

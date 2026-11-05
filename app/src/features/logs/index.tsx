@@ -156,7 +156,7 @@ function EmailDetail({ email }: { email: Email }) {
   const hasPlainText = plainText.trim().length > 0
   const contacts = useApiQuery(['contact-for-email', email.to], (api, signal) => api.contacts.list({ email: email.to, pageSize: 1 }, signal))
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
-  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
+  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/audience/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
     <dl className="email-metadata"><div><dt>To</dt><dd>{email.to}</dd></div><div><dt>From</dt><dd>{email.fromName ? `${email.fromName} <${email.from}>` : email.from}</dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
     {email.simulated && <Alert tone="info">Simulated; not sent to SES.</Alert>}
     {email.status === 'bounced' && <Alert tone="warning">Delivery failed.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}

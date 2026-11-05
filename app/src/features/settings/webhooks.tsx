@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useApi } from '../../data/context'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import { fieldError, MutationError, SecretDialog, SettingsTabs } from './shared'
+import { fieldError, MutationError, SecretDialog } from './shared'
 import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './skeletons'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
@@ -33,24 +33,22 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
   </div>
 }
 
-export function WebhooksPage() {
+export const useWebhooks = (cursor?: string, enabled = true) => useApiQuery(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor), { enabled })
+export function WebhooksSection() {
   const navigate = useNavigate()
   const pagination = useCursorPagination()
-  const cursor = pagination.cursor
-  const webhooks = useApiQuery(['webhooks', cursor], (api, signal) => api.webhooks.list(signal, cursor))
-  return <div className="stack">
-    <PageHeader title="Settings" actions={<Button variant="primary" onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
-    <SettingsTabs value="webhooks" />
-    <SectionHeader title={webhooks.isPending ? <SkeletonText width={110} /> : 'Webhooks'} />
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={3} minRows={3} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhook endpoints" action={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />} columns={[
-      { ...settingsColumns.webhooks[0], render: webhook => <div><Link to={`/settings/webhooks/${webhook.id}`}>{webhook.name}</Link><div className="muted settings-break">{webhook.url}</div></div> },
+  const webhooks = useWebhooks(pagination.cursor)
+  return <section id="webhooks" className="section stack settings-group">
+    <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={1} minRows={1} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<span className="muted">No webhook endpoints</span>} columns={[
+      { ...settingsColumns.webhooks[0], render: webhook => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
       { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
       { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(label).join(', ')}>{number(webhook.events.length)} events</span> },
       { ...settingsColumns.webhooks[3], render: webhook => <StatusBadge status={label(webhook.status)} /> },
       { ...settingsColumns.webhooks[4], label: 'History', render: webhook => <Link to={`/settings/webhooks/${webhook.id}`}>View deliveries</Link> },
     ]} />}
-    {webhooks.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data?.nextCursor)} />}
-  </div>
+    {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
+  </section>
 }
 
 function NewWebhook() {
@@ -67,11 +65,11 @@ function NewWebhook() {
     try { const endpoint = await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim() }); navigate(`/settings/webhooks/${endpoint.id}`) } catch { /* Shown inline. */ }
   }
   return <div className="stack">
-    <PageHeader title="Add webhook" backTo="/settings/webhooks" />
+    <PageHeader title="Add webhook" backTo="/settings#webhooks" />
     {regions.isPending ? <WebhookBodySkeleton isNew /> : regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
       <EndpointFields input={input} onChange={setInput} regions={regions.data.data} errors={errors} apiError={save.error} disabled={save.isPending} />
-      <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings/webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add endpoint</Button></div>
+      <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add endpoint</Button></div>
     </form>}
   </div>
 }
@@ -123,12 +121,12 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   async function confirm() {
     if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
     if (action === 'rotate') { const result = await rotate.mutateAsync(webhook.id); setSecret(result.secret); rotate.reset() }
-    if (action === 'delete') { await remove.mutateAsync(webhook.id); navigate('/settings/webhooks') }
+    if (action === 'delete') { await remove.mutateAsync(webhook.id); navigate('/settings#webhooks') }
   }
   const actionTitle = action === 'rotate' ? `Rotate ${webhook.name} signing secret?` : action === 'delete' ? `Delete ${webhook.name}?` : `${action === 'pause' ? 'Pause' : 'Resume'} ${webhook.name}?`
   const actionDescription = action === 'rotate' ? 'The current secret stops working. The new one is shown once.' : action === 'delete' ? 'Future deliveries to this endpoint stop.' : action === 'pause' ? 'Stops deliveries to this endpoint.' : 'Resumes deliveries to this endpoint.'
   return <div className="stack">
-    <PageHeader title={webhook.name} backTo="/settings/webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
+    <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} /></form>
     <section className="section stack"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
     <section className="section stack"><SectionHeader title="Delivery history" actions={<span className="muted">UTC</span>} /><MutationError error={retry.error} />

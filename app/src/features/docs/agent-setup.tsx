@@ -18,7 +18,8 @@ function receivingMx(domain: Domain) {
   return record ? { name: record.name, host: match ? match[2] : record.value, priority: match ? match[1] : '10' } : null
 }
 
-export function agentPrompt({ origin, domain, email, multiTenant }: { origin: string; domain: Domain | null; email: string | null; multiTenant: boolean }) {
+// domain is undefined when the reader is signed out and the workspace's domains are unknown.
+export function agentPrompt({ origin, domain, email, multiTenant }: { origin: string; domain: Domain | null | undefined; email: string | null; multiTenant: boolean }) {
   const lines = [
     'Set up OpenSend email in this project.',
     '',
@@ -27,6 +28,10 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
     `- Install the TypeScript SDK: npm i opensend-js. Create the client with createClient from 'opensend-js/client' (baseUrl ${origin}) and call it from server code only.`,
     '- Auth: bearer API key from the OPENSEND_API_KEY environment variable. Never hardcode it or ship it to a browser.',
   ]
+  if (domain === undefined) {
+    lines.push('- Sending domain: use a verified domain from Domains in the OpenSend dashboard. Ask me which one before sending.')
+    return lines.join('\n')
+  }
   if (!domain) {
     lines.push('- Sending domain: none yet. Ask me to add one under Domains in the OpenSend dashboard before sending.')
     return lines.join('\n')
@@ -50,14 +55,15 @@ function downloadText(name: string, text: string) {
   Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
 }
 
-export function AgentPrompt({ prompt }: { prompt: string }) {
-  return <section className="section stack developer-section" aria-label="Agent prompt">
-    <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions">
-      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText('opensend-agent-prompt.txt', prompt)}><Download size={14} aria-hidden="true" /></button>
-      <CopyAction value={prompt} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
+// A null prompt is still loading: the section keeps its place and its actions stay hidden.
+export function AgentPrompt({ prompt }: { prompt: string | null }) {
+  return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
+    <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
+      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText('opensend-agent-prompt.txt', prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
+      <CopyAction value={prompt ?? ''} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>
-    <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code>{prompt}</code></pre>
+    <pre className="developer-code developer-code--wrap" tabIndex={0} aria-label="Agent prompt"><code>{prompt ?? ''}</code></pre>
   </section>
 }
 
@@ -80,7 +86,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
   }
   const snippet = snippets[client]
   const label = clients.find(item => item.value === client)!.label
-  return <section className="section stack developer-section" aria-label="MCP server">
+  return <section id="mcp" className="section stack developer-section" aria-label="MCP server">
     <SectionHeader title="MCP server" />
     <div className="developer-url"><code>{serverUrl}</code><CopyAction value={serverUrl} label="Copy MCP URL" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
     <p className="muted developer-copy">Add this URL as a remote HTTP server in your MCP client. Authorization uses your dashboard’s Google login; no API key or local MCP process is needed.</p>
