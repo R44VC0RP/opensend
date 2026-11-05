@@ -112,3 +112,4 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
 .page-surface > .stack.inbound-stack > .section--bordered { margin-top: calc(var(--space-24) - var(--page-gap)); }
 .inbound-stack > .data-toolbar { padding-bottom: 0; margin-bottom: calc(var(--space-12) - var(--page-gap)); }
 .inbound-note { max-width: 60ch; margin: calc(var(--space-8) - var(--page-gap)) 0 calc(var(--space-12) - var(--page-gap)); font-size: var(--text-sm); }
+.inbound-note code { white-space: nowrap; }

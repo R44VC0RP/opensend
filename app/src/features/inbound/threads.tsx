@@ -243,6 +243,8 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   const key = useRef({ key: '', body: '' })
   const send = useApiMutation((api, input: Omit<Parameters<typeof api.inbound.startThread>[0], 'idempotencyKey'>) => api.inbound.startThread({ ...input, idempotencyKey: idempotencyFor(key.current, input) }), 'Message queued')
   useEffect(() => { if (open) { send.reset(); setErrors({}); setFrom(current => current || defaultAddress || (addresses.length === 1 ? addresses[0]!.id : '')) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  const selected = addresses.find(address => address.id === from)
+  const sender = selected ? senderOf(selected) : null
   async function submit(event: FormEvent) {
     event.preventDefault()
     const recipients = to.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean)
@@ -263,7 +265,7 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
   return <Dialog open={open} onOpenChange={next => { if (!send.isPending) onOpenChange(next) }} title="New message" footer={<><Button disabled={send.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-new-thread" loading={send.isPending}>Send</Button></>}>
     <form id="inbound-new-thread" className="stack" onSubmit={submit} noValidate>
       <MutationError error={send.error} />
-      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')}>
+      <Field label="Address" htmlFor="inbound-new-from" error={errors.addressId || fieldError(send.error, 'addressId')} hint={selected && sender && sender.address !== selected.address ? `Sends as ${full(sender)}.` : undefined}>
         <Select id="inbound-new-from" value={from} onValueChange={setFrom} disabled={send.isPending} placeholder="Choose an address" options={addresses.map(address => ({ value: address.id, label: address.displayName ? `${address.displayName} <${address.address}>` : address.address }))} />
       </Field>
       <Field label="To" htmlFor="inbound-new-to" error={errors.to || fieldError(send.error, 'to')} hint="Separate several recipients with commas."><Input id="inbound-new-to" value={to} onChange={event => setTo(event.target.value)} disabled={send.isPending} placeholder="name@example.com" autoComplete="off" /></Field>

@@ -28,7 +28,7 @@ function WebhookFields({ input, onChange, addresses, errors, apiError, disabled 
   return <div className="stack">
     <div className="form-grid">
       <Field label="Description" htmlFor="mailbox-webhook-description"><Input id="mailbox-webhook-description" value={input.description} onChange={event => onChange({ ...input, description: event.target.value })} disabled={disabled} placeholder="Support agent runtime" /></Field>
-      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint="A public HTTPS URL. Deliveries are signed."><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder="https://agents.acme.com/hooks/mail" /></Field>
+      <Field label="Endpoint URL" htmlFor="mailbox-webhook-url" error={errors.url || fieldError(apiError, 'url')} hint="A public HTTPS URL. Signed with Standard Webhooks headers."><Input id="mailbox-webhook-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} disabled={disabled} placeholder="https://agents.acme.com/hooks/mail" /></Field>
     </div>
     <Field label="Addresses" htmlFor="mailbox-webhook-scope" error={errors.addressIds || fieldError(apiError, 'addressIds')} hint={input.addressIds === null ? 'Includes addresses created later.' : undefined}>
       <Select id="mailbox-webhook-scope" value={input.addressIds === null ? 'all' : 'selected'} disabled={disabled} onValueChange={value => onChange({ ...input, addressIds: value === 'all' ? null : [], eventTypes: value === 'all' ? input.eventTypes : input.eventTypes.filter(type => type !== 'message.stored') })} options={[{ value: 'all', label: 'Every address' }, { value: 'selected', label: 'Selected addresses' }]} />
@@ -60,7 +60,7 @@ export function InboundWebhooksPage() {
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/inbound" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
-    <p className="muted inbound-note">Signed POST requests for mail events. Without a public URL, long-poll <code>GET /v1/inbound/events</code>.</p>
+    <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail events. Without a public URL, long-poll <code>GET /v1/inbound/events</code>.</p>
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/inbound/webhooks/${row.id}`)}
       empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
