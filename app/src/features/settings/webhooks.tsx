@@ -11,6 +11,7 @@ import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './s
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...events] }
+const eventLabel = (event: string) => label(event.replace(/^email\./, '').replace('.', '_'))
 function scopeText(scope: WebhookInput['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }
 function validate(input: WebhookInput) {
   const errors: Record<string, string> = {}
@@ -29,7 +30,7 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
     </div>
     <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {input.regionIds !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = input.regionIds !== 'all' && input.regionIds.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: next ? [...selected, region.region] : selected.filter(id => id !== region.region) }) }} /> })}</div>}</div>
-    <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={label(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
+    <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={eventLabel(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
   </div>
 }
 
@@ -43,7 +44,7 @@ export function WebhooksSection() {
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhooks" />} columns={[
       { ...settingsColumns.webhooks[0], render: webhook => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
       { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
-      { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(label).join(', ')}>{number(webhook.events.length)}</span> },
+      { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(eventLabel).join(', ')}>{number(webhook.events.length)}</span> },
       { ...settingsColumns.webhooks[3], render: webhook => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
@@ -132,7 +133,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...settingsColumns.deliveries[0], render: delivery => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
         { ...settingsColumns.deliveries[1], render: delivery => delivery.regionId },
-        { ...settingsColumns.deliveries[2], render: delivery => label(delivery.event) },
+        { ...settingsColumns.deliveries[2], render: delivery => eventLabel(delivery.event) },
         { ...settingsColumns.deliveries[3], render: delivery => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
         { ...settingsColumns.deliveries[4], render: delivery => number(delivery.attempts) },
         { ...settingsColumns.deliveries[5], render: delivery => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
@@ -142,7 +143,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete endpoint</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete endpoint' : action === 'pause' ? 'Pause endpoint' : 'Resume endpoint'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />
     <SecretDialog secret={secret} title={`${webhook.name} · New signing secret`} onClose={() => { setSecret(null); rotate.reset() }} />
-    <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title="Delivery payload" description={inspected ? `${label(inspected.event)} · ${inspected.regionId} · ${label(inspected.status)}` : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
+    <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title="Delivery payload" description={inspected ? `${eventLabel(inspected.event)} · ${inspected.regionId} · ${label(inspected.status)}` : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
   </div>
 }
 

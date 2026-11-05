@@ -4,6 +4,8 @@
 .data-toolbar .ui-select-trigger:is(.audience-list-filter, .audience-status-filter) { width: 170px; }
 .audience-summary > .ui-skeleton-line { width: auto; }
 .ui-input.audience-search { width: 320px; max-width: 100%; flex-shrink: 0; }
+.ui-input.audience-list-search { width: 220px; max-width: 100%; flex-shrink: 0; }
+.audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-page > .section { margin-block: var(--space-24) 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
