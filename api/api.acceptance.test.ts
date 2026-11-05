@@ -937,13 +937,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           try {error(await local('GET',ret.pathname,undefined,b.cookie),403,'PERMISSION_DENIED'); assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,a.org.id);}
           finally {await pool.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2",[b.org.id,me.id]);}
           assert.equal((await local('GET',ret.pathname+'?error=access_denied',undefined,b.cookie)).status,303); // Cancel does not schedule verification.
-          assert.equal((await pool.query('SELECT status FROM jobs WHERE id=$1',[vjob.id])).rows[0].status,'completed');
+          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND status='completed' AND available_at>now()",[vjob.id])).rowCount,1);
           ok(await local('GET','/v1/me',undefined,b.cookie,select(a.org.id)));
           const success=await local('GET',ret.pathname,undefined,b.cookie); // No workspace header or state from Cloudflare.
           assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}`);
           assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,b.org.id);
           assert.equal((await local('GET',ret.pathname+`?state=${token}`,undefined,b.cookie)).status,303,'Replays may only request the same throttled recheck.');
-          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND workspace_id=$2 AND payload->>'domainId'=$3 AND status='pending' AND available_at<=now()",[vjob.id,b.org.id,created.id])).rowCount,1);
+          // The harness runner can claim the recheck between the callback and this read. The old completed job was due tomorrow.
+          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND workspace_id=$2 AND payload->>'domainId'=$3 AND available_at<=now() AND (status='pending' OR (status IN ('running','completed') AND attempts>0))",[vjob.id,b.org.id,created.id])).rowCount,1);
           assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false,'Approval never promotes sending or receiving.');
           let clock=Date.now()+601_000; dc.mock.method(Date,'now',()=>clock);
           assert.equal((await local('GET',ret.pathname,undefined,b.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
@@ -2009,8 +2010,8 @@ describe('Hosted MCP OAuth and tools', () => {
 
 describe('DB region catalog and explicit SES setup', () => {
   test('MOCK AWS TRANSPORT: catalog changes are immediate, discovery is read-only, and provisioning is explicit and idempotent', async t => {
-    const [{ createApp }, { nodeRuntime }, { drizzle }, { drain }, ses, sns, sts, { regionalLimits }] = await Promise.all([
-      import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/dispatch.js'),
+    const [{ createApp }, { nodeRuntime }, { drizzle }, { drainJobs }, { dispatchDue }, ses, sns, sts, { regionalLimits }] = await Promise.all([
+      import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/dispatch.js'), import('./src/dispatcher.js'),
       import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('@aws-sdk/client-sts'), import('./src/db/sending.js'),
     ]);
     const db = await fixtureDatabase(t);
@@ -2150,7 +2151,7 @@ describe('DB region catalog and explicit SES setup', () => {
         // Avoid routing the simulator's quota read through the live AWS mock; this
         // fixture is testing persisted region selection, not quota discovery.
         await runtime.db.insert(regionalLimits).values({ workspaceId: runtime.config.workspaceId, region: second, maxSendRate: 1000, max24HourSend: -1, sentLast24Hours: 0, checkedAt: new Date().toISOString() });
-        for (let count = 0; count < 5 && await drain(runtime, 10); count++) { /* Drain only this transaction's unique workspace. */ }
+        await dispatchDue(runtime, second); // Do not dispatch other regions through this fixture's AWS mock.
         assert.equal(ok(await local('GET', `/v1/emails/${sent.id}`, undefined, testKey)).status, 'accepted');
         ok(await local('PUT', `/v1/regions/${second}`, { enabled: false }, admin));
         error(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: address(), region: second, subject: 'Disabled region', text: 'Synthetic only' }, testKey), 422);
@@ -2176,7 +2177,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(await startup.queueStartupDiscovery(runtime), 1);
         assert.equal(await startup.queueStartupDiscovery(runtime), 0, 'Concurrent/repeated startup discovery must reuse its pending job.');
         assert.equal(ok(await local('GET', '/v1/regions', undefined, reader)).data.find((row: Json) => row.region === REGION).discoveryStatus, 'discovering');
-        await drain(runtime, 10);
+        await drainJobs(runtime, 10);
         const startupReport = ok(await local('GET', `/v1/regions/${REGION}/discovery`, undefined, reader));
         assert.equal(startupReport.feedbackUrl, runtime.config.sesFeedbackUrl);
         assert.equal(startupReport.status, 'needs_provisioning');
@@ -2220,7 +2221,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(writes().length, 0, 'Only the durable worker may perform provisioning writes.');
         const job = (await db.query('SELECT type, status FROM jobs WHERE id = $1', [queued.jobId])).rows[0];
         assert.deepEqual(job, { type: 'ses.provision', status: 'pending' });
-        await drain(runtime, 10);
+        await drainJobs(runtime, 10);
         assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [queued.jobId])).rows[0].status, 'completed');
         const pending = ok(await local('GET', `${discoveryPath}?refresh=true`, undefined, reader));
         assert.equal(pending.resources.topic.subscription, 'pending');
@@ -2255,7 +2256,7 @@ describe('DB region catalog and explicit SES setup', () => {
         sets.get(expectedSets[0]!)!.destinations.push(unrelated);
         const repeated = ok(await local('POST', provisionPath, { confirm: true }, admin), 202);
         assert.notEqual(repeated.jobId, queued.jobId);
-        await drain(runtime, 10);
+        await drainJobs(runtime, 10);
         assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [repeated.jobId])).rows[0].status, 'completed');
         assert.equal(writes().filter(call => call.name === 'CreateConfigurationSetCommand').length, 2);
         assert.equal(writes().filter(call => call.name === 'PutConfigurationSetSuppressionOptionsCommand').length, 3, 'Reprovisioning must preserve explicit validation settings.');
@@ -2289,7 +2290,7 @@ describe('DB region catalog and explicit SES setup', () => {
         assert.equal(conflict.status, 'blocked');
         assert.ok(conflict.blockers.some((blocker: Json) => blocker.code === 'RESOURCE_OWNERSHIP_CONFLICT'));
         const conflictJob = ok(await local('POST', provisionPath, { confirm: true }, admin), 202);
-        await drain(runtime, 10);
+        await drainJobs(runtime, 10);
         assert.equal((await db.query('SELECT status FROM jobs WHERE id = $1', [conflictJob.jobId])).rows[0].status, 'failed');
         assert.equal(writes().length, beforeWrongOwner, 'A conflicting owner must block all provisioning writes.');
         wrongOwner = false;
@@ -3954,15 +3955,18 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(wid,customer?byo:shared); assert.equal(input.TenantName,customer?undefined:`opensend-${shared}`);
         assert.equal(input.ConfigurationSetName,customer?setupResources(byo).transactional:'opensend-mx-transactional');
         if(!customer){assert.ok(input.Content?.Simple);assert.equal(input.Content?.Raw,undefined);if(input.Content.Simple.Subject?.Data==='ordinary'){const [file]=input.Content.Simple.Attachments!;assert.equal(file!.ContentDisposition,'INLINE');assert.equal(file!.ContentId,'logo');assert.deepEqual(Buffer.from(file!.RawContent!),gif);}}
+        if (customer) assert.match(Buffer.from(input.Content!.Raw!.Data!).toString(), /\r\nX-Ticket: 42\r\n\r\nFixture\.$/);
+        else if (input.Content?.Simple?.Subject?.Data === 'ordinary') assert.deepEqual(input.Content.Simple.Headers, [{Name:'X-Ticket',Value:'42'}]);
         sends.push(wid);
         if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
         return {MessageId:'same-provider-id-in-both-accounts'};
       });
       const wakes: string[]=[]; runtime.dispatch=async (region, accountId)=>{ wakes.push(`${region}:${accountId}`); };
       const send = (wid:string, body:Json) => local('POST','/v1/emails/send',{from:`sender@${wid===shared?'pool':'customer'}.example`,to:address(),...body},'live',{'x-opensend-workspace':wid});
-      const template={template:{name:'fixture',data:{}}}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
+      const headers=[{name:'X-Ticket',value:'42'}];
+      const template={template:{name:'fixture',data:{}},headers}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
       const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-opensend-workspace':shared}),201);
-      const a=ok(await send(shared,{subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id]}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
+      const a=ok(await send(shared,{subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id],headers}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
       assert.deepEqual(wakes,[pool,account,pool].map(id=>`${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
       const drain=(accountId:string)=>runDispatcher(runtime,{region:REGION,accountId,lanes:1});
@@ -4235,6 +4239,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const passed = ok(await get(`${inbox}&direction=inbound&q=verified`,agent)).data; assert.equal(passed.length,1); assert.deepEqual(await labels(passed[0].id),{[box.id]:[]});
       const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
       assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
+      // Custom headers: reserved names and malformed Message-IDs are refused, replies keep their own threading,
+      // and a new conversation can cite a thread OpenSend never received.
+      const plain = { from:publicAddress,to:'customer@example.net',subject:'Headers',text:'Header check' };
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'from',value:'ceo@example.com'}] }),422);
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-SES-Configuration-Set',value:'other'}] }),422);
+      for (const name of ['Mail-Reply-To','Disposition-Notification-To','TLS-Required']) error(await post('/v1/emails/send',{ ...plain,headers:[{name,value:'attacker@example.org'}] }),422);
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'In-Reply-To',value:'not-a-message-id'}] }),422);
+      error(await post(replyPath,{ text:'own threading',headers:[{name:'References',value:'<old@example.net>'}] },agent),422,'THREADING_HEADER_NOT_ALLOWED');
+      const custom = ok(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-Ticket',value:'42'},{name:'Priority',value:'urgent'}] }),202);
+      const cited = ok(await post('/v1/inbound/threads',{ addressId:box.id,to:['customer@example.net'],subject:'Re: Old case',text:'Following up',
+        headers:[{name:'In-Reply-To',value:'<old-1@example.net>'},{name:'References',value:'<old-0@example.net> <old-1@example.net>'},{name:'X-Ticket',value:'7'}] },{ 'Idempotency-Key':'cite-old-case' }),202);
+      assert.equal(cited.inReplyTo,'old-1@example.net'); assert.deepEqual(cited.references,['old-0@example.net','old-1@example.net']);
+      const bridged = ok(await post('/v1/emails/send',{ ...plain,replyAddressId:box.id,headers:[{name:'In-Reply-To',value:'<old-1@example.net>'},{name:'References',value:'<old-0@example.net> <old-1@example.net>'}] }),202);
+      const stored = ok(await get(`${base}/messages/${bridged.inboundMessageId}`,agent));
+      assert.equal(stored.inReplyTo,cited.inReplyTo); assert.deepEqual(stored.references,cited.references); assert.notEqual(stored.threadId,cited.threadId);
+      assert.equal((await db.query('SELECT 1 FROM mail_message_ids WHERE workspace_id=$1 AND message_id=ANY($2)',[scope,cited.references])).rowCount,0);
+      const contact = ok(await post('/v1/contacts',{email:plain.to}),201);
+      ok(await post(`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
+      const marketing = {...plain,kind:'marketing',headers:[{name:'X-Ticket',value:'42'}]};
+      error(await post('/v1/emails/batch',{emails:[{...marketing,headers:[{name:'list-unsubscribe',value:'<https://example.net/override>'}]}]}),422);
+      const batch = ok(await post('/v1/emails/batch',{emails:[marketing]}),202);
+      await dispatchDue(runtime, REGION);
+      assert.deepEqual(outgoing.get(custom.id).Content.Simple.Headers,[{Name:'X-Ticket',Value:'42'},{Name:'Priority',Value:'urgent'}]);
+      assert.deepEqual(outgoing.get(cited.emailId).Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<old-1@example.net>'},{Name:'References',Value:'<old-0@example.net> <old-1@example.net>'},{Name:'X-Ticket',Value:'7'}]);
+      assert.deepEqual(outgoing.get(bridged.id).Content.Simple.Headers,outgoing.get(cited.emailId).Content.Simple.Headers.slice(0,2));
+      const deliveredHeaders = outgoing.get(batch.data[0].id).Content.Simple.Headers;
+      assert.deepEqual(deliveredHeaders.map((h:Json)=>h.Name),['X-Ticket','List-Unsubscribe','List-Unsubscribe-Post']);
+      assert.equal(deliveredHeaders[0].Value,'42'); assert.match(deliveredHeaders[1].Value,/\/unsubscribe\/u_[a-f0-9]{64}>$/); assert.equal(deliveredHeaders[2].Value,'List-Unsubscribe=One-Click');
     });
   });
 

@@ -386,6 +386,13 @@ export type SendEmailInput = {
     attachments?: Array<string>;
     tracking?: boolean;
     /**
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
+    /**
      * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
      */
     screen?: boolean;
@@ -444,6 +451,13 @@ export type BatchSendEmailItem = {
     };
     attachments?: Array<string>;
     tracking?: boolean;
+    /**
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
     /**
      * Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Transactional messages only; ignored for marketing and when SES is simulated. Skipped (and logged) when the installation has no classifier configured.
      */
@@ -1773,7 +1787,7 @@ export type CreateInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;
@@ -1822,7 +1836,7 @@ export type ReplyToInboundThread = {
     attachments?: Array<InboundAttachmentInput>;
     replyTo?: Array<string>;
     /**
-     * Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.
+     * Extra MIME headers, up to 20 and 8 KB in total. Any name is allowed except headers OpenSend controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and reply, receipt, trace and transport headers (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). In-Reply-To and References must be <id@domain> Message-IDs and thread the message in the recipient's mail client.
      */
     headers?: Array<{
         name: string;

@@ -11,7 +11,8 @@ import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, w
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
 import { encrypt, webhookSecret, webhookUrl } from './operations.js';
-import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, CustomHeaders, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
+import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
+import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
 import { withRegionSettings } from './ses-region-state.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
@@ -463,7 +464,7 @@ export function registerMailbox(app: App) {
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
     attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Any type Amazon SES delivers (executables and scripts are refused).'),
     replyTo: Recipients.max(10).default([]),
-    headers: CustomHeaders.default([]).describe('Extra headers such as List-Id, Precedence or X-Ticket. Structural and authentication headers (From, To, Date, Message-ID, Content-*, Resent-*, ARC-*, Authentication-Results, DKIM/DomainKey-Signature, Feedback-ID, In-Reply-To, References, Auto-Submitted, X-SES-*) are set by OpenSend or the provider and refused.'),
+    headers: CustomHeaders.default([]),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),
   };
   const needsBody = (value: { text?: string; html?: string }) => !!value.text || !!value.html;
@@ -505,8 +506,9 @@ export function registerMailbox(app: App) {
   };
   async function prepareSend(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, body: z.infer<typeof CreateInbound>) {
     const from=await senderAddress(c,mailbox,body.from,db);
+    const { inReplyTo, references, rest } = splitThreadingHeaders(body.headers);
     return { from, to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
-      attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers };
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), inReplyTo, references, autoSubmitted: body.autoSubmitted, headers: rest };
   }
   async function prepareReply(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, original: MessageRow, body: z.infer<typeof ReplyInbound>) {
     const from = await senderAddress(c, mailbox, body.from, db);
@@ -542,6 +544,7 @@ export function registerMailbox(app: App) {
   });
   app.openapi(replyToInboundThreadRoute(ReplyInbound), async c => {
     const body = c.req.valid('json'), value = access(c, 'send');
+    if (splitThreadingHeaders(body.headers).present) throw new ApiError(422, 'THREADING_HEADER_NOT_ALLOWED', 'Replies set In-Reply-To and References from the original message. Remove them from headers.', 'headers');
     return c.json(await queueInboundThreadMessage(c, sendActor(c, value), async db => {
       const { original, addressId } = await inboundReplyTarget(db, value, { addressId: body.addressId, threadId: c.req.valid('param').threadId, messageId: body.replyToMessageId });
       const { mailbox, scope } = await mailboxFor(c, addressId, 'send', db);

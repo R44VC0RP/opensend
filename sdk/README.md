@@ -87,6 +87,24 @@ await replyToInboundThread({
 
 The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and OpenSend files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
 
+**Reply to a conversation OpenSend never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
+
+```ts
+await createInboundThread({
+  client, headers: { 'Idempotency-Key': `reply-${ticketId}` },
+  body: {
+    addressId, from: 'support@example.com', to: ['customer@example.net'], subject: 'Re: Widget issue', text: 'Following up.',
+    headers: [
+      { name: 'In-Reply-To', value: '<last-message-id@example.net>' },
+      { name: 'References', value: '<first-message-id@example.net> <last-message-id@example.net>' },
+    ],
+  },
+  throwOnError: true,
+});
+```
+
+Single sends, each item in a batch, and inbound thread creation and reply accept up to 20 custom headers (8 KB total). Names use letters, digits and hyphens; values must be single-line printable ASCII. OpenSend reserves identity, recipient, MIME, authentication, transport and unsubscribe headers; see the `headers` field in the generated SDK for the full list. When replying to an existing OpenSend thread, omit `In-Reply-To` and `References`: OpenSend computes them from the selected message.
+
 **Only act on verified senders:** set `"requireDmarc": true` in `POST /v1/inbound/addresses` or `PATCH /v1/inbound/addresses/{addressId}`. Mail without a DMARC pass for its `From` domain is still stored and labelled `unverified` for that address, but it triggers neither a `message.received` event nor a webhook for that address. The event’s `data.dmarc` carries the SES verdict, or `null` if absent. Forwarded mail can still pass when the original sender’s aligned DKIM signature survives. The setting defaults to `false`; enable it on every address whose events you treat as verified.
 
 **Browse or start conversations:** `GET /v1/inbound/threads?q=invoice` returns one row per visible conversation, newest activity first. Filter by `addressId` or page using `nextCursor`. Detail pages read oldest first within the most recent page; follow their cursor for earlier messages. `GET /v1/inbound/messages/{messageId}` returns the full stored body and attachment metadata. `POST /v1/inbound/threads` with `{addressId, to, subject, text}` starts a conversation. Alternatively, add `replyAddressId` to a single explicit-body transactional `/v1/emails/send` with live manage permission; the receipt includes `threadId` and `inboundMessageId`.

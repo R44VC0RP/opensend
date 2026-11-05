@@ -2,8 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { Buffer } from 'node:buffer';
 import { ApiError } from './core.js';
 
-// The one validation layer for caller-supplied outbound content: attachments uploaded for
-// /v1/emails, campaigns and templates, files attached to inbound replies, and custom headers.
+// Shared attachment validation for /v1/emails, campaigns, templates and inbound replies.
 
 export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 // Base64 of 8 MiB plus padding and the line breaks MIME tools and SDKs insert.
@@ -41,12 +40,3 @@ export function validateAttachment<T extends AttachmentMetadataInput>(metadata: 
   if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Inline attachments require contentId.', 'contentId');
   return metadata;
 }
-
-// Structural headers OpenSend or SES write themselves. A caller-supplied copy would duplicate or override them.
-const PROTECTED_HEADERS = new Set(['from', 'sender', 'reply-to', 'to', 'cc', 'bcc', 'date', 'message-id', 'subject', 'mime-version', 'return-path', 'received', 'dkim-signature', 'domainkey-signature',
-  'authentication-results', 'feedback-id', 'in-reply-to', 'references', 'auto-submitted', 'list-unsubscribe', 'list-unsubscribe-post']);
-const PROTECTED_PREFIXES = ['content-', 'x-ses-', 'resent-', 'arc-'];
-export const headerAllowed = (name: string) => { const lower = name.toLowerCase(); return !PROTECTED_HEADERS.has(lower) && !PROTECTED_PREFIXES.some(prefix => lower.startsWith(prefix)); };
-export const HeaderName = z.string().min(1).max(120).regex(/^[A-Za-z0-9-]+$/, 'Header names use letters, digits and hyphens.').refine(headerAllowed, 'This header is set by OpenSend or the mail provider and cannot be overridden.');
-export const HeaderValue = z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be single-line printable ASCII.');
-export const CustomHeaders = z.array(z.object({ name: HeaderName, value: HeaderValue }).strict()).max(10).refine(headers => new Set(headers.map(h => h.name.toLowerCase())).size === headers.length, 'Do not repeat a header name.');

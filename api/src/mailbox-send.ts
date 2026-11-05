@@ -2,6 +2,7 @@ import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { ApiError, isSimulatedSes, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachmentLinks, attachments as sendingAttachments, emails } from './db/sending.js';
+import { splitThreadingHeaders } from './custom-headers.js';
 import { domains } from './db/operations.js';
 import { unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { claimReceives, connectionReady } from './states.js';
@@ -211,10 +212,11 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
   if (input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'Reply-To must belong to the selected receivable address.', field);
   // Hosted admission checks every From (including mailbox-owned addresses) against verified claims.
   if (!runtime.config.multiTenant && !owned.has(input.from.toLowerCase())) await assertRegisteredSender(tx, scope, target.region, input.from, 'from');
+  const { inReplyTo, references, rest } = splitThreadingHeaders(input.headers ?? []);
   const { message, runnable } = await sendFromMailbox(runtime, tx, {
     mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,
-    attachments: files, inReplyTo: null, references: [], headers: [],
+    attachments: files, inReplyTo, references, headers: rest,
   });
   if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
   return { id: message.sendingEmailId!, status: 'queued' as const, simulated: isSimulatedSes(runtime), mailboxMessageId: message.id, threadId: message.threadId };
