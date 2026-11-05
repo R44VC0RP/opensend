@@ -114,7 +114,7 @@ export function McpSetup({ chooseAccess = false }: { chooseAccess?: boolean }) {
         <li>In Cursor Settings, open <strong>MCP</strong> and sign in to <strong>opensend</strong>.</li>
       </ol>}
       {value !== 'opencode' && <p className="muted developer-copy">{name} signs in with read access. Your code sends with the SDK and API key.</p>}
-      {value === 'opencode' && chooseAccess && <p className="muted developer-copy">Code Mode is enabled by default. Tools include typed input and output schemas. The access selection only changes the configuration above; reconnect and authorize after changing scopes.</p>}
+      {value === 'opencode' && chooseAccess && <p className="muted developer-copy">Changing access only updates the configuration above; reconnect and authorize again to apply it.</p>}
     </div>)}</div>
   </section>
 }

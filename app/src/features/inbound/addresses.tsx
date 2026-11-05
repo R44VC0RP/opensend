@@ -1,11 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, Textarea } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import type { InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
+import type { InboundAddress, InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
+import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { receivingStatus } from './status'
 import '../settings/settings.css'
 import './inbound.css'
@@ -48,17 +49,17 @@ function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; o
     if (Object.keys(next).length) return
     try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/inbound/addresses/${row.id}`) } catch { /* Shown in the form. */ }
   }
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="Create address" description="Mail sent to this address is stored and grouped into conversations. Earlier unrouted mail for it is claimed." footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
+  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="Create address" footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
     <form id="inbound-create-address" className="stack" onSubmit={submit} noValidate>
       <MutationError error={create.error} />
-      <Field label="Address" htmlFor="inbound-address" error={errors.address || fieldError(create.error, 'address')} hint={receiving.length ? `Receiving domains: ${receiving.map(domain => domain.name).join(', ')}` : 'Enable receiving on a domain first.'}>
+      <Field label="Address" htmlFor="inbound-address" error={errors.address || fieldError(create.error, 'address')} hint={receiving.length ? receiving.length > 1 ? `Receiving domains: ${receiving.map(domain => domain.name).join(', ')}` : undefined : 'Enable receiving on a domain first.'}>
         <Input id="inbound-address" type="email" value={address} onChange={event => setAddress(event.target.value)} disabled={create.isPending} placeholder={`support@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
       </Field>
-      <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')} hint="Optional. Shown as the sender name on replies."><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
+      <Field label="Display name" htmlFor="inbound-address-name" error={fieldError(create.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-name" value={displayName} onChange={event => setDisplayName(event.target.value)} disabled={create.isPending} placeholder="Support" /></Field>
       <Field label="Lifetime" htmlFor="inbound-address-lifetime" error={fieldError(create.error, 'ttlSeconds')} hint={lifetime ? 'After expiry it stops receiving and sending. History stays readable until you delete it.' : 'Permanent addresses also claim earlier unrouted mail.'}>
         <Select id="inbound-address-lifetime" value={lifetime} onValueChange={value => { setLifetime(value); if (value) setPublicAddress('') }} disabled={create.isPending} options={lifetimes} />
       </Field>
-      <Field label="Public sender" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can have a public sender.' : 'Optional and permanent. The default From: the same name on a parent domain verified for sending, such as support@example.com.'}>
+      <Field label="Public sender" htmlFor="inbound-address-public" error={errors.publicAddress || fieldError(create.error, 'publicAddress')} hint={lifetime ? 'Only permanent addresses can have a public sender.' : 'The default From: the same name on a parent domain verified for sending, such as support@example.com.'}>
         <Input id="inbound-address-public" type="email" value={publicAddress} onChange={event => setPublicAddress(event.target.value)} disabled={create.isPending || !!lifetime} placeholder={address.includes('@') ? `${address.split('@')[0]}@${address.split('@')[1]!.split('.').slice(1).join('.') || 'example.com'}` : 'support@example.com'} autoComplete="off" />
       </Field>
     </form>
@@ -74,7 +75,7 @@ export function InboundAddressesPage() {
   const cursor = pagination.cursor
   const addresses = useApiQuery(['inbound-addresses', search, cursor], (api, signal) => api.inbound.addresses({ search: search.trim() || undefined, cursor }, signal), { interval: 60_000 })
   const domains = useApiQuery(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal))
-  return <div className="stack">
+  return <div className="stack inbound-stack">
     <PageHeader title="Addresses" backTo="/inbound" actions={<>
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Inbound keys</Link>}
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>}
@@ -84,10 +85,9 @@ export function InboundAddressesPage() {
     <div className="data-toolbar"><Input className="audience-search" aria-label="Search addresses" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
     {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
       <DataTable loading={addresses.isPending} skeletonRows={5} minRows={3} rows={addresses.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/inbound/addresses/${row.id}`)}
-        empty={<EmptyState title={search ? 'No matching addresses' : 'No addresses yet'} description={search ? undefined : 'Create an address here or with the inbound API, or let a domain catch-all create them when mail arrives.'} />}
+        empty={<EmptyState title={search ? 'No matching addresses' : 'No addresses yet'} description={search ? undefined : 'Create one, or let a catch-all create them as mail arrives.'} />}
         columns={[
-          { key: 'address', label: 'Address', width: '34%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link to={`/inbound/addresses/${row.id}`}>{row.address}</Link>{row.origin === 'auto' && <StatusBadge status="Auto" tone="neutral" />}</span>{(row.displayName || row.aliases.length > 0) && <span className="muted">{[row.displayName, row.aliases.length ? `+${row.aliases.length} alias${row.aliases.length === 1 ? '' : 'es'}` : null].filter(Boolean).join(' · ')}</span>}</div> },
-          { key: 'domain', label: 'Domain', width: '20%', render: row => row.domain },
+          { key: 'address', label: 'Address', width: '44%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link to={`/inbound/addresses/${row.id}`}>{row.address}</Link>{row.origin === 'auto' && <StatusBadge status="Auto" tone="neutral" />}</span>{(row.displayName || row.aliases.length > 0) && <span className="muted">{[row.displayName, row.aliases.length ? `+${row.aliases.length} alias${row.aliases.length === 1 ? '' : 'es'}` : null].filter(Boolean).join(' · ')}</span>}</div> },
           { key: 'threads', label: 'Threads', align: 'right', width: '12%', render: row => <Link to={`/inbound?address=${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{number(row.stats.threads)}</Link> },
           { key: 'unread', label: 'Unread', align: 'right', width: '12%', render: row => row.stats.unreadThreads ? <strong>{number(row.stats.unreadThreads)}</strong> : <span className="muted">0</span> },
           { key: 'last', label: 'Last message', align: 'right', render: row => row.stats.lastMessageAt ? date(row.stats.lastMessageAt) : <span className="muted">None yet</span> },
@@ -98,7 +98,10 @@ export function InboundAddressesPage() {
   </div>
 }
 
-const aliasList = (value: string) => value.split(/[\s,;]+/).map(item => item.trim().toLowerCase()).filter(Boolean)
+// `base` is the saved address the edit started from, so a just-saved form doesn't wait on the refetch.
+type AddressForm = { base: InboundAddress; displayName: string; aliases: AliasState }
+const formOf = (address: InboundAddress): AddressForm => ({ base: address, displayName: address.displayName ?? '', aliases: aliasState(address.aliases) })
+const sameList = (a: string[], b: string[]) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n')
 
 export function InboundAddressDetailPage() {
   const { id = '' } = useParams()
@@ -106,50 +109,50 @@ export function InboundAddressDetailPage() {
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
   const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved')
   const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted')
-  const [input, setInput] = useState<{ displayName: string; aliases: string } | null>(null)
-  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const current = address.data
-  useEffect(() => { if (current && !input) setInput({ displayName: current.displayName ?? '', aliases: current.aliases.join('\n') }) }, [current, input])
+  const input = edited ?? (current ? formOf(current) : null)
   if (address.error) return <><PageHeader title="Address" backTo="/inbound/addresses" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
-  const dirty = !!current && !!input && (input.displayName.trim() !== (current.displayName ?? '') || aliasList(input.aliases).join('\n') !== current.aliases.join('\n'))
+  const base = input?.base
+  const dirty = !!base && !!input && (input.displayName.trim() !== (base.displayName ?? '') || !sameList(input.aliases.list, base.aliases) || !!input.aliases.draft.trim())
   async function submit(event: FormEvent) {
-    event.preventDefault(); if (!input || !current) return
-    const aliases = aliasList(input.aliases)
-    const next: Record<string, string> = {}
-    if (aliases.some(alias => !EMAIL.test(alias))) next.aliases = 'Enter one valid email address per line.'
-    setErrors(next)
-    if (Object.keys(next).length) return
+    event.preventDefault(); if (!input || !base) return
+    // Text still in the alias box counts: add it, or stop on it so nothing invalid is sent.
+    const aliases = commitAliases(input.aliases, { address: base.address, temporary: !!base.expiresAt })
+    if (!aliases.ok) { setInput({ ...input, aliases: { list: aliases.list, draft: aliases.draft, message: aliases.message } }); document.getElementById('inbound-address-aliases')?.focus(); return }
     const patch: InboundAddressPatch = {}
-    if (input.displayName.trim() !== (current.displayName ?? '')) patch.displayName = input.displayName.trim() || null
-    if (aliases.join('\n') !== current.aliases.join('\n')) patch.aliases = aliases
-    try { await save.mutateAsync(patch); setInput(null) } catch { /* Shown in the form. */ }
+    if (input.displayName.trim() !== (base.displayName ?? '')) patch.displayName = input.displayName.trim() || null
+    if (!sameList(aliases.list, base.aliases)) patch.aliases = aliases.list
+    if (!Object.keys(patch).length) { setInput(null); return }
+    setInput({ ...input, aliases: { list: aliases.list, draft: '', message: null } })
+    try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
-  return <div className="stack">
-    <PageHeader title={current ? <span className="mailbox-title">{current.address}{current.displayName && <span className="muted">{current.displayName}</span>}</span> : <SkeletonText width={240} lineHeight={28} />} backTo="/inbound/addresses" actions={current && <>
+  return <div className="stack inbound-stack">
+    <PageHeader title={current ? current.address : <SkeletonText width={240} lineHeight={28} />} backTo="/inbound/addresses" actions={current && <>
       <Link className="ui-button ui-button--secondary ui-button--md" to={`/inbound?address=${encodeURIComponent(current.id)}`}>Open conversations</Link>
       <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>
     </>} />
-    {current && <dl className="settings-facts settings-account-summary">
-      <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
-      <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'Automatically, ' : ''}{date(current.createdAt)}</dd></div>
-      <div><dt>Threads</dt><dd>{number(current.stats.threads)}{current.stats.unreadThreads > 0 && <span className="muted"> · {number(current.stats.unreadThreads)} unread</span>}</dd></div>
-      <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>
-      <div><dt>Sends as</dt><dd className="settings-break">{current.publicAddress ?? current.address}</dd></div>
-      {current.expiresAt && <div><dt>Expires</dt><dd>{date(current.expiresAt)}</dd></div>}
-    </dl>}
-    {current?.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address has expired. It no longer receives or sends mail; its history stays readable until you delete it.</Alert>}
-    <section className="section stack">
-      <SectionHeader title="Settings" />
-      {!input || !current ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
-        <MutationError error={save.error} />
-        <div className="form-grid">
+    {current && <>
+      <dl className="settings-facts">
+        <div><dt>Domain</dt><dd><Link to="/domains">{current.domain}</Link></dd></div>
+        <div><dt>Sends as</dt><dd className="settings-break">{current.publicAddress ?? current.address}</dd></div>
+        <div><dt>Created</dt><dd>{current.origin === 'auto' ? 'Automatically, ' : ''}{date(current.createdAt)}</dd></div>
+        <div><dt>Threads</dt><dd>{number(current.stats.threads)}{current.stats.unreadThreads > 0 && <span className="muted"> · {number(current.stats.unreadThreads)} unread</span>}</dd></div>
+        <div><dt>Last message</dt><dd>{current.stats.lastMessageAt ? date(current.stats.lastMessageAt) : 'None yet'}</dd></div>
+        {current.expiresAt && <div><dt>Expires</dt><dd>{date(current.expiresAt)}</dd></div>}
+      </dl>
+      {current.expiresAt && Date.parse(current.expiresAt) <= Date.now() && <Alert tone="info">This temporary address has expired. It no longer receives or sends mail; its history stays readable until you delete it.</Alert>}
+      <section className="section section--bordered stack">
+        <SectionHeader title="Settings" />
+        {input && <form className="stack inbound-settings-form" onSubmit={submit} noValidate>
+          <MutationError error={save.error} />
           <Field label="Display name" htmlFor="inbound-address-display" error={fieldError(save.error, 'displayName')} hint="Shown as the sender name on replies."><Input id="inbound-address-display" value={input.displayName} onChange={event => setInput({ ...input, displayName: event.target.value })} disabled={save.isPending} placeholder="Support" /></Field>
-          <Field label="Aliases" htmlFor="inbound-address-aliases" error={errors.aliases || fieldError(save.error, 'aliases')} hint={current.expiresAt ? 'Temporary addresses cannot have aliases.' : 'Other addresses that deliver here, one per line.'}><Textarea id="inbound-address-aliases" rows={3} value={input.aliases} onChange={event => setInput({ ...input, aliases: event.target.value })} disabled={save.isPending || !!current.expiresAt} placeholder={`help@${current.domain}`} /></Field>
-        </div>
-        <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setErrors({}) }}>Discard</Button>}</div>
-      </form>}
-    </section>
+          <AliasEditor id="inbound-address-aliases" address={current.address} temporary={!!current.expiresAt} saved={input.base.aliases} value={input.aliases} onChange={aliases => setInput({ ...input, aliases })} disabled={save.isPending} error={fieldError(save.error, 'aliases')} />
+          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
+        </form>}
+      </section>
+    </>}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="The address and its aliases are released, and its read, star and archive state is removed. Stored messages are kept; future mail to these addresses follows the domain’s routing." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/inbound/addresses') }} />
   </div>
 }
