@@ -13,6 +13,7 @@ import { claimReceives, connectionReady, poolReceives } from './states.js';
 
 const PARSE_LIMIT = 6 * 1024 * 1024; // Larger or line-heavy messages keep headers and raw MIME only (Worker memory).
 const PARSE_LINE_LIMIT = 30_000;
+const PARSE_ESCAPE_LIMIT = 131_072; // PostalMime escapeHtml expands [<>"'?&] 6x with per-match callbacks.
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
@@ -87,6 +88,59 @@ function withinLineLimit(raw: Uint8Array) {
   for (let i = 0; i < raw.byteLength; i++) if (raw[i] === 10 && ++lines > PARSE_LINE_LIMIT) return false;
   return lines <= PARSE_LINE_LIMIT;
 }
+function countEscaped(value: string | undefined, count: number) {
+  if (!value) return count;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 63 && (c === 60 || c === 62 || c === 34 || c === 39 || c === 63 || c === 38) && ++count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  return count;
+}
+function countAddressesEscaped(list: Address[] | undefined, count: number): number {
+  for (const addr of list ?? []) {
+    if (addr.group) {
+      count = countEscaped(addr.name, count);
+      if (count <= PARSE_ESCAPE_LIMIT) count = countAddressesEscaped(addr.group, count);
+    } else {
+      count = countEscaped(addr.address, count);
+      if (count <= PARSE_ESCAPE_LIMIT) count = addr.name ? countEscaped(addr.name, count) : countEscaped(addr.address, count + 2);
+    }
+    if (count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  return count;
+}
+function countHeaderEscaped(msg: Email, count: number) {
+  if (msg.from) { count = countAddressesEscaped([msg.from], count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  if (msg.subject) { count = countEscaped(msg.subject, count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  if (msg.date) {
+    count = countEscaped(msg.date, count);
+    if (count <= PARSE_ESCAPE_LIMIT && Number.isNaN(Date.parse(msg.date))) count = countEscaped(msg.date, count);
+    if (count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  for (const list of [msg.to, msg.cc, msg.bcc]) if (list?.length) { count = countAddressesEscaped(list, count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  return count;
+}
+type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
+type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
+const origRenderTextContent = (PostalMime.prototype as unknown as { renderTextContent?: (this: InternalParser) => void }).renderTextContent;
+if (typeof origRenderTextContent !== 'function') throw new Error('Incompatible postal-mime: missing renderTextContent');
+let escapeBudget: { count: number } | null = null;
+(PostalMime.prototype as unknown as { renderTextContent: (this: InternalParser) => void }).renderTextContent = function () {
+  if (!(this.textTypes instanceof Set) || !(this.textMap instanceof Map)) throw new Error('Incompatible postal-mime internal state');
+  if (this.textTypes.has('html')) {
+    const budget = escapeBudget ?? { count: 0 };
+    let count = budget.count;
+    for (const entry of this.textMap.values()) {
+      const own = entry.html;
+      for (const item of own || entry.plain || []) {
+        count = item.type === 'subMessage' ? countHeaderEscaped(item.value, count) : !own ? countEscaped(item.value, count) : count;
+        if (count > PARSE_ESCAPE_LIMIT) { budget.count = count; throw new RangeError('MIME entity expansion limit exceeded'); }
+      }
+    }
+    budget.count = count;
+  }
+  return origRenderTextContent.call(this);
+};
 
 const ingestJob: JobHandler = async (runtime, payload, job) => {
   const scope: Scope = { workspaceId: job.workspaceId };
@@ -113,7 +167,9 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   }
   let email: Email | null = null, status = 'received';
   if (raw.byteLength <= PARSE_LIMIT && withinLineLimit(raw)) {
+    escapeBudget = { count: 0 };
     try { email = await PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' }); } catch { status = 'unparsed'; }
+    finally { escapeBudget = null; }
   } else status = 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;

@@ -4613,6 +4613,41 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(firstEmpty.status, 'received');
       assert.equal(laterUnparsed.status, 'unparsed');
       assert.notEqual(laterUnparsed.id, firstEmpty.id, 'A later unparsed receipt must not deduplicate onto an earlier empty-body parsed message.');
+
+      // PostalMime textToHtml escapes all 6 characters [<>"'?&] across decoded text/plain leaves rendered into HTML.
+      // Cap total decoded matches at 131,072 (including quoted-printable and base64 parts) without penalizing multipart/alternative.
+      const mixedMime = (encoding: string, body: string) => Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="mix"\r\n\r\n--mix\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: ${encoding}\r\n\r\n${body}\r\n--mix\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>tail</p>\r\n--mix--\r\n`
+      );
+      const qpGroup = '=3C=3E=22=27=3F=26'; // 6 escaped characters in decoded text, zero raw [<>"'?&] bytes in body.
+      const qpLine = qpGroup.repeat(40) + '=\r\n'; // 240 decoded matches per line.
+      const qpAtCap = qpLine.repeat(546) + qpGroup.repeat(5) + '=3C=3E'; // 546*240 + 30 + 2 = 131,072 decoded matches.
+      const parsedQp = await ingest(mixedMime('quoted-printable', qpAtCap), 'QP at 131,072', 'qp-at-cap@example.net');
+      assert.equal(parsedQp.status, 'received');
+
+      const unparsedQp = await ingest(mixedMime('quoted-printable', qpAtCap + '=26'), 'QP over 131,072', 'qp-over-cap@example.net');
+      assert.equal(unparsedQp.status, 'unparsed');
+      assert.equal(unparsedQp.body_truncated, true);
+      assert.equal(unparsedQp.subject, 'QP over 131,072');
+
+      const b64OverCap = Buffer.from('<>"\'?&'.repeat(21_845) + '<>"').toString('base64').replace(/.{76}/g, '$&\r\n'); // 131,073 decoded matches.
+      const unparsedB64 = await ingest(mixedMime('base64', b64OverCap), 'Base64 over 131,072', 'b64-over-cap@example.net');
+      assert.equal(unparsedB64.status, 'unparsed');
+      assert.equal(unparsedB64.body_truncated, true);
+
+      const raw6MibLt = mixedMime('8bit', '<'.repeat(5_900_000));
+      assert.ok(raw6MibLt.byteLength <= 6 * 1024 * 1024);
+      const unparsedRawLt = await ingest(raw6MibLt, 'Raw 14-line < expansion', 'raw-lt-over-cap@example.net');
+      assert.equal(unparsedRawLt.status, 'unparsed');
+      assert.equal(unparsedRawLt.body_truncated, true);
+
+      // multipart/alternative with both text/plain and text/html never runs textToHtml, so >131,072 [<>"'?&] stays parsed.
+      const altBody = '<div class="r"><a href="https://example.com/?a=1&amp;b=2">item \'x\'</a></div>\r\n'.repeat(18_000); // >180,000 [<>"'?&] chars, <30k lines.
+      const altPlain = 'quote "a" & \'b\' <c> ?\r\n'.repeat(28_000 - 18_000 - 20); // >50,000 in plain too; total lines < 30,000.
+      const parsedAlt = await ingest(Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\n${altPlain}\r\n--alt\r\nContent-Type: text/html\r\n\r\n${altBody}\r\n--alt--\r\n`
+      ), 'Alternative HTML', 'alt-html-ok@example.net');
+      assert.equal(parsedAlt.status, 'received');
     });
   });
 
