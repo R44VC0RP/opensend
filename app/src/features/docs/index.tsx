@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
 import { CopyButton, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { useApi, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
+import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from './agent-setup'
 import './docs.css'
 
 type Schema = Record<string, any>
@@ -75,11 +77,34 @@ function OperationPage({ document, operation }: {document: Document; operation: 
   </article>
 }
 
+// Agent setup sections the overview can be linked to, as on the former Developer page.
+const sectionAnchors = new Set(['agent-prompt', 'mcp'])
+
+// Workspace admins (and demo mode) get a prompt with this workspace's domain; null while it loads.
+// Members and signed-out readers get the general prompt, so they never call /v1/domains.
+function useAgentPrompt() {
+  const identity = useSession()?.identity
+  const checkingSession = useIsFetching({ queryKey: ['identity'] }) > 0
+  const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const demo = useApi().mode === 'demo'
+  const withDomain = (Boolean(identity) || demo) && canAdminister
+  const origin = usePublicOrigin()
+  const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { enabled: withDomain })
+  if ((!identity && !demo && checkingSession) || (withDomain && domains.isPending)) return null
+  // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
+  const items = domains.data?.items ?? []
+  const domain = withDomain ? items.find(row => row.status === 'verified') ?? items[0] ?? null : undefined
+  return agentPrompt({ origin, domain, email: identity?.email ?? null, multiTenant })
+}
+
 function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
+  const prompt = useAgentPrompt()
   const groups = [...new Set(all.map(operation => operation.tag))]
   const install = 'npm install opensend-js'
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>OpenSend API</h1><p>{document.info.description}</p></header>
+    <AgentPrompt prompt={prompt} />
+    <McpSetup chooseAccess />
     <section className="docs-section"><h2>Start with the TypeScript SDK</h2><div className="docs-install"><code>{install}</code><CopyButton value={install} label="Copy install command" /></div><p className="muted">Use an API key from your OpenSend installation on a trusted server.</p></section>
     <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
@@ -99,7 +124,8 @@ export function DocsPage() {
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState(() => window.location.hash.slice(1))
   useEffect(() => { const change = () => setSelected(window.location.hash.slice(1)); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
-  useEffect(() => { if (selected && all.length && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
+  useEffect(() => { if (selected && all.length && !sectionAnchors.has(selected) && !all.some(operation => operation.id === selected)) { history.replaceState(null, '', window.location.pathname); setSelected('') } }, [all, selected])
+  useEffect(() => { if (all.length && sectionAnchors.has(selected)) window.document.getElementById(selected)?.scrollIntoView({ block: 'start' }) }, [all.length, selected])
   const filtered = search.trim() ? all.filter(operation => `${operation.id} ${operation.summary} ${operation.path} ${operation.tag}`.toLowerCase().includes(search.trim().toLowerCase())) : all
   const groups = [...new Set(filtered.map(operation => operation.tag))]
   const current = all.find(operation => operation.id === selected)
@@ -109,7 +135,7 @@ export function DocsPage() {
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
         <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
-      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : current ? <OperationPage document={query.data!} operation={current} /> : <DocsOverview document={query.data!} all={all} />}</main>
+      <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</main>
     </div>
   </div>
 }

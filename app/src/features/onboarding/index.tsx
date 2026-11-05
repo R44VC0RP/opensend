@@ -10,7 +10,7 @@ import { useApi, useApiMutation, useApiQuery, useSession } from '../../data/cont
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
-import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../developer/agent-setup'
+import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../docs/agent-setup'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 
@@ -449,7 +449,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   return <div className="onboarding onboarding--agent">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <h1 className="onboarding-title">Connect your agent</h1>
-      <p className="onboarding-lead">Give your coding agent these three things. You can find them again under Developer.</p>
+      <p className="onboarding-lead">Give your coding agent these three things. You can find them again in Docs.</p>
     </div>
     <div className="onboarding-agent-steps">
       <section className="section stack developer-section onb-rise" style={rise(1)} aria-label="API key">

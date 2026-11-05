@@ -1,7 +1,8 @@
 import {
   Button, ControlSkeleton, Input, LoadingRegion, PageHeader, SectionHeader,
-  Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
+  Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn,
 } from '../../components/ui'
+import { CampaignsHeader } from './header'
 import './campaigns.css'
 
 export const campaignColumns: SkeletonColumn[] = [
@@ -11,6 +12,13 @@ export const campaignColumns: SkeletonColumn[] = [
   { key: 'delivered', label: 'Delivered', skeleton: <SkeletonText width={42} /> },
   { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" /> },
   { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span /> },
+]
+
+export const templateColumns: SkeletonColumn[] = [
+  { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton },
+  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} /> },
+  { key: 'updated', label: 'Updated', width: 190, skeleton: <SkeletonText width="90%" /> },
+  { key: 'action', label: '', width: 150, align: 'right', skeleton: <span /> },
 ]
 
 export function CampaignAudienceSkeleton() {
@@ -40,13 +48,16 @@ export function CampaignEditorSkeleton() {
   </LoadingRegion>
 }
 
-export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review'; isNew?: boolean }) {
-  if (kind === 'list') return <>
-    <PageHeader title="Campaigns" actions={<Button variant="primary" disabled>Create campaign</Button>} />
-    <Tabs value="all" onValueChange={() => {}} items={[{ value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' }, { value: 'sent', label: 'Sent' }]} />
-    <div className="data-toolbar"><Input className="campaign-search" aria-label="Search campaigns" placeholder="Search campaigns" type="search" disabled /></div>
-    <TableSkeleton columns={campaignColumns} rows={4} pagination />
-  </>
+export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 'editor' | 'review' | 'templates' | 'template'; isNew?: boolean }) {
+  if (kind === 'list' || kind === 'templates') {
+    const templates = kind === 'templates'
+    return <>
+      <CampaignsHeader actions={<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button>} />
+      <div className="data-toolbar"><div className="cluster"><Input className={templates ? 'template-search' : 'campaign-search'} aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} type="search" disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
+      <TableSkeleton columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
+    </>
+  }
+  if (kind === 'template') return <div className="campaign-compose-page"><ComposerSkeleton /></div>
   if (kind === 'editor') return <div className="campaign-compose-page">
     <PageHeader title={isNew ? 'Create campaign' : 'Edit campaign'} backTo="/campaigns" actions={<><span className="campaign-sync-status"><span className="campaign-sync-dot" />{isNew ? 'New draft' : 'Connecting…'}</span><div className="campaign-compose-actions"><Button variant="ghost" disabled>Send test</Button><Button disabled>Save draft</Button><Button variant="primary" disabled>Continue to review</Button></div></>} />
     <CampaignEditorSkeleton />

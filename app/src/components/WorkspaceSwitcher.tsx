@@ -14,7 +14,7 @@ export function WorkspaceSwitcher() {
   async function changeWorkspace(id: string) {
     // Detail routes belong to the previous workspace; keep only the section.
     const [section, child] = location.pathname.split('/').filter(Boolean)
-    const path = section === 'settings' && child === 'workspace' ? '/settings/workspace' : section ? `/${section}` : '/'
+    const path = (section === 'audience' && ['lists', 'segments'].includes(child)) || (section === 'campaigns' && child === 'templates') ? `/${section}/${child}` : section ? `/${section}` : '/'
     setSwitching(true)
     try { await session?.switchWorkspace(id, path) }
     catch (error) { toast(error instanceof Error ? error.message : 'Couldn’t switch workspace.', 'error'); setSwitching(false) }

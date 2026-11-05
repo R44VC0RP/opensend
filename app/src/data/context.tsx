@@ -1,5 +1,6 @@
 import { createContext, lazy, Suspense, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
 import { ApiError, type Identity, type OpenSendApi } from './types'
 import { createLiveApi, request, selectedWorkspace, selectWorkspace } from './live'
@@ -31,7 +32,8 @@ function invitationError(error: unknown) {
   return `Couldn’t accept the invitation. ${error instanceof Error ? error.message : 'Try the link again.'}`
 }
 export function ApiProvider({ children, api }: { children: ReactNode; api?: OpenSendApi }) {
-  const publicRoute = window.location.pathname === '/docs'
+  // The docs are public: they render signed out, and /v1/me only adds the workspace's context.
+  const publicRoute = useLocation().pathname === '/docs'
   const [provided] = useState(() => api ?? (import.meta.env.VITE_DEMO_MODE === 'true' ? createMockApi() : null))
   // Bumped on workspace switches so clients, cursors and every mounted screen start fresh.
   const [generation, setGeneration] = useState(0)
@@ -62,7 +64,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     },
   })
   const identity = useQuery({
-    queryKey: ['identity'], enabled: client.mode !== 'demo' && !publicRoute && (!invitation || accept.isFetched),
+    queryKey: ['identity'], enabled: client.mode !== 'demo' && (!invitation || accept.isFetched),
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
@@ -110,7 +112,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     void cache.prefetchQuery({ queryKey: ['opensend', client.mode, 'campaign', id], queryFn: ({ signal }) => client.campaigns.get(id, signal), staleTime: 30_000 })
   }, [cache, client, identity.data])
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
-  useEffect(() => { const denied = () => { if (!publicRoute && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
+  useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
   async function login() {
     setBusy(true); setAuthError(null)

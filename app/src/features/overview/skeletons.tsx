@@ -1,6 +1,17 @@
 import { ArrowUpRight } from 'lucide-react'
-import { useRegion } from '../../data/context'
-import { Button, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, TableSkeleton, Tabs } from '../../components/ui'
+import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
+import type { RegionCatalogEntry } from '../../data/types'
+import { label } from '../../lib/format'
+import { Button, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
+
+// Hosted mail manages its region, so it shows no status; a bring-your-own connection shows its own state,
+// and self-hosted SES shows the region's discovery status.
+export function RegionStatus({ current }: { current?: RegionCatalogEntry }) {
+  const { multiTenant } = useWorkspaceAccess()
+  const connection = useSession()?.identity?.connection
+  if (multiTenant) return connection?.kind === 'byo' ? <StatusBadge status={label(connection.state)} tone={connection.state === 'ready' ? 'success' : connection.state === 'failed' ? 'danger' : 'warning'} /> : null
+  return current ? <StatusBadge status={label(current.discoveryStatus)} tone={current.discoveryStatus === 'ready' ? 'success' : current.discoveryStatus === 'blocked' ? 'danger' : 'warning'} /> : <Skeleton width={84} height={20} />
+}
 
 export const recentCampaignColumns = [{ key: 'name', label: 'Campaign', width: '48%', skeleton: <><SkeletonText /><SkeletonText width="45%" lineHeight={18} /></> }, { key: 'sent', label: 'Recipients', width: '26%', align: 'right' as const }, { key: 'delivered', label: 'Delivered', width: '26%', align: 'right' as const }]
 export function OverviewBodySkeleton() {
@@ -12,5 +23,5 @@ export function OverviewBodySkeleton() {
 }
 export function OverviewRouteSkeleton() {
   const { regionId } = useRegion()
-  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span><Skeleton width={84} height={20} /></div>} /><div className="overview-toolbar"><Tabs value="7d" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
+  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span><RegionStatus /></div>} /><div className="overview-toolbar"><Tabs value="7d" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
 }

@@ -49,6 +49,12 @@
 .settings-facts > div { min-width: 0; }
 .settings-facts dt { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); margin-bottom: var(--space-6); }
 .settings-facts dd { margin: 0; overflow-wrap: anywhere; }
+.settings-facts dd > .ui-status { vertical-align: top; }
+.settings-group { scroll-margin-top: var(--space-24); }
+.settings-ses .settings-group ~ .settings-group { border-top: 1px solid var(--color-border); padding-top: var(--space-24); }
+.ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }
+.settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
+.settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
 .settings-issues { margin: 0; padding-left: var(--space-20); }
 .settings-issues li + li { margin-top: var(--space-6); }

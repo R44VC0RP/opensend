@@ -10,12 +10,10 @@ export function RouteSkeleton() {
   const [section, id, view] = pathname.split('/').filter(Boolean)
   if (!section) return <OverviewRouteSkeleton />
   if (section === 'logs') return id ? <EmailDetailSkeleton /> : <LogsRouteSkeleton />
-  if (section === 'campaigns') return <CampaignRouteSkeleton kind={!id ? 'list' : view === 'review' ? 'review' : 'editor'} isNew={id === 'new'} />
-  if (section === 'contacts') return <AudienceRouteSkeleton kind={id ? 'contact' : 'contacts'} />
-  if (section === 'lists') return <AudienceRouteSkeleton kind={id ? 'list' : 'lists'} />
-  if (section === 'segments') return <AudienceRouteSkeleton kind={id ? 'segment' : 'segments'} isNew={id === 'new'} />
+  if (section === 'campaigns') return id === 'templates' ? <CampaignRouteSkeleton kind={view ? 'template' : 'templates'} /> : <CampaignRouteSkeleton kind={!id ? 'list' : view === 'review' ? 'review' : 'editor'} isNew={id === 'new'} />
+  if (section === 'audience') return id === 'lists' ? <AudienceRouteSkeleton kind={view ? 'list' : 'lists'} /> : id === 'segments' ? <AudienceRouteSkeleton kind={view ? 'segment' : 'segments'} isNew={view === 'new'} /> : <AudienceRouteSkeleton kind={view ? 'contact' : 'contacts'} />
   if (section === 'api-keys') return <SettingsRouteSkeleton kind="keys" />
   if (section === 'domains') return <SettingsRouteSkeleton kind={id ? 'domain' : 'domains'} />
-  if (section === 'settings') return <SettingsRouteSkeleton kind={id === 'webhooks' ? view ? 'webhook' : 'webhooks' : 'ses'} isNew={view === 'new'} />
+  if (section === 'settings') return <SettingsRouteSkeleton kind={id === 'webhooks' && view ? 'webhook' : 'settings'} isNew={view === 'new'} />
   return null
 }

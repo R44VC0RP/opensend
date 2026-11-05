@@ -60,7 +60,7 @@
   .docs-header { padding-inline: 16px; }
   .docs-header nav a:not(:last-child) { display: none; }
   .docs-layout { display: block; }
-  .docs-sidebar { position: static; width: auto; height: auto; max-height: 300px; padding: 16px; border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .docs-sidebar { position: static; width: auto; height: 300px; padding: 16px; border-right: 0; border-bottom: 1px solid var(--color-border); }
   .docs-sidebar > .ui-input { position: static; }
   .docs-sidebar nav { margin-top: 14px; }
   .docs-main { padding: 28px 16px 56px; }
@@ -73,3 +73,9 @@
   .docs-overview-groups section a { grid-template-columns: 40px minmax(0, 1fr); }
   .docs-overview-groups section a code { grid-column: 2; }
 }
+.docs-overview [id] { scroll-margin-top: 74px; }
+.docs-overview .developer-section { max-width: none; margin: 0; padding-block: 30px; border-bottom: 1px solid var(--color-border); gap: 14px; }
+.docs-overview .developer-section > .ui-section-header { margin: 0; }
+.docs-overview .developer-section > .ui-section-header h2 { font-size: var(--text-lg); line-height: var(--leading-lg); }
+/* A fixed height, so the workspace's prompt arriving after the page never moves what follows. */
+.docs-overview .developer-code--wrap { box-sizing: content-box; height: 16lh; overflow: auto; }

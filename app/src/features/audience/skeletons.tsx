@@ -1,4 +1,5 @@
-import { ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeader, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { AudienceHeader } from './header'
 import './audience.css'
 
 const statuses = [{ value: 'subscribed', label: 'Subscribed' }, { value: 'unsubscribed', label: 'Unsubscribed' }, { value: 'suppressed', label: 'Suppressed' }]
@@ -58,14 +59,12 @@ export function SegmentEditorBodySkeleton() {
   return <div className="stack audience-editor"><div className="audience-name"><FieldSkeleton label="Segment name" /></div><section className="section stack"><SectionHeader title="Conditions" /><div className="cluster"><span>Match</span><ControlSkeleton width={220} /></div><div className="audience-rule"><FieldSkeleton label="Property" /><FieldSkeleton label="Operator" /><FieldSkeleton label="Value" /><div className="audience-rule-remove"><ControlSkeleton width={34} /></div></div><div className="cluster"><ControlSkeleton width={133} /><ControlSkeleton width={141} /></div></section></div>
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {
-  if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={200} lineHeight={24} />} backTo="/contacts" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
-  if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={180} lineHeight={24} />} backTo="/lists" actions={<ControlSkeleton width={132} />} /><AudienceSummarySkeleton /><AudienceMembersSkeleton /></LoadingRegion>
-  if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/segments" actions={<><ControlSkeleton width={72} /><ControlSkeleton width={121} /></>} /><SegmentEditorBodySkeleton /></LoadingRegion>
+  if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={200} lineHeight={24} />} backTo="/audience" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
+  if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={180} lineHeight={24} />} backTo="/audience/lists" actions={<ControlSkeleton width={132} />} /><AudienceSummarySkeleton /><AudienceMembersSkeleton /></LoadingRegion>
+  if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<><ControlSkeleton width={72} /><ControlSkeleton width={121} /></>} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
-  const title = contacts ? 'Contacts' : kind === 'lists' ? 'Lists' : 'Segments'
-  return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><PageHeader title={title} actions={<>{contacts && <ControlSkeleton width={132} />}<ControlSkeleton width={contacts ? 131 : kind === 'lists' ? 124 : 155} /></>} />
-    {contacts && <Tabs value="" onValueChange={() => {}} items={[{ value: '', label: 'All contacts' }, ...statuses]} />}
-    <div className="data-toolbar"><div className="cluster"><ControlSkeleton width={320} />{contacts && <ControlSkeleton width={170} />}</div><SkeletonText width={100} /></div>
+  return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={132} />}<ControlSkeleton width={contacts ? 131 : kind === 'lists' ? 124 : 155} /></>} />
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><Input aria-label="Find list filter" placeholder="Find list by name" disabled /><ControlSkeleton width={170} /></> : <ControlSkeleton width={320} />}</div><SkeletonText width={100} /></div>
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }

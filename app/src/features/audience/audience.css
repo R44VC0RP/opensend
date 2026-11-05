@@ -1,7 +1,8 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
+.audience-page > * { flex-shrink: 0; }
 .audience-property-placeholder { display: contents; }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.data-toolbar .ui-select-trigger.audience-list-filter { width: 170px; }
+.data-toolbar .ui-select-trigger:is(.audience-list-filter, .audience-status-filter) { width: 170px; }
 .audience-count { min-width: 100px; min-height: 20px; }
 .audience-summary > .ui-skeleton-line, .audience-page > .data-toolbar > .ui-skeleton-line { width: auto; }
 .ui-input.audience-search { width: 320px; max-width: 100%; flex-shrink: 0; }

@@ -14,5 +14,5 @@ const DevAnnotations = import.meta.env.DEV ? lazy(() => import('./components/Dev
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000, refetchOnWindowFocus: false } } })
 createRoot(document.getElementById('root')!).render(
-  <StrictMode><ThemeProvider><QueryClientProvider client={queryClient}><ToastProvider><ApiProvider><RegionProvider><BrowserRouter><App /></BrowserRouter></RegionProvider></ApiProvider></ToastProvider></QueryClientProvider>{DevAnnotations && <Suspense fallback={null}><DevAnnotations /></Suspense>}</ThemeProvider></StrictMode>,
+  <StrictMode><ThemeProvider><QueryClientProvider client={queryClient}><ToastProvider><BrowserRouter><ApiProvider><RegionProvider><App /></RegionProvider></ApiProvider></BrowserRouter></ToastProvider></QueryClientProvider>{DevAnnotations && <Suspense fallback={null}><DevAnnotations /></Suspense>}</ThemeProvider></StrictMode>,
 )
