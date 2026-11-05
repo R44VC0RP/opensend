@@ -49,16 +49,23 @@ function VolumeBars({ values }: { values: readonly number[] }) {
   </svg>
 }
 
-export function HomePage({ onSignIn, busy, notice }: { onSignIn: () => void; busy: boolean; notice?: ReactNode }) {
+export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn: () => void; onSignInIntent: () => void; busy: boolean; notice?: ReactNode }) {
   const sent = useLiveCount(publicStats.emailsSent, publicStats.sendsPerMinute)
   useEffect(() => { document.title = 'opensend · Email sending infrastructure' }, [])
+  // The first screen after signing in: fetch its code while the visitor reads, so it is already cached on return.
+  useEffect(() => {
+    const load = () => void import('../onboarding')
+    if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 3000 }); return () => cancelIdleCallback(idle) }
+    const timer = setTimeout(load, 1500); return () => clearTimeout(timer)
+  }, [])
+  const intent = { onPointerEnter: onSignInIntent, onFocus: onSignInIntent, onTouchStart: onSignInIntent }
   return <div className="home-page">
     <header className="home-header">
       <a className="wordmark" href="/" aria-label="opensend home"><span className="wordmark-square" aria-hidden="true" />opensend</a>
       <nav className="home-nav" aria-label="Site">
         <a href="/docs">Docs</a>
         <ThemeToggle />
-        <Button onClick={onSignIn} disabled={busy}>Sign in</Button>
+        <Button onClick={onSignIn} disabled={busy} {...intent}>Sign in</Button>
       </nav>
     </header>
     <main className="home-main">
@@ -66,7 +73,7 @@ export function HomePage({ onSignIn, busy, notice }: { onSignIn: () => void; bus
         <h1>Email sending infrastructure done right.</h1>
         <p>Send, receive, reply and thread email through one API, on Amazon SES.</p>
         <div className="home-actions">
-          <Button variant="primary" loading={busy} onClick={onSignIn}>Get started with Google</Button>
+          <Button variant="primary" loading={busy} onClick={onSignIn} {...intent}>Get started with Google</Button>
           <a className="ui-button ui-button--secondary ui-button--md" href="/docs">Read the docs <ArrowUpRight size={16} aria-hidden="true" /></a>
         </div>
         {notice}

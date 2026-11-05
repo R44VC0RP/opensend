@@ -1,4 +1,4 @@
-import { createContext, Suspense, useContext, useState, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLocation } from 'react-router'
 import { createMockApi } from './mock'
@@ -116,22 +116,35 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
-  async function login() {
-    setBusy(true); setAuthError(null)
-    try {
-      // Assign path components rather than resolving an untrusted redirect parameter.
-      const callback = new URL(window.location.origin)
-      callback.pathname = window.location.pathname
-      callback.search = window.location.search
-      callback.hash = window.location.hash
-      callback.searchParams.delete('auth')
-      const errorCallback = new URL(callback)
-      errorCallback.searchParams.set('auth', 'error')
-      const result = await request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href}})
+  // Google's sign-in URL is requested as soon as the visitor shows intent (hover, focus, touch), so the
+  // click itself rarely waits. Each URL carries its own single-use state: reuse one for a few minutes only.
+  const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
+  function googleUrl() {
+    const current = signIn.current
+    if (current && Date.now() - current.at < 4 * 60_000) return current.url
+    // Assign path components rather than resolving an untrusted redirect parameter.
+    const callback = new URL(window.location.origin)
+    callback.pathname = window.location.pathname
+    callback.search = window.location.search
+    callback.hash = window.location.hash
+    callback.searchParams.delete('auth')
+    const errorCallback = new URL(callback)
+    errorCallback.searchParams.set('auth', 'error')
+    // A new account goes straight to onboarding (its first step is known), unless it is joining by invitation link.
+    const onboarding = callback.pathname === '/' && !callback.searchParams.has('invitation') ? new URL('/onboarding', window.location.origin) : null
+    const url = request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href, ...(onboarding ? {newUserCallbackURL: onboarding.href} : {})}}).then(result => {
       const url = new URL(result.url)
       if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.')
-      window.location.assign(url.href)
-    }
+      return url.href
+    })
+    signIn.current = {at: Date.now(), url}
+    url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
+    return url
+  }
+  function prepareLogin() { if (!busy) void googleUrl().catch(() => {}) }
+  async function login() {
+    setBusy(true); setAuthError(null)
+    try { const url = await googleUrl(); signIn.current = null; window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -146,11 +159,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   } })
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert> : new URLSearchParams(window.location.search).get('auth') === 'error' && <Alert tone="danger">Google sign-in was not completed.</Alert>
   return <ApiContext.Provider key={generation} value={client}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, notice, dismissNotice: () => setNotice(null)}}>
-    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
+    {publicRoute || client.mode === 'demo' || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending || home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage onSignIn={login} onSignInIntent={prepareLogin} busy={busy} notice={authNotice} /></Suspense> : <main className="page-surface"><PageHeader title="OpenSend" /><div className="stack" style={{maxWidth: 520}}>
       {signedOut ? <>
         <h2>Sign in with Google</h2>
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login}>Continue with Google</Button>
+        <Button variant="primary" loading={busy} onClick={login} onPointerEnter={prepareLogin} onFocus={prepareLogin} onTouchStart={prepareLogin}>Continue with Google</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'OpenSend couldn’t verify your session. Try again without signing in.'}</Alert>
