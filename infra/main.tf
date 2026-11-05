@@ -97,6 +97,18 @@ variable "domain_connect" {
   default = null
 }
 
+variable "dns_records" {
+  description = "Extra records in the deployment's own zone, e.g. the shared e2e.opensend.mx test domain (its OpenSend DKIM, ownership and inbound MX records)."
+  type = list(object({
+    zone_id  = string
+    name     = string
+    type     = string
+    content  = string
+    priority = optional(number)
+  }))
+  default = []
+}
+
 locals {
   prefix = "opensend-mx-${var.environment}"
   # The spec splits the key into p=1..n TXT records of at most 200 base64 characters.
@@ -146,6 +158,16 @@ resource "cloudflare_dns_record" "domain_connect_key" {
   type    = "TXT"
   content = "\"p=${count.index + 1},a=RS256,d=${local.domain_connect_chunks[count.index]}\""
   ttl     = 3600
+}
+
+resource "cloudflare_dns_record" "extra" {
+  for_each = { for r in var.dns_records : "${r.type} ${r.name}" => r }
+  zone_id  = each.value.zone_id
+  name     = each.value.name
+  type     = each.value.type
+  content  = each.value.type == "TXT" ? "\"${each.value.content}\"" : each.value.content
+  priority = each.value.priority
+  ttl      = 300
 }
 
 output "work_queue" {
