@@ -14,7 +14,7 @@ import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
-import { domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
+import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
@@ -481,8 +481,8 @@ export function registerOperations(app: App) {
     }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: domainName, region: z.string().optional().describe('Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
-    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name); assertSesConfigured(c.env);
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
+    const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);
     if (c.env.config.multiTenant) {
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
@@ -501,6 +501,7 @@ export function registerOperations(app: App) {
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
       return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
     }
+    assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
     const client = getSes(c.env, body.region); let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity = await sesCall(() => client.send(new GetEmailIdentityCommand({ EmailIdentity: body.name }))); }

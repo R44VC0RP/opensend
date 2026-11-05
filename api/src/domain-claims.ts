@@ -1,13 +1,32 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
-import { ApiError, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
+import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { claimSends, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
+// Exact suffixes are shared by independent DNS owners; their customer subdomains are still claimable.
+const publicSuffixes = new Set(`co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk net.uk sch.uk nhs.uk police.uk
+  com.au net.au org.au edu.au gov.au asn.au id.au co.nz org.nz net.nz govt.nz ac.nz co.jp or.jp ne.jp ac.jp go.jp
+  com.br org.br net.br com.cn net.cn org.cn gov.cn co.in net.in org.in ac.in gov.in co.za org.za net.za com.mx org.mx
+  co.kr com.sg com.hk com.tw com.tr com.ar com.co co.id co.il co.th com.my com.ph com.vn co.ke co.ug
+  github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
+  azurewebsites.net web.app firebaseapp.com appspot.com blogspot.com fly.dev onrender.com ngrok.io`.split(/\s+/));
+const reservedRoots = ['amazonses.com','amazonaws.com'];
+const notAllowed = () => new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
+// Report the same policy error for a bare TLD, before the ordinary DNS syntax validator rejects it.
+export const claimName = z.preprocess(value=>{
+  if (typeof value==='string' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i.test(value.trim())) throw notAllowed();
+  return value;
+},domainName);
+export function claimNameAllowed(name:string,publicUrl:string) {
+  return name.includes('.') && !publicSuffixes.has(name) && ![...reservedRoots,new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'')].some(root=>name===root || name.endsWith('.'+root));
+}
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
 export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string) {
+  if (!claimNameAllowed(name,runtime.config.publicUrl)) throw notAllowed();
+  assertSesConfigured(runtime);
   // The statement's snapshot predates the function's own insert, so a brand-new claim joins to nothing: that is
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
   const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null }) | null; fresh: boolean}>(

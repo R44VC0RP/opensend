@@ -846,6 +846,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
         const discovery = `/v1/regions/${region}/discovery`;
+        await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
+          const own=new URL(runtime.config.publicUrl).hostname, start=calls.length;
+          const blocked=['com','xn--p1ai',' CO.UK ','com.au','github.io','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com',own,'in.'+own];
+          for (const name of blocked) error(await add(b.cookie,name),422,'DOMAIN_NOT_ALLOWED');
+          assert.equal(calls.length,start);
+          assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=ANY($1)',[blocked.map(s=>s.trim().toLowerCase())])).rowCount,0);
+          const allowed=ok(await add(b.cookie,unique('customer')+'.github.io'),201);
+          ok(await local('DELETE',`/v1/domains/${allowed.id}`,undefined,b.cookie));
+        });
         await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
           const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
