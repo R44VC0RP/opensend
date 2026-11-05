@@ -16,15 +16,13 @@ const security: Record<string, string[]>[] = [{ dashboardSession: [] }, { secure
 const tags = ['Workspaces'];
 const base = '/v1/workspaces/current';
 
-// Accept one invitation, deterministically if several workspaces invited this address. Never
-// overwrite an existing membership's role. The invite claim and membership are one statement.
-export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId?: string) {
+// Accept only the invitation the verified recipient followed. Never overwrite an existing role.
+export async function claimInvitation(db: DbExecutor, userId: string, email: string, invitationId: string) {
   const result = await db.execute<{ workspace_id: string }>(sql`WITH pending AS (
     SELECT i.id FROM workspace_invitations i JOIN workspace_members inviter ON inviter.workspace_id = i.workspace_id AND inviter.user_id = i.inviter_id
     WHERE i.email = ${email.toLowerCase()} AND i.status = 'pending' AND i.expires_at > now() AND i.role IN ('owner','admin','member')
       AND (inviter.role = 'owner' OR (inviter.role = 'admin' AND i.role <> 'owner'))
-      ${invitationId === undefined ? sql`AND NOT EXISTS (SELECT 1 FROM workspace_members WHERE user_id = ${userId})` : sql`AND i.id = ${invitationId}`}
-    ORDER BY i.created_at, i.id LIMIT 1 FOR UPDATE OF i FOR SHARE OF inviter
+      AND i.id = ${invitationId} FOR UPDATE OF i FOR SHARE OF inviter
   ), claimed AS (
     UPDATE workspace_invitations i SET status = 'accepted' FROM pending WHERE i.id = pending.id RETURNING i.workspace_id, i.role
   ), joined AS (
@@ -36,9 +34,8 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
 
 // Called only in the transaction that *inserts* the Google user. Ordinary dashboard requests,
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string) {
-  if (await claimInvitation(db, user.id, user.email)) return true;
-  if (!allowSignup) return false;
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
+  if (!allowSignup) return !!invitationId && !!await claimInvitation(db, user.id, user.email, invitationId);
   const workspaceId = id('ws'), name = `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`;
   const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   await db.execute(sql`WITH created AS (

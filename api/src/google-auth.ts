@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { betterAuth } from 'better-auth';
-import { APIError } from 'better-auth/api';
+import { APIError, getOAuthState } from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { google, verifyGoogleIdToken } from 'better-auth/social-providers';
 import { jwt } from 'better-auth/plugins';
@@ -79,6 +79,13 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
   const consentWorkspace = typeof options === 'string' ? options : options?.consentWorkspace;
   const includeMcp = typeof options === 'object' && options?.mcp === true;
   const origin = new URL(runtime.config.publicUrl).origin;
+  // The dashboard preserves the invitation link in Better Auth's one-use, cookie-bound OAuth state.
+  async function callbackInvitation() {
+    const state = await getOAuthState();
+    if (!state?.callbackURL) return null;
+    const url = new URL(state.callbackURL, origin);
+    return url.origin === origin && url.pathname === '/' ? url.searchParams.get('invitation') : null;
+  }
   const secure = origin.startsWith('https:');
   const googleProvider = google({ clientId: runtime.config.googleClientId!, clientSecret: runtime.config.googleClientSecret! });
   // Better Auth intentionally drops input:false fields from mapProfileToUser. Only
@@ -101,7 +108,7 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
         async function onboard<T>(pending: Promise<T>): Promise<T> {
           const result = await pending;
           const user = z.object({ id: z.string(), email: z.email(), name: z.string(), emailVerified: z.literal(true), googleHostedDomain: z.string().nullish() }).parse(result);
-          if (!await onboardNewUser(tx, user, approvedGoogleIdentity(runtime, user.email, true, user.googleHostedDomain), runtime.config.regions[0]!)) throw new APIError('FORBIDDEN', { code: 'GOOGLE_ACCESS_DENIED', message: 'This account is not approved for sign-up.' });
+          if (!await onboardNewUser(tx, user, approvedGoogleIdentity(runtime, user.email, true, user.googleHostedDomain), runtime.config.regions[0]!, await callbackInvitation())) throw new APIError('FORBIDDEN', { code: 'GOOGLE_ACCESS_DENIED', message: 'This account is not approved for sign-up.' });
           return result;
         }
         scoped.create = input => input.model === 'user' ? onboard(create(input)) : create(input);
@@ -186,7 +193,10 @@ export function createAuth(runtime: Runtime, options?: string | { consentWorkspa
       session: {
         create: { before: async (session, context) => {
           const profile = profileFor(context);
-          if (runtime.config.multiTenant && profile.returning) await claimInvitation(runtime.db, session.userId, profile.email);
+          if (runtime.config.multiTenant && profile.returning) {
+            const invitationId = await callbackInvitation();
+            if (invitationId) await claimInvitation(runtime.db, session.userId, profile.email, invitationId);
+          }
           if (!await isApprovedUser(runtime, session.userId)) throw new APIError('FORBIDDEN');
         } },
         update: { before: async (changes, context) => {

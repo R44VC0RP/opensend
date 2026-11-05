@@ -579,14 +579,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       { allowed: false, email: returningEmail, hd: 'revoked.invalid', verified: true, sub: returningSub },
       { allowed: false, email: `${unique('mock-returning-revoked')}@unapproved.invalid`, hd: undefined, verified: true, sub: returningSub },
     ];
-    async function login(scenario: typeof scenarios[number]) {
+    async function login(scenario: typeof scenarios[number], callbackURL = `${origin}/`) {
       fixtureEmails.push(scenario.email);
       jwtFault = scenario.jwtFault ?? '';
       profile = { sub: scenario.sub ?? unique('mock-google-sub'), name: 'Mock provider identity', email: scenario.email, email_verified: scenario.verified, ...(scenario.hd ? { hd: scenario.hd } : {}) };
       const userBefore = (await authDb!.query('SELECT * FROM auth_user WHERE email = $1', [scenario.email])).rows;
       const subjectBefore = (await authDb!.query('SELECT u.*, a.account_id FROM auth_user u JOIN auth_account a ON a.user_id = u.id WHERE a.provider_id = $1 AND a.account_id = $2', ['google', profile.sub])).rows;
       const sessionsBefore = (await authDb!.query('SELECT s.* FROM auth_session s JOIN auth_account a ON a.user_id = s.user_id WHERE a.provider_id = $1 AND a.account_id = $2 ORDER BY s.id', ['google', profile.sub])).rows;
-      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL: `${origin}/`, disableRedirect: true });
+      const start = await local('POST', '/api/auth/sign-in/social', { provider: 'google', callbackURL, disableRedirect: true });
       const authorization = new URL(ok(start).url);
       assert.equal(authorization.origin, 'https://accounts.google.com');
       assert.deepEqual(authorization.searchParams.get('scope')!.split(' ').sort(), ['email', 'openid', 'profile']);
@@ -605,7 +605,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(callback.status, 302, diagnostic(callback));
       const users = await authDb!.query('SELECT id, email_verified, google_hosted_domain FROM auth_user WHERE email = $1', [scenario.email]);
       if (scenario.allowed) {
-        assert.equal(callback.headers.get('location'), `${origin}/`);
+        assert.equal(callback.headers.get('location'), callbackURL);
         assert.equal(users.rowCount, 1, 'An approved real callback must create its user through the normal Better Auth lifecycle.');
         assert.equal(users.rows[0].email_verified, true);
         assert.equal(users.rows[0].google_hosted_domain, scenario.hd ?? null);
@@ -674,15 +674,24 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(org.role, 'owner'); assert.equal(org.name, "Mock provider identity's Organization"); assert.notEqual(org.id, 'default');
         return { cookie, org };
       };
-      const a = await newOwner(ownerEmail), b = await newOwner(otherEmail);
+      const a = await newOwner(ownerEmail);
+      const unsolicited = ok(await local('POST', `${base}/invitations`, { email: otherEmail, role: 'member' }, a.cookie), 201);
+      const b = await newOwner(otherEmail); // No link: exactly one personal workspace, despite the pending invitation.
       assert.notEqual(a.org.id, b.org.id); assert.notEqual(a.org.slug, b.org.slug);
+      const acceptedPath = `/v1/workspaces/invitations/${unsolicited.id}/accept`;
+      assert.equal(ok(await local('POST', acceptedPath, undefined, b.cookie)).workspaceId, a.org.id);
+      const invitedMember = ok(await local('GET', `${base}/members`, undefined, a.cookie)).data.find((row: Json) => row.email === otherEmail);
+      ok(await local('DELETE', `${base}/members/${invitedMember.id}`, undefined, a.cookie));
       const select = (id: string) => ({ 'x-opensend-workspace': id });
       error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
       runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
       await login({ allowed: false, email: `${unique('mx-denied')}@outside.invalid`, verified: true });
       const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
       assert.equal(new URL(invitation.acceptUrl).searchParams.get('invitation'), invitation.id);
-      const guestSub = unique('guest-sub'), guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
+      const guestSub = unique('guest-sub');
+      await login({ allowed: false, email: guestEmail, verified: true, sub: guestSub });
+      await login({ allowed: false, email: guestEmail, verified: true, sub: guestSub }, unsolicited.acceptUrl);
+      const guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
@@ -1425,6 +1434,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       ok(await local('DELETE', `${base}/invitations?id=${revoked.id}`, undefined, a.cookie));
       error(await local('POST', `/v1/workspaces/invitations/${revoked.id}/accept`, undefined, guest), 404);
       const rejoin = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role:'member' }, a.cookie), 201);
+      await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, rejoin.acceptUrl);
       assert.equal(ok(await local('POST', `/v1/workspaces/invitations/${rejoin.id}/accept`, undefined, guest)).workspaceId, a.org.id);
       const invited = ok(await local('POST', `${base}/members`, { email: guestEmail, role:'admin' }, b.cookie), 201);
       const returning = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub });
