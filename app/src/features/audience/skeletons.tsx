@@ -53,7 +53,7 @@ export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
     <div className="section form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'] }, { title: 'Marketing consent', labels: ['Consent source', 'Confirmed', 'Suppression'] }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section>)}</div>
     <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
-    <section className="section"><SectionHeader title="Matching emails" /><TableSkeleton columns={activityColumns} rows={5} pagination /></section>
+    <section className="section"><SectionHeader title="Matching emails" /><p className="muted"><SkeletonText width={110} /></p><TableSkeleton columns={activityColumns} rows={5} pagination /></section>
   </>
 }
 export function SegmentEditorBodySkeleton() {
