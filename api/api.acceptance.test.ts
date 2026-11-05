@@ -4521,6 +4521,79 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('inbound MIME parsing enforces the 6 MiB byte cap and 30,000-line cap, storing oversized or line-heavy messages raw with SES headers', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const PostalMime = (await import('postal-mime')).default;
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-caps`;
+      const domainId = unique('domain');
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)`, [domainId, scope, REGION]);
+      await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,'example.com',$4,'active','store')`, [unique('mdom'), scope, domainId, REGION]);
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: 'caps@example.com' }, 'live'), 201);
+      const raw = new Map<string, Uint8Array>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: raw.get(cmd.input.Key!)!.byteLength, ETag: '"fixture"' };
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        assert.ok(cmd instanceof GetObjectCommand);
+        const bytes = raw.get(cmd.input.Key!)!;
+        return { Body: { transformToByteArray: async () => bytes } };
+      });
+      const parseSpy = t.mock.method(PostalMime, 'parse');
+      async function ingest(bytes: Uint8Array, subject: string, messageId: string) {
+        const receiptId = unique('cap'), objectKey = `raw/${receiptId}`;
+        raw.set(objectKey, bytes);
+        const message = {
+          notificationType: 'Received',
+          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: ['Sender <sender@example.net>'], subject, messageId: `<${messageId}>` } },
+          receipt: { timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
+        };
+        assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
+        const { rows: [row] } = await db.query('SELECT id, status, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
+        return row;
+      }
+
+      const header = Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Exact 6 MiB\r\n\r\n');
+      const exact6Mib = Buffer.concat([header, Buffer.alloc(6 * 1024 * 1024 - header.length - 2, 0x61), Buffer.from('\r\n')]);
+      assert.equal(exact6Mib.byteLength, 6 * 1024 * 1024);
+      const parsed6Mib = await ingest(exact6Mib, 'Exact 6 MiB', 'exact-6m@example.net');
+      assert.equal(parsed6Mib.status, 'received');
+      assert.equal(parseSpy.mock.callCount(), 1);
+
+      const over6Mib = Buffer.concat([exact6Mib, Buffer.from('x')]);
+      assert.equal(over6Mib.byteLength, 6 * 1024 * 1024 + 1);
+      const unparsedBytes = await ingest(over6Mib, 'Over 6 MiB SES subject', 'over-6m@example.net');
+      assert.equal(parseSpy.mock.callCount(), 1, 'Messages over 6 MiB must not invoke PostalMime.parse.');
+      assert.equal(unparsedBytes.status, 'unparsed');
+      assert.equal(unparsedBytes.body_truncated, true);
+      assert.equal(unparsedBytes.subject, 'Over 6 MiB SES subject');
+      assert.equal(unparsedBytes.from_address, 'sender@example.net');
+      assert.equal(unparsedBytes.message_id, 'over-6m@example.net');
+      const overDetail = ok(await local('GET', `/v1/inbound/messages/${unparsedBytes.id}?includeDelivery=true`, undefined, 'live'));
+      assert.equal(overDetail.bodyTruncated, true);
+      assert.match(overDetail.rawUrl, /\.eml/);
+
+      const lineHeader = 'From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Exact 30k lines\r\n\r\n';
+      const atLineCap = Buffer.from(lineHeader + 'x\r\n'.repeat(30_000 - 4));
+      const parsedLines = await ingest(atLineCap, 'Exact 30k lines', 'at-30k@example.net');
+      assert.equal(parsedLines.status, 'received');
+      assert.equal(parseSpy.mock.callCount(), 2);
+
+      const overLineCap = Buffer.from(lineHeader + 'x\r\n'.repeat(30_001 - 4));
+      assert.ok(overLineCap.byteLength < 200_000);
+      const unparsedLines = await ingest(overLineCap, 'Over 30k SES subject', 'over-30k@example.net');
+      assert.equal(parseSpy.mock.callCount(), 2, 'Messages over 30,000 lines must skip PostalMime.parse.');
+      assert.equal(unparsedLines.status, 'unparsed');
+      assert.equal(unparsedLines.body_truncated, true);
+      assert.equal(unparsedLines.subject, 'Over 30k SES subject');
+      assert.equal(unparsedLines.message_id, 'over-30k@example.net');
+      assert.match(ok(await local('GET', `/v1/inbound/messages/${unparsedLines.id}?includeDelivery=true`, undefined, 'live')).rawUrl, /\.eml/);
+    });
+  });
+
   test('forwarded support: query every stored inbound message and reply to the selected message as the public address', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');

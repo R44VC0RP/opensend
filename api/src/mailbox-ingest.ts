@@ -11,7 +11,8 @@ import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageB
 import { messageIdList, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
 import { claimReceives, connectionReady, poolReceives } from './states.js';
 
-const PARSE_LIMIT = 25 * 1024 * 1024; // Larger messages keep headers and raw MIME only (Worker memory).
+const PARSE_LIMIT = 6 * 1024 * 1024; // Larger or line-heavy messages keep headers and raw MIME only (Worker memory).
+const PARSE_LINE_LIMIT = 30_000;
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
@@ -81,6 +82,11 @@ function automated(email: Email | null, from: string) {
     || /^(?:mailer-daemon|postmaster)@/.test(from) || /multipart\/report/.test(header('content-type'));
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+function withinLineLimit(raw: Uint8Array) {
+  let lines = raw.byteLength > 0 && raw[raw.byteLength - 1] !== 10 ? 1 : 0;
+  for (let i = 0; i < raw.byteLength; i++) if (raw[i] === 10 && ++lines > PARSE_LINE_LIMIT) return false;
+  return lines <= PARSE_LINE_LIMIT;
+}
 
 const ingestJob: JobHandler = async (runtime, payload, job) => {
   const scope: Scope = { workspaceId: job.workspaceId };
@@ -106,7 +112,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
   let email: Email | null = null, status = 'received';
-  if (raw.byteLength <= PARSE_LIMIT) {
+  if (raw.byteLength <= PARSE_LIMIT && withinLineLimit(raw)) {
     try { email = await PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' }); } catch { status = 'unparsed'; }
   } else status = 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
