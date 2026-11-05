@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
+import { useRefreshListsOnChange } from '../../data/invalidation'
 import { request } from '../../data/live'
 import type { DnsRecord, DnsRecordPurpose, Domain } from '../../data/types'
 import { settingsColumns } from './skeletons'
@@ -14,13 +15,16 @@ import './domain-records.css'
 export function useDomain(id: string) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
-  return useQuery({
+  const query = useQuery({
     queryKey: ['opensend', api.mode, 'domain', id],
     queryFn: ({ signal }) => api.domains.get(id, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: multiTenant ? 'always' : false,
   })
+  // The cached Domains list must not keep showing the status the poll has just moved past.
+  useRefreshListsOnChange('domains', query.data && `${query.data.status}/${query.data.mailFromStatus}`)
+  return query
 }
 
 export type DnsSetup = { provider: { id: string; name: string } | null; applyUrl: string | null; groups: string[] }

@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEven
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
+import { useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { campaignEditable, campaignResumable, type Campaign, type CampaignInput, type SendCampaignInput } from '../../data/types'
 import {
@@ -343,6 +344,8 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
+  // The polled review learns of a finished or paused send before the cached Campaigns list does.
+  useRefreshListsOnChange('campaigns', query.data?.status)
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <CampaignReview key={id} campaign={query.data} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
