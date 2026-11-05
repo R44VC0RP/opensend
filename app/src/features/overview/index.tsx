@@ -32,11 +32,11 @@ export function OverviewPage() {
   const regions = useRegionCatalog()
   const current = regions.data?.data.find(region => region.region === regionId)
   // Hosted workspaces have no SES discovery; their connection manages the region.
-  const multiTenant = useWorkspaceAccess().multiTenant
+  const { multiTenant, canAdminister } = useWorkspaceAccess()
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
   const data = query.data
   const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
-  return <><PageHeader title="Overview" actions={<div className="cluster"><ReputationSummary report={discovery.data} regionId={regionId} /><span className="muted">{regionId}</span><RegionStatus current={current} /></div>} />{filterBar}
+  return <><PageHeader title="Overview" actions={<div className="cluster"><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></div>} />{filterBar}
     {query.isPending ? <OverviewBodySkeleton range={range} live={live} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <div className="overview-content">
       <div className="metrics-grid">
         <Metric title={live ? "Created" : "Sent"} value={number(data.sent)} note={data.previousSent ? `${percent((data.sent - data.previousSent) / data.previousSent, 1)} vs. previous period` : 'No emails in the previous period'} tone="accent" />

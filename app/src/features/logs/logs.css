@@ -11,7 +11,7 @@
 .page-surface .message-identifiers { padding-top: var(--space-24); border-top-color: var(--color-border-muted); }
 .email-header-actions { display: grid; align-items: center; }
 .email-header-actions > * { grid-area: 1 / 1; justify-self: end; }
-.page-surface :is(.email-header-actions > [data-hidden], .email-reserve[data-hidden]) { visibility: hidden; }
+.page-surface .email-header-actions > [data-hidden] { visibility: hidden; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table), .page-surface > .ui-page-header:has(+ .ui-loading-layout .email-metadata) { flex-shrink: 0; }
 .page-surface .logs-page .search-box { min-width: 0; }

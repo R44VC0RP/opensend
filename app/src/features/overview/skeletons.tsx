@@ -25,5 +25,7 @@ export function OverviewBodySkeleton({ range = '24h', live = false }: { range?: 
 }
 export function OverviewRouteSkeleton() {
   const { regionId } = useRegion()
-  return <><PageHeader title="Overview" actions={<div className="cluster"><span className="muted">{regionId}</span><RegionStatus /></div>} /><div className="overview-toolbar"><Tabs value="24h" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
+  // The sidebar's region selector names the region for admins; members have no selector.
+  const { canAdminister } = useWorkspaceAccess()
+  return <><PageHeader title="Overview" actions={<div className="cluster">{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></div>} /><div className="overview-toolbar"><Tabs value="24h" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
 }
