@@ -435,13 +435,14 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
         </>}
       </section>
       <section className="campaign-fields">
-        <SectionHeader title="Message" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
+        <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
         <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd>{campaign.replyTo.join(', ')}</dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} />
       </section>
     </div>
     {draft && <section className="campaign-delivery">
       <SectionHeader title="Delivery" />
+      <p className="muted campaign-delivery-lead">Review the message and audience, then send.</p>
       <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
       {mode === 'schedule' && <Field label="Date and time (UTC)" htmlFor="campaign-schedule"><Input id="campaign-schedule" type="datetime-local" value={scheduled} onChange={event => { setScheduled(event.target.value); setError('') }} disabled={sendMutation.isPending} /></Field>}
       <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">

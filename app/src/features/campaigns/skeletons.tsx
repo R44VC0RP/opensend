@@ -80,13 +80,14 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
         <CampaignAudienceSkeleton />
       </section>
       <section className="campaign-fields">
-        <SectionHeader title="Message" actions={<div className="cluster"><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></div>} />
+        <SectionHeader title="Message" actions={<><Button variant="ghost" disabled>Edit message</Button><Button variant="secondary" disabled>Send test</Button></>} />
         <dl className="campaign-message-details"><dt>From</dt><dd><SkeletonText width="70%" /></dd><dt>Subject</dt><dd><SkeletonText width="85%" /></dd><dt>Preview</dt><dd><SkeletonText width="65%" /></dd></dl>
         <Skeleton height={400} />
       </section>
     </LoadingRegion>
     <section className="campaign-delivery">
       <SectionHeader title="Delivery" />
+      <p className="muted campaign-delivery-lead">Review the message and audience, then send.</p>
       <Tabs value="now" onValueChange={() => {}} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled>Back to draft</Button><Button variant="primary" disabled>Send campaign now</Button></div>
     </section>
