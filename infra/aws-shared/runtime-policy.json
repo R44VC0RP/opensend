@@ -21,7 +21,6 @@
       "Action": [
         "ses:GetAccount",
         "ses:ListEmailIdentities",
-        "ses:ListTenants",
         "cloudwatch:GetMetricData",
         "ses:ApplyTrackingConfigurationOverrides",
         "ses:DescribeActiveReceiptRuleSet",
@@ -58,15 +57,28 @@
       "Effect": "Allow",
       "Action": [
         "ses:CreateEmailIdentity",
-        "ses:DeleteEmailIdentity",
         "ses:TagResource",
-        "ses:GetEmailIdentity",
-        "ses:PutEmailIdentityMailFromAttributes"
+        "ses:GetEmailIdentity"
       ],
       "Resource": [
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/*",
         "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:identity/*"
       ]
+    },
+    {
+      "Sid": "EditClaimedSenderDomains",
+      "Effect": "Allow",
+      "Action": [
+        "ses:DeleteEmailIdentity",
+        "ses:PutEmailIdentityMailFromAttributes"
+      ],
+      "Resource": [
+        "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/*",
+        "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:identity/*"
+      ],
+      "Condition": {
+        "Null": { "aws:ResourceTag/opensend:domain-claim": "false" }
+      }
     },
     {
       "Sid": "ConfigurationSets",
@@ -91,16 +103,7 @@
       "Action": [
         "ses:CreateTenant",
         "ses:GetTenant",
-        "ses:DeleteTenant",
-        "ses:ListTenantResources",
-        "ses:PutTenantSuppressionAttributes",
-        "ses:ListSuppressedDestinations",
-        "ses:GetSuppressedDestination",
-        "ses:PutSuppressedDestination",
-        "ses:DeleteSuppressedDestination",
-        "ses:GetReputationEntity",
-        "ses:ListReputationEntities",
-        "ses:UpdateReputationEntityCustomerManagedStatus"
+        "ses:PutTenantSuppressionAttributes"
       ],
       "Resource": [
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/opensend-*/*",
