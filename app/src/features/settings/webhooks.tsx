@@ -29,7 +29,7 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
     </div>
     <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {input.regionIds !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = input.regionIds !== 'all' && input.regionIds.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: next ? [...selected, region.region] : selected.filter(id => id !== region.region) }) }} /> })}</div>}</div>
-    <div className="stack"><div id="endpoint-events-label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={label(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
+    <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={label(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
   </div>
 }
 
@@ -38,14 +38,13 @@ export function WebhooksSection() {
   const navigate = useNavigate()
   const pagination = useCursorPagination()
   const webhooks = useWebhooks(pagination.cursor)
-  return <section id="webhooks" className="section stack settings-group">
+  return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={1} minRows={1} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<span className="muted">No webhook endpoints</span>} columns={[
       { ...settingsColumns.webhooks[0], render: webhook => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
       { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
-      { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(label).join(', ')}>{number(webhook.events.length)} events</span> },
+      { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(label).join(', ')}>{number(webhook.events.length)}</span> },
       { ...settingsColumns.webhooks[3], render: webhook => <StatusBadge status={label(webhook.status)} /> },
-      { ...settingsColumns.webhooks[4], label: 'History', render: webhook => <Link to={`/settings/webhooks/${webhook.id}`}>View deliveries</Link> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
   </section>
@@ -64,7 +63,7 @@ function NewWebhook() {
     if (Object.keys(nextErrors).length) return
     try { const endpoint = await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim() }); navigate(`/settings/webhooks/${endpoint.id}`) } catch { /* Shown inline. */ }
   }
-  return <div className="stack">
+  return <div className="stack settings-page">
     <PageHeader title="Add webhook" backTo="/settings#webhooks" />
     {regions.isPending ? <WebhookBodySkeleton isNew /> : regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
@@ -125,11 +124,11 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   }
   const actionTitle = action === 'rotate' ? `Rotate ${webhook.name} signing secret?` : action === 'delete' ? `Delete ${webhook.name}?` : `${action === 'pause' ? 'Pause' : 'Resume'} ${webhook.name}?`
   const actionDescription = action === 'rotate' ? 'The current secret stops working. The new one is shown once.' : action === 'delete' ? 'Future deliveries to this endpoint stop.' : action === 'pause' ? 'Stops deliveries to this endpoint.' : 'Resumes deliveries to this endpoint.'
-  return <div className="stack">
+  return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
     <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} /></form>
-    <section className="section stack"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
-    <section className="section stack"><SectionHeader title="Delivery history" actions={<span className="muted">UTC</span>} /><MutationError error={retry.error} />
+    <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
+    <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
         { ...settingsColumns.deliveries[0], render: delivery => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
         { ...settingsColumns.deliveries[1], render: delivery => delivery.regionId },
@@ -140,7 +139,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
       ]} />
       <MutationError error={historyError} />{api.webhookDeliveries && (historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />)}
     </section>
-    <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete endpoint</Button></div>
+    <div className="settings-rule"><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete endpoint</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete endpoint' : action === 'pause' ? 'Pause endpoint' : 'Resume endpoint'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />
     <SecretDialog secret={secret} title={`${webhook.name} · New signing secret`} onClose={() => { setSecret(null); rotate.reset() }} />
     <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title="Delivery payload" description={inspected ? `${label(inspected.event)} · ${inspected.regionId} · ${label(inspected.status)}` : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>

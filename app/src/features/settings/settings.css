@@ -37,8 +37,6 @@
   flex: 1;
 }
 .settings-ses { font-family: var(--font-body); }
-.settings-ses > .section { gap: var(--space-20); }
-.settings-region-detail { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
 .settings-discovery-state { min-height: 20px; }
 .settings-discovery-section { gap: var(--space-16); min-width: 0; }
 .settings-discovery-section + .settings-discovery-section { border-top: 1px solid var(--color-border); padding-top: var(--space-20); }
@@ -51,7 +49,6 @@
 .settings-facts dd { margin: 0; overflow-wrap: anywhere; }
 .settings-facts dd > .ui-status { vertical-align: top; }
 .settings-group { scroll-margin-top: var(--space-24); }
-.settings-ses .settings-group ~ .settings-group { border-top: 1px solid var(--color-border); padding-top: var(--space-24); }
 .ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -82,7 +79,7 @@
 .settings-ses > .section > .ui-table-scroll .ui-table td:first-child { padding-left: var(--space-12); }
 .settings-provisioning-details > summary { width: fit-content; padding-block: var(--space-8); cursor: pointer; }
 .settings-provisioning-details > .stack { padding-top: var(--space-16); }
-.settings-setup-checklist { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-16); }
+.settings-setup-checklist { min-width: 0; }
 .settings-setup-heading, .settings-setup-step-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-16); }
 .settings-setup-heading h3 { font-size: var(--text-sm); line-height: var(--leading-sm); }
 .settings-setup-heading > span, .settings-setup-status { font-size: var(--text-xs); line-height: var(--leading-xs); color: var(--color-muted); }
@@ -105,7 +102,7 @@
 .settings-key-domain-options { display: flex; flex-direction: column; gap: var(--space-12); max-height: 180px; overflow-y: auto; border-top: 1px solid var(--color-border); padding: var(--space-12) 2px 2px; }
 .settings-key-domain-options .ui-check-field { flex-shrink: 0; }
 .settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }
-.settings-default-region { width: 320px; max-width: 100%; }
+.ui-select-trigger.settings-default-region { width: 320px; max-width: 100%; }
 .settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:hover { text-decoration-color: currentColor; }
 .domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 280px; }
@@ -114,11 +111,11 @@
 .settings-aws-details { border-top: 1px solid var(--color-border); padding-top: var(--space-8); }
 .settings-aws-details > summary { width: fit-content; padding-block: var(--space-8); cursor: pointer; }
 .settings-aws-details > .stack { padding-top: var(--space-20); }
-.reputation-heading { display: grid; gap: var(--space-4); }
+.reputation-heading { display: grid; gap: var(--space-8); }
 .reputation-heading h3 { gap: var(--space-8); }
-.reputation-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
-.reputation-panel { display: grid; gap: var(--space-16); min-width: 0; padding: var(--space-16); border: 1px solid var(--color-border); border-radius: var(--radius-sm); }
-.reputation-panel-header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8); }
+.reputation-title { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); }
+.reputation-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-24) var(--space-32); }
+.reputation-panel { display: grid; gap: var(--space-12); min-width: 0; }
 .reputation-panel-value { display: grid; gap: var(--space-6); }
 .reputation-panel-value strong { font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-bold); }
 .reputation-legend { display: flex; gap: var(--space-12); color: var(--color-muted); font-size: var(--text-xs); }
@@ -145,3 +142,11 @@
 .mailbox-key-permissions { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-12) var(--space-24); margin: 0; padding: 0; border: 0; }
 .mailbox-key-permissions legend { margin-bottom: var(--space-8); padding: 0; }
 .settings-row-actions { justify-content: flex-end; flex-wrap: nowrap; }
+
+.page-surface > .settings-page.stack { gap: var(--space-24); }
+.page-surface > .settings-page.stack > .ui-page-header { margin-bottom: calc(var(--page-gap) - var(--space-24)); }
+.settings-rule { border-top: 1px solid var(--color-border-muted); padding-top: var(--space-24); }
+.settings-ses .settings-discovery-section { gap: var(--space-12); }
+.settings-ses .settings-report { display: flex; flex-direction: column; gap: var(--space-24); margin-top: var(--space-12); }
+.settings-ses .settings-report > * + * { border-top: 1px solid var(--color-border-muted); padding-top: var(--space-24); }
+.settings-ses .settings-report > .settings-aws-details { padding-top: var(--space-16); }

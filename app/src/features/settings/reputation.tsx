@@ -9,7 +9,7 @@ export function ReputationSection({ report }: { report: SesDiscovery }) {
   const status = accountStatus(report.account?.enforcementStatus)
   return <div className="stack settings-discovery-section">
     <div className="reputation-heading">
-      <h3 className="cluster">Reputation <StatusBadge status={status.label} tone={status.tone} /></h3>
+      <div className="reputation-title"><h3 className="cluster">Reputation <StatusBadge status={status.label} tone={status.tone} /></h3>{reputation?.available && <span className="reputation-legend"><span><i className="reputation-key--warning" />Warning</span><span><i className="reputation-key--risk" />At risk</span></span>}</div>
       <p className="muted">Historic rates SES calculates from a representative volume of your mail.</p>
     </div>
     {reputation == null ? <p className="muted">Reputation rates load on the next check. Select Refresh to check now.</p>
@@ -24,10 +24,7 @@ export function ReputationSection({ report }: { report: SesDiscovery }) {
 function RatePanel({ metric, title, reputation }: { metric: ReputationMetric; title: string; reputation: SesReputation }) {
   const value = reputation[metric], status = rateStatus(metric, value)
   return <section className="reputation-panel" aria-label={title}>
-    <div className="reputation-panel-header">
-      <div className="reputation-panel-value"><span className="muted">{title}</span><span className="cluster"><strong>{ratePercent(value)}</strong><StatusBadge status={status.label} tone={status.tone} /></span></div>
-      <span className="reputation-legend"><span><i className="reputation-key--warning" />Warning</span><span><i className="reputation-key--risk" />At risk</span></span>
-    </div>
+    <div className="reputation-panel-value"><span className="muted">{title}</span><span className="cluster"><strong>{ratePercent(value)}</strong><StatusBadge status={status.label} tone={status.tone} /></span></div>
     <RateChart metric={metric} title={title} series={reputation.series} />
   </section>
 }

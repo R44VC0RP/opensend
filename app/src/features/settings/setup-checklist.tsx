@@ -13,7 +13,7 @@ export function awaitingConfirmationOnly(report: SesDiscovery | undefined) {
     && !report.blockers.some(issue => !['SNS_CONFIRMATION_PENDING', 'SES_SANDBOX', 'SES_DOMAIN_REQUIRED', 'SES_SENDING_DISABLED', 'SES_ACCOUNT_ENFORCEMENT'].includes(issue.code))
 }
 
-export function SetupChecklist({report, running, queued}: {report?: SesDiscovery; running: boolean; queued: boolean}) {
+export function SetupChecklist({report, running, queued, bare}: {report?: SesDiscovery; running: boolean; queued: boolean; bare?: boolean}) {
   const sets = report ? [report.resources.transactional, report.resources.marketing] : []
   const topic = report?.resources.topic
   const checks: SetupCheck[] = [
@@ -26,7 +26,7 @@ export function SetupChecklist({report, running, queued}: {report?: SesDiscovery
   const pending = topic?.subscription === 'pending'
   const snsUrl = report && topic?.arn ? `https://${report.region}.console.aws.amazon.com/sns/v3/home?region=${report.region}#/topic/${encodeURIComponent(topic.arn)}` : undefined
   return <div className="settings-setup-checklist" aria-label="Provisioning checklist">
-    <div className="settings-setup-heading"><h3>Provisioning</h3>{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>
+    {(!bare || running) && <div className="settings-setup-heading">{bare ? <span /> : <h3>Provisioning</h3>}{running && <span role="status">{queued ? 'Queued' : 'In progress'}</span>}</div>}
     {running && report && <p className="muted">Last checked state.</p>}
     <ul className="settings-setup-steps">{checks.map(check => {
       const Icon = check.state === 'complete' ? Check : check.state === 'waiting' ? Clock3 : check.state === 'blocked' ? CircleAlert : Circle

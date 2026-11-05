@@ -61,10 +61,10 @@ export function RegionSetup() {
   }
   return <>
     <section id="sending" className="section stack settings-group">
-      <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button variant="primary" disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
+      <SectionHeader title="Regions" actions={<div className="cluster"><Button loading={catalog.isFetching} onClick={() => void catalog.refetch()}>Refresh</Button><Button disabled={!canManage || configure.isPending} onClick={() => {configure.reset(); setNewRegion(''); setEnableOpen(true)}}>Add region</Button></div>} />
       <MutationError error={catalog.error} />
       {!enableOpen && !disableRegion && <MutationError error={configure.error} />}
-      <Field label="Default sending region" htmlFor="default-sending-region" hint="Used when a send doesn't specify a region.">
+      <Field label="Default sending region" htmlFor="default-sending-region">
         <Select id="default-sending-region" className="settings-default-region" value={catalog.data?.defaultRegion ?? ''} options={(catalog.data?.data ?? []).filter(row => row.enabled).map(row => ({value: row.region, label: row.region}))} disabled={!canManage || configure.isPending || !catalog.data} onValueChange={region => configure.mutate({region, makeDefault: true})} />
       </Field>
       <DataTable loading={catalog.isPending} skeletonRows={2} rows={catalog.data?.data ?? []} rowKey={row => row.region} selectedId={entry?.region} empty={<EmptyState title="No regions configured" />} columns={[
@@ -115,9 +115,9 @@ function RegionDetail({entry, inspected}: {entry: RegionCatalogEntry; inspected:
   const hardBlocker = report?.blockers.find(issue => !['SES_SANDBOX', 'SES_SENDING_DISABLED', 'SES_ACCOUNT_ENFORCEMENT', 'SES_DOMAIN_REQUIRED', 'SES_CONFIGURATION_SET_DISABLED', 'SNS_CONFIRMATION_PENDING'].includes(issue.code))
   const status = discovering ? 'Checking' : running ? entry.provisionStatus === 'pending' ? 'Queued' : 'Provisioning' : ready ? 'Ready' : entry.provisionStatus === 'failed' ? 'Setup failed' : report?.resources.topic.subscription === 'pending' ? 'Awaiting confirmation' : report ? report.status === 'blocked' ? 'Needs attention' : 'Needs setup' : 'Not checked'
   const actions = <div className="cluster"><Button disabled={!canDiscover || !entry.enabled || discovering || running || refresh.isPending} loading={discovery.isFetching || refresh.isPending} onClick={() => {if (!report) void discovery.refetch().then(result => {if (result.data) setExplicitInspection(true)}); else refresh.mutate()}}>Check AWS</Button><Button variant="primary" disabled={!canManage || !entry.enabled || running || discovering || !report || confirmationOnly || Boolean(hardBlocker) || provision.isPending} title={confirmationOnly ? 'Resources are created. Request the pending confirmation in SNS, then check AWS.' : hardBlocker?.message} onClick={() => {provision.reset(); setConfirmOpen(true)}}>{confirmationOnly ? 'Resources created' : entry.provisionStatus === 'failed' ? 'Retry provisioning' : 'Provision resources'}</Button></div>
-  const checklist = <SetupChecklist report={report} running={running} queued={entry.provisionStatus === 'pending'} />
-  return <section id="ses-region-detail" className="section stack settings-region-detail" aria-label={`${entry.region} setup`}>
-    <SectionHeader title={<span className="cluster">{entry.region}<StatusBadge status={status} tone={ready ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : report?.status === 'blocked' && !running ? 'warning' : 'neutral'} /></span>} actions={ready ? undefined : actions} />
+  const checklist = <SetupChecklist report={report} running={running} queued={entry.provisionStatus === 'pending'} bare={ready} />
+  return <section id="ses-region-detail" className="section stack settings-rule" aria-label={`${entry.region} setup`}>
+    <SectionHeader title={<span className="cluster">{entry.region}{status !== regionStatus(entry) && <StatusBadge status={status} tone={ready ? 'success' : entry.provisionStatus === 'failed' ? 'danger' : report?.status === 'blocked' && !running ? 'warning' : 'neutral'} />}</span>} actions={ready ? undefined : actions} />
     {!entry.enabled && <p className="muted">Enable this region to check or provision AWS resources.</p>}
     {!canDiscover && <p className="muted">Read permission required to check AWS.</p>}
     {entry.provisionError && !ready && <Alert tone="danger">{setupError(entry.provisionError)}</Alert>}
@@ -140,6 +140,7 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
   return <>
     {blockers.length > 0 && <Alert tone="warning" title="Needs attention"><IssueList issues={blockers} /></Alert>}
     {report.warnings.length > 0 && <Alert tone="warning"><IssueList issues={report.warnings} /></Alert>}
+    <div className="settings-report">
     <div className="stack settings-discovery-section"><h3>Account</h3><dl className="settings-facts settings-account-summary">
       <div><dt>AWS account</dt><dd>{account?.id ?? 'Unknown'}</dd></div><div><dt>SES access</dt><dd>{flag(account?.productionAccess, 'Production', 'Sandbox')}</dd></div><div><dt>Sent / daily quota</dt><dd>{amount(account?.quota.sentLast24Hours)} / {amount(account?.quota.max24HourSend)}</dd></div><div><dt>Send rate</dt><dd>{amount(account?.quota.maxSendRate)}{account?.quota.maxSendRate != null ? ' / sec' : ''}</dd></div>
     </dl></div>
@@ -156,6 +157,7 @@ function DiscoveryReport({report, entry}: {report: SesDiscovery; entry: RegionCa
         <dl className="settings-facts"><div className="settings-fact-wide"><dt>Event destination</dt><dd>{resources.eventDestinationName}</dd></div><div className="settings-fact-wide"><dt>SNS topic</dt><dd>{topic.name}</dd></div><div className="settings-fact-wide"><dt>Topic ARN</dt><dd>{topic.arn ?? 'Unknown'}</dd></div><div><dt>Exists</dt><dd>{flag(topic.exists)}</dd></div><div><dt>Owned</dt><dd>{flag(topic.owned)}</dd></div><div><dt>Policy</dt><dd>{flag(topic.policyReady, 'Ready', 'Not ready')}</dd></div><div><dt>Subscription</dt><dd>{topic.subscription === 'pending' ? 'Awaiting confirmation' : label(topic.subscription)}</dd></div><div><dt>Raw delivery</dt><dd>{flag(topic.rawMessageDelivery, 'Enabled', 'Disabled')}</dd></div><div><dt>Other HTTPS subscriptions</dt><dd>{number(topic.staleSubscriptions)}</dd></div></dl>
       </div>
     </details>
+    </div>
   </>
 }
 
