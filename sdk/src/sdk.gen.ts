@@ -1821,7 +1821,7 @@ export const getDomainDnsSetup = <ThrowOnError extends boolean = false>(options:
 });
 
 /**
- * Browser return from Domain Connect. Validates the ten-minute signed token and the initiating user’s current owner/admin membership in the workspace owning the domain. Restores that workspace and returns to the domain page. Success queues normal DNS/SES verification; a replay cannot create a second job. Provider approval is not proof.
+ * Browser return from Domain Connect. Validates the ten-minute signed token and the initiating user’s current owner/admin membership in the workspace owning the domain, restores that workspace and returns to the domain page. An invalid or expired token returns to the domain page without changing anything. Success queues normal DNS/SES verification; a replay cannot create a second job. Provider approval is not proof.
  */
 export const completeDomainDnsSetup = <ThrowOnError extends boolean = false>(options: Options<CompleteDomainDnsSetupData, ThrowOnError>): RequestResult<unknown, CompleteDomainDnsSetupErrors, ThrowOnError> => (options.client ?? client).get<unknown, CompleteDomainDnsSetupErrors, ThrowOnError>({
     security: [{

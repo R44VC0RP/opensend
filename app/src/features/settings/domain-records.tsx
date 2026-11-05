@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { Copy } from 'lucide-react'
-import type { CSSProperties, ReactNode } from 'react'
+import { ArrowRight, Copy } from 'lucide-react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { Button, CopyButton, DataTable, StatusBadge, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
+import { request } from '../../data/live'
 import type { DnsRecord, DnsRecordPurpose, Domain } from '../../data/types'
 import { settingsColumns } from './skeletons'
 import './settings.css'
@@ -20,6 +21,41 @@ export function useDomain(id: string) {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: multiTenant ? 'always' : false,
   })
+}
+
+export type DnsSetup = { provider: { id: string; name: string } | null; applyUrl: string | null; groups: string[] }
+// Domain Connect: the provider's one-click consent URL, when the domain's DNS host supports it.
+// Fetched once per page. Callers hold the records back while it is pending (the API bounds discovery
+// to about three seconds), and the answer is fixed at reveal, so the button never appears above
+// records that are already on screen.
+export function useDnsSetup(domain: Domain | undefined) {
+  const api = useApi()
+  const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const needed = !!domain && domain.records.some(record => record.status !== 'verified')
+  const enabled = api.mode !== 'demo' && multiTenant && canAdminister && needed
+  const query = useQuery({
+    queryKey: ['opensend', api.mode, 'domain', domain?.id, 'dns-setup'],
+    queryFn: ({ signal }) => request<DnsSetup>(`/v1/domains/${encodeURIComponent(domain!.id)}/dns-setup`, { signal }),
+    // gcTime 0: each page asks afresh, since pending groups change between onboarding and the domain page.
+    enabled, retry: false, staleTime: Infinity, gcTime: 0, refetchOnWindowFocus: false,
+  })
+  const id = domain?.id
+  const [timedOut, setTimedOut] = useState<string>()
+  useEffect(() => { if (!enabled || !id) return; const timer = setTimeout(() => setTimedOut(id), 4000); return () => clearTimeout(timer) }, [enabled, id])
+  const pending = !!domain && enabled && query.isPending && timedOut !== id
+  // Decided once per domain, so moving between domains never reuses another domain's link.
+  const decided = useRef<{ id: string; setup: DnsSetup | null }>(undefined)
+  if (domain && !pending && decided.current?.id !== domain.id) decided.current = { id: domain.id, setup: query.data?.applyUrl && query.data.provider ? query.data : null }
+  const current = decided.current
+  return { pending: !domain || pending, setup: current && current.id === id ? current.setup : null }
+}
+
+// Navigates this tab: providers refuse to be framed, and they return to /domains/<id> when done.
+function DnsConnect({ setup, open }: { setup: DnsSetup; open: boolean }) {
+  return <div className="dns-connect" data-hidden={!open || undefined} inert={!open}>
+    <a className="ui-button ui-button--primary ui-button--md" href={setup.applyUrl!} rel="noopener">Configure DNS with {setup.provider!.name}<ArrowRight size={16} aria-hidden /></a>
+    <p className="muted">Or add the records below yourself.</p>
+  </div>
 }
 
 // Records saved before purposes split into sending and receiving may still say dkim or ownership.
@@ -92,7 +128,7 @@ function RecordRows({ title, optional = false, description, notes = [], verified
 }
 
 // Sending and receiving records. MAIL FROM is optional and lives in the domain's Advanced section.
-export function DomainRecords({ domain, actions, guided = false }: { domain: Domain; actions?: ReactNode; guided?: boolean }) {
+export function DomainRecords({ domain, actions, guided = false, setup = null }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null }) {
   const toast = useToast()
   const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving')
   const all = [...sending, ...receiving]
@@ -103,7 +139,10 @@ export function DomainRecords({ domain, actions, guided = false }: { domain: Dom
   }
   const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
   const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
+  // Stays in place (invisible) once every record verifies, so nothing below moves.
+  const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.status !== 'verified')} />
   if (guided) return <section className="dns-guided" aria-label="DNS records">
+    {connect}
     <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
     {sending.length > 0 && <RecordRows title="Sending" description={`Signs your mail and proves ${domain.name} is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
@@ -113,6 +152,7 @@ export function DomainRecords({ domain, actions, guided = false }: { domain: Dom
     <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. They usually verify within minutes; you can leave this page and OpenSend keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
+    {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
     {sending.length > 0 && <RecordGroup title="Sending" description={`Signs mail sent from ${domain.name} and proves the domain is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
     {receiving.length > 0 && <RecordGroup title="Receiving" description="Optional — add to receive mail on this domain." notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}

@@ -8,7 +8,7 @@ import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../..
 import { receivingStatus } from '../inbound/status'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, settingsColumns } from './skeletons'
-import { DnsRecordTable, DomainRecords, domainState, recordsFor, useDomain, zoneLines } from './domain-records'
+import { DnsRecordTable, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
@@ -92,7 +92,8 @@ export function DomainDetailPage() {
     setMailFromInvalid('')
     try { await configureMailFrom.mutateAsync({id, mailFromDomain: value}); setMailFromOpen(false) } catch { /* Shown inline. */ }
   }
-  if (domain.isPending) return <DomainDetailSkeleton />
+  const dns = useDnsSetup(domain.data)
+  if (domain.isPending || (!domain.error && dns.pending)) return <DomainDetailSkeleton />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   const mailFromRecords = recordsFor(current, 'mail_from')
@@ -102,7 +103,8 @@ export function DomainDetailPage() {
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
-      {current.status !== 'verified' && <Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Check now</Button>}
+      {/* Kept in place once verified, so the header doesn't reflow as the live status flips. */}
+      <span className="dns-reserve" data-hidden={current.status === 'verified' || undefined} inert={current.status === 'verified'}><Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Check now</Button></span>
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error} />
@@ -111,7 +113,7 @@ export function DomainDetailPage() {
       <div><dt>Status</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
       <div><dt>Region</dt><dd>{current.regionId}</dd></div>
     </dl>
-    <DomainRecords domain={current} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+    <DomainRecords domain={current} setup={dns.setup} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
     <details className="settings-aws-details">
       <summary>Advanced</summary>
       <div className="stack settings-discovery-section">

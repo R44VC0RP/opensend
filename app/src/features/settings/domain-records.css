@@ -40,3 +40,9 @@
   .dns-cell:not(.dns-status) > .dns-label { position: static; width: auto; height: auto; overflow: visible; clip: auto; color: var(--color-faint); font-size: var(--text-xs); }
   .ui-button.copy-action.dns-copy::before { inset: -12px; }
 }
+
+/* One-click DNS: a plain primary action and one quiet line, no container. */
+.dns-connect { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8) var(--space-16); }
+.dns-connect p { font-size: var(--text-sm); line-height: var(--leading-sm); }
+.dns-connect[data-hidden], .dns-reserve[data-hidden] { visibility: hidden; }
+@media (max-width: 640px) { .dns-connect { flex-direction: column; align-items: stretch; } .dns-connect .ui-button { height: 40px; } }

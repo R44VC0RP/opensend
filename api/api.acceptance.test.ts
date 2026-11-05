@@ -920,13 +920,13 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.deepEqual((await getSetup('?groups=ownership')).groups,['ownership']); assert.equal(requests.length,before,'Cached consent URL generation makes no outbound calls.');
           const ret=new URL(params.get('redirect_uri')!); assert.equal(ret.origin,origin); const token=params.get('state')!; assert.equal(ret.pathname.split('/').at(-1),token);
           await pool.query("UPDATE jobs SET status='completed',available_at=now()+interval '1 day' WHERE id=$1",[vjob.id]);
-          error(await local('GET',setup,undefined,guest),403); error(await local('GET',ret.pathname,undefined,a.cookie),400,'DNS_SETUP_RETURN_INVALID');
-          error(await local('GET',ret.pathname.replace(created.id,'dom_other'),undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
-          error(await local('GET',ret.pathname+'?state=other',undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          error(await local('GET',setup,undefined,guest),403); assert.equal((await local('GET',ret.pathname,undefined,a.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
+          assert.equal((await local('GET',ret.pathname.replace(created.id,'dom_other'),undefined,b.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
+          assert.equal((await local('GET',ret.pathname+'?state=other',undefined,b.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
           const [encoded,mac]=token.split('.'), payload=JSON.parse(Buffer.from(encoded!,'base64url').toString());
           assert.equal(payload.workspaceId,b.org.id); assert.equal(payload.domainId,created.id);
           const tampered=Buffer.from(JSON.stringify({...payload,workspaceId:a.org.id})).toString('base64url')+'.'+mac;
-          error(await local('GET',ret.pathname.replace(token,tampered),undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          assert.equal((await local('GET',ret.pathname.replace(token,tampered),undefined,b.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
           // Simulate selecting a different workspace in another tab while the provider is open. B
           // is only a member there: neither that role nor that workspace authorizes the return.
           const me=ok(await local('GET','/v1/me',undefined,b.cookie)); assert.equal(payload.userId,me.id);
@@ -946,7 +946,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND workspace_id=$2 AND payload->>'domainId'=$3 AND status='pending' AND available_at<=now()",[vjob.id,b.org.id,created.id])).rowCount,1);
           assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false,'Approval never promotes sending or receiving.');
           let clock=Date.now()+601_000; dc.mock.method(Date,'now',()=>clock);
-          error(await local('GET',ret.pathname,undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          assert.equal((await local('GET',ret.pathname,undefined,b.cookie)).status,303,'Invalid returns land on the domain page and change nothing.');
           supportStatus=503; assert.equal((await getSetup()).provider,null); const after503=requests.length;
           supportStatus=200; clock+=29_000; assert.equal((await getSetup()).applyUrl,null); assert.equal(requests.length,after503);
           clock+=2000; assert.deepEqual((await getSetup()).provider,expectedProvider,'503 recovers after 30 seconds, not five minutes.');

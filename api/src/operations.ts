@@ -545,23 +545,27 @@ export function registerOperations(app: App) {
     return c.json({provider,groups:selection.groups,applyUrl},200);
   });
   app.openapi(createRoute({method:'get',path:`${dnsSetup}/return/{token}`,operationId:'completeDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
-    description:'Browser return from Domain Connect. Validates the ten-minute signed token and the initiating user’s current owner/admin membership in the workspace owning the domain. Restores that workspace and returns to the domain page. Success queues normal DNS/SES verification; a replay cannot create a second job. Provider approval is not proof.',
+    description:'Browser return from Domain Connect. Validates the ten-minute signed token and the initiating user’s current owner/admin membership in the workspace owning the domain, restores that workspace and returns to the domain page. An invalid or expired token returns to the domain page without changing anything. Success queues normal DNS/SES verification; a replay cannot create a second job. Provider approval is not proof.',
     request:{params:IdParams.extend({token:z.string().max(1600)}),query:z.object({state:z.string().max(1600).optional(),error:z.string().max(128).optional()})},
     responses:{303:{description:'Return to the domain in its original workspace.'},...errors}}),async c=>{
     if(!c.env.config.multiTenant) return notFound('Endpoint');
     const {id,token}=c.req.valid('param'), {state,error}=c.req.valid('query');
-    const invalid=()=>new ApiError(400,'DNS_SETUP_RETURN_INVALID','This DNS setup link is invalid or expired.');
+    // An expired or foreign token changes nothing but still lands on the domain page: the provider has
+    // already applied the records by now, and the page's own polling picks up verification.
+    const back=()=>c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}`,303);
     const claim=verifyReturn(c.env.config.authSecret,token);
-    if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) throw invalid();
-    const {userId}=await verifiedDashboardUser(c.env,c.req.raw.headers);
-    if(claim.userId!==userId) throw invalid();
+    if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) return back();
+    // A session that ended while the user was at the provider also goes back; the dashboard asks them to sign in.
+    const user=await verifiedDashboardUser(c.env,c.req.raw.headers).catch((e:unknown)=>{ if(e instanceof ApiError && (e.status===401 || e.status===403)) return null; throw e; });
+    if(!user || claim.userId!==user.userId) return back();
+    const {userId}=user;
     const wid=claim.workspaceId;
     const result=await c.env.db.execute(sql`WITH target AS (SELECT d.id,d.token FROM (${hostedDomainSelect(wid,id,sql`FOR SHARE OF dc`)}) d
       JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
       selected AS (UPDATE auth_user SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
       queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
     if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
-    return c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}`,303);
+    return back();
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read');

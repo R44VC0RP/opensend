@@ -9,7 +9,7 @@ import { WorkspaceSwitcher } from '../../components/WorkspaceSwitcher'
 import { useApi, useApiMutation, useApiQuery, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, setDomainStep, type OnboardingStage } from '../../data/onboarding'
-import { DomainRecords, useDomain } from '../settings/domain-records'
+import { DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
 import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from '../developer/agent-setup'
 import { ApiError, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
@@ -400,7 +400,9 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
   useEffect(() => { if (missing) onMissing() }, [missing]) // eslint-disable-line react-hooks/exhaustive-deps
   // Verified: show it, then carry on to the agent setup.
   useEffect(() => { if (!verified) return; const timer = setTimeout(onContinue, 2500); return () => clearTimeout(timer) }, [verified]) // eslint-disable-line react-hooks/exhaustive-deps
-  if (domain.isPending || missing) return <BootLoader inline />
+  // Resolved before the records show, so the one-click button never lands above visible records.
+  const dns = useDnsSetup(domain.data)
+  if (domain.isPending || missing || (!domain.error && dns.pending)) return <BootLoader inline />
   if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
   const current = domain.data
   return <div className="onboarding onboarding--wide">
@@ -418,7 +420,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
       </div>
       <span className="sr-only" role="status">{verified ? `${current.name} is verified. Continuing to the last step.` : ''}</span>
     </div>
-    <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided /></div>
+    <div className="onb-rise" style={rise(1)}><DomainRecords domain={current} guided setup={dns.setup} /></div>
     <div className="onboarding-actions">
       <p className="muted">{verified ? 'All set.' : 'Records can take a few minutes to show up.'}</p>
       <Button variant="primary" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
