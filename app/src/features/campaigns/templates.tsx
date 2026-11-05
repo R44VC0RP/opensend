@@ -5,10 +5,10 @@ import { useApi, useApiMutation, useApiQuery, useRegion } from '../../data/conte
 import type { CampaignTemplate, CampaignTemplateDraft } from '../../data/types'
 import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { date, time } from '../../lib/format'
+import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import type { EmailComposerRef } from './EmailComposer'
-import { ComposerSkeleton, templateColumns } from './skeletons'
+import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skeletons'
 import { CampaignsHeader } from './header'
 import './campaigns.css'
 
@@ -46,7 +46,7 @@ export function TemplatesPage() {
       <DataTable loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/campaigns/templates/${encodeURIComponent(row.id)}`)} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
         {...templateColumns[0], render: row => <div className="campaign-row-name"><Link to={`/campaigns/templates/${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject || row.description || 'No subject yet'}</span></div>},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
-        {...templateColumns[2], render: row => <span className="muted">{date(row.updatedAt)} · {time(row.updatedAt)} UTC</span>},
+        {...templateColumns[2], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>},
         {...templateColumns[3], render: row => row.published && !archived ? <Button size="sm" variant="secondary" disabled={instantiate.isPending || !regionId} onClick={() => void createCampaign(row)}>Create campaign</Button> : null},
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
@@ -58,7 +58,7 @@ export function TemplatesPage() {
 export function TemplateEditorPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['template', id], (api, signal) => api.templates.get(id, signal))
-  if (query.isPending) return <div className="campaign-compose-page"><ComposerSkeleton /></div>
+  if (query.isPending) return <CampaignRouteSkeleton kind="template" />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   return <TemplateEditor key={query.data.id} initial={query.data} />
 }
@@ -121,7 +121,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     catch (cause) { toast(errorMessage(cause), 'error') }
   }
   return <div className="campaign-compose-page template-compose-page">
-    <PageHeader title={draft.name || 'Template'} backTo="/campaigns/templates" actions={<>
+    <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>
       <div className="campaign-sync-status" data-state={error ? 'offline' : dirty || saving ? 'changed' : 'live'} role="status"><span className="campaign-sync-dot" aria-hidden="true" /><span>{saving ? 'Saving…' : error ? 'Save failed' : dirty ? 'Unsaved changes' : 'Saved'}</span></div>
       <Button variant="ghost" disabled={saving || dirty || !draft.html} onClick={() => setPreviewOpen(true)}>Preview</Button>
       {archived && <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete</Button>}

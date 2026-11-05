@@ -67,16 +67,16 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   if (opened.current !== undefined) return <CampaignEditor initial={opened.current} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
   if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  if (query.data?.archivedAt) return <>
+  if (query.data?.archivedAt) return <div className="stack campaign-locked">
     <PageHeader title={query.data.name} backTo="/campaigns?archived=true" actions={<CampaignArchiveButton campaign={query.data} />} />
     <Alert tone="info">This campaign is archived. Restore it to edit or send it.</Alert>
     <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
-  </>
-  if (query.data && !campaignEditable(query.data)) return <>
+  </div>
+  if (query.data && !campaignEditable(query.data)) return <div className="stack campaign-locked">
     <PageHeader title={query.data.name} backTo="/campaigns" />
     <Alert tone="info">{campaignResumable(query.data) && query.data.status === 'failed' ? 'This campaign failed after releasing some recipients. Resume or cancel it from its review page; it cannot be edited or sent again from scratch.' : `This campaign is ${query.data.status} and cannot be edited.`}</Alert>
     <Link to={campaignRoute(query.data, 'review')}>View campaign</Link>
-  </>
+  </div>
   return null
 }
 
@@ -335,7 +335,7 @@ function TestEmailDialog({ id, open, onOpenChange }: { id: string; open: boolean
       {receipt && <Alert tone="success">{receipt.simulated ? 'Simulated test queued' : 'Test queued'} · {receipt.id ?? 'Demo'}</Alert>}
       <Field label="Recipient email" htmlFor="campaign-test-recipient"><Input id="campaign-test-recipient" type="email" autoComplete="email" value={to} onChange={event => { setTo(event.target.value); setError(''); setReceipt(null) }} required disabled={mutation.isPending} /></Field>
       {error && <Alert tone="danger">{error}</Alert>}
-      <div className="cluster"><Button variant="secondary" type="button" disabled={mutation.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" loading={mutation.isPending}>Send test</Button></div>
+      <div className="cluster campaign-dialog-actions"><Button variant="secondary" type="button" disabled={mutation.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" loading={mutation.isPending}>Send test</Button></div>
     </form>
   </Dialog>
 }
@@ -345,10 +345,7 @@ export function CampaignReviewPage() {
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
   if (query.isPending) return <CampaignRouteSkeleton kind="review" />
   if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <>
-    {query.isError && <Alert tone="warning">Could not refresh this campaign. Showing the last available counts.</Alert>}
-    <CampaignReview key={id} campaign={query.data} refreshing={query.isFetching} refresh={() => void query.refetch()} />
-  </>
+  return <CampaignReview key={id} campaign={query.data} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -358,7 +355,7 @@ function CampaignRenderedPreview({ campaign }: { campaign: Campaign }) {
   if (preview.isError) return <ErrorState error={preview.error} onRetry={() => void preview.refetch()} />
   return <EmailPreview html={preview.data.html} title="Campaign email preview" attachmentIds={campaign.attachments} respectStyles remoteImages />
 }
-function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign; refreshing: boolean; refresh: () => void }) {
+function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Campaign; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
   const [mode, setMode] = useState<'now' | 'schedule'>('now')
   const [scheduled, setScheduled] = useState('')
@@ -407,18 +404,18 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     if (readinessError) { setError(readinessError); setConfirmation(null); return }
     guard.current = true
     setError('')
-    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt(`Campaign ${'queued' in result ? `${result.state} · ${number(result.queued)} recipient intents accepted` : result.status}${'simulated' in result && result.simulated ? ' · simulated' : ''}`); setConfirmation(null) }
+    try { const result = await sendMutation.mutateAsync(confirmation); setReceipt('queued' in result ? `Campaign ${result.state} · ${number(result.queued)} recipient intents accepted${result.simulated ? ' · simulated' : ''}` : ''); setConfirmation(null) }
     catch (cause) { setError(message(cause)); setConfirmation(null) }
     finally { guard.current = false }
   }
-  return <>
-    <PageHeader title={draft ? 'Review campaign' : campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
-    {draft && <p className="muted campaign-review-name">{campaign.name}</p>}
+  return <div className="stack campaign-review">
+    <PageHeader title={campaign.name} backTo={campaign.archivedAt ? '/campaigns?archived=true' : '/campaigns'} actions={<div className="cluster">{!campaignEditable(campaign) && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaign.archivedAt ? 'archived' : campaign.status} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</div>} />
+    {stale && <Alert tone="warning">Could not refresh this campaign. Showing the last available counts.</Alert>}
     {draft && readinessError && <Alert tone="warning">{readinessError} <Link to={campaignRoute(campaign, 'edit')}>Edit draft</Link></Alert>}
     {receipt && <Alert tone="success">{receipt}</Alert>}{campaign.delivery?.error && <Alert tone="danger">{campaign.delivery.error.message} [{campaign.delivery.error.code}]</Alert>}{!draft && campaign.scheduledAt && <Alert tone="info">Scheduled for {date(campaign.scheduledAt)} at {time(campaign.scheduledAt)} UTC.</Alert>}
     <div className="campaign-review-layout">
       <section className="campaign-fields">
-        <SectionHeader title="Recipients" actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
+        <SectionHeader title={campaignEditable(campaign) ? 'Recipients' : 'Delivery'} actions={draft ? <Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit audience</Button> : <Button variant="ghost" onClick={refresh} disabled={refreshing}>Refresh</Button>} />
         {draft ? audience.isPending ? <><CampaignAudienceSkeleton /><p role="status" className="muted">Counting recipients…</p></> : audience.isError ? <ErrorState error={audience.error} onRetry={() => audience.mutate(undefined)} /> : !audience.data ? <><p className="muted">Recipient validation runs automatically after send confirmation.</p><Button disabled={Boolean(readinessError)} onClick={() => audience.mutate(undefined)}>Preview recipient count</Button></> : <>
           <div><strong className="campaign-recipient-count">{number(audience.data.eligible)}</strong><p className="muted">eligible recipients</p></div>
           <div className="campaign-audience-summary">
@@ -438,20 +435,21 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
         </>}
       </section>
       <section className="campaign-fields">
-        <SectionHeader title="Message preview" actions={draft ? <div className="cluster"><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></div> : undefined} />
+        <SectionHeader title="Message" actions={draft ? <><Button variant="ghost" onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Edit message</Button><Button variant="secondary" disabled={Boolean(readinessError)} onClick={() => setTestOpen(true)}>Send test</Button></> : undefined} />
         <dl className="campaign-message-details"><dt>From</dt><dd>{campaign.fromName} &lt;{campaign.fromEmail}&gt;</dd>{campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd>{campaign.replyTo.join(', ')}</dd></>}<dt>Subject</dt><dd>{campaign.subject}</dd>{campaign.previewText && <><dt>Preview</dt><dd>{campaign.previewText}</dd></>}</dl>
         <CampaignRenderedPreview campaign={campaign} />
       </section>
     </div>
-    {draft && <section className="section campaign-delivery">
+    {draft && <section className="campaign-delivery">
       <SectionHeader title="Delivery" />
+      <p className="muted campaign-delivery-lead">Review the message and audience, then send.</p>
       <Tabs value={mode} onValueChange={value => { if (!sendMutation.isPending) { setMode(value as 'now' | 'schedule'); setError('') } }} items={[{ value: 'now', label: 'Send now' }, { value: 'schedule', label: 'Schedule' }]} />
-      {mode === 'schedule' && <div className="form-grid"><Field label="Time zone"><Input value="UTC (UTC+00:00)" readOnly aria-label="Time zone" /></Field><Field label="Date and time (UTC)" htmlFor="campaign-schedule"><Input id="campaign-schedule" type="datetime-local" value={scheduled} onChange={event => { setScheduled(event.target.value); setError('') }} disabled={sendMutation.isPending} /></Field></div>}
+      {mode === 'schedule' && <Field label="Date and time (UTC)" htmlFor="campaign-schedule"><Input id="campaign-schedule" type="datetime-local" value={scheduled} onChange={event => { setScheduled(event.target.value); setError('') }} disabled={sendMutation.isPending} /></Field>}
       <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">
         <div id="campaign-pacing-label" className="ui-field__label">Pace sending</div>
         <Checkbox label="Limit per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
         {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError} hint={paceDays ? `About ${paceDays} ${paceDays === 1 ? 'day' : 'days'} for ${number(audience.data!.eligible)} eligible recipients.` : undefined}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
-        <Field label={`Use at most ${shareError ? 'N' : sharePercent}% of the SES send rate`} htmlFor="campaign-rate-share" error={shareError} hint="The rest stays free for transactional email and other campaigns."><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
+        <Field label="Max share of SES send rate (%)" htmlFor="campaign-rate-share" error={shareError} hint="The rest stays free for transactional email and other campaigns."><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
         <Checkbox label="Auto-pause on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />
         <p className="muted">Sending also respects the SES daily quota.</p>
       </div>
@@ -461,5 +459,5 @@ function CampaignReview({ campaign, refreshing, refresh }: { campaign: Campaign;
     </section>}
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
-  </>
+  </div>
 }
