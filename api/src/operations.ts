@@ -191,7 +191,7 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
 const dnsUnavailable = () => new ApiError(503,'DOMAIN_DNS_UNAVAILABLE','DNS did not return a definitive answer. Verification will retry.',undefined,true);
 async function txtProof(name: string, token: string) {
   try {
-    const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'error' });
+    const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'manual' }); // Workers reject 'error'; a 3xx fails !r.ok below.
     if (!r.ok) { await r.body?.cancel();throw dnsUnavailable(); }
     const answer = await r.json() as { Status: number; TC?: boolean; Answer?: { name: string; type: number; data: string }[] };
     if (answer.TC || (answer.Status!==0 && answer.Status!==3)) throw dnsUnavailable();

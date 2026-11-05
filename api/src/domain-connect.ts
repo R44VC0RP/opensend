@@ -40,8 +40,9 @@ function txtAt(answers: z.infer<typeof rr>[], name: string) {
 // undefined: no marker at this label, keep walking. null: definitive lack of support.
 async function probe(zone:string, signal:AbortSignal): Promise<Discovery|null|undefined> {
   const get=async (url:string,accept='application/json')=>{
-    const res=await fetch(url,{headers:{accept},redirect:'error',signal});
-    if(res.status===429 || res.status>=500) { await res.body?.cancel(); throw new Error('Discovery temporarily unavailable'); }
+    // Workers reject redirect:'error'; 'manual' hands back the 3xx, which is refused here.
+    const res=await fetch(url,{headers:{accept},redirect:'manual',signal});
+    if(res.status===429 || res.status>=500 || (res.status>=300 && res.status<400)) { await res.body?.cancel(); throw new Error('Discovery temporarily unavailable'); }
     return res;
   };
   const record=`_domainconnect.${zone}`;

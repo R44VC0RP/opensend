@@ -858,12 +858,12 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
               if(q===`_opensend.${name}`) return Response.json({Status:3});
-              assert.equal(type,'TXT'); assert.equal(init?.redirect,'error');
+              assert.equal(type,'TXT'); assert.equal(init?.redirect,'manual');
               if(q===`_domainconnect.${name}`) return Response.json({Status:3,Authority:[{name:zone,type:6,data:'ns.invalid. hostmaster.invalid. 1 2 3 4 5'}]});
               assert.equal(q,`_domainconnect.${zone}`);
               return Response.json({Status:0,Answer:[...(alias?[{name:q,type:5,data:'_domainconnect.ionos.com.'}]:[]),{name:alias?'_domainconnect.ionos.com.':q,type:16,data:JSON.stringify(settingsHost.slice(8))}]});
             }
-            assert.equal(init?.redirect,'error');
+            assert.equal(init?.redirect,'manual');
             if(url.href===`${settingsHost}/v2/${zone}/settings`) return Response.json({providerId,providerName,urlAPI:api,urlSyncUX:sync});
             assert.equal(url.href,api+providerPath); return new Response(null,{status:supportStatus});
           });
