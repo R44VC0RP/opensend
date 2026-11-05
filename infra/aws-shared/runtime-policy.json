@@ -6,15 +6,15 @@
       "Condition": { "StringNotEquals": { "aws:RequestedRegion": ["us-east-2", "eu-west-1"] } }
     },
     {
-      "Effect": "Deny", "Action": ["sns:*", "ses:*Identity*", "ses:*Tenant*", "ses:*ConfigurationSet*", "ses:TagResource", "ses:SendEmail", "ses:*Reputation*"],
+      "Effect": "Deny", "Action": ["sns:*Topic*", "sns:*Tag*", "sns:Subscribe", "ses:*Identity*", "ses:*Tenant*", "ses:*ConfigurationSet*", "ses:TagResource", "ses:SendEmail", "ses:*Reputation*"],
       "NotResource": [
         "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:ses:eu-west-1:YOUR_AWS_ACCOUNT_ID:*",
         "arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:*", "arn:aws:sns:eu-west-1:YOUR_AWS_ACCOUNT_ID:*",
-        "arn:aws:ses:us-east-2:aws:reputation-policy/strict", "arn:aws:ses:eu-west-1:aws:reputation-policy/strict"
+        "arn:aws:ses:us-east-2:aws:reputation-policy/*", "arn:aws:ses:eu-west-1:aws:reputation-policy/*"
       ]
     },
     {
-      "Effect": "Deny", "Action": "ses:*", "Resource": "arn:aws:ses:*:*:identity/*@*"
+      "Effect": "Deny", "NotAction": "ses:SendEmail", "Resource": "arn:aws:ses:*:*:*@*"
     },
     {
       "Effect": "Allow", "Resource": "*",
@@ -26,46 +26,42 @@
     },
     {
       "Effect": "Allow", "Action": "ses:SendEmail",
-      "Resource": [
-        "arn:aws:ses:*:*:configuration-set/opensend-mx-transactional",
-        "arn:aws:ses:*:*:configuration-set/opensend-mx-marketing",
-        "arn:aws:ses:*:*:identity/?*.??*"
-      ],
-      "Condition": { "StringLike": { "ses:TenantName": "opensend-ws_????????????????????????????????" }, "Null": { "ses:MultiRegionEndpointId": "true" } }
+      "Resource": ["arn:aws:ses:*:*:identity/*", "arn:aws:ses:*:*:configuration-set/opensend-*"],
+      "Condition": { "StringLike": { "ses:TenantName": "opensend-?*" }, "Null": { "ses:MultiRegionEndpointId": "true" } }
     },
     {
-      "Effect": "Deny", "Action": ["ses:SendEmail", "ses:DeleteEmailIdentity", "ses:PutEmailIdentityMailFromAttributes", "ses:*TenantResourceAssociation", "ses:ListResourceTenants"],
+      "Effect": "Allow", "Action": ["ses:DeleteEmailIdentity", "ses:PutEmailIdentityMailFromAttributes", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:ListResourceTenants"],
       "Resource": "arn:aws:ses:*:*:identity/?*.??*",
-      "Condition": { "StringNotLike": { "aws:ResourceTag/opensend:domain-claim": "????????-????-4???-????-????????????" } }
+      "Condition": { "StringLike": { "aws:ResourceTag/opensend:domain-claim": "????????-????-4???-????-????????????" } }
     },
     {
-      "Effect": "Allow", "Action": "ses:CreateEmailIdentity", "Resource": "arn:aws:ses:*:*:identity/?*.??*",
+      "Effect": "Allow", "Action": ["ses:CreateEmailIdentity", "ses:TagResource"], "Resource": "arn:aws:ses:*:*:identity/?*.??*",
       "Condition": {
         "StringLike": { "aws:RequestTag/opensend:domain-claim": "????????-????-4???-????-????????????" },
-        "ForAllValues:StringEquals": { "aws:TagKeys": "opensend:domain-claim" }
+        "ForAllValues:StringEquals": { "aws:TagKeys": ["opensend:domain-claim"] }
       }
+    },
+    {
+      "Effect": "Deny", "Action": "ses:TagResource", "Resource": "*",
+      "Condition": { "Null": { "aws:ResourceTag/opensend:domain-claim": "false" } }
     },
     {
       "Effect": "Allow",
       "Action": [
-        "ses:GetEmailIdentity", "ses:DeleteEmailIdentity", "ses:PutEmailIdentityMailFromAttributes", "ses:CreateTenantResourceAssociation",
-        "ses:CreateTenant", "ses:GetTenant", "ses:PutTenantSuppressionAttributes", "ses:UpdateReputationEntityPolicy",
+        "ses:CreateTenantResourceAssociation",
         "ses:GetConfigurationSet", "ses:GetConfigurationSetEventDestinations", "ses:CreateConfigurationSetEventDestination",
         "ses:UpdateConfigurationSetEventDestination", "ses:PutConfigurationSetSuppressionOptions",
         "sns:ListTagsForResource", "sns:SetTopicAttributes", "sns:ListSubscriptionsByTopic"
       ],
       "Resource": [
-        "arn:aws:ses:*:*:identity/?*.??*",
-        "arn:aws:ses:*:*:tenant/opensend-ws_????????????????????????????????/*",
         "arn:aws:ses:*:*:configuration-set/opensend-mx-transactional",
         "arn:aws:ses:*:*:configuration-set/opensend-mx-marketing",
-        "arn:aws:ses:*:aws:reputation-policy/strict",
         "arn:aws:sns:*:*:opensend-mx-feedback", "arn:aws:sns:*:*:opensend-mx-inbound"
       ]
     },
     {
-      "Effect": "Allow", "Action": ["ses:DeleteTenantResourceAssociation", "ses:ListResourceTenants", "sns:GetTopicAttributes", "sns:GetSubscriptionAttributes", "sns:SetSubscriptionAttributes"],
-      "Resource": ["arn:aws:ses:*:*:identity/?*.??*", "arn:aws:ses:*:*:tenant/opensend-ws_????????????????????????????????/*", "arn:aws:sns:*:*:opensend-mx-feedback"]
+      "Effect": "Allow", "Action": ["sns:GetSubscriptionAttributes", "sns:SetSubscriptionAttributes"],
+      "Resource": ["arn:aws:sns:us-east-2:YOUR_AWS_ACCOUNT_ID:opensend-*-feedback", "arn:aws:sns:eu-west-1:YOUR_AWS_ACCOUNT_ID:opensend-*-feedback"]
     },
     {
       "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "ses:TagResource", "sns:CreateTopic", "sns:TagResource"],
@@ -96,23 +92,32 @@
       "Condition": { "StringEquals": { "s3:LocationConstraint": "${aws:RequestedRegion}" }, "Null": { "s3:x-amz-object-ownership": "true" } }
     },
     {
-      "Effect": "Allow", "Action": ["s3:PutBucketTagging", "s3:PutBucketPublicAccessBlock", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:GetObject"],
+      "Effect": "Deny", "Action": ["s3:GetObject", "s3:Put*"], "Resource": "*",
+      "Condition": { "StringNotEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
+    },
+    {
+      "Effect": "Allow", "Action": ["s3:PutBucketTagging", "s3:PutBucketPublicAccessBlock", "s3:PutBucketPolicy", "s3:PutLifecycleConfiguration", "s3:GetObject", "ses:GetEmailIdentity", "sns:GetTopicAttributes"],
       "Resource": [
         "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}",
         "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/staging/?*",
-        "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/workspaces/ws_????????????????????????????????/raw/?*.eml"
-      ],
-      "Condition": { "StringEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
+        "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/workspaces/ws_????????????????????????????????/raw/?*.eml",
+        "arn:aws:ses:*:*:identity/?*.??*", "arn:aws:sns:*:*:opensend-mx-feedback"
+      ]
     },
     {
-      "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"],
-      "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/workspaces/ws_????????????????????????????????/att/msg_????????????????????????????????/matt_????????????????????????????????",
-      "Condition": { "StringEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID" } }
+      "Effect": "Allow", "Action": [
+        "s3:GetObject", "s3:PutObject", "ses:CreateTenantResourceAssociation", "ses:CreateTenant", "ses:GetTenant",
+        "ses:PutTenantSuppressionAttributes", "ses:UpdateReputationEntityPolicy", "ses:DeleteTenantResourceAssociation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/workspaces/ws_????????????????????????????????/att/msg_????????????????????????????????/matt_????????????????????????????????",
+        "arn:aws:ses:*:*:tenant/opensend-ws_????????????????????????????????/*", "arn:aws:ses:*:aws:reputation-policy/strict"
+      ]
     },
     {
       "Effect": "Allow", "Action": ["s3:PutObject", "s3:PutObjectTagging"],
       "Resource": "arn:aws:s3:::opensend-mx-YOUR_AWS_ACCOUNT_ID-mail-${aws:RequestedRegion}/workspaces/ws_????????????????????????????????/raw/?*.eml",
-      "Condition": { "StringEquals": { "s3:ResourceAccount": "YOUR_AWS_ACCOUNT_ID", "s3:RequestObjectTag/opensend-kind": "raw" }, "ForAllValues:StringEquals": { "s3:RequestObjectTagKeys": "opensend-kind" } }
+      "Condition": { "StringEquals": { "s3:RequestObjectTag/opensend-kind": "raw" }, "ForAllValues:StringEquals": { "s3:RequestObjectTagKeys": "opensend-kind" } }
     },
     {
       "Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "arn:aws:iam::*:role/OpenSendMX-????????????????????",
