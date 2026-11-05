@@ -3915,6 +3915,12 @@ describe('Operational configuration and public event boundaries', () => {
   });
 
   test('unsigned or untrusted SNS envelopes fail publicly without trusting arbitrary certificate URLs', async () => {
+    // http serializes strings as JSON (two extra quotes). Exactly 512 KiB reaches envelope validation.
+    error(await http('POST', '/v1/events/ses', undefined, 'x'.repeat(512 * 1024 - 2)), 422, 'VALIDATION_FAILED');
+    error(await http('POST', '/v1/events/ses', undefined, 'x'.repeat(512 * 1024 - 1)), 413, 'REQUEST_TOO_LARGE');
+    // Without Content-Length, enforce the same limit on streamed bytes before parsing malformed JSON.
+    const streamed = await fetch(`${BASE}/v1/events/ses`, { method: 'POST', duplex: 'half', body: new Blob(['x'.repeat(512 * 1024 + 1)]).stream() } as RequestInit);
+    assert.equal(streamed.status, 413); assert.equal((await streamed.json() as Json).error.code, 'REQUEST_TOO_LARGE');
     const envelope = {
       Type: 'Notification', MessageId: unique('sns'), TopicArn: `arn:aws:sns:${REGION}:000000000000:acceptance-untrusted`,
       Message: JSON.stringify({ eventType: 'Delivery', mail: { messageId: unique('forged') } }),

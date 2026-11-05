@@ -30,6 +30,8 @@ try {
     const headers = new Headers(request.headers);
     headers.set('x-opensend-client-ip', address);
     const response = await app.fetch(new Request(request, { headers }), runtime);
+    // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
+    if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
     const bucket = publicFailureBucket(new URL(request.url).pathname, response.status, request.headers);
     if (bucket && !await publicFailureAllowed(runtime, bucket, await digest(key))) return publicFailureDenied();
     return response;

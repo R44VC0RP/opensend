@@ -56,7 +56,9 @@ export function createApp() {
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
   });
-  app.use('*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } }));
+  const apiLimit = bodyLimit({ maxSize: 12 * 1024 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 12 MiB limit.'); } });
+  const snsLimit = bodyLimit({ maxSize: 512 * 1024, onError() { throw new ApiError(413, 'REQUEST_TOO_LARGE', 'SNS envelope exceeds the 512 KiB limit.'); } });
+  app.use('*', (c, next) => (c.req.method === 'POST' && c.req.path === '/v1/events/ses' ? snsLimit : apiLimit)(c, next));
   app.use('/v1/*', async (c, next) => {
     // Inbound authenticates its own address-scoped keys as well as live administrators.
     if (c.req.path.startsWith('/v1/inbound/')) return next();
