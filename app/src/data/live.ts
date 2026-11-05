@@ -12,20 +12,30 @@ export function selectWorkspace(id: string | null) {
 }
 // Responses public/theme.js started before the app loaded. Each is used once, and only while fresh
 // and for the workspace the app would have asked about.
-type EarlyRequests = { workspace: string | null; at: number; responses: Record<string, Promise<Response | null> | undefined> }
-function takeEarly(path: string) {
+type EarlyRequests = { workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
+const aborted = () => new DOMException('The operation was aborted.', 'AbortError')
+// A request that is aborted before it reads the response (React StrictMode's first mount) puts it back for the next one.
+async function takeEarly(path: string, signal?: AbortSignal) {
   const early = (window as { __opensendEarly?: EarlyRequests }).__opensendEarly
   const pending = early?.responses[path]
   if (!early || !pending) return null
   delete early.responses[path]
-  return early.workspace === workspaceSelection && Date.now() - early.at < 10_000 ? pending : null
+  if (early.workspace !== workspaceSelection || Date.now() - early.at >= 10_000) return null
+  const restore = () => { early.responses[path] ??= pending }
+  if (signal?.aborted) { restore(); throw aborted() }
+  signal?.addEventListener('abort', restore, { once: true })
+  try {
+    const response = await pending
+    if (signal?.aborted) { restore(); throw aborted() }
+    return response
+  } finally { signal?.removeEventListener('abort', restore) }
 }
 export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string } = {}): Promise<T> {
   const started = performance.now()
   let response: Response
   try {
-    const early = options.method === undefined && options.body === undefined ? takeEarly(path) : null
-    response = (early && await early) || await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
+    const early = options.method === undefined && options.body === undefined ? takeEarly(path, options.signal) : null
+    response = (early && await early) ?? await fetch(path, { method: options.method ?? 'GET', credentials: 'include', signal: options.signal,
       headers: { Accept: 'application/json', ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {}), ...(workspaceSelection ? { 'X-OpenSend-Workspace': workspaceSelection } : {}) },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) })
   } catch (error) {

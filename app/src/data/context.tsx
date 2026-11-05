@@ -116,12 +116,11 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
   // Before a session is known, a 401 from the boot prefetch is answered by /v1/me itself.
   useEffect(() => { const denied = () => { if (window.location.pathname !== '/docs' && cache.getQueryData(['identity']) === undefined) return; cache.clear(); void identity.refetch() }; window.addEventListener('opensend:unauthorized', denied); return () => window.removeEventListener('opensend:unauthorized', denied) }, [cache])
   async function logout() { setAuthError(null); try { await request('/api/auth/sign-out', {method: 'POST', body: {}}); rememberDashboardReady(selectedWorkspace(), false); selectWorkspace(null); cache.clear(); await identity.refetch() } catch (error) { setAuthError(error) } }
-  // Google's sign-in URL is requested as soon as the visitor shows intent (hover, focus, touch), so the
-  // click itself rarely waits. Each URL carries its own single-use state: reuse one for a few minutes only.
+  // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
+  // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
+  // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   function googleUrl() {
-    const current = signIn.current
-    if (current && Date.now() - current.at < 4 * 60_000) return current.url
     // Assign path components rather than resolving an untrusted redirect parameter.
     const callback = new URL(window.location.origin)
     callback.pathname = window.location.pathname
@@ -132,19 +131,23 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
     errorCallback.searchParams.set('auth', 'error')
     // A new account goes straight to onboarding (its first step is known), unless it is joining by invitation link.
     const onboarding = callback.pathname === '/' && !callback.searchParams.has('invitation') ? new URL('/onboarding', window.location.origin) : null
-    const url = request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href, ...(onboarding ? {newUserCallbackURL: onboarding.href} : {})}}).then(result => {
+    return request<{url: string}>('/api/auth/sign-in/social', {method: 'POST', body: {provider: 'google', callbackURL: callback.href, errorCallbackURL: errorCallback.href, ...(onboarding ? {newUserCallbackURL: onboarding.href} : {})}}).then(result => {
       const url = new URL(result.url)
       if (url.protocol !== 'https:' || url.hostname !== 'accounts.google.com') throw new Error('Invalid Google sign-in redirect.')
       return url.href
     })
+  }
+  function prepareLogin(event: { button: number }) {
+    if (busy || event.button !== 0) return
+    const url = googleUrl()
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
-    return url
   }
-  function prepareLogin() { if (!busy) void googleUrl().catch(() => {}) }
   async function login() {
     setBusy(true); setAuthError(null)
-    try { const url = await googleUrl(); signIn.current = null; window.location.assign(url) }
+    const pending = signIn.current
+    signIn.current = null
+    try { window.location.assign(await (pending && Date.now() - pending.at < 5000 ? pending.url : googleUrl())) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
@@ -163,7 +166,7 @@ export function ApiProvider({ children, api }: { children: ReactNode; api?: Open
       {signedOut ? <>
         <h2>Sign in with Google</h2>
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerEnter={prepareLogin} onFocus={prepareLogin} onTouchStart={prepareLogin}>Continue with Google</Button>
+        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin}>Continue with Google</Button>
       </> : <>
         <h2>Couldn’t check your session</h2>
         <Alert tone="warning">{unconfigured ? 'Google sign-in is not configured on this installation.' : 'OpenSend couldn’t verify your session. Try again without signing in.'}</Alert>

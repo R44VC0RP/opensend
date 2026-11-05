@@ -50,16 +50,17 @@ const LegacyMailboxWebhookRedirect = lazy(() => loadInbound().then(m => ({ defau
 const OnboardingPage = onboarding.Component
 
 // Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
+const noop = () => {}
 const initialPath = window.location.pathname
-if (initialPath === '/onboarding') void loadOnboarding()
-else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') void loadHome() /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
-else if (initialPath === '/') void loadOverview()
-else if (initialPath.startsWith('/logs')) void loadLogs()
-else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) void loadCampaigns()
-else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) void loadAudience()
-else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) void loadSettings()
-else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) void loadDocs()
-else if (['/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) void loadInbound()
+if (initialPath === '/onboarding') loadOnboarding().catch(noop)
+else if (!dashboardLikelyReady(selectedWorkspace())) { if (initialPath === '/') loadHome().catch(noop) /* /v1/me decides between onboarding and the dashboard; the homepage is the signed-out answer. */ }
+else if (initialPath === '/') loadOverview().catch(noop)
+else if (initialPath.startsWith('/logs')) loadLogs().catch(noop)
+else if (['/campaigns', '/templates'].some(path => initialPath.startsWith(path))) loadCampaigns().catch(noop)
+else if (['/audience', '/contacts', '/lists', '/segments'].some(path => initialPath.startsWith(path))) loadAudience().catch(noop)
+else if (['/api-keys', '/domains', '/settings'].some(path => initialPath.startsWith(path))) loadSettings().catch(noop)
+else if (['/docs', '/developer'].some(path => initialPath.startsWith(path))) loadDocs().catch(noop)
+else if (['/inbound', '/mailboxes'].some(path => initialPath.startsWith(path))) loadInbound().catch(noop)
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false }

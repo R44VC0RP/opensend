@@ -12,10 +12,14 @@
 // responses over, and only when the workspace header matches what it would have sent itself.
 ;(() => {
   const path = location.pathname
-  if (path === '/docs' || path.startsWith('/docs/') || /[?&]invitation=/.test(location.search)) return
+  if (path === '/docs' || path.startsWith('/docs/') || new URLSearchParams(location.search).get('invitation')) return
   let workspace = null, ready = null
   try { workspace = localStorage.getItem('opensend.workspace'); ready = localStorage.getItem('opensend.dashboard-ready') } catch {}
-  const start = url => fetch(url, { credentials: 'include', headers: { Accept: 'application/json', ...(workspace ? { 'X-OpenSend-Workspace': workspace } : {}) } }).catch(() => null)
+  const start = url => {
+    const response = fetch(url, { credentials: 'include', headers: { Accept: 'application/json', ...(workspace ? { 'X-OpenSend-Workspace': workspace } : {}) } })
+    response.catch(() => {}) // The app awaits the real rejection; this only silences the unhandled one.
+    return response
+  }
   const responses = { '/v1/me': start('/v1/me') }
   // The public homepage check, for visitors whose workspace is not remembered as ready.
   if (path === '/' && ready !== (workspace ?? '*')) responses['/health'] = start('/health')

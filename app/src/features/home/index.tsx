@@ -49,16 +49,16 @@ function VolumeBars({ values }: { values: readonly number[] }) {
   </svg>
 }
 
-export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn: () => void; onSignInIntent: () => void; busy: boolean; notice?: ReactNode }) {
+export function HomePage({ onSignIn, onSignInIntent, busy, notice }: { onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean; notice?: ReactNode }) {
   const sent = useLiveCount(publicStats.emailsSent, publicStats.sendsPerMinute)
   useEffect(() => { document.title = 'opensend · Email sending infrastructure' }, [])
   // The first screen after signing in: fetch its code while the visitor reads, so it is already cached on return.
   useEffect(() => {
-    const load = () => void import('../onboarding')
+    const load = () => void import('../onboarding').catch(() => {})
     if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 3000 }); return () => cancelIdleCallback(idle) }
     const timer = setTimeout(load, 1500); return () => clearTimeout(timer)
   }, [])
-  const intent = { onPointerEnter: onSignInIntent, onFocus: onSignInIntent, onTouchStart: onSignInIntent }
+  const intent = { onPointerDown: onSignInIntent }
   return <div className="home-page">
     <header className="home-header">
       <a className="wordmark" href="/" aria-label="opensend home"><span className="wordmark-square" aria-hidden="true" />opensend</a>
