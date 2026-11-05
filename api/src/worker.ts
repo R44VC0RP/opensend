@@ -24,8 +24,8 @@ function initHttpDeps() {
     import('./app.js'), import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { app }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink }]) => ({
-    Pool, drizzle, sql, app, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { app }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage }]) => ({
+    Pool, drizzle, sql, app, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage,
   }));
 }
 let httpDepsPromise: ReturnType<typeof initHttpDeps> | undefined;
@@ -188,7 +188,7 @@ export default {
   },
   // Queue/scheduled continuations bypass coalescing to preserve active worker chains and future due times.
   async queue(batch, env) {
-    const { jobConcurrency, followDueJobs, core } = await loadHttpDeps();
+    const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadHttpDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     if (batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'opensend-feedback')) {
@@ -198,7 +198,7 @@ export default {
       await withRuntime(env, async runtime => {
         const messages = batch.messages as readonly Message<FeedbackItem>[];
         const outcomes = await ingestFeedbackBatch(runtime, messages.map(message => message.body));
-        for (const [index, message] of messages.entries()) outcomes[index]?.ok ? message.ack() : message.retry({ delaySeconds: Math.min(300, 15 * 2 ** message.attempts) });
+        for (const [index, message] of messages.entries()) settleFeedbackMessage(message, outcomes[index]);
         core.log('info', { code: 'FEEDBACK_BATCH', size: messages.length, failed: outcomes.filter(outcome => !outcome.ok).length });
       });
       return;

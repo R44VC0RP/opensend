@@ -87,7 +87,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const sesMessageId = String(payload.sesMessageId ?? '');
   const [read] = await runtime.db.select({receipt:mailReceipts,binding:runtime.config.multiTenant ? storageBinding(scope.workspaceId,sql`mail_receipts.region`,sql`mail_receipts.bucket`) : sql<null>`NULL`}).from(mailReceipts).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
   const receipt=read?.receipt;
-  if (!receipt || receipt.status === 'processed') return;
+  if (!receipt || receipt.status !== 'pending') return;
   const notification = receipt.notification as ReceivedNotification;
   const s3 = await mailboxS3(runtime,scope.workspaceId,receipt.region,receipt.bucket,runtime.db,read!.binding);
   const sourceKey=(!runtime.config.multiTenant && (receipt.notification.legacy || receipt.objectKey.startsWith('raw/'))?'raw/':STAGING_PREFIX)+sesMessageId;
@@ -96,12 +96,13 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   try {
     raw=await copyWorkspaceRaw(s3,receipt.region,receipt.bucket,sourceKey,rawKey,receipt.recipients,'raw');
   } catch (error) {
-    if (error instanceof Error && error.name === 'NoSuchKey') {
-      s3.destroy();
-      await runtime.db.update(mailReceipts).set({ status: 'failed', error: 'RAW_MESSAGE_MISSING', processedAt: new Date().toISOString() }).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId)));
+    s3.destroy();
+    const terminal = error instanceof ApiError && error.code === 'RAW_MESSAGE_TOO_LARGE' ? error.code :
+      error instanceof Error && (error.name === 'NoSuchKey' || error.name === 'NotFound') ? 'RAW_MESSAGE_MISSING' : null;
+    if (terminal) {
+      await runtime.db.update(mailReceipts).set({ status: 'failed', error: terminal, processedAt: new Date().toISOString() }).where(and(eq(mailReceipts.workspaceId, scope.workspaceId), eq(mailReceipts.sesMessageId, sesMessageId), eq(mailReceipts.status, 'pending')));
       return;
     }
-    s3.destroy();
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
   let email: Email | null = null, status = 'received';

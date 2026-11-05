@@ -726,7 +726,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           switch(cmd.constructor.name){
             case 'HeadBucketCommand': throw Object.assign(new Error('missing fixture bucket'),{name:'NotFound'});
             case 'CreateBucketCommand': case 'PutBucketTaggingCommand': case 'PutPublicAccessBlockCommand':case 'PutBucketPolicyCommand':case 'PutBucketLifecycleConfigurationCommand':return {};
-            case 'GetObjectCommand': assert.ok(objects.has(k));return {Body:{transformToByteArray:async()=>objects.get(k)}};
+            case 'HeadObjectCommand': return {ContentLength:objects.get(k)!.length,ETag:'"fixture"'};
+            case 'GetObjectCommand': assert.ok(objects.has(k));assert.equal(i.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>objects.get(k)}};
             case 'CopyObjectCommand':assert.ok(objects.has(i.CopySource));objects.set(k,objects.get(i.CopySource)!);return {};
             case 'PutObjectCommand':if(failNextArchive){failNextArchive=false;throw Error('synthetic archive interruption');}objects.set(k,Buffer.from(i.Body));return {};
             default:throw Error(cmd.constructor.name);
@@ -1340,9 +1341,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');if(cmd.constructor.name==='DescribeActiveReceiptRuleSetCommand')return {Metadata:{Name:'customer-set'},Rules:[]};
             assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.RuleSetName,'customer-set');assert.deepEqual(cmd.input.Rule.Recipients,[domain]);return {};
           });
-          let copied='';bt.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
+          const oversized = unique('oversized'), mime = Buffer.from('From: sender@example.org\r\nSubject: BYO\r\n\r\nBody');
+          let copied='', oversizedHeads=0;bt.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');
-            if(cmd.constructor.name==='GetObjectCommand')return {Body:{transformToByteArray:async()=>Buffer.from('From: sender@example.org\r\nSubject: BYO\r\n\r\nBody')}};
+            if (cmd.input.Key === `staging/${oversized}`) {
+              assert.equal(cmd.constructor.name,'HeadObjectCommand','Never download an oversized staging object.');
+              oversizedHeads++; return {ContentLength:40*1024*1024+1,ETag:'"oversized"'};
+            }
+            if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:mime.length,ETag:'"fixture"'};
+            if(cmd.constructor.name==='GetObjectCommand'){assert.equal(cmd.input.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>mime}};}
             if(cmd.constructor.name==='CopyObjectCommand')copied=cmd.input.Key;return {};
           });
           // Verify and claim its new reconcile atomically so the separate, unmocked runner never takes it.
@@ -1365,6 +1372,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
           const {rows:[stored]}=await pool.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,sesMessageId]);
           const detail=ok(await local('GET',`/v1/inbound/messages/${stored.id}?includeDelivery=true`,undefined,a.cookie,headers));assert.deepEqual(detail.envelopeTo,[recipient]);assert.match(new URL(detail.rawUrl).searchParams.get('X-Amz-Credential')!,/^synthetic-customer\//);
+          message.mail.messageId=oversized;message.receipt.action.objectKey=`staging/${oversized}`;
+          await runtime.db.transaction(async tx=>{
+            const scoped={...runtime,db:tx};
+            assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
+            for (const attempts of [1,2]) await mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts,workspaceId:wid});
+            assert.equal(oversizedHeads,1,'Even a duplicate ingest job does not revisit the failed receipt.');
+          });
+          assert.deepEqual((await pool.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,oversized])).rows,[{status:'failed',error:'RAW_MESSAGE_TOO_LARGE'}]);
         });
         providerTest.mock.method((await import('@aws-sdk/client-cloudwatch')).CloudWatchClient.prototype,'send',async () => ({ MetricDataResults:[] }));
         assert.equal(ok(await local('GET',discovery,undefined,a.cookie)).domains.length,4);
@@ -4095,7 +4110,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(followup.inReplyTo, wire); assert.equal(followup.threadId, sent.threadId);
 
       let mime = '';
-      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};assert.ok(cmd instanceof GetObjectCommand); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => { if(cmd.constructor.name==='HeadObjectCommand') return {ContentLength:Buffer.byteLength(mime),ETag:'"fixture"'};if(cmd.constructor.name==='CopyObjectCommand') return {};assert.ok(cmd instanceof GetObjectCommand); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string, timestamp = new Date().toISOString()) {
         const receiptId = unique('fixture'), inboundId = `${receiptId}@example.net`;
         mime = `From: Customer <customer@example.net>\r\nTo: ${to}\r\nSubject: Re: Case 42\r\nMessage-ID: <${inboundId}>\r\nIn-Reply-To: <${wire}>\r\nReferences: <${wire}>\r\n\r\nThank you.`;
@@ -4166,7 +4181,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'] }), 201);
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
-      t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
+      t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='HeadObjectCommand') return {ContentLength:Buffer.byteLength(raw.get(cmd.input.Key)!),ETag:'"fixture"'};if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
       async function receive(to: string | string[], mime: string, dmarc = 'PASS') {
         const receipt = unique('receipt'), objectKey = `raw/${receipt}`; raw.set(objectKey,mime);
         const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'forwarder@example.net' }, receipt: { timestamp: new Date().toISOString(), recipients: Array.isArray(to) ? to : [to], dmarcVerdict: { status: dmarc }, action: { type:'S3', bucketName:'fixture-inbox', objectKey, topicArn:topic } } } };
@@ -4612,6 +4627,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(outcomes.slice(0, 5).map(outcome => outcome.ok), [true, true, true, true, true], 'Routine items and an exact duplicate are acknowledged.');
       assert.equal(outcomes[5]!.ok, false);
       assert.equal(outcomes[5]!.error, 'SIMULATED_FEEDBACK_UNSUPPORTED');
+      const { settleFeedbackMessage } = await import('./src/adapters/feedback-queue.js');
+      const unknown = { ...deliveries[0]!, message: { eventType:'Delivery', mail:{ messageId:`sim_${randomUUID()}` } } };
+      const [unmatched] = await ingestFeedbackBatch(runtime, [unknown]);
+      assert.equal(unmatched?.error, 'SES_EMAIL_NOT_FOUND');
+      const settled: (number | 'ack')[] = [];
+      for (const [attempts, outcome] of [[1,unmatched],[2,unmatched],[2,outcomes[5]],[1,outcomes[0]]] as const) {
+        settleFeedbackMessage({ attempts, ack:()=>settled.push('ack'), retry:opts=>settled.push(opts!.delaySeconds!) }, outcome);
+      }
+      assert.deepEqual(settled, [15,'ack',60,'ack']);
       const persisted = await receipts();
       assert.equal(persisted.length, 4, 'Exactly one receipt per distinct callback; duplicates and rejected items add none.');
       assert.ok(persisted.every(receipt => receipt.processed_at !== null));

@@ -1,4 +1,7 @@
-import {GetObjectCommand,PutObjectCommand,CopyObjectCommand,type S3Client} from '@aws-sdk/client-s3';
+import {HeadObjectCommand,GetObjectCommand,PutObjectCommand,CopyObjectCommand,type S3Client} from '@aws-sdk/client-s3';
+import { ApiError } from './core.js';
+
+const MAX_RAW_BYTES = 40 * 1024 * 1024; // SES receiving maximum, before MIME parsing or copying.
 
 // AWS's receiving-email-notifications-examples shows the SES-added first Received field can end
 // in "for recipient@example.com;". Remove that field (including folds) when not ours. The S3
@@ -30,11 +33,16 @@ function workspaceMime(bytes:Uint8Array,region:string,recipients:string[]) {
 
 /** Inspect the exact bytes being copied. CopySourceIfMatch prevents substituting another object after inspection. */
 export async function copyWorkspaceRaw(client:S3Client,region:string,bucket:string,source:string,key:string,recipients:string[],kind:'raw'|'legacy-raw') {
-  const object=await client.send(new GetObjectCommand({Bucket:bucket,Key:source}));
+  const location={Bucket:bucket,Key:source};
+  const head=await client.send(new HeadObjectCommand(location));
+  if (head.ContentLength === undefined || !head.ETag) throw new Error('Raw message metadata unavailable');
+  if (head.ContentLength > MAX_RAW_BYTES) throw new ApiError(413,'RAW_MESSAGE_TOO_LARGE','The raw message exceeds the 40 MiB receiving limit.');
+  // Pin the checked object and do not let fetch transparently expand BYO Content-Encoding metadata.
+  const object=await client.send(new GetObjectCommand({...location,IfMatch:head.ETag,ResponseContentEncoding:'identity'}));
   const original=await object.Body!.transformToByteArray();
   const bytes=workspaceMime(original,region,recipients);
   const destination={Bucket:bucket,Key:key,Tagging:`opensend-kind=${kind}`};
-  if(bytes===original) await client.send(new CopyObjectCommand({...destination,CopySource:`${bucket}/${source}`,CopySourceIfMatch:object.ETag,TaggingDirective:'REPLACE'}));
+  if(bytes===original) await client.send(new CopyObjectCommand({...destination,CopySource:`${bucket}/${source}`,CopySourceIfMatch:head.ETag,TaggingDirective:'REPLACE'}));
   else await client.send(new PutObjectCommand({...destination,Body:bytes,ContentType:'message/rfc822'}));
   return bytes;
 }
