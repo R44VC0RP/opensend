@@ -42,7 +42,7 @@ function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?:
   const [status, setStatus] = useState('all')
   const [stream, setStream] = useState('all')
   const [page, setPage] = useState(1)
-  const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100)
+  const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
   useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
   const params = { ...(campaignId ? { campaignId } : { regionId }), search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }

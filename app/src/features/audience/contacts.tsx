@@ -12,7 +12,7 @@ import { AudienceHeader } from './header'
 import { useAdaptivePageSize, useCursorPagination } from '../../lib/pagination'
 
 export function ContactsPage() {
-  const { pageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize, tableRef } = useAdaptivePageSize(5, 20, 'contacts')
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [listId, setListId] = useState('')

@@ -6,6 +6,7 @@ import { Button, EmptyState } from './components/ui'
 import { loadHome, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
+import { routeChunks } from './data/prefetch'
 import { chunk } from './lib/preloadable'
 const onboarding = chunk(() => import('./features/onboarding'))
 const overview = chunk(() => import('./features/overview'))
@@ -23,6 +24,7 @@ const loadAudience = audience.preload
 const loadSettings = settings.preload
 const loadDocs = docs.preload
 const loadInbound = inbound.preload
+Object.assign(routeChunks, { '/': loadOverview, '/logs': loadLogs, '/inbound': loadInbound, '/campaigns': loadCampaigns, '/audience': loadAudience, '/domains': loadSettings, '/api-keys': loadSettings, '/settings': loadSettings, '/docs': loadDocs })
 const LogsPage = logs.page(m => m.LogsPage)
 const EmailDetailPage = logs.page(m => m.EmailDetailPage)
 const ReceivedEmailDetailPage = logs.page(m => m.ReceivedEmailDetailPage)
