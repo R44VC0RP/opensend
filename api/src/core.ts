@@ -155,14 +155,14 @@ export function hasSessionCookie(headers: Headers): boolean {
   const cookie = headers.get('cookie');
   return Boolean(cookie && /(?:^|;\s*)(?:__Secure-)?opensend\.session_token(?:\.\d+)?=[^;\s]/.test(cookie));
 }
-export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | 'ses' | null {
-  if (status < 400 || status >= 500) return null;
-  if (path === '/v1/events/ses') return 'ses';
+export function publicFailureBucket(path: string, status: number, headers?: Headers): 'auth' | 'unsubscribe' | null {
+  // SNS callers share egress addresses; reject untrusted topics/signatures without charging that pool.
+  if (status < 400 || status >= 500 || path === '/v1/events/ses') return null;
   if (/^\/unsubscribe(?:\/|$)/.test(path)) return 'unsubscribe';
   if (status !== 401 || !/^\/v1(?:\/|$)/.test(path)) return null;
   return headers && !headers.has('authorization') && !hasSessionCookie(headers) ? null : 'auth';
 }
-export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe' | 'ses', peer: string): Promise<boolean> {
+export async function publicFailureAllowed(runtime: Runtime, bucket: 'auth' | 'unsubscribe', peer: string): Promise<boolean> {
   const keyId = `public:${bucket}:${peer}`;
   const budget = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
     VALUES (${runtime.config.workspaceId}, ${keyId}, date_trunc('minute', now()), 1)

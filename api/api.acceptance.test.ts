@@ -247,7 +247,8 @@ describe('Public contract and authentication', () => {
     assert.equal(publicFailureBucket('/v1/me', 401), 'auth');
     assert.equal(publicFailureBucket('/v1/me', 200), null);
     assert.equal(publicFailureBucket('/unsubscribe/invalid', 404), 'unsubscribe');
-    assert.equal(publicFailureBucket('/v1/events/ses', 403), 'ses');
+    assert.equal(publicFailureBucket('/v1/events/ses', 403), null);
+    assert.equal(publicFailureBucket('/v1/events/ses', 401, new Headers({ authorization: 'invalid' })), null);
     const document = ok(await http('GET', '/openapi.json'));
     assert.match(document.openapi, /^3\./);
     assert.ok(document.info?.title);
@@ -3728,7 +3729,8 @@ describe('Operational configuration and public event boundaries', () => {
       Timestamp: new Date().toISOString(), SignatureVersion: '2', Signature: Buffer.from('forged').toString('base64'),
       SigningCertURL: 'https://127.0.0.1/never-fetch-this.pem',
     };
-    error(await http('POST', '/v1/events/ses', undefined, envelope), 403, 'SNS_TOPIC_NOT_ALLOWED');
+    // One shared SNS peer can exceed the public failure threshold without losing the real rejection.
+    for (let i = 0; i < 41; i++) error(await http('POST', '/v1/events/ses', undefined, envelope), 403, 'SNS_TOPIC_NOT_ALLOWED');
     // SNS defaults to text/plain, including signed subscription confirmations.
     // These must reach the same security checks, not fail as an absent JSON body.
     for (const contentType of ['text/plain', 'text/plain; charset=UTF-8']) {
