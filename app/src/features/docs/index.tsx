@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useIsFetching, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { CopyButton, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { CopyAction } from '../../components/motion'
 import { useApi, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
 import { AgentPrompt, McpSetup, agentPrompt, usePublicOrigin } from './agent-setup'
 import './docs.css'
@@ -63,13 +64,14 @@ function OperationPage({ document, operation }: {document: Document; operation: 
   return <article className="docs-operation">
     <header className="docs-operation-header">
       <h1>{operation.summary}</h1>
-      <div className="docs-endpoint"><span data-method={operation.method}>{operation.method}</span><code>{operation.path}</code><CopyButton value={operation.path} label="Copy endpoint path" /></div>
+      <div className="docs-endpoint"><span data-method={operation.method}>{operation.method}</span><code>{operation.path}</code><CopyAction value={operation.path} label="Copy endpoint path" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
       {operation.description && <p>{operation.description}</p>}
     </header>
     {sample && <section className="docs-section" aria-labelledby="docs-example-title">
-      <div className="docs-section-heading"><h2 id="docs-example-title">Example</h2><CopyButton key={`${operation.id}:${language}`} value={sample.source} label="Copy code example" /></div>
-      <Tabs label="Example language" value={language} onValueChange={setLanguage} items={operation.samples.map(item => ({value: item.label, label: item.label}))} />
-      <pre className="docs-code" tabIndex={0}><code>{sample.source}</code></pre>
+      <h2 id="docs-example-title">Example</h2>
+      <div className="docs-example-bar"><Tabs label="Example language" value={language} onValueChange={setLanguage} items={operation.samples.map(item => ({value: item.label, label: item.label}))} /><CopyAction key={`${operation.id}:${language}`} value={sample.source} label="Copy code example" variant="ghost" size="sm" compact className="developer-copy-icon" /></div>
+      {/* Every language shares one cell, so switching tabs never changes the section's height. */}
+      <div className="docs-example-panels">{operation.samples.map(item => <pre key={item.label} className="docs-code" tabIndex={0} aria-label={`${item.label} example`} data-active={item.label === sample.label || undefined} inert={item.label !== sample.label}><code>{item.source}</code></pre>)}</div>
     </section>}
     {parameters.length > 0 && <section className="docs-section"><h2>Parameters</h2><div className="docs-field-list">{parameters.map(parameter => <div className="docs-field" key={`${parameter.in}:${parameter.name}`}><div><code>{parameter.name}</code>{parameter.required && <span className="docs-required">required</span>}<span className="docs-type">{parameter.in} · {typeLabel(document, parameter.schema)}</span></div>{parameter.description && <p>{parameter.description}</p>}</div>)}</div></section>}
     {body && <section className="docs-section"><h2>Request body</h2><SchemaDefinition document={document} input={body} /></section>}
@@ -105,14 +107,13 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
     <header className="docs-operation-header"><h1>OpenSend API</h1><p>{document.info.description}</p></header>
     <AgentPrompt prompt={prompt} />
     <McpSetup chooseAccess />
-    <section className="docs-section"><h2>Start with the TypeScript SDK</h2><div className="docs-install"><code>{install}</code><CopyButton value={install} label="Copy install command" /></div><p className="muted">Use an API key from your OpenSend installation on a trusted server.</p></section>
+    <section className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href="https://www.npmjs.com/package/opensend-js">published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>Complete API documentation for agents and text tools.</span></a>
       <a href="/llms.txt"><strong>Agent index</strong><span>Canonical links to every focused operation page.</span></a>
       <a href="/openapi.json"><strong>OpenAPI 3.1</strong><span>Machine-readable schemas and generated code examples.</span></a>
-      <a href="https://www.npmjs.com/package/opensend-js"><strong>TypeScript SDK</strong><span>Generated client and request/response types.</span></a>
     </div></section>
-    <section className="docs-section"><div className="docs-section-heading"><h2>API operations</h2><span className="muted">{all.length} operations</span></div>
+    <section className="docs-section"><h2 className="docs-section-heading">API operations<span>{all.length}</span></h2>
       <div className="docs-overview-groups">{groups.map(group => <section key={group}><h3>{group}<span>{all.filter(operation => operation.tag === group).length}</span></h3><div>{all.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span><code>{operation.path}</code></a>)}</div></section>)}</div>
     </section>
   </article>
@@ -133,7 +134,7 @@ export function DocsPage() {
     <header className="docs-header"><Link className="docs-brand" to="/"><strong>OpenSend</strong><span>Docs</span></Link><nav aria-label="Documentation links"><a href="/docs.md">Markdown</a><a href="/openapi.json">OpenAPI</a><a href="https://www.npmjs.com/package/opensend-js">TypeScript SDK</a><Link to="/">Dashboard</Link></nav></header>
     <div className="docs-layout">
       <aside className="docs-sidebar"><Input type="search" aria-label="Search API documentation" placeholder="Search API" value={search} onChange={event => setSearch(event.target.value)} />
-        <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
+        <nav aria-label="API operations">{query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && search.trim() ? <p className="muted docs-nav-empty">No matching operations.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{group}</h2>{filtered.filter(operation => operation.tag === group).map(operation => <a key={operation.id} href={`#${operation.id}`} data-active={operation.id === selected || undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></a>)}</div>)}</nav>
       </aside>
       <main className="docs-main">{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : current ? <OperationPage document={query.data!} operation={current} /> : query.isPending ? <EmptyState title="Loading API documentation…" /> : <DocsOverview document={query.data!} all={all} />}</main>
     </div>

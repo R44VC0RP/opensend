@@ -1,0 +1,12 @@
+/* Credentials page: plain sections split by hairlines, no boxes (same rhythm as onboarding). */
+.keys-sections { display: flex; flex-direction: column; min-width: 0; }
+.keys-sections > .section { margin-block: 0; }
+.keys-sections > .section:not(:first-child) { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.keys-head { display: flex; flex-direction: column; gap: var(--space-8); }
+.keys-head > .ui-section-header { margin-bottom: 0; }
+.keys-head > p { max-width: 60ch; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+/* Two-line rows (name + caption, access + scope) render 53px; the skeleton must match. */
+.ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
+.keys-head > .ui-section-header { align-items: center; flex-wrap: wrap; }
+/* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
+.keys-sections .ui-table { min-width: 880px; }

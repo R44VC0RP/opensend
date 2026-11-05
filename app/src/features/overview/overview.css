@@ -1,0 +1,15 @@
+/* Overview sections read as one column split by hairlines, 24px above and below (onboarding rhythm). */
+.page-surface .metrics-grid { border-top: 0; padding-bottom: var(--space-24); border-bottom: 1px solid var(--color-border-muted); }
+.page-surface .metric { min-height: 0; padding-top: 0; border-left-color: var(--color-border-muted); }
+.page-surface .chart-section { padding-top: var(--space-24); }
+.page-surface .dashboard-bottom { margin-top: var(--space-24); padding-top: var(--space-24); border-top-color: var(--color-border-muted); }
+.page-surface .sending-streams { border-left-color: var(--color-border-muted); }
+.page-surface .overview-reputation { border-right-color: var(--color-border-muted); }
+@media (max-width: 850px) {
+  .page-surface .metrics-grid { row-gap: var(--space-24); }
+  .page-surface .dashboard-bottom { row-gap: var(--space-24); }
+  .page-surface .sending-streams { border-top-color: var(--color-border-muted); }
+}
+/* The surface is a fixed-height flex column; keep the header and filters at their own height when content overflows. */
+.page-surface > .overview-toolbar { flex-shrink: 0; }
+.page-surface .overview-reputation { flex-wrap: wrap; min-width: 0; }

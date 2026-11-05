@@ -89,9 +89,9 @@ export function DnsRecordTable({ domain, records }: { domain: string; records: D
   ]} />
 }
 
-function RecordGroup({ title, description, notes = [], verified, domain, records }: { title: string; description: string; notes?: string[]; verified: boolean; domain: string; records: DnsRecord[] }) {
-  return <div className="stack settings-discovery-section">
-    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note}>{note}</p>)}</div><StatusBadge status={verified ? 'Verified' : 'Pending'} /></div>
+function RecordGroup({ title, optional = false, description, notes = [], domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; domain: string; records: DnsRecord[] }) {
+  return <div className="stack domain-group">
+    <div className="ui-section-header"><div className="domain-group-title"><h3>{title}{optional && <span className="muted"> · optional</span>}</h3><p className="muted">{description}</p>{notes.map(note => <p key={note}>{note}</p>)}</div></div>
     <DnsRecordTable domain={domain} records={records} />
   </div>
 }
@@ -149,12 +149,12 @@ export function DomainRecords({ domain, actions, guided = false, setup = null }:
     {receiving.length > 0 && <RecordRows title="Receiving" optional description={`Add this to receive mail at ${domain.name}.`} notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
   </section>
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. They usually verify within minutes; you can leave this page and OpenSend keeps checking.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>DNS records</h2><p className="muted">Add these at your DNS provider. OpenSend keeps checking.</p></div>
       <div className="cluster">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
     </div>
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
-    {sending.length > 0 && <RecordGroup title="Sending" description={`Signs mail sent from ${domain.name} and proves the domain is yours.`} verified={sendingVerified} domain={domain.name} records={sending} />}
-    {receiving.length > 0 && <RecordGroup title="Receiving" description="Optional — add to receive mail on this domain." notes={notes} verified={receivingVerified} domain={domain.name} records={receiving} />}
+    {sending.length > 0 && <RecordGroup title="Sending" description="Signs your mail and proves the domain is yours." domain={domain.name} records={sending} />}
+    {receiving.length > 0 && <RecordGroup title="Receiving" optional description="Add to receive mail on this domain." notes={notes} domain={domain.name} records={receiving} />}
   </section>
 }

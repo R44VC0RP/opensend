@@ -52,9 +52,8 @@ export function DomainsPage() {
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.status !== 'verified' && <div className="muted">{setupSummary(row)}</div>}</div> },
+        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus)) && <div className="muted">{setupSummary(row)}</div>}</div> },
         { ...settingsColumns.domains[2], render: row => row.regionId },
-        { ...settingsColumns.domains[3], render: row => <Link to={`/domains/${row.id}`}>{row.status === 'verified' && row.mailFromStatus === 'verified' ? 'Manage' : 'Review records'}</Link> },
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
@@ -102,34 +101,36 @@ export function DomainDetailPage() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<>
-      {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {/* Kept in place once verified, so the header doesn't reflow as the live status flips. */}
       <span className="dns-reserve" data-hidden={current.status === 'verified' || undefined} inert={current.status === 'verified'}><Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Check now</Button></span>
+      {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error} />
     {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
-    <dl className="settings-facts settings-account-summary">
+    <dl className="settings-facts domain-facts">
       <div><dt>Status</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
       <div><dt>Region</dt><dd>{current.regionId}</dd></div>
     </dl>
-    <DomainRecords domain={current} setup={dns.setup} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
-    <details className="settings-aws-details">
-      <summary>Advanced</summary>
-      <div className="stack settings-discovery-section">
-        <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">{mailFromName ? 'Routes bounces through your subdomain and aligns SPF.' : 'Optional. Routes bounces through a subdomain you own and aligns SPF.'}</p></div>
-          <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add custom MAIL FROM'}</Button></div>
+    <div className="domain-sections">
+      <DomainRecords domain={current} setup={dns.setup} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <details className="domain-advanced">
+        <summary>Advanced</summary>
+        <div className="domain-advanced-body">
+          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">Routes bounces through a subdomain you own and aligns SPF.</p></div>
+            <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button aria-label={mailFromName ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
+          </div>
+          {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
         </div>
-        {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
-      </div>
-    </details>
-    {!hosted && <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />}
+      </details>
+      {!hosted && <MailboxReceiving domainId={id} domainName={current.name} verified={current.status === 'verified'} />}
+    </div>
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="You can no longer send from this domain. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'domain' && query.queryKey[4] === id }); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'opensend' && query.queryKey[3] === 'domains' }) }} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Continue to DNS records</Button></>}>
       <form id="configure-mail-from" className="stack" onSubmit={submitMailFrom} noValidate>
         <MutationError error={configureMailFrom.error} />
         <Field label="MAIL FROM domain" htmlFor="mail-from-domain" error={mailFromInvalid || fieldError(configureMailFrom.error, 'mailFromDomain')}><Input id="mail-from-domain" autoFocus required value={mailFromDomain} onChange={event => setMailFromDomain(event.target.value)} disabled={configureMailFrom.isPending} placeholder={`email.${current.name}`} /></Field>
-        <p className="muted">Use an unused subdomain of {current.name}. OpenSend will show its MX and SPF records here.</p>
+        <p className="muted">Use an unused subdomain of {current.name}.</p>
       </form>
     </Dialog>
   </div>
@@ -154,7 +155,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Inbound</h2><p className="muted">Receive mail on {domainName} and read it as conversations in <Link to="/inbound">Inbound</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Inbound</h2><p className="muted">Receive mail on {domainName}. Conversations appear in <Link to="/inbound">Inbound</Link>.</p></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
@@ -163,7 +164,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     <MutationError error={enable.error ?? disable.error ?? check.error} />
     {!verified && !on && <p className="muted">Verify the domain before enabling receiving.</p>}
     {state && status && on && <>
-      <dl className="settings-facts settings-account-summary">
+      <dl className="settings-facts domain-facts">
         <div><dt>Receiving</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
         <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_address' ? 'Create an address' : 'Store as unrouted'}</dd></div>
         <div><dt>Addresses</dt><dd><Link to="/inbound/addresses">{state.addressCount}</Link></dd></div>
