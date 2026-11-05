@@ -46,7 +46,7 @@ export function MailboxKeysSection({ showRevoked }: { showRevoked: boolean }) {
   return <section className="section stack">
     <div className="keys-head">
       <SectionHeader title="Inbound keys" actions={<Button onClick={openCreate}>Create inbound key</Button>} />
-      <p className="muted">For agents on chosen <Link to="/inbound/addresses">inbound addresses</Link>. No admin access.</p>
+      <p className="muted">For agents on chosen <Link to="/inbound/addresses">inbound addresses</Link>. Can't manage domains, addresses or other keys.</p>
     </div>
     {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable className="keys-table--two-line" loading={keys.isPending} skeletonRows={2} minRows={2} rows={keys.data ?? []} rowKey={row => row.id}
       empty={<EmptyState title={showRevoked ? 'No inbound keys' : 'No active inbound keys'} action={<Button onClick={openCreate}>Create inbound key</Button>} />}

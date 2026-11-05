@@ -52,7 +52,7 @@ export function DomainsPage() {
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{row.status !== 'verified' && <div className="muted">{setupSummary(row)}</div>}</div> },
+        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus)) && <div className="muted">{setupSummary(row)}</div>}</div> },
         { ...settingsColumns.domains[2], render: row => row.regionId },
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
@@ -118,7 +118,7 @@ export function DomainDetailPage() {
         <summary>Advanced</summary>
         <div className="domain-advanced-body">
           <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">Routes bounces through a subdomain you own and aligns SPF.</p></div>
-            <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
+            <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button aria-label={mailFromName ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
           </div>
           {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
         </div>

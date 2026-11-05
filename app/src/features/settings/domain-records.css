@@ -55,7 +55,7 @@
 .domain-group-title p { font-size: var(--text-sm); line-height: var(--leading-sm); max-width: 60ch; text-wrap: pretty; }
 .domain-group-title h3 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .domain-group + .domain-group { margin-top: var(--space-16); }
-.settings-facts.domain-facts { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: max-content; gap: var(--space-8) var(--space-40); }
+.settings-facts.domain-facts { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-40); }
 .domain-advanced > summary { width: fit-content; cursor: pointer; font-weight: var(--font-weight-bold); }
 .domain-advanced-body { display: flex; flex-direction: column; gap: var(--space-12); padding-top: var(--space-12); min-width: 0; }
 .domain-advanced-body .ui-section-header { margin-bottom: 0; }
