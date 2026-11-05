@@ -848,11 +848,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         const discovery = `/v1/regions/${region}/discovery`;
         await providerTest.test('MX refuses public suffixes and reserved domain trees before reserving or contacting SES',async()=>{
           const own=new URL(runtime.config.publicUrl).hostname, start=calls.length;
-          const blocked=['com','xn--p1ai',' CO.UK ','com.au','github.io','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com',own,'in.'+own];
+          const blocked=['com','xn--p1ai',' CO.UK ','com.au','github.io','customer.github.io','mail.vercel.app','netlify.app','onmicrosoft.com','amazonses.com','in.amazonses.com','amazonaws.com','ses.amazonaws.com',own,'in.'+own,own.split('.').slice(1).join('.')];
           for (const name of blocked) error(await add(b.cookie,name),422,'DOMAIN_NOT_ALLOWED');
           assert.equal(calls.length,start);
           assert.equal((await pool.query('SELECT 1 FROM domain_claims WHERE name=ANY($1)',[blocked.map(s=>s.trim().toLowerCase())])).rowCount,0);
-          const allowed=ok(await add(b.cookie,unique('customer')+'.github.io'),201);
+          const allowed=ok(await add(b.cookie,unique('customer')+'.co.uk'),201);
           ok(await local('DELETE',`/v1/domains/${allowed.id}`,undefined,b.cookie));
         });
         await providerTest.test('MX serializes workspace claim limits across unrelated DNS names',async()=>{

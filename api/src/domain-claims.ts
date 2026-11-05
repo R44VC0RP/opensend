@@ -5,14 +5,13 @@ import type { ReadyConnection } from './provider-credentials.js';
 import { claimSends, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
-// Exact suffixes are shared by independent DNS owners; their customer subdomains are still claimable.
+// Registry suffixes have independently owned children. Platform-controlled DNS trees do not.
 const publicSuffixes = new Set(`co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk net.uk sch.uk nhs.uk police.uk
   com.au net.au org.au edu.au gov.au asn.au id.au co.nz org.nz net.nz govt.nz ac.nz co.jp or.jp ne.jp ac.jp go.jp
   com.br org.br net.br com.cn net.cn org.cn gov.cn co.in net.in org.in ac.in gov.in co.za org.za net.za com.mx org.mx
-  co.kr com.sg com.hk com.tw com.tr com.ar com.co co.id co.il co.th com.my com.ph com.vn co.ke co.ug
-  github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
-  azurewebsites.net web.app firebaseapp.com appspot.com blogspot.com fly.dev onrender.com ngrok.io`.split(/\s+/));
-const reservedRoots = ['amazonses.com','amazonaws.com'];
+  co.kr com.sg com.hk com.tw com.tr com.ar com.co co.id co.il co.th com.my com.ph com.vn co.ke co.ug`.split(/\s+/));
+const reservedRoots = `amazonses.com amazonaws.com github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
+  azurewebsites.net web.app firebaseapp.com appspot.com blogspot.com fly.dev onrender.com ngrok.io`.split(/\s+/);
 const notAllowed = () => new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
 // Report the same policy error for a bare TLD, before the ordinary DNS syntax validator rejects it.
 export const claimName = z.preprocess(value=>{
@@ -20,7 +19,9 @@ export const claimName = z.preprocess(value=>{
   return value;
 },domainName);
 export function claimNameAllowed(name:string,publicUrl:string) {
-  return name.includes('.') && !publicSuffixes.has(name) && ![...reservedRoots,new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'')].some(root=>name===root || name.endsWith('.'+root));
+  const host=new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
+  return name.includes('.') && !publicSuffixes.has(name) && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
+    && !reservedRoots.some(root=>name===root || name.endsWith('.'+root));
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
