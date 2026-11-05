@@ -1,0 +1,24 @@
+/* Email detail: metadata, notices, body and identifiers on one 24px rhythm, split by hairlines. */
+.page-surface .email-metadata { padding-bottom: 0; }
+.page-surface .email-detail-page > .ui-alert { margin-top: var(--space-24); }
+.page-surface .email-detail-page > .ui-alert + .ui-alert { margin-top: var(--space-12); }
+.page-surface .email-detail-grid { margin-top: var(--space-24); padding-block: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.page-surface .delivery-timeline { border-left-color: var(--color-border-muted); }
+.page-surface .delivery-timeline > .ui-section-header { min-height: var(--control-height); }
+.page-surface .delivery-timeline li:first-child { padding-top: 0; }
+.page-surface .received-details { gap: 0; }
+.page-surface .received-group { margin-top: var(--space-24); }
+.page-surface .message-identifiers { padding-top: var(--space-24); border-top-color: var(--color-border-muted); }
+.email-header-actions { display: grid; align-items: center; }
+.email-header-actions > * { grid-area: 1 / 1; justify-self: end; }
+.page-surface :is(.email-header-actions > [data-hidden], .email-reserve[data-hidden]) { visibility: hidden; }
+/* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
+.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :is(.ui-page-header, .ui-tabs, .data-toolbar), .page-surface > .ui-page-header:has(+ .ui-loading-layout .email-metadata) { flex-shrink: 0; }
+.page-surface .logs-page .search-box { min-width: 0; }
+@media (max-width: 850px) {
+  .page-surface .email-detail-page { min-height: auto; }
+  .page-surface .email-detail-grid { row-gap: var(--space-24); }
+  .page-surface .delivery-timeline { border-top-color: var(--color-border-muted); }
+}
+/* Only the table and the message body flex to the surface height; headers, notices and footers keep their content height when they wrap. */
+.page-surface :is(.logs-page, .email-detail-page) > :not(.logs-table, .email-detail-grid) { flex-shrink: 0; }
