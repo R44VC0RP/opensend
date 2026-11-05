@@ -61,10 +61,10 @@ export const releaseConnectionClaims = (wid: string, target: SQL) => sql`target 
   released AS (SELECT * FROM detached UNION ALL SELECT * FROM forgotten),
   dropped AS (DELETE FROM operation_domains d USING released r WHERE d.workspace_id=${wid} AND d.name=r.name), ${releasedClaimCleanup(wid)}`;
 // Used in the existing admission/dispatch statements. The connection join also fences
-// disconnects and verifies the region. Simulation needs a claim, never delivery proof.
+// disconnects and verifies the region. Hosted sender proof is required even when SES is simulated.
 export const sendingConnections = (runtime: Runtime) => sql.identifier(isSimulatedSes(runtime) ? 'provider_simulated_connections' : 'provider_sending_connections');
 export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL, runtime: Runtime) => sql`EXISTS (SELECT 1 FROM domain_claims dc
   JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
-  WHERE dc.workspace_id=${workspace} AND pc.region=${region} AND ${connectionReady()} ${!isSimulatedSes(runtime) ? sql`AND ${claimSends()}` : sql``}
+  WHERE dc.workspace_id=${workspace} AND pc.region=${region} AND ${connectionReady()} ${runtime.config.multiTenant || !isSimulatedSes(runtime) ? sql`AND ${claimSends()}` : sql``}
     AND ${within(host, sql`dc.name`)} FOR SHARE OF dc,pc)`;
 export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'Verify this sender domain or a parent domain in this workspace and region.', 'from');

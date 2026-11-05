@@ -1915,9 +1915,11 @@ describe('Hosted MCP OAuth and tools', () => {
       Object.assign(runtime.config, { multiTenant: true, allowedDomains: [], allowedEmails: [] });
       const wid = runtime.config.workspaceId, uid = manager!.userId;
       const connection = unique('conn');
-      // A cold hosted connection and unverified claim are sufficient for simulated delivery, even without AWS credentials.
+      // Simulation can use a cold connection, but must still require a verified sender claim on MX.
       await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$2,'shared',$3,'ready')",[connection,wid,REGION]);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
+      error(await local('POST','/v1/emails/send',mail()),403,'SENDER_DOMAIN_NOT_VERIFIED');
+      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1 AND name='example.com'",[wid]);
       await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       const deniedClient = ok(await registerClient(t, db, {}, request), 201);
       const query = new URLSearchParams({ response_type: 'code', client_id: deniedClient.client_id, redirect_uri: 'http://127.0.0.1/callback',
@@ -1946,9 +1948,9 @@ describe('Hosted MCP OAuth and tools', () => {
       await run('email.dispatch');
       assert.deepEqual((await db.query('SELECT status,provider_id FROM sending_emails WHERE id=$1', [oldMail])).rows, [{status:'canceled',provider_id:null}]);
       await db.query('UPDATE oauth_consent SET reference_id=$1 WHERE id=$2', [reference, consentId]);
-      const lostProof = await send(); await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]); await run('email.dispatch');
-      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still exist at dispatch.');
-      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ('example.com',$1,$2)",[wid,connection]);
+      const lostProof = await send(); await db.query("UPDATE domain_claims SET sending_state='failed' WHERE workspace_id=$1",[wid]); await run('email.dispatch');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[lostProof])).rows[0].status,'canceled','The claim must still permit sending at dispatch.');
+      await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1",[wid]);
       const second = await send();
       await db.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2", [wid, uid]);
       assert.equal((await call('getContext')).response.role, 'member', 'An existing member grant must not grow on promotion.');
