@@ -1,3 +1,4 @@
+import { Fragment } from 'react'
 import { ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
 import { AudienceHeader } from './header'
 import './audience.css'
@@ -50,9 +51,9 @@ export function AudiencePreviewSkeleton() {
 }
 export function ContactDetailBodySkeleton() {
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
-    <div className="form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'] }, { title: 'Marketing consent', labels: ['Status', 'Consent source', 'Confirmed', 'Suppression'] }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <div className="audience-property-placeholder" key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></div>)}</dl></section>)}</div>
+    <div className="section form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'] }, { title: 'Marketing consent', labels: ['Consent source', 'Confirmed', 'Suppression'] }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section>)}</div>
     <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
-    <section className="section"><SectionHeader title="Matching emails" /><p className="muted"><SkeletonText width={80} /></p><TableSkeleton columns={activityColumns} rows={5} pagination /></section>
+    <section className="section"><SectionHeader title="Matching emails" /><TableSkeleton columns={activityColumns} rows={5} pagination /></section>
   </>
 }
 export function SegmentEditorBodySkeleton() {
@@ -60,11 +61,11 @@ export function SegmentEditorBodySkeleton() {
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {
   if (kind === 'contact') return <LoadingRegion className="audience-page" label="Loading contact"><PageHeader title={<SkeletonText width={200} lineHeight={24} />} backTo="/audience" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
-  if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={180} lineHeight={24} />} backTo="/audience/lists" actions={<ControlSkeleton width={132} />} /><AudienceSummarySkeleton /><AudienceMembersSkeleton /></LoadingRegion>
-  if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<><ControlSkeleton width={72} /><ControlSkeleton width={121} /></>} /><SegmentEditorBodySkeleton /></LoadingRegion>
+  if (kind === 'list') return <LoadingRegion className="audience-page" label="Loading list"><PageHeader title={<SkeletonText width={96} lineHeight={24} />} backTo="/audience/lists" actions={<><ControlSkeleton width={85} /><ControlSkeleton width={120} /></>} /><AudienceSummarySkeleton /><AudienceMembersSkeleton /></LoadingRegion>
+  if (kind === 'segment') return <LoadingRegion className="audience-page" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
   return <LoadingRegion className="audience-page" label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={132} />}<ControlSkeleton width={contacts ? 131 : kind === 'lists' ? 124 : 155} /></>} />
-    <div className="data-toolbar"><div className="cluster">{contacts ? <><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><Input aria-label="Find list filter" placeholder="Find list by name" disabled /><ControlSkeleton width={170} /></> : <ControlSkeleton width={320} />}</div><SkeletonText width={100} /></div>
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><Input className="audience-search" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><Input aria-label="Find list filter" placeholder="Find list by name" disabled /><ControlSkeleton width={170} /></> : <ControlSkeleton width={320} />}</div></div>
     <TableSkeleton columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? 8 : 5} pagination />
   </LoadingRegion>
 }
