@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowUpRight, ChevronRight, Download, Paperclip, Search, X } from 'lucide-react'
-import { useApiQuery, useRegion, useApi } from '../../data/context'
+import { useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import type { Email, ReceivedEmail, ReceivedEmailDetail } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { EmailPreview, htmlToText } from '../../components/EmailPreview'
@@ -26,7 +26,10 @@ export function LogsPage() {
 }
 function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'received' }) {
   const [params, setParams] = useSearchParams()
-  return <><PageHeader title="Logs" actions={<span className="muted">{regionId}</span>} />
+  const selected = useRegion().regionId
+  const { canAdminister } = useWorkspaceAccess()
+  // The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
+  return <><PageHeader title="Logs" actions={!canAdminister || regionId !== selected ? <span className="muted">{regionId}</span> : undefined} />
     <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></>
 }
 function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
@@ -107,7 +110,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
   const html = email.attachments.reduce((value, file) => file.contentId && file.url ? value.split(`cid:${file.contentId}`).join(file.url) : value, email.html ?? '')
   const hasHtml = html.trim().length > 0
   const checks = (['spf', 'dkim', 'dmarc', 'spam', 'virus'] as const).filter(key => email.verdicts[key])
-  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.spam ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" />} />
+  return <div className="email-detail-page"><PageHeader title={email.subject || '(no subject)'} backTo="/logs?view=received" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--md" href={email.rawUrl}><Download size={16} />Download .eml</a> : undefined} />
     <dl className="email-metadata"><div><dt>From</dt><dd>{addressText(email.from)}</dd></div><div><dt>To</dt><dd>{email.envelopeTo.join(', ') || email.to.map(addressText).join(', ')}</dd></div><div><dt>Address</dt><dd>{email.addresses.length ? email.addresses.map((mailbox, index) => <Fragment key={mailbox.id}>{index > 0 && ', '}<Link to={`/inbound?address=${encodeURIComponent(mailbox.id)}&thread=${encodeURIComponent(email.threadId)}&message=${encodeURIComponent(email.id)}`}>{mailbox.address}</Link></Fragment>) : 'Unrouted'}</dd></div></dl>
     {email.spam && <Alert tone="warning">SES flagged this message as spam or a virus. It’s stored, but spam never creates a new address.</Alert>}
     {email.bodyTruncated && <Alert tone="info">Part of this message was too large to store in full. Download the original for the complete content.</Alert>}
@@ -117,7 +120,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
         : view === 'html' ? <pre className="message-source">{email.html || 'No HTML body.'}</pre>
         : <pre className="message-source">{(email.headers ?? []).map(header => `${header.name}: ${header.value}`).join('\n') || 'No headers stored.'}</pre>}
     </section><section className="delivery-timeline received-details">
-      <SectionHeader title="Details" actions={email.rawUrl ? <a className="ui-button ui-button--secondary ui-button--sm" href={email.rawUrl}>Download .eml</a> : undefined} />
+      <SectionHeader title="Details" />
       <dl className="received-facts">
         <div><dt>Received</dt><dd>{date(email.receivedAt)} · {time(email.receivedAt)} UTC</dd></div>
         {email.sentAt && <div><dt>Sent</dt><dd>{date(email.sentAt)} · {time(email.sentAt)} UTC</dd></div>}
@@ -126,7 +129,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
         {email.replyTo.length > 0 && <div><dt>Reply-To</dt><dd>{email.replyTo.map(addressText).join(', ')}</dd></div>}
         {email.sizeBytes !== null && <div><dt>Size</dt><dd>{fileSize(email.sizeBytes)}</dd></div>}
       </dl>
-      {email.attachments.length > 0 && <div className="received-group"><h3 className="received-heading">Attachments · {email.attachments.length}</h3><ul className="received-attachments">{email.attachments.map(file => <li key={file.id}>
+      {email.attachments.length > 0 && <div className="received-group"><h3 className="received-heading">Attachments</h3><ul className="received-attachments">{email.attachments.map(file => <li key={file.id}>
         <Paperclip size={14} aria-hidden />{file.url ? <a href={file.url} target="_blank" rel="noreferrer">{file.filename}</a> : <span>{file.filename}</span>}<span className="muted">{fileSize(file.size)}{file.disposition === 'inline' ? ' · inline' : ''}</span>
       </li>)}</ul></div>}
     </section></div>
@@ -156,7 +159,9 @@ function EmailDetail({ email }: { email: Email }) {
   const hasPlainText = plainText.trim().length > 0
   const contacts = useApiQuery(['contact-for-email', email.to], (api, signal) => api.contacts.list({ email: email.to, pageSize: 1 }, signal))
   const contact = contacts.data?.items.find(item => item.email.toLowerCase() === email.to.toLowerCase())
-  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={contact ? <Button onClick={() => navigate(`/audience/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button> : <StatusBadge status={email.status} />} />
+  // Bounce and complaint notices say whether the address is suppressed; keep the loading state until the contact lookup settles so the notice never grows or shrinks under the reader.
+  if (contacts.isPending && ['bounced', 'complaint', 'complained'].includes(email.status)) return <EmailDetailSkeleton />
+  return <div className="email-detail-page"><PageHeader title={email.subject} backTo="/logs" actions={<span className="email-header-actions"><span data-hidden={contact ? true : undefined}><StatusBadge status={email.status} /></span><Button data-hidden={contact ? undefined : true} onClick={() => contact && navigate(`/audience/contacts/${contact.id}`)}>View contact<ArrowUpRight size={16} /></Button></span>} />
     <dl className="email-metadata"><div><dt>To</dt><dd>{email.to}</dd></div><div><dt>From</dt><dd>{email.fromName ? `${email.fromName} <${email.from}>` : email.from}</dd></div><div><dt>Stream</dt><dd>{label(email.stream)}</dd></div></dl>
     {email.simulated && <Alert tone="info">Simulated; not sent to SES.</Alert>}
     {email.status === 'bounced' && <Alert tone="warning">Delivery failed.{contact?.status === 'suppressed' && ' This address is suppressed.'}</Alert>}
