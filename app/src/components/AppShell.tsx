@@ -1,6 +1,5 @@
 import { Suspense, useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router'
-import { useQueryClient } from '@tanstack/react-query'
 import { useApi, useRegion, useSession, useWorkspaceAccess } from '../data/context'
 import { sidebarPaths, usePrefetchRoute, useRouteIntent } from '../data/prefetch'
 import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
@@ -30,7 +29,6 @@ export function AppShell() {
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const navigate = useNavigate()
-  const cache = useQueryClient()
   const prefetchRoute = usePrefetchRoute()
   const intent = useRouteIntent()
   const latest = useRef({ prefetchRoute, pathname: location.pathname, canAdminister: access.canAdminister })
@@ -45,22 +43,28 @@ export function AppShell() {
     if (warming.current || api.mode !== 'live' || !regionReady || saveData) return
     warming.current = true
     let stopped = false
+    let release: (() => void) | undefined
+    // A hidden tab waits for the user to come back instead of fetching in the background.
+    const visible = () => !document.hidden ? Promise.resolve() : new Promise<void>(resolve => {
+      const done = () => { document.removeEventListener('visibilitychange', onChange); release = undefined; resolve() }
+      const onChange = () => { if (!document.hidden) done() }
+      release = done
+      document.addEventListener('visibilitychange', onChange)
+    })
     const idle = () => new Promise<void>(resolve => typeof requestIdleCallback === 'function' ? requestIdleCallback(() => resolve(), { timeout: 3000 }) : void setTimeout(resolve, 300))
-    const quiet = async (limit: number) => { for (let waited = 0; !stopped && (cache.isFetching() > 0 || document.hidden) && waited < limit; waited += 250) await new Promise(resolve => setTimeout(resolve, 250)) }
     void (async () => {
       await new Promise(resolve => setTimeout(resolve, 600))
-      await quiet(6000)
       for (const path of sidebarPaths) {
+        await visible()
         await idle()
-        await quiet(2000)
         const { pathname, canAdminister, prefetchRoute } = latest.current
         if (stopped) return
         if ((path === '/' ? pathname === '/' : pathname.startsWith(path)) || (!canAdminister && adminOnly.has(path))) continue
         await prefetchRoute(path)
       }
     })()
-    return () => { stopped = true; warming.current = false }
-  }, [api.mode, cache, regionReady])
+    return () => { stopped = true; release?.(); warming.current = false }
+  }, [api.mode, regionReady])
   useEffect(() => {
     window.scrollTo(0, 0)
     content.current?.scrollTo(0, 0)
