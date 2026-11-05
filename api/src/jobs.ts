@@ -191,7 +191,7 @@ export async function followDueJobs(runtime: Runtime, drain: () => Promise<unkno
     const delaySeconds = await nextWakeDelay(runtime);
     if (delaySeconds === null) return 'idle';
     if (!await reserveNextWake(runtime, delaySeconds)) return 'covered';
-    const waitMs = Math.max(1000, delaySeconds * 1000);
+    const waitMs = Math.max(1000, delaySeconds * 1000) + 150;
     if (Date.now() + waitMs + 2000 <= deadline) { await new Promise(resolve => setTimeout(resolve, waitMs)); continue; }
     await sendWake(delaySeconds);
     return 'scheduled';

@@ -4744,6 +4744,40 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('followDueJobs pads in-place waits past available_at so a 2 s busy-slot deferral completes without stranding on covered', async t => {
+    const [{ nodeRuntime }, { drizzle }, { processJobs, followDueJobs, JobDeferred }, { enqueue }] = await Promise.all([
+      import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'), import('./src/jobs.js'), import('./src/jobs.js'),
+    ]);
+    const session = await fixtureDatabase(t);
+    const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BETTER_AUTH_SECRET: AUTH_SECRET,
+      PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
+      S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
+    cleanup(t, instance.close);
+    // Autocommit temp tables advance now()/clock_timestamp() across sleeps while remaining invisible to the harness runner.
+    await session.query('CREATE TEMP TABLE jobs (LIKE public.jobs INCLUDING ALL); CREATE TEMP TABLE job_schedule (LIKE public.job_schedule INCLUDING ALL)');
+    const scoped = { ...instance.runtime, db: drizzle(session) };
+    const ws = unique('follow-due-workspace');
+    let active = false, completed = 0, wakes = 0;
+    const handlers: Record<string, import('./src/core.js').JobHandler> = {
+      'mailbox.ingest': async () => {
+        if (active) throw new JobDeferred(new Date(Date.now() + 2_000).toISOString());
+        active = true;
+        try { await new Promise(resolve => setTimeout(resolve, 40)); completed++; } finally { active = false; }
+      },
+    };
+    const first = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 1 } });
+    const second = await enqueue(scoped.db, { type: 'mailbox.ingest', workspaceId: ws, payload: { n: 2 } });
+    const started = Date.now();
+    const outcome = await followDueJobs(scoped, () => processJobs(scoped, handlers, 100, 2), async () => { wakes++; }, 10_000);
+    const elapsed = Date.now() - started;
+    assert.equal(outcome, 'idle');
+    assert.equal(completed, 2);
+    assert.equal(wakes, 0);
+    assert.ok(elapsed >= 2_100, `Expected padded 2.15 s in-place wait; observed ${elapsed}ms.`);
+    const { rows } = await session.query('SELECT id, status, attempts FROM jobs WHERE id = ANY($1) ORDER BY id', [[first, second]]);
+    assert.deepEqual(rows.map(r => ({ status: r.status, attempts: r.attempts })), [{ status: 'completed', attempts: 1 }, { status: 'completed', attempts: 1 }]);
+  });
+
   test('the pacing gate spaces slots evenly at the quota times the rate factor and brakes to the quota after throttling', async () => {
     const { initialGate, reserve, brake, shardRate } = await import('./src/dispatcher.js');
     const gate = initialGate();
