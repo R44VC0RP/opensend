@@ -212,12 +212,17 @@ export function requireDashboardOrigin(runtime: Runtime, headers: Headers) {
 }
 export async function invitationRecipient(runtime: Runtime, headers: Headers) {
   requireDashboardOrigin(runtime, headers);
-  if (headers.has('authorization')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Accept invitations from a signed-in Google session.');
+  return verifiedDashboardUser(runtime, headers);
+}
+// Authenticate the live Google session without selecting a workspace. The caller must authorize
+// the exact invitation or signed DNS return before changing anything on the user's behalf.
+export async function verifiedDashboardUser(runtime: Runtime, headers: Headers) {
+  if (headers.has('authorization')) throw new ApiError(403, 'DASHBOARD_AUTH_REQUIRED', 'Use a signed-in Google session.');
   requireConfigured(runtime);
-  if (!hasSessionCookie(headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with the invited Google account.');
+  if (!hasSessionCookie(headers)) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
   const session = await createAuth(runtime).api.getSession({ headers, query: { disableRefresh: true } });
   const user = session && await approvedUser(runtime, session.user.id, runtime.db, session.session, false);
-  if (!user || !session) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with the invited Google account.');
+  if (!user || !session) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
   return { userId: session.user.id, email: user.email };
 }
 export async function getDashboardActor(runtime: Runtime, headers: Headers, measure: <T>(name: string, work: () => Promise<T>) => Promise<T> = async (_name, work) => work(), applyHeaders?: (headers: Headers) => void): Promise<Actor | null> {

@@ -1090,6 +1090,15 @@ export type ConfigureDomainMailFrom = {
     mailFromDomain: string;
 };
 
+export type DomainDnsSetup = {
+    provider: {
+        id: string;
+        name: string;
+    } | null;
+    applyUrl: string | null;
+    groups: Array<'sending' | 'ownership' | 'receiving' | 'mailfrom'>;
+};
+
 export type WebhookPage = {
     data: Array<Webhook>;
     nextCursor: string | null;
@@ -7709,6 +7718,132 @@ export type ConfigureDomainMailFromResponses = {
 };
 
 export type ConfigureDomainMailFromResponse = ConfigureDomainMailFromResponses[keyof ConfigureDomainMailFromResponses];
+
+export type GetDomainDnsSetupData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Optional comma-separated subset of pending groups. Defaults to all eligible groups.
+         */
+        groups?: string;
+    };
+    url: '/v1/domains/{id}/dns-setup';
+};
+
+export type GetDomainDnsSetupErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetDomainDnsSetupError = GetDomainDnsSetupErrors[keyof GetDomainDnsSetupErrors];
+
+export type GetDomainDnsSetupResponses = {
+    /**
+     * Success
+     */
+    200: DomainDnsSetup;
+};
+
+export type GetDomainDnsSetupResponse = GetDomainDnsSetupResponses[keyof GetDomainDnsSetupResponses];
+
+export type CompleteDomainDnsSetupData = {
+    body?: never;
+    path: {
+        id: string;
+        token: string;
+    };
+    query?: {
+        state?: string;
+        error?: string;
+    };
+    url: '/v1/domains/{id}/dns-setup/return/{token}';
+};
+
+export type CompleteDomainDnsSetupErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CompleteDomainDnsSetupError = CompleteDomainDnsSetupErrors[keyof CompleteDomainDnsSetupErrors];
 
 export type DeleteDomainData = {
     body?: never;

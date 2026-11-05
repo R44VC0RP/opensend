@@ -63,6 +63,9 @@ export function createApp() {
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
+    // Provider redirects cannot carry a workspace header. This route authenticates the Google
+    // session itself, then authorizes and selects the workspace from the signed return token.
+    if (c.req.method === 'GET' && /^\/v1\/domains\/[^/]+\/dns-setup\/return\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.path === '/v1/events/ses') {
       // Only SNS ingress needs trusted topic/account bindings; unknown topics are checked fresh in the handler.
       if (c.req.method === 'POST' && !c.env.config.multiTenant) c.env = await timed(c, 'region-db', () => resolveRegionRuntime(c.env, { cacheMs: 30_000 }));

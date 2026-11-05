@@ -39,6 +39,7 @@ export interface Config {
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   byoTemplateUrl?: string;
+  domainConnect?: { privateKey: import('node:crypto').KeyObject; keyId: string };
   /** Regions offered for MX shared sending; defaults to us-east-2. */
   sharedRegions?: string[];
   publicUrl: string;

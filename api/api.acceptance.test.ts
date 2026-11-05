@@ -1,7 +1,7 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 
 // Run against the actual server and normal background-job runner with npm test.
@@ -846,6 +846,109 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal((await getSes(scoped(a.org.id), region).config.credentials()).accessKeyId, platformKey.accessKeyId);
         const add = (cookie: string, name: string) => local('POST','/v1/domains',{ name,region },cookie);
         const discovery = `/v1/regions/${region}/discovery`;
+        await providerTest.test('Domain Connect: inline cached discovery, sorted signature and workspace-bound dashboard return',async dc=>{
+          const { operationJobs }=await import('./src/operations.js'), {JobDeferred}=await import('./src/jobs.js');
+          const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
+          const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
+          let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false;
+          const requests:string[]=[];
+          dc.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
+            const url=new URL(String(input)); requests.push(url.href);
+            if(url.origin==='https://cloudflare-dns.com') {
+              const q=url.searchParams.get('name'), type=url.searchParams.get('type');
+              if(type==='MX') return Response.json({Status:0,Answer:q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
+              if(q===`_opensend.${name}`) return Response.json({Status:3});
+              assert.equal(type,'TXT'); assert.equal(init?.redirect,'error');
+              if(q===`_domainconnect.${name}`) return Response.json({Status:3,Authority:[{name:zone,type:6,data:'ns.invalid. hostmaster.invalid. 1 2 3 4 5'}]});
+              assert.equal(q,`_domainconnect.${zone}`);
+              return Response.json({Status:0,Answer:[...(alias?[{name:q,type:5,data:'_domainconnect.ionos.com.'}]:[]),{name:alias?'_domainconnect.ionos.com.':q,type:16,data:JSON.stringify(settingsHost.slice(8))}]});
+            }
+            assert.equal(init?.redirect,'error');
+            if(url.href===`${settingsHost}/v2/${zone}/settings`) return Response.json({providerId,providerName,urlAPI:api,urlSyncUX:sync});
+            assert.equal(url.href,api+providerPath); return new Response(null,{status:supportStatus});
+          });
+          const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
+          dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
+          const getSetup=async(query='')=>ok(await local('GET',setup+query,undefined,b.cookie));
+          assert.equal(requests.length,0,'Domain creation does not discover the provider.');
+          const expectedProvider={id:providerId,name:providerName};
+          assert.deepEqual(await getSetup(),{provider:expectedProvider,groups:['sending','ownership'],applyUrl:null},'Supported provider with signing disabled.');
+          assert.equal(requests.length,4,'Cold GET walks two labels, fetches settings, and checks template support inline.');
+          const accountIdentity=identities.get(`${platform}:${name}`)!;
+          accountIdentity.DkimAttributes={...accountIdentity.DkimAttributes,Status:'PENDING',SigningHostedZone:`dkim.${region}.amazonses.com`};
+          const {rows:[vjob]}=await pool.query("SELECT * FROM jobs WHERE type='domain.verify' AND payload->>'domainId'=$1",[created.id]);
+          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+          await assert.rejects(operationJobs['domain.verify']!(runtime,vjob.payload,{id:vjob.id,attempts:1,workspaceId:b.org.id}),JobDeferred);
+          // Do not let this extra fixture take the next scenario's account-wide SES slot.
+          await pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+          const manual=ok(await local('POST',detail+'/mail-from',{mailFromDomain:`bounce.${name}`},b.cookie));
+          const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+          const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'synthetic-root-'.repeat(4),PUBLIC_URL:origin};
+          const pem=privateKey.export({type:'pkcs1',format:'pem'}).toString().replaceAll('\n','\\n');
+          for(const invalid of [{DOMAIN_CONNECT_KEY_ID:'_dck1'},{DOMAIN_CONNECT_PRIVATE_KEY:pem},
+            ...['invalid-pem',generateKeyPairSync('rsa',{modulusLength:1024}).privateKey.export({type:'pkcs1',format:'pem'}),generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({type:'pkcs8',format:'pem'})].map(k=>({DOMAIN_CONNECT_KEY_ID:'_dck1',DOMAIN_CONNECT_PRIVATE_KEY:k.toString()}))]) {
+            assert.throws(()=>loadConfig({...env,...invalid}),{code:'CONFIG_INVALID'});
+          }
+          runtime.config.domainConnect=loadConfig({...env,DOMAIN_CONNECT_PRIVATE_KEY:pem,DOMAIN_CONNECT_KEY_ID:'_dck1'}).domainConnect;
+          const {getDashboardActor}=await import('./src/google-auth.js');
+          const authStart=queries.mock.callCount(); await getDashboardActor(runtime,new Headers({cookie:b.cookie}),undefined,()=>{});
+          const authQueries=queries.mock.callCount()-authStart, setupStart=queries.mock.callCount();
+          const before=requests.length, offered=await getSetup(), url=new URL(offered.applyUrl), params=url.searchParams;
+          const total=queries.mock.callCount()-setupStart; assert.equal(total-authQueries,1); dc.diagnostic(`GET dns-setup: ${total-authQueries} domain statement; ${total} pg round trips including dashboard auth.`);
+          assert.deepEqual(offered.provider,expectedProvider); assert.deepEqual(offered.groups,['sending','ownership','receiving','mailfrom']);
+          assert.equal(url.origin+url.pathname,sync+providerPath+'/apply'); assert.equal(params.get('domain'),zone); assert.equal(params.get('host'),'mail');
+          assert.equal(params.get('groupId'),offered.groups.join(',')); assert.equal(params.get('key'),'_dck1'); assert.equal([...params.keys()].at(-1),'sig');
+          const wire=url.search.slice(1).split('&key=')[0]!, sig=Buffer.from(params.get('sig')!,'base64');
+          const sorted=new URLSearchParams(params); sorted.delete('key'); sorted.delete('sig'); sorted.sort(); assert.equal(wire,sorted.toString());
+          assert.ok(verifySignature('RSA-SHA256',Buffer.from(sorted.toString()),publicKey,sig)); assert.ok(!verifySignature('RSA-SHA256',Buffer.from(wire.replace('host=mail','host=other')),publicKey,sig));
+          const template=JSON.parse(await (await import('node:fs/promises')).readFile(new URL('../domain-connect/opensend.mx.mail.json',import.meta.url),'utf8'));
+          const expand=(s:string)=>s.replace(/%(\w+)%/g,(_,key:string)=>{assert.ok(params.has(key));return params.get(key)!;});
+          for(const record of template.records) {
+            const host=expand(record.host), target=host==='@'?name:`${host}.${name}`;
+            const type=record.type==='SPFM'?'TXT':record.type, value=record.type==='SPFM'?`v=spf1 ${record.spfRules} ~all`:expand(record.pointsTo ?? record.data);
+            assert.ok(manual.dns.some((r:Json)=>r.name===target && r.type===type && r.value===value && r.priority===record.priority),`Signed ${type} at ${target} must match the manual DNS record`);
+          }
+          assert.deepEqual((await getSetup('?groups=ownership')).groups,['ownership']); assert.equal(requests.length,before,'Cached consent URL generation makes no outbound calls.');
+          const ret=new URL(params.get('redirect_uri')!); assert.equal(ret.origin,origin); const token=params.get('state')!; assert.equal(ret.pathname.split('/').at(-1),token);
+          await pool.query("UPDATE jobs SET status='completed',available_at=now()+interval '1 day' WHERE id=$1",[vjob.id]);
+          error(await local('GET',setup,undefined,guest),403); error(await local('GET',ret.pathname,undefined,a.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          error(await local('GET',ret.pathname.replace(created.id,'dom_other'),undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          error(await local('GET',ret.pathname+'?state=other',undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          const [encoded,mac]=token.split('.'), payload=JSON.parse(Buffer.from(encoded!,'base64url').toString());
+          assert.equal(payload.workspaceId,b.org.id); assert.equal(payload.domainId,created.id);
+          const tampered=Buffer.from(JSON.stringify({...payload,workspaceId:a.org.id})).toString('base64url')+'.'+mac;
+          error(await local('GET',ret.pathname.replace(token,tampered),undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          // Simulate selecting a different workspace in another tab while the provider is open. B
+          // is only a member there: neither that role nor that workspace authorizes the return.
+          const me=ok(await local('GET','/v1/me',undefined,b.cookie)); assert.equal(payload.userId,me.id);
+          const member=unique('dc-member'); await pool.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'member')",[member,a.org.id,me.id]);
+          dc.after(async()=>{await pool.query('DELETE FROM workspace_members WHERE id=$1',[member]);});
+          assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie,select(a.org.id))).role,'member');
+          await pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[b.org.id,me.id]);
+          try {error(await local('GET',ret.pathname,undefined,b.cookie),403,'PERMISSION_DENIED'); assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,a.org.id);}
+          finally {await pool.query("UPDATE workspace_members SET role='owner' WHERE workspace_id=$1 AND user_id=$2",[b.org.id,me.id]);}
+          assert.equal((await local('GET',ret.pathname+'?error=access_denied',undefined,b.cookie)).status,303); // Cancel does not schedule verification.
+          assert.equal((await pool.query('SELECT status FROM jobs WHERE id=$1',[vjob.id])).rows[0].status,'completed');
+          ok(await local('GET','/v1/me',undefined,b.cookie,select(a.org.id)));
+          const success=await local('GET',ret.pathname,undefined,b.cookie); // No workspace header or state from Cloudflare.
+          assert.equal(success.status,303,diagnostic(success)); assert.equal(success.headers.get('location'),`${origin}/domains/${created.id}`);
+          assert.equal(ok(await local('GET','/v1/me',undefined,b.cookie)).workspaceId,b.org.id);
+          assert.equal((await local('GET',ret.pathname+`?state=${token}`,undefined,b.cookie)).status,303,'Replays may only request the same throttled recheck.');
+          assert.equal((await pool.query("SELECT 1 FROM jobs WHERE id=$1 AND workspace_id=$2 AND payload->>'domainId'=$3 AND status='pending' AND available_at<=now()",[vjob.id,b.org.id,created.id])).rowCount,1);
+          assert.equal(ok(await local('GET',detail,undefined,b.cookie)).verified,false,'Approval never promotes sending or receiving.');
+          let clock=Date.now()+601_000; dc.mock.method(Date,'now',()=>clock);
+          error(await local('GET',ret.pathname,undefined,b.cookie),400,'DNS_SETUP_RETURN_INVALID');
+          supportStatus=503; assert.equal((await getSetup()).provider,null); const after503=requests.length;
+          supportStatus=200; clock+=29_000; assert.equal((await getSetup()).applyUrl,null); assert.equal(requests.length,after503);
+          clock+=2000; assert.deepEqual((await getSetup()).provider,expectedProvider,'503 recovers after 30 seconds, not five minutes.');
+          clock+=301_000; supportStatus=404; const unsupported=await getSetup(); assert.equal(unsupported.provider,null); assert.equal(unsupported.applyUrl,null);
+          supportStatus=200; clock+=31_000; assert.equal((await getSetup()).provider,null,'404 is a definitive negative for five minutes.');
+          settingsHost='https://domainconnect.vercel.com'; api='https://vercel.com/api/domain-connect'; sync='https://vercel.com/domain-connect'; providerId='vercel.com'; providerName='Vercel';
+          clock+=301_000; assert.equal(new URL((await getSetup()).applyUrl).pathname,'/domain-connect'+providerPath+'/apply');
+          settingsHost=api='https://api.domainconnect.ionos.com'; sync='https://domainconnect.ionos.de/sync'; providerId='ionos.com'; providerName='IONOS'; alias=true;
+          clock+=301_000; assert.equal(new URL((await getSetup()).applyUrl).origin,'https://domainconnect.ionos.de');
+          api='https://unexpected.invalid'; clock+=301_000; assert.equal((await getSetup()).applyUrl,null); assert.ok(!requests.some(r=>r.startsWith(api)),'An advertised URL outside the provider allowlist is never requested.');
+        });
         // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
           let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>();

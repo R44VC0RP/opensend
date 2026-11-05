@@ -15,6 +15,8 @@ import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
 import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
+import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
+import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
 import { awsError } from './ses-setup.js';
@@ -170,12 +172,15 @@ type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
-async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheckDomains?: readonly string[]) {
-  const target = sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
+function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
+  return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
-    WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``}`;
+    WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock}`;
+}
+async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheckDomains?: readonly string[]) {
+  const target=hostedDomainSelect(wid,domainId,lock ? sql`FOR UPDATE OF dc` : recheckDomains ? sql`FOR SHARE OF dc` : sql``);
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheckDomains?.length ? sql`WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheckDomains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql``;
@@ -318,6 +323,12 @@ export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid
 async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string}) {
   await db.execute(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND token=${row.token} RETURNING name,token), ${releasedClaimCleanup(wid)}
     DELETE FROM operation_domains WHERE workspace_id=${wid} AND id=${row.id} AND name IN (SELECT name FROM released)`);
+}
+function dnsSetupActor(c:Ctx) {
+  if (!c.env.config.multiTenant) return notFound('Endpoint');
+  const a=actor(c,'manage');
+  if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.');
+  return a;
 }
 function recheckJob(wid: string, source: SQL, supersede=false) {
   // A recovered creation or MAIL FROM change supersedes even a running poll based on an older SES read.
@@ -518,6 +529,38 @@ export function registerOperations(app: App) {
     const client = getSes(c.env, row.region);
     await sesCall(() => client.send(new PutEmailIdentityMailFromAttributesCommand({ EmailIdentity: row.name, MailFromDomain: mailFromDomain, BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' })));
     return c.json(await domainReadiness(c.env, row), 200);
+  });
+  const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
+  const dnsSetup='/v1/domains/{id}/dns-setup';
+  app.openapi(createRoute({method:'get',path:dnsSetup,operationId:'getDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
+    description:'MX owner/admin dashboard only. Returns a signed provider consent URL for eligible pending records, never changes DNS itself. Inline discovery has a three-second budget; unsupported providers and discovery failures fall back to manual DNS. Receiving is offered only after DNS checks find the target empty.',
+    request:{params:IdParams,query:z.object({groups:z.string().max(64).regex(/^(sending|ownership|receiving|mailfrom)(,(sending|ownership|receiving|mailfrom))*$/).optional().describe('Optional comma-separated subset of pending groups. Defaults to all eligible groups.')})},
+    responses:{200:response(z.object({provider:z.object({id:z.string(),name:z.string()}).nullable(),applyUrl:z.url().nullable(),groups:z.array(z.enum(groupIds))}).openapi('DomainDnsSetup')),...errors}}),async c=>{
+    const a=dnsSetupActor(c), wid=a.workspaceId, id=c.req.valid('param').id;
+    const row=await hostedDomain(c.env.db,wid,id) ?? notFound('Domain');
+    const found=await discover(row.name);
+    const selection=pendingGroups(derivedReadiness(row),row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','));
+    const provider=found && {id:found.id,name:found.name}, applyUrl=found && signedApply(c.env.config,found,row,selection,wid,a.keyId.slice(5));
+    return c.json({provider,groups:selection.groups,applyUrl},200);
+  });
+  app.openapi(createRoute({method:'get',path:`${dnsSetup}/return/{token}`,operationId:'completeDomainDnsSetup',tags:['Domains'],security:dashboardSecurity,
+    description:'Browser return from Domain Connect. Validates the ten-minute signed token and the initiating user’s current owner/admin membership in the workspace owning the domain. Restores that workspace and returns to the domain page. Success queues normal DNS/SES verification; a replay cannot create a second job. Provider approval is not proof.',
+    request:{params:IdParams.extend({token:z.string().max(1600)}),query:z.object({state:z.string().max(1600).optional(),error:z.string().max(128).optional()})},
+    responses:{303:{description:'Return to the domain in its original workspace.'},...errors}}),async c=>{
+    if(!c.env.config.multiTenant) return notFound('Endpoint');
+    const {id,token}=c.req.valid('param'), {state,error}=c.req.valid('query');
+    const invalid=()=>new ApiError(400,'DNS_SETUP_RETURN_INVALID','This DNS setup link is invalid or expired.');
+    const claim=verifyReturn(c.env.config.authSecret,token);
+    if(!claim || claim.domainId!==id || (state!==undefined && state!==token)) throw invalid();
+    const {userId}=await verifiedDashboardUser(c.env,c.req.raw.headers);
+    if(claim.userId!==userId) throw invalid();
+    const wid=claim.workspaceId;
+    const result=await c.env.db.execute(sql`WITH target AS (SELECT d.id,d.token FROM (${hostedDomainSelect(wid,id,sql`FOR SHARE OF dc`)}) d
+      JOIN workspace_members m ON m.user_id=${userId} AND m.workspace_id=${wid} AND m.role IN ('owner','admin') FOR SHARE OF m),
+      selected AS (UPDATE auth_user SET selected_workspace_id=${wid} WHERE id=${userId} AND selected_workspace_id IS DISTINCT FROM ${wid} AND EXISTS(SELECT 1 FROM target)),
+      queued AS (${recheckJob(wid,sql`SELECT id,token FROM target WHERE ${error===undefined}`)}) SELECT 1 FROM target`);
+    if(!result.rowCount) throw new ApiError(403,'PERMISSION_DENIED','Domain setup requires owner or admin access to the original workspace and domain.');
+    return c.redirect(`${c.env.config.publicUrl}/domains/${encodeURIComponent(id)}`,303);
   });
   for (const verifyRoute of [false, true]) app.openapi(createRoute({ method: verifyRoute ? 'post' : 'get', path: verifyRoute ? '/v1/domains/{id}/verify' : '/v1/domains/{id}', operationId: verifyRoute ? 'verifyDomain' : 'getDomain', description: verifyRoute ? 'On MX, request a background verification and return the current stored status. Read the domain again for updates.' : 'On MX, read the stored DNS records and verification status without an AWS call.', tags: ['Domains'], security, request: { params: IdParams }, responses: { 200: response(domainSchema), ...errors } }), async c => {
     const a = actor(c, verifyRoute ? 'manage' : 'read');

@@ -1,4 +1,4 @@
-import { hkdfSync } from 'node:crypto';
+import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError } from './core.js';
 import type { Config } from './core.js';
@@ -13,6 +13,8 @@ const values = z.object({
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
+  DOMAIN_CONNECT_PRIVATE_KEY: optional(z.string().min(1)),
+  DOMAIN_CONNECT_KEY_ID: optional(z.string().regex(/^_?[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$/)),
   // Comma-separated regions offered for MX shared sending.
   SHARED_SENDING_REGIONS: z.string().default('us-east-2'),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
@@ -51,6 +53,15 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const parsed = values.safeParse(input);
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
+  let domainConnect: Config['domainConnect'];
+  if (v.DOMAIN_CONNECT_PRIVATE_KEY && v.DOMAIN_CONNECT_KEY_ID) {
+    try {
+      const privateKey=createPrivateKey(v.DOMAIN_CONNECT_PRIVATE_KEY.replace(/\\n/g,'\n'));
+      if (privateKey.asymmetricKeyType!=='rsa' || privateKey.asymmetricKeyDetails?.modulusLength!==2048) throw new Error();
+      domainConnect={privateKey,keyId:v.DOMAIN_CONNECT_KEY_ID};
+    } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
+  }
   if (Boolean(v.GOOGLE_CLIENT_ID) !== Boolean(v.GOOGLE_CLIENT_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or neither.');
   if (v.PREVIOUS_BETTER_AUTH_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_BETTER_AUTH_SECRET.');
   const allowedEmails = list(v.AUTH_ALLOWED_EMAILS).map(e => e.toLowerCase());
@@ -68,6 +79,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
     byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions,
+    domainConnect,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,
