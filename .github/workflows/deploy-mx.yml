@@ -63,3 +63,22 @@ jobs:
           AUTH_ALLOWED_EMAILS: ${{ vars.MX_AUTH_ALLOWED_EMAILS }}
           AUTH_ALLOWED_DOMAINS: ${{ vars.MX_AUTH_ALLOWED_DOMAINS }}
           DEFAULT_WORKSPACE_OWNERS: ${{ vars.MX_DEFAULT_WORKSPACE_OWNERS }}
+      - name: Check MX health
+        run: |
+          set -o pipefail
+          curl --fail --silent --show-error --max-time 10 --retry 4 https://opensend.mx/health |
+            jq -e '.status == "ok" and .service == "opensend" and .multiTenant == true'
+      - name: Live MX E2E
+        id: e2e
+        working-directory: api
+        timeout-minutes: 5
+        env:
+          OPENSEND_E2E_API_KEY: ${{ secrets.MX_E2E_API_KEY }}
+        run: npm run e2e
+      - name: Upload live E2E report
+        if: ${{ !cancelled() && (steps.e2e.outcome == 'success' || steps.e2e.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mx-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: api/e2e-report.json
+          if-no-files-found: error
