@@ -11,6 +11,5 @@
   .page-surface .sending-streams { border-top-color: var(--color-border-muted); }
 }
 /* The surface is a fixed-height flex column; keep the header and filters at their own height when content overflows. */
-.page-surface > :is(.ui-page-header:has(~ .overview-toolbar), .overview-toolbar) { flex-shrink: 0; }
+.page-surface > .overview-toolbar { flex-shrink: 0; }
 .page-surface .overview-reputation { flex-wrap: wrap; min-width: 0; }
-.page-surface .chart-section > .ui-section-header { flex-wrap: wrap; }

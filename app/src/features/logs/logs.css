@@ -13,11 +13,8 @@
 .email-header-actions > * { grid-area: 1 / 1; justify-self: end; }
 .page-surface .email-header-actions > [data-hidden] { visibility: hidden; }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
-.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table), .page-surface > .ui-page-header:has(+ .ui-loading-layout .email-metadata) { flex-shrink: 0; }
+.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table) { flex-shrink: 0; }
 .page-surface .logs-page .search-box { min-width: 0; }
-.page-surface .logs-page .data-toolbar > .cluster { min-width: 0; }
-/* Screen-reader text (copy buttons, masked recipients) is positioned absolutely; contain it so it never extends the window's scroll area. */
-.page-surface :is(.logs-page, .email-detail-page) { position: relative; }
 @media (max-width: 850px) {
   .page-surface .email-detail-page { min-height: auto; }
   .page-surface .email-detail-grid { row-gap: var(--space-24); }
