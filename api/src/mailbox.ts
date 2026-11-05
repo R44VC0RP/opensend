@@ -15,6 +15,7 @@ import { encrypt, webhookSecret, webhookUrl } from './operations.js';
 import { IdempotencyHeaders, idempotent, storeAttachmentBytes } from './sending.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, forwardBody, safeForwardHtml, latestReplyTarget, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendFromMailbox, sendLimitsFor, type OutgoingMessage } from './mailbox-send.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
+import { CustomHeaders, splitThreadingHeaders, type CustomHeader } from './custom-headers.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses, wakeMailboxSend } from './inbound-threads.js';
 
 const BASE = '/mailbox/v1';
@@ -685,7 +686,7 @@ export function registerMailbox(app: App) {
     text: z.string().min(1).max(524288).optional(), html: z.string().min(1).max(524288).optional(),
     attachments: z.array(AttachmentItem).max(20).default([]).describe('Up to 20 files, 8 MiB combined. Types: PDF, text, CSV, JSON, images, ICS and Office documents.'),
     replyTo: Recipients.max(10).default([]),
-    headers: z.array(z.object({ name: z.string().regex(/^[Xx]-(?![Ss][Ee][Ss]-)[A-Za-z0-9-]{1,120}$/, 'Use an X- extension header, not an X-SES- sending instruction.'), value: z.string().min(1).max(900).regex(/^[ -~]+$/, 'Header values must be printable ASCII.') })).max(10).refine(headers => new Set(headers.map(h => h.name.toLowerCase())).size === headers.length, 'Do not repeat a header name.').default([]),
+    headers: CustomHeaders.default([]),
     autoSubmitted: z.enum(['auto-generated', 'auto-replied']).optional().describe('Adds an RFC 3834 Auto-Submitted header so other automated systems do not reply to this message.'),
   };
   const needsBody = (value: { text?: string; html?: string }) => !!value.text || !!value.html;
@@ -738,9 +739,16 @@ export function registerMailbox(app: App) {
     const text = original.text ?? (original.html ? htmlToPlain(original.html) : '');
     return { text: `\n\n${intro}\n${text.split('\n').map(line => `> ${line}`).join('\n')}`, html: `<br><br><div>${intro.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</div><blockquote style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">${original.html ? safeForwardHtml(original.html) : `<pre>${text.replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[ch]!)}</pre>`}</blockquote>` };
   };
+  // A new message may cite an earlier conversation; OpenSend stores the cited IDs like any other threading headers.
+  const threadingFor = (headers: CustomHeader[]) => { const split = splitThreadingHeaders(headers); return { inReplyTo: split.inReplyTo, references: split.references, headers: split.rest }; };
+  // Replies and forwards compute In-Reply-To and References from the parent; a caller value would contradict them.
+  const ownThreading = (headers: CustomHeader[]) => {
+    if (splitThreadingHeaders(headers).present) throw new ApiError(422, 'THREADING_HEADER_NOT_ALLOWED', 'Replies and forwards set In-Reply-To and References from the original message. Remove them from headers.', 'headers');
+    return headers;
+  };
   async function prepareSend(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, body: z.infer<typeof SendBody>) {
     return { from: await senderAddress(c, mailbox, body.from, db), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject, text: body.text, html: body.html,
-      attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), inReplyTo: null, references: [], autoSubmitted: body.autoSubmitted, headers: body.headers };
+      attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), ...threadingFor(body.headers), autoSubmitted: body.autoSubmitted };
   }
   async function prepareReply(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, original: MessageRow, body: z.infer<typeof ReplyBody> & { expectedRecipients?: Pick<OutgoingMessage, 'to' | 'cc' | 'bcc'> }) {
     const from = await senderAddress(c, mailbox, body.from, db);
@@ -756,7 +764,7 @@ export function registerMailbox(app: App) {
       from, to, cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(original.subject, 'Re'),
       text: body.text ? body.text + (quote?.text ?? '') : undefined, html: body.html ? body.html + (quote?.html ?? '') : undefined,
       attachments: await resolveAttachments(c.env, mailbox, body.attachments, db), threadId: original.threadId,
-      inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: body.headers,
+      inReplyTo: parentId, references: replyReferences(original, parentId), autoSubmitted: body.autoSubmitted, headers: ownThreading(body.headers),
     };
   }
   async function reply(c: Ctx, mailboxId: string, target: (mailbox: typeof mailboxes.$inferSelect) => Promise<MessageRow | undefined>) {
@@ -835,7 +843,7 @@ export function registerMailbox(app: App) {
     const view = await dispatch(c, item.mailbox, item.scope, access(c, 'send'), { ...body, target: item.row.id }, async () => ({
       from: await senderAddress(c, item.mailbox, body.from), to: body.to, cc: body.cc, bcc: body.bcc, replyTo: body.replyTo, subject: body.subject ?? replySubject(item.row.subject, 'Fwd'), text: content.text, html: content.html,
       attachments: await resolveAttachments(c.env, item.mailbox, [...originals, ...body.attachments]), threadId: item.row.threadId, inReplyTo: null,
-      references: [...item.row.references, ...(item.row.messageId ? [item.row.messageId] : [])], autoSubmitted: body.autoSubmitted, headers: body.headers,
+      references: [...item.row.references, ...(item.row.messageId ? [item.row.messageId] : [])], autoSubmitted: body.autoSubmitted, headers: ownThreading(body.headers),
     }));
     return c.json(view, 202);
   });

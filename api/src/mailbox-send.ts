@@ -1,3 +1,4 @@
+import { splitThreadingHeaders } from './custom-headers.js';
 import { and, desc, eq, gte, inArray, sql } from 'drizzle-orm';
 import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
@@ -177,10 +178,12 @@ export async function queueTrackedMailboxSend(runtime: Runtime, tx: DbExecutor, 
   // Reply-To must route back into this address so the conversation keeps tracking. From can be any registered sender.
   if (input.replyTo.some(address => !owned.has(address.toLowerCase()))) throw new ApiError(422, 'MAILBOX_ADDRESS_MISMATCH', 'Reply-To must belong to the selected receivable address.', field);
   if (!owned.has(input.from.toLowerCase())) await assertRegisteredSender(tx, scope, target.region, input.from, 'from');
+  const { inReplyTo, references, rest } = splitThreadingHeaders(input.headers ?? []);
+  const threading = { inReplyTo, references, headers: rest };
   const { message, runnable } = await sendFromMailbox(runtime, tx, {
     mailbox, actor, scope, from: input.from.toLowerCase(), fromName: input.fromName, to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo,
     region: input.region, tracking: input.tracking, screen: input.screen, subject: input.subject, text: input.text, html: input.html,
-    attachments: await resolveAttachments(runtime, mailbox, input.attachments.map(id => ({ id })), tx), inReplyTo: null, references: [], headers: [],
+    attachments: await resolveAttachments(runtime, mailbox, input.attachments.map(id => ({ id })), tx), ...threading,
   });
   if (runnable) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, runnable);
   return { id: message.sendingEmailId!, status: 'queued' as const, environment: scope.environment, simulated: false, mailboxMessageId: message.id, threadId: message.threadId };

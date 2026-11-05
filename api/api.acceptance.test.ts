@@ -3248,6 +3248,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const passed = ok(await get(`${inbox}?direction=inbound&q=verified`,agent)).data; assert.equal(passed.length,1); assert.deepEqual(passed[0].labels,[]);
       const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
       assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
+      // Custom headers: reserved names and malformed Message-IDs are refused, replies keep their own threading,
+      // and a new conversation can cite a thread OpenSend never received.
+      const plain = { from:publicAddress,to:'customer@example.net',subject:'Headers',text:'Header check' };
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'from',value:'ceo@example.com'}] }),422);
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-SES-Configuration-Set',value:'other'}] }),422);
+      for (const name of ['Mail-Reply-To','Disposition-Notification-To','TLS-Required']) error(await post('/v1/emails/send',{ ...plain,headers:[{name,value:'attacker@example.org'}] }),422);
+      error(await post('/v1/emails/send',{ ...plain,headers:[{name:'In-Reply-To',value:'not-a-message-id'}] }),422);
+      error(await post(replyPath,{ text:'own threading',headers:[{name:'References',value:'<old@example.net>'}] },agent),422,'THREADING_HEADER_NOT_ALLOWED');
+      const custom = ok(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-Ticket',value:'42'},{name:'Priority',value:'urgent'}] }),202);
+      const cited = ok(await post('/v1/inbound/threads',{ addressId:box.id,to:['customer@example.net'],subject:'Re: Old case',text:'Following up',
+        headers:[{name:'In-Reply-To',value:'<old-1@example.net>'},{name:'References',value:'<old-0@example.net> <old-1@example.net>'},{name:'X-Ticket',value:'7'}] },{ 'Idempotency-Key':'cite-old-case' }),202);
+      assert.equal(cited.inReplyTo,'old-1@example.net'); assert.deepEqual(cited.references,['old-0@example.net','old-1@example.net']);
+      await dispatchDue(runtime,'live',REGION);
+      assert.deepEqual(outgoing.get(custom.id).Content.Simple.Headers,[{Name:'X-Ticket',Value:'42'},{Name:'Priority',Value:'urgent'}]);
+      assert.deepEqual(outgoing.get(cited.emailId).Content.Simple.Headers,[{Name:'In-Reply-To',Value:'<old-1@example.net>'},{Name:'References',Value:'<old-0@example.net> <old-1@example.net>'},{Name:'X-Ticket',Value:'7'}]);
     });
   });
 
