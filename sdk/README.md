@@ -87,6 +87,24 @@ await replyToInboundThread({
 
 The customer sees only `support@example.com`. When they reply, their client references your message's SES `Message-ID`, the provider forwards it to `inbox.example.com`, and OpenSend files it in the same thread. Test one round trip with a real external inbox before sending customer traffic.
 
+**Reply to a conversation OpenSend never received:** pass the original Message-IDs as headers when starting the thread, and the customer's mail app keeps it in the same conversation:
+
+```ts
+await createInboundThread({
+  client, headers: { 'Idempotency-Key': `reply-${ticketId}` },
+  body: {
+    addressId, from: 'support@example.com', to: ['customer@example.net'], subject: 'Re: Widget issue', text: 'Following up.',
+    headers: [
+      { name: 'In-Reply-To', value: '<last-message-id@example.net>' },
+      { name: 'References', value: '<first-message-id@example.net> <last-message-id@example.net>' },
+    ],
+  },
+  throwOnError: true,
+});
+```
+
+Every send route (`/v1/emails/send`, batch, inbound threads, mailbox send, reply and forward) accepts up to 20 custom headers. OpenSend rejects headers it controls: From, Sender, Reply-To, Return-Path, To, Cc, Bcc, Subject, Date, Message-ID, MIME-Version, Content-*, DKIM-*, ARC-*, Authentication-Results, Received*, Resent-*, X-SES-*, List-Unsubscribe*, Auto-Submitted, and headers that redirect replies or receipts or affect transport (Mail-Reply-To, Mail-Followup-To, Followup-To, Disposition-Notification-*, Return-Receipt-To, Errors-To, Bounces-To, Delivered-To, X-Original-To, DomainKey-*, Feedback-ID, TLS-Required, BIMI-*, Autocrypt*, OpenPGP). Replies and forwards set In-Reply-To and References themselves.
+
 **Only act on verified senders:** set `"requireDmarc": true` when creating the address (or `PATCH` it later). Mail without a DMARC pass for its `From` domain is still stored, labelled `unverified` for a person to review, but does not emit `message.received`, so every `message.received` comes from a sender that passed DMARC. The event's `data.dmarc` carries the verdict. SES checks DMARC against the original `From` domain, so it works through forwarding as long as the sender's DKIM signature survives.
 
 **Browse or start conversations:** `GET /v1/inbound/threads?q=invoice` returns one row per visible conversation, newest activity first. Filter by `addressId` or page using `nextCursor`. Detail pages read oldest first within the most recent page; follow their cursor for earlier messages. `GET /v1/inbound/messages/{messageId}` returns the full stored body and attachment metadata. `POST /v1/inbound/threads` with `{addressId, to, subject, text}` starts a conversation. Alternatively, add `replyAddressId` to a single explicit-body transactional `/v1/emails/send` with live manage permission; the receipt includes `threadId` and `inboundMessageId`.

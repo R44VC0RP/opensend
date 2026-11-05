@@ -15,6 +15,7 @@ import { assertLiveRegionReady, assertRegionEnabled } from './ses-region-state.j
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { queueTrackedMailboxSend } from './mailbox-send.js';
+import { CustomHeaders } from './custom-headers.js';
 import { attachmentLinks, attachments, campaignExpansions, campaignReviews, campaigns, emailEvents, emails, sendingIdempotency, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { BlockContentError, CAMPAIGN_CONTENT_GUIDE, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
 import { instantiateTemplate } from './templates.js';
@@ -83,7 +84,7 @@ const SendInput = z.object({
   from: Address, fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
   region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.'), kind: z.enum(['transactional', 'marketing']).default('transactional'), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Test keys do not contact SES or render the template.').optional(),
-  attachments: AttachmentIds, tracking: z.boolean().optional(),
+  attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
   screen: z.boolean().optional().describe('Ask the installation’s content classifier (Jev) whether this message is unsolicited advertising smuggled into a transactional template, e.g. an ad placed in a user-supplied name. Screened messages that look like spam are rejected before delivery with error code CONTENT_REJECTED_SPAM and a reject event; nothing reaches the provider. Live transactional messages only; ignored for marketing and in the test environment. Skipped (and logged) when the installation has no classifier configured.'),
 }).strict().superRefine((v, ctx) => {
   if (v.template ? (v.subject !== undefined || v.html !== undefined || v.text !== undefined) : (!v.subject || (!v.html && !v.text))) ctx.addIssue({ code: 'custom', message: 'Provide subject and html/text, or template, but not both.' });
@@ -505,7 +506,8 @@ function marketingFooter(snapshot: EmailSnapshot, url: string) {
     snapshot.html = close >= 0 ? snapshot.html.slice(0, close) + footer + snapshot.html.slice(close) : snapshot.html + footer;
   }
   snapshot.text = (snapshot.text ?? '') + `\n\nUnsubscribe: ${url}`;
-  snapshot.headers = [{ Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
+  // Keep caller headers; the unsubscribe pair is always OpenSend's own.
+  snapshot.headers = [...snapshot.headers.filter(header => !/^list-unsubscribe/i.test(header.Name)), { Name: 'List-Unsubscribe', Value: `<${url}>` }, { Name: 'List-Unsubscribe-Post', Value: 'List-Unsubscribe=One-Click' }];
 }
 async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: SendRequest, preview = false, lockedAttachments?: (typeof attachments.$inferSelect)[], sharedValidated = false, htmlValidated = false): Promise<EmailSnapshot> {
   const input = { ...request, region: sharedValidated ? request.region! : await assertRegionEnabled(db, a.workspaceId, request.region) };
@@ -513,7 +515,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     if (a.environment === 'live') await assertLiveRegionReady(runtime, db, input.region, input.kind);
     sender(runtime, a, input.from, input.region);
   }
-  const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: [], ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
+  const snapshot: EmailSnapshot = { from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
   const rows = lockedAttachments ?? await attachmentRows(db, a, input.attachments, true);
   if (!htmlValidated) validateHtmlUrls(snapshot.html);
   if (input.template) {
@@ -536,7 +538,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
       const split = normalized.indexOf('\r\n\r\n');
       if (split < 0) throw new ApiError(422, 'INVALID_RENDERED_MIME', 'SES rendered content has no MIME header/body separator.');
       const headers = normalized.slice(0, split).split(/\r\n(?![ \t])/).filter(h => !/^(?:from|to|cc|bcc|reply-to|return-path|date|message-id):/i.test(h));
-      snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers].join('\r\n') + normalized.slice(split);
+      snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers, ...snapshot.headers.map(header => `${header.Name}: ${header.Value}`)].join('\r\n') + normalized.slice(split);
     }
   }
   if (input.kind === 'marketing' && !preview) {
