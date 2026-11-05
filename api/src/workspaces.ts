@@ -44,6 +44,7 @@ export async function onboardNewUser(db: DbExecutor, user: { id: string; name: s
     INSERT INTO ses_installation_settings(workspace_id, installation_id, default_region, enabled_regions)
     SELECT id, ${id('install')}, ${region}, ${JSON.stringify([region])}::jsonb FROM created
   ) INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${user.id}, 'owner' FROM created`);
+  if (invitationId) await claimInvitation(db, user.id, user.email, invitationId);
   return true;
 }
 

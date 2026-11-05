@@ -684,6 +684,15 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       ok(await local('DELETE', `${base}/members/${invitedMember.id}`, undefined, a.cookie));
       const select = (id: string) => ({ 'x-opensend-workspace': id });
       error(await local('GET', '/v1/me', undefined, a.cookie, select(b.org.id)), 403, 'WORKSPACE_ACCESS_DENIED');
+      const invitedEmail = `${unique('mx-invited-owner')}@example.com`;
+      const linked = ok(await local('POST', `${base}/invitations`, {email:invitedEmail,role:'member'}, b.cookie),201);
+      const invitedCookie = await login({allowed:true,email:invitedEmail,verified:true,hd:'example.com'},linked.acceptUrl);
+      const joined = ok(await local('GET','/v1/workspaces',undefined,invitedCookie)).data;
+      assert.equal(joined.length,2,'OAuth accepted the link before any dashboard POST, without skipping the personal workspace.');
+      const personal = joined.find((w:Json)=>w.role==='owner');assert.ok(personal && personal.id!==b.org.id);workspaces.push(personal.id);
+      assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
+      assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id);
+      assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
       runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
       await login({ allowed: false, email: `${unique('mx-denied')}@outside.invalid`, verified: true });
       const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
