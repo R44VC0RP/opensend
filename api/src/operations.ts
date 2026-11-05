@@ -169,11 +169,12 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'opensend:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean };
+type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
+    domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
     JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
@@ -184,7 +185,7 @@ async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=
   // Authorize the write inside the statement; a restricted key may see a 403 but must never schedule work.
   const allowed = recheck?.domains.length ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheck.domains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql`true`;
-  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
+  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND ${allowed} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
     SELECT target.*,EXISTS(SELECT 1 FROM queued) AS queued FROM target` : target;
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
@@ -292,6 +293,14 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
     return existing;
   }
 }
+// A retried/reconnected creation or a verifier can recover an old claim right at its deadline.
+// Recheck and hold the row across Create so recovery cannot recreate the identity after expiry cleanup.
+function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
+  return runtime.db.transaction(async db=>{
+    const current=await hostedDomain(db,wid,domainId,true);
+    if (current && current.token===token && !current.expired) return ensureIdentity(client,current.name,token);
+  });
+}
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
 // domain deletion and by disconnecting a shared connection, so a later reconnect never meets its own ghost.
 async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDomain,'name'|'region'|'token'|'connection'>) {
@@ -321,9 +330,36 @@ export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid
   }
   await db.execute(sql`WITH ${releaseConnectionClaims(wid,sql`SELECT ${connection.id}::text AS id`)} SELECT 1`);
 }
-async function releaseClaim(db:DbExecutor,wid:string,row:{token:string;id:string}) {
+async function releaseClaim(db:DbExecutor,wid:string,row:{token:string}) {
   await db.execute(sql`WITH released AS (DELETE FROM domain_claims WHERE workspace_id=${wid} AND token=${row.token} RETURNING name,token), ${releasedClaimCleanup(wid)}
-    DELETE FROM operation_domains WHERE workspace_id=${wid} AND id=${row.id} AND name IN (SELECT name FROM released)`);
+    DELETE FROM operation_domains WHERE workspace_id=${wid} AND name IN (SELECT name FROM released)`);
+}
+/** Each release holds one lock through the tag check, SES deletion and database cleanup. On SES
+ * failure retain the claim for the next sweep, without letting it block other expired names. */
+export async function expireDomainClaims(runtime:Runtime,deadline:number) {
+  let cursor:{created:string;token:string}|undefined, released=0;
+  while (Date.now()<deadline) {
+    const after=cursor ? sql`AND (dc.created_at,dc.token)>(${cursor.created}::timestamptz,${cursor.token}::uuid)` : sql``;
+    let selected=false;
+    try {
+      const found=await runtime.db.transaction(async db=>{
+        const row=(await db.execute<{workspace_id:string;name:string;token:string;created:string;connection:(HostedDomain['connection'] & {region:string})|null}>(sql`
+          SELECT dc.workspace_id,dc.name,dc.token,dc.created_at::text AS created,to_jsonb(pc) AS connection FROM domain_claims dc
+          LEFT JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
+          WHERE domain_claim_expired(dc) ${after} ORDER BY dc.created_at,dc.token LIMIT 1 FOR UPDATE OF dc SKIP LOCKED`)).rows[0];
+        if (!row) return false;
+        cursor=row; selected=true;
+        if (row.connection?.kind==='shared') await deleteClaimIdentity(runtime,row.workspace_id,{...row,region:row.connection.region,connection:row.connection});
+        await releaseClaim(db,row.workspace_id,row); return true;
+      });
+      if (!found) break;
+      released++;
+    } catch (e) {
+      if (!selected || !(e instanceof ApiError)) throw e;
+      log('warn',{code:'DOMAIN_EXPIRY_RETRY',reason:e.code});
+    }
+  }
+  return released;
 }
 function dnsSetupActor(c:Ctx) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -343,9 +379,8 @@ function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'superse
 const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
-  if (!row || row.token!==payload.token) return; // Deleted, reclaimed or disconnected.
-  // Polling never gives up: hourly for about three days, then every six hours for three more, then daily,
-  // paced per account below, so records added weeks later still verify on their own. FAILED means DOMAIN_UNAVAILABLE only.
+  if (!row || row.token!==payload.token || row.expired) return; // Deleted, reclaimed, disconnected or awaiting expiry cleanup.
+  // Only previously proven claims keep polling beyond 72 hours (including recovery after lost proof).
   const poll=Number(payload.poll ?? 0);
   const backoff=(n:number)=>n<5 ? [15000,30000,120000,600000,1800000][n]! : n<72 ? 3600_000 : n<84 ? 6*3600_000 : 24*3600_000;
   const defer=(ms:number, next=poll) => { throw new JobDeferred(new Date(Date.now()+ms).toISOString(),{...payload,poll:next}); };
@@ -362,7 +397,11 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
     catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity) throw e; }
     // The claim exists but the creating request never reached SES: the job owns the identity from here (ensureIdentity proves ownership itself).
-    if (!identity) identity={...await ensureIdentity(client,row.name,row.token),VerificationStatus:'PENDING',$metadata:{}};
+    if (!identity) {
+      const recovered=await recoverIdentity(runtime,job.workspaceId,row.id,row.token,client);
+      if (!recovered) return;
+      identity={...recovered,VerificationStatus:'PENDING',$metadata:{}};
+    }
     else if (!(row.connection.kind==='byo' && row.identity?.imported) && !ownsIdentity(identity,row.token)) throw unavailableDomain();
     const shared=row.connection.kind==='shared';
     const identityVerified=identity.VerificationStatus==='SUCCESS';
@@ -370,17 +409,21 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // Don't seed the resolver's negative cache before the user has published DNS. Once ownership
     // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
-    const checkHostedTxt=dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
+    const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
     const [positive,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,
       scopedImport ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
-    if (shared && report.ready && row.connection.tenant_state!=='ready') { log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),poll+1); }
+    if (shared && report.ready && row.connection.tenant_state!=='ready') {
+      // Platform setup delay is not a failure to prove ownership.
+      await runtime.db.execute(sql`UPDATE domain_claims dc SET ever_proven=true WHERE dc.token=${row.token} AND dc.connection_id=${row.connection.id} AND NOT dc.ever_proven AND NOT domain_claim_expired(dc)`);
+      log('info',{code:'TENANT_NOT_READY',workspaceId:job.workspaceId,domain:row.name}); defer(backoff(poll),poll+1);
+    }
     const outcome=await runtime.db.transaction(async db=>{
       if (upgrade) await db.execute(sql`SELECT promote_imported_claim(${job.workspaceId},${row.name},${row.token},${row.connection.id})`);
       // Serialize the association with deletion: a stale verifier cannot bind a replacement identity.
       const current=await hostedDomain(db,job.workspaceId,row.id,true);
-      if (!current || current.token!==row.token) return null;
+      if (!current || current.token!==row.token || current.expired) return null;
       const mailFrom=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus=(facts:IdentityFacts|null)=>facts?.ses.MailFromAttributes?.MailFromDomainStatus ?? null;
       if (current.receiving_host!==row.receiving_host || mailFrom(current.identity)!==mailFrom(row.identity) || (mailFromStatus(current.identity)==='PENDING' &&
         (mailFromStatus(row.identity)!=='PENDING' || mailFrom(current.identity)!==report.mailFromDomain))) {
@@ -489,12 +532,16 @@ export function registerOperations(app: App) {
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
-      let identity: Partial<GetEmailIdentityCommandOutput>;
-      try { identity=await ensureIdentity(getSes(runtime,row.region,claim.connection),row.name,claim.token); }
+      let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
+      try {
+        const client=getSes(runtime,row.region,claim.connection);
+        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token));
+      }
       catch(e) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
+      if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL RETURNING ${row.id}::text AS id,token`;
