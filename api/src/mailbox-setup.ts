@@ -133,16 +133,20 @@ async function ensureRegion(runtime: Runtime, region: string, installationId: st
     if (runtime.config.awsAccountId && runtime.config.awsAccountId !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'Mailboxes must use the same AWS account as the provisioned SES region.');
     const names = mailboxResources(installationId, region,account);
 
-    // Bucket: a 403 on HeadBucket means another AWS account owns the name.
-    let exists = true;
-    try { await s3.send(new HeadBucketCommand({ Bucket: names.bucket,ExpectedBucketOwner:account }), { abortSignal: signal }); }
-    catch (error) {
-      if (httpStatus(error) === 404 || errorName(error) === 'NotFound') exists = false;
-      else if (httpStatus(error) === 403) throw new ApiError(409, 'MAILBOX_BUCKET_CONFLICT', `The S3 bucket name ${names.bucket} is owned by another AWS account.`);
-      else throw step('s3:HeadBucket', error);
+    // Outside Virginia, CreateBucket returns BucketAlreadyOwnedByYou without changing the bucket.
+    // Avoid granting MX ListBucket for a HEAD probe. In Virginia re-creation can reset ACLs.
+    let exists = false;
+    if (!runtime.config.multiTenant || region === 'us-east-1') {
+      try { await s3.send(new HeadBucketCommand({ Bucket: names.bucket,ExpectedBucketOwner:account }), { abortSignal: signal }); exists = true; }
+      catch (error) {
+        if (httpStatus(error) === 403) throw new ApiError(409, 'MAILBOX_BUCKET_CONFLICT', `The S3 bucket name ${names.bucket} is owned by another AWS account.`);
+        if (httpStatus(error) !== 404 && errorName(error) !== 'NotFound') throw step('s3:HeadBucket', error);
+      }
     }
     if (!exists) {
-      try { await s3.send(new CreateBucketCommand({ Bucket: names.bucket, ObjectOwnership: 'BucketOwnerEnforced', ...(region === 'us-east-1' ? {} : { CreateBucketConfiguration: { LocationConstraint: region as never } }) }), { abortSignal: signal }); }
+      // New general-purpose S3 buckets default to BucketOwnerEnforced. On MX, omitting the header
+      // avoids granting the Worker permission to change an existing bucket's ownership controls.
+      try { await s3.send(new CreateBucketCommand({ Bucket: names.bucket, ...(runtime.config.multiTenant ? {} : { ObjectOwnership: 'BucketOwnerEnforced' as const }), ...(region === 'us-east-1' ? {} : { CreateBucketConfiguration: { LocationConstraint: region as never } }) }), { abortSignal: signal }); }
       catch (error) { if (errorName(error) !== 'BucketAlreadyOwnedByYou') throw errorName(error) === 'BucketAlreadyExists' ? new ApiError(409, 'MAILBOX_BUCKET_CONFLICT', `The S3 bucket name ${names.bucket} is taken.`) : step('s3:CreateBucket', error); }
     }
     await aws('s3:PutBucketTagging', () => s3.send(new PutBucketTaggingCommand({ Bucket: names.bucket, Tagging: { TagSet: tags(installationId) } }), { abortSignal: signal }));
