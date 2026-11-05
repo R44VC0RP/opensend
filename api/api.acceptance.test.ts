@@ -1,7 +1,7 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import { makeSignature } from 'better-auth/crypto';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, generateKeyPairSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
 import pg from 'pg';
 
 // Run against the actual server and normal background-job runner with npm test.
@@ -1855,6 +1855,16 @@ describe('Hosted MCP OAuth and tools', () => {
     const temporary = await callTool(token, 'createAgentToken', { body: { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic acceptance script' }, confirm: true }, 201);
     secrets.add(temporary.token);
     assert.equal(ok(await http('GET', '/v1/me', temporary.token)).environment, undefined);
+    const [encoded, signature] = temporary.token.slice('os_agent_'.length).split('.');
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    const derived = Buffer.from(hkdfSync('sha256', AUTH_SECRET!, 'opensend:keys:v1', 'agent-token:v1', 32));
+    const mac = (body: string, key: string | Buffer) => createHmac('sha256', key).update(`opensend-agent-token-v1:${body}`).digest('base64url');
+    assert.equal(payload.v, 4); assert.ok(signature === mac(encoded, derived));
+    const legacy = Buffer.from(JSON.stringify({ ...payload, v: 3 })).toString('base64url');
+    ok(await http('GET', '/v1/me', `os_agent_${legacy}.${mac(legacy, AUTH_SECRET!)}`));
+    for (const [body, key] of [[legacy, derived], [encoded, AUTH_SECRET!]] as const) {
+      error(await http('GET', '/v1/me', `os_agent_${body}.${mac(body, key)}`), 401, 'AUTH_INVALID');
+    }
     error(await http('POST', '/v1/agent-tokens', temporary.token, { permissions: ['read'], expiresInSeconds: 30, domains: [], purpose: 'Forbidden renewal' }), 403, 'MCP_AUTHORIZATION_REQUIRED');
     const managed = await callTool(token, 'createAgentToken', { body: { permissions: ['read', 'manage'], expiresInSeconds: 30, domains: [], purpose: 'Synthetic managed acceptance script' }, confirm: true }, 201);
     secrets.add(managed.token);
