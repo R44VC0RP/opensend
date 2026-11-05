@@ -177,7 +177,7 @@ export async function mailboxHourly(runtime: Runtime) {
 // another job stays in Postgres and JobDeferred returns its attempt rather than waiting in memory.
 let ingestActive = false;
 export const mailboxIngestJobs: Record<string, JobHandler> = { 'mailbox.ingest': async (runtime, payload, job) => {
-  if (ingestActive) throw new JobDeferred(new Date(Date.now() + 15_000).toISOString());
+  if (ingestActive) throw new JobDeferred(new Date(Date.now() + 2_000).toISOString());
   ingestActive = true;
   try { await ingestJob(runtime, payload, job); } finally { ingestActive = false; }
 } };

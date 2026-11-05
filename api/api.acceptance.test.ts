@@ -1488,7 +1488,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
             const ingest=()=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts:1,workspaceId:wid});
             const first=ingest(); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
-            try { await assert.rejects(ingest(),JobDeferred); } finally {releaseHead(); await first;}
+            const deferredAt=Date.now();
+            try { await assert.rejects(ingest(),e=>e instanceof JobDeferred && Date.parse(e.availableAt)>=deferredAt+1_500 && Date.parse(e.availableAt)<=Date.now()+2_500); } finally {releaseHead(); await first;}
             await ingest();
             assert.equal(oversizedHeads,1,'Even a duplicate ingest job does not revisit the failed receipt.');
           });
