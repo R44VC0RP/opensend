@@ -4,54 +4,37 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
+import { crc32, deflateSync } from 'node:zlib';
 import * as sdk from '../../sdk/src/sdk.gen.js';
 import { createClient } from '../../sdk/src/client/index.js';
 import type { SendEmailInput } from '../../sdk/src/types.gen.js';
 
 type Op = keyof typeof sdk;
-const dashboard = 'Requires a signed-in dashboard owner/admin, not an API key.';
+const dashboard = 'Requires a signed-in dashboard session, not an API key.';
 const shared = 'Would change shared domain, routing, provider or workspace configuration.';
-const importer = 'Import previews persist; there is no delete-import API for a run-owned fixture.';
-const schedule = 'No scheduled mail: the single-recipient immediate campaign does not test pacing or pause/resume.';
-const oauth = 'Requires an MCP OAuth approval; the runner uses only the supplied API key.';
-const artwork = 'Template artwork is not used by the literal text template; no external asset dependency.';
-const inboundKey = 'Secondary address-scoped credential administration; this run uses its supplied key.';
-const inboundHook = 'No external subscription to incoming mail; the synthetic outbound webhook tests signed delivery.';
 const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subdomain fixture.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const SKIP: Partial<Record<Op, string>> = {
   listMcpConnections: dashboard, revokeMcpConnection: dashboard,
-  createAgentToken: oauth, listAgentTokens: oauth, revokeAgentToken: oauth,
+  createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
+  revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
   listWorkspaces: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
   inviteWorkspaceMember: dashboard, createWorkspaceInvitation: dashboard, listWorkspaceInvitations: dashboard,
   revokeWorkspaceInvitation: dashboard, updateWorkspaceMember: dashboard, removeWorkspaceMember: dashboard,
   acceptWorkspaceInvitation: dashboard,
   getConnection: dashboard, listConnectionRegions: dashboard, createConnection: shared,
   verifyConnection: 'BYO AWS-role verification, not Hosted mail.', deleteConnection: 'Would disconnect this shared workspace.',
-  updateWorkspaceSettings: shared, getWorkspaceSettings: 'Workspace-wide read requires unrestricted access; domain ID pins the workspace instead.',
-  getSesSettings: 'Account-wide SES read requires unrestricted access.', listRegions: 'Installation-wide catalog requires unrestricted access.',
-  configureRegion: shared, discoverRegion: 'Operator discovery of the underlying AWS account, not a per-domain check.',
-  provisionRegion: shared, configureRegionAutoValidation: shared,
-  createDomain: shared, deleteDomain: shared, configureDomainMailFrom: shared,
+  updateWorkspaceSettings: shared, configureRegion: shared, provisionRegion: shared, configureRegionAutoValidation: shared,
+  createDomain: 'Creates an SES identity/domain claim; the runner does not provision DNS or AWS resources.',
+  deleteDomain: 'The verified claim is shared by every run.', configureDomainMailFrom: shared,
   getDomainDnsSetup: dashboard, completeDomainDnsSetup: 'Browser return with signed Domain Connect token and Google session.',
   receiveSesSnsEvent: 'Authenticated AWS ingress; indirect coverage via real SES feedback, never forge SNS.',
   unsubscribeOneClick: 'Leaves a persistent recipient opt-out; consent CRUD uses a fresh simulator contact instead.',
-  unsubscribeByLink: 'Recipient-facing capability URL, not part of the authenticated delivery flow.',
-  previewContactImport: importer, getContactImport: importer, commitContactImport: importer,
-  listContactImports: 'No run-owned import; do not inspect other imports.',
-  importTemplateImage: artwork, uploadTemplateAsset: artwork, getTemplateAsset: artwork,
-  getTemplateAssetContent: artwork, deleteTemplateAsset: artwork,
-  renderCampaignPreviewImage: 'Optional external screenshot renderer; assert rendered HTML and text via previewCampaign.',
-  renderCampaignTemplatePreviewImage: 'Optional external screenshot renderer; assert the published template HTML and text.',
-  scheduleCampaign: schedule, pauseCampaign: schedule, resumeCampaign: schedule, setCampaignPacing: schedule,
-  retryWebhookDelivery: 'No manual replay of an already attempted live delivery.',
-  updateInboundDomain: shared, enableInboundDomain: shared, disableInboundDomain: shared,
+  importTemplateImage: 'Requires a remote HTTPS image source; test assets are generated in-process.',
+  updateInboundDomain: shared, enableInboundDomain: 'Hosted receiving follows DNS; there is no run-owned domain to enable.',
+  disableInboundDomain: 'Hosted receiving cannot be disabled via API; removing the shared MX would break delivery.',
   createInboundSubdomain: subdomain, updateInboundSubdomain: subdomain, removeInboundSubdomain: subdomain,
-  listInboundSubdomains: subdomain, getInboundSubdomain: subdomain,
-  createInboundKey: inboundKey, listInboundKeys: inboundKey, revokeInboundKey: inboundKey,
-  createInboundWebhook: inboundHook, listInboundWebhooks: inboundHook, getInboundWebhook: inboundHook,
-  updateInboundWebhook: inboundHook, deleteInboundWebhook: inboundHook, rotateInboundWebhookSecret: inboundHook,
-  listInboundWebhookDeliveries: inboundHook,
+  getInboundSubdomain: subdomain,
 };
 
 const started = Date.now();
@@ -63,6 +46,7 @@ const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${k
 const success = simulator('success'), singleSuccess = simulator('success', '-single'), bounce = simulator('bounce'), complaint = simulator('complaint');
 const subject = `OpenSend MX E2E ${prefix}`, text = `OpenSend MX delivery check ${prefix}.`;
 const html = `<p>${text}</p>`;
+const webhookUrl = 'https://httpbin.org/status/204';
 const key = process.env.OPENSEND_E2E_API_KEY;
 const base = new URL(process.env.OPENSEND_E2E_URL || 'https://opensend.mx');
 const client = createClient({ baseUrl: base.origin, redirect: 'error', auth: scheme => scheme.scheme === 'bearer' ? key : undefined });
@@ -87,19 +71,26 @@ class ApiFailure extends Error {
 }
 async function api<K extends Op>(op: K, input: Input<K>): Promise<Output<K>> {
   check(contract.has(op) && !SKIP[op], `unregistered or skipped operation ${op}`);
-  const ms = Math.min(12_000, deadline - Date.now());
+  const ms = Math.min(op === 'renderCampaignPreviewImage' || op === 'renderCampaignTemplatePreviewImage' ? 30_000 : 12_000, deadline - Date.now());
   check(ms > 0, `run deadline before ${op}`);
   const state = ctx.getStore();
   if (state) { state.last = op; state.requestId = null; state.ops.add(op); }
   attempted.add(op);
   // Keep the generated method's input/output tied to its key; no handwritten route or schema.
   const call = sdk[op] as (opts: Input<K>) => ReturnType<typeof sdk[K]>;
-  const result = await call({ ...input, client, signal: AbortSignal.timeout(ms) });
+  const result = await call({ ...input, client: input.client ?? client, signal: AbortSignal.timeout(ms) });
   const apiError = 'error' in result ? result.error?.error : undefined;
   if (state) state.requestId = result.response?.headers.get('x-request-id') ?? apiError?.requestId ?? null;
   // Never serialize SDK errors: request objects, tokens, and unrelated mail can all be sensitive.
   if (result.data === undefined || !result.response?.ok) throw new ApiFailure(op, result.response?.status, apiError?.code);
   return result.data as Output<K>;
+}
+async function expectDenial(call: () => Promise<unknown>, status: number, code: string) {
+  try { await call(); } catch (error) {
+    if (error instanceof ApiFailure && error.status === status && error.code === code) return;
+    throw error;
+  }
+  throw new Error(`expected ${status} ${code}, got success`);
 }
 async function step<T>(name: string, work: () => Promise<T>) {
   const trace = { requestId: null, ops: new Set<Op>() };
@@ -129,6 +120,26 @@ async function until<T>(label: string, read: () => Promise<T>, ready: (value: T)
   }
 }
 function hasId(page: { data: { id: string }[] }, id: string) { return page.data.some(row => row.id === id); }
+async function listed<T extends { id: string }>(id: string, read: (cursor?: string) => Promise<{ data: T[]; nextCursor: string | null }>) {
+  let cursor: string | undefined;
+  do {
+    const page = await read(cursor), row = page.data.find(r => r.id === id);
+    if (row) return row;
+    check(page.nextCursor !== cursor, 'pagination cursor did not advance');
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  throw new Error(`run-owned record not listed: ${id}`);
+}
+async function workspaceReads() {
+  check((await api('getWorkspaceSettings', {})).name === "Ryan Vogel's Organization", 'unexpected workspace name');
+  const catalog = await api('listRegions', {});
+  check(catalog.data.some(r => r.region === region && r.enabled) && catalog.data.some(r => r.region === catalog.defaultRegion && r.isDefault), 'invalid regional catalog');
+  const tokens = await api('listAgentTokens', { query: { includeInactive: 'false', limit: 1 } });
+  check(Array.isArray(tokens.data) && tokens.data.every(t => t.id.startsWith('agt_') && t.revokedAt === null && !('token' in t)), 'invalid active agent-token metadata');
+  // Even an unrestricted workspace manager must not see the shared SES account.
+  await expectDenial(() => api('getSesSettings', { query: { region } }), 403, 'SHARED_ACCOUNT_PRIVATE');
+  await expectDenial(() => api('discoverRegion', { path: { region } }), 409, 'CONNECTION_MANAGED_REGION');
+}
 const idKey = (name: string) => ({ 'Idempotency-Key': `${prefix}:${name}` });
 function message(to: string): SendEmailInput {
   check([singleSuccess, bounce, complaint].includes(to), 'refusing a recipient outside this run');
@@ -209,7 +220,48 @@ async function audience() {
   const plan = await api('planAudienceMutation', { body: { statement: `UPDATE contacts SET name = '${prefix}' WHERE id = '${c.id}'` } });
   check(plan.matched === 1 && plan.sample.length === 1 && plan.sample[0].id === c.id && plan.sample[0].email === success, 'refusing plan: not exactly this run’s contact');
   check((await api('applyAudiencePlan', { body: { planId: plan.id } })).affected === 1, 'audience plan did not apply');
+  await step('One-row contact import and retained receipt', async () => {
+    const name = `${prefix}-import`;
+    const preview = await api('previewContactImport', { body: { csv: `email,name\n${success},${name}\n`, listId: l.id, mapping: { email: 'email', name: 'name' } } });
+    const path = { id: preview.id };
+    check(preview.status === 'preview' && preview.listId === l.id && preview.rows.length === 1 && preview.rows[0].email === success && !preview.errors.length, 'refusing import of anything but this run’s contact');
+    const committed = await api('commitContactImport', { path });
+    check(committed.status === 'committed' && committed.imported === 1, 'import did not commit exactly one row');
+    const receipt = await api('getContactImport', { path });
+    check(receipt.id === path.id && receipt.listId === l.id && receipt.rows.length === 1 && receipt.rows[0].name === name, 'incorrect stored import');
+    // This endpoint exposes summary metadata only and has no server-side listId filter.
+    const summary = await listed(path.id, cursor => api('listContactImports', { query: { cursor, limit: 100 } }));
+    check(summary.listId === l.id && summary.imported === 1 && summary.status === 'committed', 'incorrect import summary');
+    const updated = await api('getContact', { path: c });
+    check(updated.name === name && updated.email === success && updated.listIds.includes(l.id) && updated.marketingConsent === 'subscribed', 'import lost membership or consent');
+  });
   return { listId: l.id, segmentId: s.id };
+}
+
+// One opaque RGBA pixel. Build PNG chunks locally so neither upload nor inspection fetches an image.
+function pixelPng() {
+  const chunk = (type: string, data: Buffer) => {
+    const bytes = Buffer.alloc(data.length + 12);
+    bytes.writeUInt32BE(data.length, 0); bytes.write(type, 4); bytes.set(data, 8);
+    bytes.writeUInt32BE(crc32(bytes.subarray(4, 8 + data.length)), 8 + data.length);
+    return bytes;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(1, 0); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 6;
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.from([0, 32, 96, 128, 255]))), chunk('IEND', Buffer.alloc(0))]);
+}
+async function templateAsset() {
+  const png = pixelPng(), filename = `${prefix}.png`, content = png.toString('base64');
+  const file = await api('uploadTemplateAsset', { body: { filename, content, contentType: 'image/png', disposition: 'inline', contentId: prefix } });
+  const path = { id: file.id };
+  defer(`delete template PNG ${file.id}`, async () => check((await api('deleteTemplateAsset', { path })).deleted, 'template asset not deleted'));
+  const stored = await api('getTemplateAsset', { path });
+  check(stored.filename === filename && stored.size === png.length && stored.contentType === 'image/png' && stored.contentId === prefix, 'template PNG metadata changed');
+  check((await api('getTemplateAssetContent', { path })).content === content, 'template PNG bytes changed');
+}
+function checkScreenshot(image: { data: string; mimeType: string }) {
+  const png = Buffer.from(image.data, 'base64');
+  check(image.mimeType === 'image/png' && png.length > 33 && png.subarray(0, 8).toString('hex') === '89504e470d0a1a0a' && png.readUInt32BE(16) === 720 && png.readUInt32BE(20) > 0, 'expected a rendered 720px PNG');
 }
 
 async function attachment() {
@@ -236,6 +288,11 @@ async function template() {
   check(published.publishedRevision === saved.revision, 'wrong published revision');
   const preview = await api('previewCampaignTemplate', { path, query: { published: 'true' } });
   check(preview.html.includes(text) && preview.text.includes(text), 'published content missing in preview');
+  await step('Render published template PNG', async () => {
+    const image = await api('renderCampaignTemplatePreviewImage', { path, query: { published: 'true' } });
+    check(image.published && image.revision === saved.revision, 'renderer returned another template revision');
+    checkScreenshot(image);
+  });
   check((await api('getCampaignTemplate', { path })).published?.subject === subject, 'published subject differs');
   check(hasId(await api('listCampaignTemplates', { query: { search: prefix, publishedOnly: 'true' } }), item.id), 'template not listed');
   check((await api('setCampaignTemplateArchived', { path, body: { archived: true } })).archivedAt, 'template did not archive');
@@ -243,11 +300,10 @@ async function template() {
   return item.id;
 }
 
-async function campaign(audience: { listId: string; segmentId: string }, templateId?: string) {
-  const item = await api('createCampaign', { body: { name: prefix, from, region, audience, tracking: false, ...(templateId ? { templateId } : { subject, html }) } });
-  const path = { id: item.id };
+function retireCampaign(id: string) {
+  const path = { id };
   // Only draft/unreleased failed campaigns can be deleted. Archive dispatch history instead.
-  defer(`retire campaign ${item.id}`, async () => {
+  defer(`retire campaign ${id}`, async () => {
     const row = await api('getCampaign', { path });
     if (row.state === 'draft' || (row.state === 'failed' && !row.delivery?.expanded)) {
       check((await api('deleteCampaign', { path })).deleted, 'draft not deleted');
@@ -259,12 +315,42 @@ async function campaign(audience: { listId: string; segmentId: string }, templat
       check((await api('setCampaignArchived', { path, body: { archived: true } })).archivedAt, 'terminal campaign not archived');
     }
   });
+  return path;
+}
+type Audience = { listId: string; segmentId: string };
+async function scheduledCampaign(audience: Audience) {
+  const item = await api('createCampaign', { body: { name: `${prefix}-schedule`, audience, from, region, subject, html, tracking: false } });
+  const path = retireCampaign(item.id);
+  const eligible = await api('previewCampaignAudience', { path });
+  check(item.draft.audience?.listId === audience.listId && item.draft.audience.segmentId === audience.segmentId && eligible.matched === 1 && eligible.eligible === 1, 'refusing unexpected scheduled audience');
+  const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+  const launch = await api('scheduleCampaign', { path, headers: idKey('schedule'), body: { revision: item.revision, scheduledAt } });
+  check(launch.id === item.id && launch.queued === 1 && launch.scheduledAt === scheduledAt && !launch.simulated, 'schedule receipt differs');
+  await until('campaign prepared for tomorrow', () => api('getCampaignState', { path }), row => {
+    check(['preparing', 'scheduled'].includes(row.state), `unexpected pre-schedule state ${row.state}`);
+    return row.state === 'scheduled';
+  }, row => row.state);
+  const paused = await api('pauseCampaign', { path, body: {} });
+  check(paused.state === 'paused' && paused.delivery?.expanded === 0, 'future campaign did not pause before dispatch');
+  const paced = await api('setCampaignPacing', { path, body: { perDay: 100, rateShare: 0.25 } });
+  check(paced.delivery?.pacing.perDay === 100 && paced.delivery.pacing.rateShare === 0.25, 'pacing changes missing');
+  const resumed = await api('resumeCampaign', { path, body: {} });
+  check(resumed.state === 'scheduled' && resumed.scheduledAt && Date.parse(resumed.scheduledAt) === Date.parse(scheduledAt), 'resume lost future schedule');
+  const canceled = await api('cancelCampaign', { path });
+  check(canceled.state === 'canceled' && canceled.inFlight === 0 && canceled.canceled === 1, 'cancel did not stop one future recipient');
+  const stats = await api('getCampaignStats', { path });
+  check(stats.state === 'canceled' && stats.counts.total === 0 && stats.delivery?.expanded === 0, 'scheduled campaign materialized an email');
+}
+async function campaign(audience: Audience, templateId?: string) {
+  const item = await api('createCampaign', { body: { name: prefix, from, region, audience, tracking: false, ...(templateId ? { templateId } : { subject, html }) } });
+  const path = retireCampaign(item.id);
   check(item.draft.subject === subject && item.draft.html === html && (!templateId || item.sourceTemplateId === templateId), 'unexpected draft or template copy');
   const saved = await api('updateCampaign', { path, body: { revision: item.revision, draft: { ...item.draft, name: subject } } });
   check(saved.revision > item.revision && saved.draft.name === subject, 'revision did not advance');
   check(hasId(await api('listCampaigns', { query: { search: prefix } }), item.id), 'campaign not listed');
   const preview = await api('previewCampaign', { path });
   check(preview.html.includes(text) && preview.text.includes(text), 'campaign preview differs');
+  await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { path })));
   const allowed = await api('previewCampaignAudience', { path });
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
   const test = await api('testCampaign', { path, body: { to: success }, headers: idKey('campaign-test') });
@@ -280,6 +366,14 @@ async function campaign(audience: { listId: string; segmentId: string }, templat
   const logs = await api('listEmails', { query: { campaignId: item.id } });
   check(logs.data.length === 1 && logs.data[0].to[0] === success, 'wrong campaign recipient');
   await outcome(logs.data[0].id, success, 'delivered');
+  await step('Read unsubscribe confirmation without changing consent', async () => {
+    const { text } = await api('getEmailContent', { path: { id: logs.data[0].id } });
+    const token = text?.match(/\/unsubscribe\/(u_[a-f0-9]{64})\s*$/)?.[1];
+    check(token, 'no unsubscribe capability in run-owned marketing email');
+    const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
+    check(page.includes('<form method="post">'), 'GET must display a confirmation form');
+    check((await api('previewCampaignAudience', { path })).eligible === 1, 'GET changed audience consent');
+  });
   await outcome(test.id, success, 'delivered');
   // Cancellation must not retroactively retract a finished, delivered campaign.
   try { await api('cancelCampaign', { path }); }
@@ -293,7 +387,7 @@ async function campaign(audience: { listId: string; segmentId: string }, templat
 async function webhook() {
   // Synthetic tests bypass pause, actual workspace subscriptions do not. No customer events
   // or signing secrets leave MX. httpbin's fixed 204 endpoint is not a public request inbox.
-  const item = await api('createWebhook', { body: { url: 'https://httpbin.org/status/204', description: prefix, eventTypes: ['email.delivered'], paused: true } });
+  const item = await api('createWebhook', { body: { url: webhookUrl, description: prefix, eventTypes: ['email.delivered'], paused: true } });
   const path = { id: item.id };
   defer(`delete webhook ${item.id}`, async () => check((await api('deleteWebhook', { path })).deleted, 'webhook not deleted'));
   check(item.paused && (await api('getWebhook', { path })).paused, 'test endpoint must remain paused');
@@ -309,6 +403,17 @@ async function webhook() {
   // httpbin's uptime; a DNS/connect/signing failure (no HTTP response) does not qualify.
   check(detail.synthetic && detail.webhookId === item.id && detail.payload.id === detail.eventId && detail.attempts.some(a => a.deliveryId === test.id && a.statusCode !== null && a.statusCode >= 100 && a.statusCode < 600), `no HTTP attempt recorded for synthetic delivery ${test.id}`);
   check(hasId(await api('listWebhookDeliveries', { path }), test.id), 'signed test attempt not listed');
+  // Retry only our synthetic probe. HTTP errors can already have an automatic retry pending;
+  // in that case verify the duplicate-retry guard instead of forcing another delivery.
+  const deliveryPath = { ...path, deliveryId: test.id };
+  try {
+    const next = await api('retryWebhookDelivery', { path: deliveryPath });
+    check(next.id === test.id && next.status === 'pending', 'wrong retry receipt');
+  } catch (error) {
+    if (!(error instanceof ApiFailure && error.status === 409 && error.code === 'DELIVERY_PENDING' && detail.status === 'pending')) throw error;
+    return;
+  }
+  await until('second synthetic HTTP attempt', () => api('getWebhookDelivery', { path: deliveryPath }), d => d.synthetic && d.attemptCount > detail.attemptCount && d.attempts.some(a => a.statusCode !== null && !detail.attempts.some(first => a.id === first.id)), d => `${d.status}, attempts=${d.attemptCount}`);
 }
 
 async function apiKey() {
@@ -317,6 +422,42 @@ async function apiKey() {
   defer(`revoke throwaway key ${item.id}`, async () => check((await api('revokeApiKey', { path })).revoked, 'key not revoked'));
   check(item.name === prefix && item.domains.length === 1 && item.domains[0] === domain && item.permissions.join() === 'read', 'wrong child key scope');
   check(hasId(await api('listApiKeys', { query: { includeRevoked: 'false', limit: 100 } }), item.id), 'throwaway key not listed');
+}
+
+async function inboundKey(addressId: string, otherId: string) {
+  const key = await api('createInboundKey', { body: { name: prefix, addressIds: [addressId], permissions: ['read'] } });
+  const path = { id: key.id };
+  const restricted = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
+  defer(`revoke inbound key ${key.id}`, async () => {
+    const revoked = await api('revokeInboundKey', { path });
+    check(revoked.id === key.id && revoked.revokedAt, 'inbound key not revoked');
+    await expectDenial(() => api('getInboundAddress', { client: restricted, path: { addressId } }), 401, 'AUTH_INVALID');
+  });
+  const row = await listed(key.id, cursor => api('listInboundKeys', { query: { cursor, limit: 100 } }));
+  check(row.addressIds?.length === 1 && row.addressIds[0] === addressId && row.permissions.join() === 'read', 'inbound key scope differs');
+  check((await api('getInboundAddress', { client: restricted, path: { addressId } })).address === inbox, 'run key cannot read its address');
+  await expectDenial(() => api('getInboundAddress', { client: restricted, path: { addressId: otherId } }), 404, 'NOT_FOUND');
+}
+
+async function inboundWebhook(addressId: string, threadId: string) {
+  // Only this address's thread-state metadata, never message.received/stored or mail content.
+  const item = await api('createInboundWebhook', { body: { url: webhookUrl, description: prefix, addressIds: [addressId], eventTypes: ['thread.updated'], paused: true } });
+  const path = { id: item.id };
+  defer(`delete inbound webhook ${path.id}`, async () => check((await api('deleteInboundWebhook', { path })).ok, 'inbound webhook not deleted'));
+  const stored = await api('getInboundWebhook', { path });
+  check(stored.paused && stored.addressIds?.length === 1 && stored.addressIds[0] === addressId && stored.eventTypes.join() === 'thread.updated', 'unsafe inbound webhook subscription');
+  check(hasId(await api('listInboundWebhooks', {}), path.id), 'inbound webhook not listed');
+  const rotated = await api('rotateInboundWebhookSecret', { path });
+  check(rotated.secret.startsWith('whsec_') && rotated.secret !== item.secret, 'inbound webhook secret did not rotate');
+  const before = await api('listInboundEvents', { query: { addressId, types: 'thread.updated' } });
+  const active = await api('updateInboundWebhook', { path, body: { paused: false, addressIds: [addressId], eventTypes: ['thread.updated'] } });
+  check(!active.paused && active.addressIds?.[0] === addressId && active.addressIds.length === 1 && active.eventTypes.join() === 'thread.updated', 'inbound subscription scope changed');
+  const state = await api('updateInboundThread', { path: { threadId }, body: { addressId, addLabels: [prefix] } });
+  check(state.labels.includes(prefix), 'test label was not applied');
+  const events = await api('listInboundEvents', { query: { addressId, types: 'thread.updated', after: before.cursor } });
+  const event = events.data.find(e => e.addressId === addressId && e.threadId === threadId && e.type === 'thread.updated');
+  check(event, 'no matching thread metadata event');
+  await until('scoped thread metadata HTTP attempt', () => api('listInboundWebhookDeliveries', { path }), page => page.data.some(d => d.webhookId === item.id && d.eventId === event.id && d.attemptCount > 0 && d.lastStatusCode !== null), page => `${page.data.length} deliveries`);
 }
 
 async function inbound() {
@@ -337,6 +478,9 @@ async function inbound() {
   }
   const sender = await address(from), receiver = await address(inbox);
   const addressId = receiver.id;
+  await step('Verify inbound read key is restricted to one address', () => inboundKey(addressId, sender.id));
+  const children = await api('listInboundSubdomains', { path: d, query: { limit: 1 } });
+  check(Array.isArray(children.data) && children.data.every(r => r.parentDomainId === domainId), 'subdomain page includes another parent');
   await api('updateInboundAddress', { path: { addressId }, body: { displayName: prefix } });
   check((await api('getInboundAddress', { path: { addressId } })).displayName === prefix, 'receiving address edit not persisted');
   check(hasId(await api('listInboundAddresses', { query: { domain, q: prefix } }), addressId), 'receiving address not listed');
@@ -359,6 +503,7 @@ async function inbound() {
   check(hasId(await api('listInboundMessages', { query: { addressId, direction: 'inbound', q: prefix } }), msg.id), 'arrived message not listed');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
   check((await api('updateInboundThread', { path, body: { addressId, starred: true } })).starred, 'thread edit failed');
+  await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));
   const reply = await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
     addressId, replyToMessageId: msg.id, text, expectedRecipients: { to: [from], cc: [], bcc: [] },
   } });
@@ -397,6 +542,8 @@ async function run() {
       step('Temporary inbound addresses, self-loop, thread and reply', inbound),
       step('Paused webhook, rotated secret and synthetic signed HTTP attempt', webhook),
       step('Create and list restricted throwaway API key', apiKey),
+      step('Workspace settings, region catalog, token metadata and Hosted SES privacy', workspaceReads),
+      step('Upload and inspect a template PNG', templateAsset),
       (async () => {
         const [selection, tpl, guide] = await Promise.all([
           step('Contact, consent, list, segment and AudienceQL', audience),
@@ -407,7 +554,10 @@ async function run() {
           }),
         ]);
         // A template permission failure does not hide campaign dispatch regressions.
-        if (selection && guide) await step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl));
+        if (selection && guide) await Promise.all([
+          step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl)),
+          step('Schedule, pause, pace, resume and cancel without dispatch', () => scheduledCampaign(selection)),
+        ]);
       })(),
     ]);
     await step('Regional metrics for this run window', async () => {
