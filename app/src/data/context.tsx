@@ -8,12 +8,12 @@ import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { Alert, Button, PageHeader, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
-import { preloadable } from '../lib/preloadable'
+import { chunk } from '../lib/preloadable'
 
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>; notice: string | null; dismissNotice: () => void }
-const homePage = preloadable(() => import('../features/home'), m => m.HomePage)
-export const loadHome = homePage.preload
-const HomePage = homePage.Component
+const homeChunk = chunk(() => import('../features/home'))
+export const loadHome = homeChunk.preload
+const HomePage = homeChunk.page(m => m.HomePage)
 const ApiContext = createContext<OpenSendApi | null>(null)
 const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)

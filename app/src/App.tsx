@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
 import { Navigate, Route, Routes, Link, useLocation, useParams, type Params } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { BootLoader } from './components/BootLoader'
@@ -6,48 +6,54 @@ import { Button, EmptyState } from './components/ui'
 import { loadHome, useOnboardingStage, useSession } from './data/context'
 import { selectedWorkspace } from './data/live'
 import { dashboardLikelyReady, rememberDashboardReady } from './data/onboarding'
-import { preloadable } from './lib/preloadable'
-const onboarding = preloadable(() => import('./features/onboarding'), m => m.OnboardingPage)
-const overview = preloadable(() => import('./features/overview'), m => m.OverviewPage)
+import { chunk } from './lib/preloadable'
+const onboarding = chunk(() => import('./features/onboarding'))
+const overview = chunk(() => import('./features/overview'))
+const logs = chunk(() => import('./features/logs'))
+const campaigns = chunk(() => import('./features/campaigns'))
+const audience = chunk(() => import('./features/audience'))
+const settings = chunk(() => import('./features/settings'))
+const docs = chunk(() => import('./features/docs'))
+const inbound = chunk(() => import('./features/inbound'))
 const loadOnboarding = onboarding.preload
 const loadOverview = overview.preload
-const loadLogs = () => import('./features/logs')
-const loadCampaigns = () => import('./features/campaigns')
-const loadAudience = () => import('./features/audience')
-const loadSettings = () => import('./features/settings')
-const loadDocs = () => import('./features/docs')
-const loadInbound = () => import('./features/inbound')
-const OverviewPage = overview.Component
-const LogsPage = lazy(() => loadLogs().then(m => ({ default: m.LogsPage })))
-const EmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.EmailDetailPage })))
-const ReceivedEmailDetailPage = lazy(() => loadLogs().then(m => ({ default: m.ReceivedEmailDetailPage })))
-const CampaignsPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignsPage })))
-const CampaignEditorPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignEditorPage })))
-const CampaignReviewPage = lazy(() => loadCampaigns().then(m => ({ default: m.CampaignReviewPage })))
-const TemplatesPage = lazy(() => loadCampaigns().then(m => ({ default: m.TemplatesPage })))
-const TemplateEditorPage = lazy(() => loadCampaigns().then(m => ({ default: m.TemplateEditorPage })))
-const ContactsPage = lazy(() => loadAudience().then(m => ({ default: m.ContactsPage })))
-const ContactDetailPage = lazy(() => loadAudience().then(m => ({ default: m.ContactDetailPage })))
-const ListsPage = lazy(() => loadAudience().then(m => ({ default: m.ListsPage })))
-const ListDetailPage = lazy(() => loadAudience().then(m => ({ default: m.ListDetailPage })))
-const SegmentsPage = lazy(() => loadAudience().then(m => ({ default: m.SegmentsPage })))
-const SegmentEditorPage = lazy(() => loadAudience().then(m => ({ default: m.SegmentEditorPage })))
-const ApiKeysPage = lazy(() => loadSettings().then(m => ({ default: m.ApiKeysPage })))
-const DomainsPage = lazy(() => loadSettings().then(m => ({ default: m.DomainsPage })))
-const DomainDetailPage = lazy(() => loadSettings().then(m => ({ default: m.DomainDetailPage })))
-const SettingsPage = lazy(() => loadSettings().then(m => ({ default: m.SettingsPage })))
-const WebhookDetailPage = lazy(() => loadSettings().then(m => ({ default: m.WebhookDetailPage })))
-const DocsPage = lazy(() => loadDocs().then(m => ({ default: m.DocsPage })))
-const InboundPage = lazy(() => loadInbound().then(m => ({ default: m.InboundPage })))
-const InboundAddressesPage = lazy(() => loadInbound().then(m => ({ default: m.InboundAddressesPage })))
-const InboundAddressDetailPage = lazy(() => loadInbound().then(m => ({ default: m.InboundAddressDetailPage })))
-const InboundWebhooksPage = lazy(() => loadInbound().then(m => ({ default: m.InboundWebhooksPage })))
-const InboundWebhookDetailPage = lazy(() => loadInbound().then(m => ({ default: m.InboundWebhookDetailPage })))
-const LegacyMailboxesRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxesRedirect })))
-const LegacyMailboxRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxRedirect })))
-const LegacyMailboxWebhooksRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhooksRedirect })))
-const LegacyMailboxWebhookRedirect = lazy(() => loadInbound().then(m => ({ default: m.LegacyMailboxWebhookRedirect })))
-const OnboardingPage = onboarding.Component
+const loadLogs = logs.preload
+const loadCampaigns = campaigns.preload
+const loadAudience = audience.preload
+const loadSettings = settings.preload
+const loadDocs = docs.preload
+const loadInbound = inbound.preload
+const LogsPage = logs.page(m => m.LogsPage)
+const EmailDetailPage = logs.page(m => m.EmailDetailPage)
+const ReceivedEmailDetailPage = logs.page(m => m.ReceivedEmailDetailPage)
+const CampaignsPage = campaigns.page(m => m.CampaignsPage)
+const CampaignEditorPage = campaigns.page(m => m.CampaignEditorPage)
+const CampaignReviewPage = campaigns.page(m => m.CampaignReviewPage)
+const TemplatesPage = campaigns.page(m => m.TemplatesPage)
+const TemplateEditorPage = campaigns.page(m => m.TemplateEditorPage)
+const ContactsPage = audience.page(m => m.ContactsPage)
+const ContactDetailPage = audience.page(m => m.ContactDetailPage)
+const ListsPage = audience.page(m => m.ListsPage)
+const ListDetailPage = audience.page(m => m.ListDetailPage)
+const SegmentsPage = audience.page(m => m.SegmentsPage)
+const SegmentEditorPage = audience.page(m => m.SegmentEditorPage)
+const ApiKeysPage = settings.page(m => m.ApiKeysPage)
+const DomainsPage = settings.page(m => m.DomainsPage)
+const DomainDetailPage = settings.page(m => m.DomainDetailPage)
+const SettingsPage = settings.page(m => m.SettingsPage)
+const WebhookDetailPage = settings.page(m => m.WebhookDetailPage)
+const DocsPage = docs.page(m => m.DocsPage)
+const InboundPage = inbound.page(m => m.InboundPage)
+const InboundAddressesPage = inbound.page(m => m.InboundAddressesPage)
+const InboundAddressDetailPage = inbound.page(m => m.InboundAddressDetailPage)
+const InboundWebhooksPage = inbound.page(m => m.InboundWebhooksPage)
+const InboundWebhookDetailPage = inbound.page(m => m.InboundWebhookDetailPage)
+const LegacyMailboxesRedirect = inbound.page(m => m.LegacyMailboxesRedirect)
+const LegacyMailboxRedirect = inbound.page(m => m.LegacyMailboxRedirect)
+const LegacyMailboxWebhooksRedirect = inbound.page(m => m.LegacyMailboxWebhooksRedirect)
+const LegacyMailboxWebhookRedirect = inbound.page(m => m.LegacyMailboxWebhookRedirect)
+const OverviewPage = overview.page(m => m.OverviewPage)
+const OnboardingPage = onboarding.page(m => m.OnboardingPage)
 
 // Preload the first screen's code alongside /v1/me. A workspace that may need onboarding waits instead.
 const noop = () => {}
