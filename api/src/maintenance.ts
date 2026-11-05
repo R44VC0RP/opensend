@@ -3,6 +3,7 @@ import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
 import { campaignActive } from './states.js';
+import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -16,6 +17,7 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
+  if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.
   const drain = async (name: string, statement: () => SQL) => {
