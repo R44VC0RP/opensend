@@ -4591,6 +4591,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(unparsedLines.subject, 'Over 30k SES subject');
       assert.equal(unparsedLines.message_id, 'over-30k@example.net');
       assert.match(ok(await local('GET', `/v1/inbound/messages/${unparsedLines.id}?includeDelivery=true`, undefined, 'live')).rawUrl, /\.eml/);
+
+      // Distinct unparsed receipts with identical From/Subject/Message-ID must not deduplicate across receipts,
+      // nor collapse with an empty-body parsed receipt, while retrying the same receipt stays idempotent.
+      const sharedMessageId = 'reused-unparsed@example.net';
+      const firstUnparsed = await ingest(Buffer.from(lineHeader + 'alpha\r\n'.repeat(30_001 - 4)), 'Same unparsed subject', sharedMessageId);
+      const secondUnparsed = await ingest(Buffer.from(lineHeader + 'bravo\r\n'.repeat(30_001 - 4)), 'Same unparsed subject', sharedMessageId);
+      assert.notEqual(firstUnparsed.id, secondUnparsed.id, 'Unparsed messages on distinct receipts must remain separate stored messages.');
+      const emptyParsed = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Same unparsed subject\r\nMessage-ID: <${sharedMessageId}>\r\n\r\n`), 'Same unparsed subject', sharedMessageId);
+      assert.equal(emptyParsed.status, 'received');
+      assert.notEqual(emptyParsed.id, firstUnparsed.id, 'An empty-body parsed message must not deduplicate onto a prior unparsed message.');
+      const { rows: [retryReceipt] } = await db.query('SELECT ses_message_id, raw_key FROM mail_messages WHERE id = $1', [secondUnparsed.id]);
+      await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: retryReceipt.ses_message_id }, { id: unique('job'), workspaceId: scope, attempts: 2 });
+      const { rows: storedShared } = await db.query('SELECT id, raw_key FROM mail_messages WHERE workspace_id = $1 AND message_id = $2 ORDER BY created_at, id', [scope, sharedMessageId]);
+      assert.equal(storedShared.length, 3);
+      assert.equal(new Set(storedShared.map(r => r.raw_key)).size, 3);
+
+      const emptyFirstId = 'empty-first@example.net';
+      const firstEmpty = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nSubject: Empty then unparsed\r\nMessage-ID: <${emptyFirstId}>\r\n\r\n`), 'Empty then unparsed', emptyFirstId);
+      const laterUnparsed = await ingest(Buffer.from(lineHeader + 'charlie\r\n'.repeat(30_001 - 4)), 'Empty then unparsed', emptyFirstId);
+      assert.equal(firstEmpty.status, 'received');
+      assert.equal(laterUnparsed.status, 'unparsed');
+      assert.notEqual(laterUnparsed.id, firstEmpty.id, 'A later unparsed receipt must not deduplicate onto an earlier empty-body parsed message.');
     });
   });
 
