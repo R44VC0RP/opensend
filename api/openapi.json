@@ -87,6 +87,11 @@
               },
               "retryable": {
                 "type": "boolean"
+              },
+              "resetAt": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Next capacity change for a Hosted rolling send limit."
               }
             },
             "required": [
@@ -135,13 +140,34 @@
               "failed"
             ],
             "description": "Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready."
+          },
+          "sendingPause": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "at",
+              "reason"
+            ],
+            "description": "Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected."
           }
         },
         "required": [
           "kind",
           "region",
           "state",
-          "tenant"
+          "tenant",
+          "sendingPause"
         ],
         "description": "Multi-tenant sending connection for the current workspace, or null (always null when self-hosted)."
       },

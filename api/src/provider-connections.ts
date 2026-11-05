@@ -18,7 +18,9 @@ const State = z.enum(CONNECTION_STATES).describe('awaiting_role: waiting for the
 const Tenant = z.enum(TENANT_STATES).describe('Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.');
 const Connection = z.object({ id: z.string(), kind: Kind, region: z.string(), state: State, tenant: Tenant, importedDomains: z.number().int().nonnegative().describe('Number of currently claimed domains imported from this BYO account.'), awsAccountId: z.string().nullable(), roleArn: z.string().nullable(), templateVersion: z.string().nullable(), quickCreateUrl: z.url().nullable() }).openapi('ProviderConnection');
 // Safe for every workspace member: no account IDs, role ARNs or external IDs.
-export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant }).openapi('ConnectionSummary');
+export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), state: State, tenant: Tenant,
+  sendingPause: z.object({ at: z.iso.datetime(), reason: z.string() }).nullable().describe('Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.'),
+}).openapi('ConnectionSummary');
 type Row = { id: string; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number };
 
 function owner(c: Ctx) {
@@ -64,8 +66,8 @@ async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'>>(sql`SELECT kind, region, state, tenant_state FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
-  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state } : null;
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {paused_at: string | null; pause_reason: string | null}>(sql`SELECT kind, region, state, tenant_state, paused_at, pause_reason FROM provider_connections WHERE workspace_id=${wid}`)).rows[0];
+  return row ? { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null } : null;
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -332,13 +334,15 @@ export function registerProviderConnections(app: App) {
     try {
       await c.env.db.transaction(async db => {
         await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
-        const row = (await db.execute<Row>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}
+        const row = (await db.execute<Row & { pause_reason: string | null }>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}
           AND NOT EXISTS (SELECT 1 FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown'))
           AND NOT EXISTS (SELECT 1 FROM sending_campaigns c WHERE c.workspace_id=${wid} AND ${campaignActive()}) FOR UPDATE`)).rows[0];
         if (!row) {
           if (!(await db.execute(sql`SELECT 1 FROM provider_connections WHERE workspace_id=${wid}`)).rowCount) return notFound('Connection');
           throw new ApiError(409, 'CONNECTION_IN_USE', 'Finish queued work or active setup before disconnecting.');
         }
+        // Disconnect/reconnect must not serve as a workspace-controlled unpause.
+        if (row.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.pause_reason);
         await releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
         await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
       });

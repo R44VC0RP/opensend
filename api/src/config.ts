@@ -17,6 +17,9 @@ const values = z.object({
   DOMAIN_CONNECT_KEY_ID: optional(z.string().regex(/^_?[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$/)),
   // Comma-separated regions offered for MX shared sending.
   SHARED_SENDING_REGIONS: z.string().default('us-east-2'),
+  HOSTED_SEND_CAP_FIRST_WEEK: z.coerce.number().int().positive().max(2147483647).default(100),
+  HOSTED_SEND_CAP_SECOND_WEEK: z.coerce.number().int().positive().max(2147483647).default(1000),
+  HOSTED_SEND_CAP_MATURE: z.coerce.number().int().positive().max(2147483647).default(10000),
   AUTH_ALLOWED_DOMAINS: z.string().default(''),
   // Upgrade-only decryption input for pre-Google installations. Never used as the new encryption key.
   ENCRYPTION_KEY: optional(z.string().regex(/^[a-f0-9]{64}$/i)),
@@ -79,6 +82,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
     byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions,
+    hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,
     encryptionKey: deriveEncryptionKey(v.BETTER_AUTH_SECRET),

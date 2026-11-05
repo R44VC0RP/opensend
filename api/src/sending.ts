@@ -13,6 +13,7 @@ import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, 
 import { sendingConnections, unverifiedSender, verifiedClaim } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import type { ReadyConnection } from './provider-credentials.js';
+import { assertHostedAllowance, hostedAllowance, hostedCost, type HostedAllowance } from './hosted-sending.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { finishMailboxArchive,trackedAttachments,queueTrackedMailboxSend } from './mailbox-send.js';
@@ -68,7 +69,7 @@ function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor) => sql`SELECT count(*)::int AS total,
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number) => sql`SELECT count(*)::int AS total, ${hostedAllowance(runtime.config, a.workspaceId, cost)} AS hosted,
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
   FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
@@ -76,10 +77,12 @@ function assertPending(incoming: number, counts: { total: number; quota: number 
   const cap = pendingCap(counts.quota);
   if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace, sized from its SES daily quota. Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
 }
-async function checkPending(runtime: Pick<Runtime, 'config'>, db: DbExecutor, a: Actor, incoming: number) {
+async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
   await lockAdmission(db, a);
-  const { rows: [counts] } = await db.execute<{ total: number; quota: number | null }>(pendingCounts(runtime, a));
-  assertPending(incoming, counts!);
+  const charge = isSimulatedSes(runtime) ? 0 : cost;
+  const { rows: [counts] } = await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
+  assertHostedAllowance(counts!.hosted, charge);
+  assertPending(1, counts!);
 }
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
@@ -243,7 +246,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
     keySender(a, from); return selected;
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state,
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
     ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)} AS verified
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
@@ -251,6 +254,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   if (!state.enabled_regions.includes(state.region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
   verifiedSender(a, from, state.verified);
   if (!state.aws_account_id) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+  if (state.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', state.pause_reason);
   assertTenantReady(state, isSimulatedSes(runtime));
   a.dispatchAccount = { aws_account_id: state.aws_account_id, kind: state.kind };
   return state.region;
@@ -596,6 +600,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
     // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
     const mx = c.env.config.multiTenant;
+    const cost = mx && !isSimulatedSes(c.env) ? mails.reduce((n, m) => n + hostedCost(m.to, m.cc, m.bcc), 0) : 0;
     const ready = !mx && !isSimulatedSes(c.env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
@@ -612,10 +617,11 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; quota: number | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
+    const state = (await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(c.env, a)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+      FROM (${pendingCounts(c.env, a, cost)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    assertHostedAllowance(state.hosted, cost);
     assertPending(mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
@@ -690,7 +696,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, a: Act
   const parsed = SendInput.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.to, cc: request.cc, bcc: request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
   if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Message fields are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
   for (const header of request.headers) if (!/^[!-9;-~]{1,126}$/.test(header.Name) || !/^[ -~]{1,995}$/.test(header.Value) || header.Name.length + header.Value.length > 996) throw new ApiError(422, 'INVALID_MIME_HEADER', `Header ${header.Name} is not a valid single-line ASCII header.`);
-  await checkPending(runtime, db, a, 1);
+  await checkPending(runtime, db, a, hostedCost(request.to, request.cc, request.bcc));
   const snapshot = await prepare(runtime, db, a, parsed.data);
   snapshot.headers = [...snapshot.headers, ...request.headers];
   const receipt = await queueEmail(runtime, db, a, snapshot);
@@ -967,7 +973,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json'); const campaignId = c.req.valid('param').id;
-    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(c.env, db, a, 1); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(c.env, db, a, snapshot, undefined, undefined, c.get('requestId')); });
+    const result = await idempotent(c, a, input, async db => { const row = await findCampaign(db, a, campaignId, true); if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.'); await checkPending(c.env, db, a, hostedCost(input.to)); const snapshot = await campaignMessage(c.env, db, a, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true); return queueEmail(c.env, db, a, snapshot, undefined, undefined, c.get('requestId')); });
     return c.json(Receipt.parse(result), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/send', operationId: 'sendCampaign', description: 'Accept the current revision for durable background delivery: the audience is frozen now, every message is validated in the background, then recipients are released into the dispatch queue. The 202 count is accepted recipient intents, not SES acceptance or delivery; poll the campaign for its state.', tags: ['Campaigns'], security, request: { params: IdParams, headers: IdempotencyHeaders, body: json(CampaignSend) }, responses: { 202: response(CampaignQueued), ...errors } }), async c => {
@@ -1409,11 +1415,12 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Pro
   return null;
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
-type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; account: Actor['dispatchAccount'] | null };
+type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null };
+type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
-    account: runtime.config.multiTenant ? sql<Actor['dispatchAccount']>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
+    account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
@@ -1522,6 +1529,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
     const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
+      hosted: hostedAllowance(runtime.config, a.workspaceId, campaign.simulated ? 0 : 1),
       rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits_} WHERE workspace_id=${a.workspaceId} AND region=${draft.region}),0)`,
     }).from(emails).where(and(scope(emails, a), isNotNull(emails.campaignId), inArray(emails.status, ['queued', 'attempting'])));
     // A capped campaign opens a new 24-hour window when the previous one has elapsed (or on its first release).
@@ -1535,8 +1543,20 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       const backlog = Math.max(buffer!.campaign - campaignBuffer(buffer!.rate) / 2, buffer!.total - workspaceBuffer(buffer!.rate) / 2);
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
-    const recipients = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
+    assertHostedAllowance(buffer!.hosted, 0);
+    let recipients = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
+    const allowance = buffer!.hosted;
+    let capPause: {code: string; message: string} | undefined;
+    if (allowance && !campaign.simulated) {
+      let left = allowance.cap - allowance.used;
+      const blocked = recipients.findIndex(r => hostedCost(r.recipient.email) > 0 && --left < 0);
+      if (blocked >= 0) {
+        capPause = {code:'SEND_LIMIT_REACHED', message:`The workspace reached its Hosted limit of ${allowance.cap} recipients per rolling 24 hours. Resume after capacity returns.`};
+        if (blocked === 0) { await db.execute(pauseCampaign(ref, capPause)); return null; }
+        recipients = recipients.slice(0, blocked); // Commit the last affordable prefix and its paused cursor together.
+      }
+    }
     const prepared = recipients.map(recipient => ({ id: id('email'), ordinal: recipient.ordinal, snapshot: {
       from: draft.from, ...(draft.fromName !== undefined ? { fromName: draft.fromName } : {}), to: [recipient.recipient.email], cc: [], bcc: [], replyTo: draft.replyTo ?? [], region: draft.region,
       kind: 'marketing' as const, subject: recipient.subject!, attachments: draft.attachments, tracking: draft.tracking, headers: [], deferredCampaign: true,
@@ -1545,9 +1565,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const links = prepared.flatMap(({ id: emailId, snapshot }) => snapshot.attachments.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType: 'email' as const, ownerId: emailId })));
     if (links.length) await db.insert(attachmentLinks).values(links);
     const expanded = recipients[recipients.length - 1]!.ordinal;
-    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length));
+    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length, capPause));
     log('info', { code: 'CAMPAIGN_RELEASED', campaignId: campaign.id, released: prepared.length, expanded, total: campaign.total, capacity, buffered: buffer!.campaign, workspaceBuffered: buffer!.total, rate: buffer!.rate });
-    return { count: prepared.length, completed: expanded === campaign.total };
+    return { count: prepared.length, completed: !!capPause || expanded === campaign.total };
   });
   if (!released) return 'done';
   // Released rows are claimed directly by the region dispatcher.
@@ -1570,6 +1590,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     for (;;) {
       const row = await readRun(runtime, a, campaignId);
       if (!row || !(CAMPAIGN_RUNNING as readonly string[]).includes(row.state)) return;
+      if (row.account?.pauseReason && row.expanded < row.total) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.account.pauseReason);
       if (row.simulated !== isSimulatedSes(runtime)) throw new ApiError(409, 'SES_MODE_CHANGED', 'The campaign was launched with a different SES configuration. No more recipients were queued.');
       if (!row.reviewDraft || !row.reviewRendered) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The frozen message source is missing.');
       a.keyId = row.actorKeyId ?? a.keyId;
@@ -1582,6 +1603,10 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
     }
   } catch (error) {
     if (error instanceof JobDeferred) throw error;
+    if (error instanceof ApiError && error.code === 'HOSTED_SENDING_PAUSED') {
+      await runtime.db.execute(pauseCampaign(ref, { code: error.code, message: error.message }));
+      return;
+    }
     const retry = !(error instanceof ApiError) || error.retryable;
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_RUN_FAILED', 'The campaign run will retry from its durable cursors.', undefined, true);
     try {

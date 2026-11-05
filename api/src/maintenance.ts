@@ -2,13 +2,33 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { Runtime } from './core.js';
 import { log } from './core.js';
 import { enqueue } from './jobs.js';
-import { campaignActive } from './states.js';
+import { campaignActive, pauseHostedSending } from './states.js';
+import { hostedMail, realDestinations } from './hosted-sending.js';
 import { expireDomainClaims } from './operations.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
 // Hourly cron invocations may run up to 15 minutes; stop starting new batches after this and continue next hour.
 const RETENTION_BUDGET_MS = 4 * 60_000;
+
+export async function checkHostedHealth(runtime: Runtime) {
+  if (!runtime.config.multiTenant) return;
+  // Count each real message once per outcome. Late feedback counts when it arrives, even
+  // if acceptance was outside the window. Never dilute rates with repeated SES Send events.
+  const result = await runtime.db.execute(pauseHostedSending(sql`WITH outcomes AS (
+    SELECT pc.id,v.email_id,bool_or(v.type IN ('accepted','send')) AS sent,
+      bool_or(v.type='bounce' AND v.data->>'bounceType'='Permanent') AS bounced,bool_or(v.type='complaint') AS complained
+    FROM provider_connections pc JOIN sending_email_events v ON v.workspace_id=pc.workspace_id
+    JOIN sending_emails e ON e.workspace_id=v.workspace_id AND e.id=v.email_id
+    WHERE pc.kind='shared' AND pc.paused_at IS NULL AND v.created_at>now()-interval '24 hours'
+      AND NOT v.simulated AND NOT e.simulated AND e.status<>'suppressed' AND v.type IN ('accepted','send','bounce','complaint')
+      AND ${hostedMail} AND ${realDestinations}>0 GROUP BY pc.id,v.email_id
+  ), counts AS (SELECT id,count(*) FILTER (WHERE sent) AS sends,count(*) FILTER (WHERE bounced) AS bounces,
+    count(*) FILTER (WHERE complained) AS complaints FROM outcomes GROUP BY id)
+  SELECT *,CASE WHEN (sends<200 AND bounces>=10) OR (sends>=200 AND bounces>sends*0.03) THEN 'Hosted sending paused: high hard-bounce volume in the last 24 hours.'
+    WHEN (sends<200 AND complaints>=2) OR (sends>=200 AND complaints>sends*0.0005) THEN 'Hosted sending paused: high spam-complaint volume in the last 24 hours.' END AS reason FROM counts`));
+  for (const row of result.rows) log('warn', { code: 'HOSTED_SENDING_AUTO_PAUSED', workspaceId: row.workspace_id, reason: row.pause_reason, sends: Number(row.sends), bounces: Number(row.bounces), complaints: Number(row.complaints) });
+}
 
 /**
  * Retention runs one table at a time in bounded batches, each its own transaction. It used to be one transaction
@@ -17,6 +37,7 @@ const RETENTION_BUDGET_MS = 4 * 60_000;
  */
 export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) {
   const deadline = Date.now() + budgetMs, deleted: Record<string, number> = {};
+  await checkHostedHealth(runtime);
   if (runtime.config.multiTenant) deleted.domain_claims=await expireDomainClaims(runtime,Math.min(deadline,Date.now()+60_000));
   const cutoff = sql`now() - interval '30 days'`;
   // Repeats one bounded statement until it deletes less than a full batch or the budget runs out.

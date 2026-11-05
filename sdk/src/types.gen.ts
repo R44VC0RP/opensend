@@ -21,6 +21,10 @@ export type ApiError = {
         requestId: string;
         field?: string;
         retryable: boolean;
+        /**
+         * Next capacity change for a Hosted rolling send limit.
+         */
+        resetAt?: string;
     };
 };
 
@@ -38,6 +42,13 @@ export type ConnectionSummary = {
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
     tenant: 'pending' | 'ready' | 'failed';
+    /**
+     * Hosted reputation hold: sending and dispatch are paused until operator review. Receiving is unaffected.
+     */
+    sendingPause: {
+        at: string;
+        reason: string;
+    } | null;
 } | null;
 
 export type AgentToken = {

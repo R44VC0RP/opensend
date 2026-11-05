@@ -37,7 +37,7 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
     SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c
-    WHERE EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND ${due})` : sql`
+    WHERE c.paused_at IS NULL AND EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=c.region AND ${due})` : sql`
     SELECT DISTINCT e.region FROM sending_emails e JOIN ses_installation_settings s ON s.workspace_id=e.workspace_id
     WHERE ${due} AND s.enabled_regions ? e.region`;
   return (await runtime.db.execute<Partition>(sql`${recovery} ${partitions}`)).rows;

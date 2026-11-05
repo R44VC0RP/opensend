@@ -102,7 +102,8 @@ export function createApp() {
     const invalidJson = error instanceof SyntaxError;
     const responseError = known ? error : invalidJson ? new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.') : new ApiError(500, 'INTERNAL_ERROR', 'Unexpected server failure. Use the request ID to locate the server log.');
     log('error', { requestId, operation: c.req.routePath ?? 'unmatched', code: responseError.code, status: responseError.status, message: responseError.message, errorType: known ? undefined : error.name, databaseCode: 'code' in error && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined, stack: known ? undefined : error.stack?.split('\n').slice(1).join('\n') });
-    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}) } }, responseError.status as ContentfulStatusCode);
+    if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
+    return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}) } }, responseError.status as ContentfulStatusCode);
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404));
   app.get('/health', c => c.json({ status: 'ok', service: 'opensend', multiTenant: c.env.config.multiTenant }));

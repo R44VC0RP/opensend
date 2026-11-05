@@ -509,7 +509,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
     const runtime: import('./src/core.js').Runtime = {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
-      config: { multiTenant: false, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
+      config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
         allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -824,7 +824,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending'});
+        assert.deepEqual(ok(await local('GET','/v1/me',undefined,a.cookie)).connection,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null});
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         const { reconcileSharedConnections,tenantJob } = await import('./src/provider-connections.js');
         await reconcileSharedConnections(runtime);
@@ -1119,6 +1119,16 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await pool.query("UPDATE provider_connections SET tenant_state='failed' WHERE workspace_id=$1",[b.org.id]);
           try { error(await send(`hi@${domain}`),409,'TENANT_NOT_READY'); assert.equal((await pool.query('SELECT 1 FROM sending_emails WHERE workspace_id=$1',[b.org.id])).rowCount,0); }
           finally { await pool.query("UPDATE provider_connections SET tenant_state='ready' WHERE workspace_id=$1",[b.org.id]); }
+          // Two independent connections race for the last slot. Both passed authentication before their
+          // admission transactions; the waiter must see the winner's committed reservation.
+          const firstWeek = runtime.config.hostedSendCaps.firstWeek;
+          runtime.config.hostedSendCaps.firstWeek = 1;
+          try {
+            const race = await Promise.all([send(`hi@${domain}`),send(`hi@${domain}`)]);
+            assert.deepEqual(race.map(r=>r.status).sort(),[202,429]);
+            error(race.find(r=>r.status===429)!,429,'SEND_LIMIT_REACHED');
+            await pool.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND id=$2',[b.org.id,race.find(r=>r.status===202)!.body.id]);
+          } finally { runtime.config.hostedSendCaps.firstWeek = firstWeek; }
           await dt.test('MX inbound routes only MX-verified customer hosts, independently of DKIM, and splits private Bcc',async it=>{
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
             const otherHost=`${unique('receiving')}.invalid`,blind=`private@${otherHost}`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
@@ -4071,6 +4081,99 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('MX: Hosted admission, campaign release and dispatch share the rolling recipient cap and reputation hold', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { checkHostedHealth } = await import('./src/maintenance.js');
+      const { resumeHostedSending } = await import('./src/states.js');
+      const { runDispatcher } = await import('./src/dispatcher.js');
+      const { createMailbox } = await import('./src/mailbox-store.js');
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'guard.example', from = `sender@${domain}`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:opensend-mx-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
+      const md = unique('mdom');
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,$4,$5,'active')`,[md,wid,unique('domain'),domain,REGION]);
+      const box = await createMailbox(runtime.db,{workspaceId:wid},{domainId:md,domainName:domain,address:from,origin:'api'});
+      const simulator = 'success+e2e@simulator.amazonses.com', mail = { from, to: 'real@example.net', subject:'Guardrail', text:'Synthetic.' };
+      const send = (extra:Json = {}) => local('POST','/v1/emails/send',{...mail,...extra});
+      const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},()=>mail)});
+      const thread = () => local('POST','/v1/inbound/threads',{addressId:box.id,to:[mail.to],subject:mail.subject,text:mail.text});
+      const pause = async () => ok(await local('GET','/v1/me')).connection.sendingPause;
+      const recipients = ok(await batch(98),202).data;
+      error(await batch(3),429,'SEND_LIMIT_REACHED'); // All or nothing: leave two slots.
+      const mixed = ok(await send({to:simulator, cc:['cc@example.net'], bcc:['bcc@example.net']}),202);
+      const limited = await send(); const limitError = error(limited,429,'SEND_LIMIT_REACHED');
+      assert.ok(Date.parse(limitError.resetAt) > Date.now()+23*3600000); assert.ok(limited.headers.get('retry-after'));
+      error(await thread(),429,'SEND_LIMIT_REACHED');
+      const sim = ok(await send({to:simulator}),202); // A deploy test cannot consume tenant capacity.
+      error(await send({to:'fake@x.simulator.amazonses.com'}),429,'SEND_LIMIT_REACHED');
+      runtime.config.liveEnabled=false;
+      try { assert.equal(ok(await send(),202).simulated,true); } finally { runtime.config.liveEnabled=true; }
+      await db.query(`UPDATE sending_emails SET status='suppressed' WHERE id=$1`,[mixed.id]);
+      ok(await thread(),202); // Suppression released both real slots (not the SES simulator destination).
+
+      const list = ok(await local('POST','/v1/lists',{name:unique('guard')}),201);
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'guard-'||n||'@example.net','subscribed' FROM generate_series(1,3)n`,[wid]);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM audience_contacts WHERE workspace_id=$1`,[wid,list.id]);
+      const c = ok(await local('POST','/v1/campaigns',{name:unique('guard'),from,subject:'Cap',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),202);
+      await run('campaign.run');
+      const campaign = ok(await local('GET',`/v1/campaigns/${c.id}`));
+      assert.equal(campaign.state,'paused'); assert.equal(campaign.delivery.pauseReason.code,'SEND_LIMIT_REACHED'); assert.equal(campaign.delivery.expanded,1);
+      error(await send(),429,'SEND_LIMIT_REACHED');
+      // Even a fully drained queue cannot refill the rolling budget. Only an expired admission opens a new slot.
+      await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND status='queued'`,[wid]);
+      error(await send(),429,'SEND_LIMIT_REACHED');
+      await db.query(`UPDATE sending_emails SET created_at=now()-interval '24 hours' WHERE id=$1`,[recipients[0].id]);
+      const queued = ok(await send(),202).id;
+      error(await send(),429,'SEND_LIMIT_REACHED');
+      await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
+      ok(await batch(100),202);
+      await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
+
+      // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
+      const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
+        await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
+          SELECT gen_random_uuid()::text,$1,x,$2,$3,$4,now()-$5::interval FROM unnest($6::text[]) x`,
+          [wid,type,data,simulated,age,recipients.slice(start,end).map((r:Json)=>r.id)]);
+      };
+      await event('bounce',0,9,{bounceType:'Permanent'}); await event('bounce',0,1,{bounceType:'Permanent'}); // duplicate
+      await event('bounce',9,10,{bounceType:'Transient'}); await event('complaint',0,1); await event('complaint',1,2,{},'25 hours');
+      await event('bounce',9,10,{bounceType:'Permanent'},'0 hours',true);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES(gen_random_uuid()::text,$1,$2,'complaint',false)`,[wid,sim.id]);
+      await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await db.query(`UPDATE sending_emails SET region='eu-west-1' WHERE id=$1`,[recipients[9].id]); // The final hard bounce is in another region.
+      await event('bounce',9,10,{bounceType:'Permanent'});
+      await checkHostedHealth(runtime); const held = await pause(); assert.match(held.reason,/hard-bounce/); assert.ok(Date.parse(held.at));
+      await checkHostedHealth(runtime); assert.deepEqual(await pause(),held);
+      for (const attempt of [send,()=>batch(1),thread,()=>send({to:simulator})]) error(await attempt(),409,'HOSTED_SENDING_PAUSED');
+      const report = await runDispatcher(runtime,{region:REGION, accountId:pool}); assert.equal(report.sent,0); assert.equal(report.claimed,0);
+      assert.deepEqual((await db.query('SELECT status,lease_until FROM sending_emails WHERE id=$1',[queued])).rows,[{status:'queued',lease_until:null}]);
+      await runtime.db.execute(resumeHostedSending(wid)); assert.equal(await pause(),null);
+      const { SESv2Client, GetAccountCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const ses = t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
+        assert.ok(cmd instanceof SendEmailCommand); return {MessageId:unique('fake-ses')};
+      });
+      assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
+      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1 AND type='bounce'`,[wid]);
+      await event('complaint',1,2); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      await runtime.db.execute(resumeHostedSending(wid));
+      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
+      // At 200 sends, six hard bounces are exactly 3% (not over); seven exceed the rate despite being <10.
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated)
+        SELECT gen_random_uuid()::text,$1,id,'accepted',false FROM sending_emails WHERE workspace_id=$1 AND NOT simulated AND status<>'suppressed' AND to_addresses->>0<>$2 LIMIT 200`,[wid,simulator]);
+      assert.equal((await db.query(`SELECT count(*)::int n FROM sending_email_events WHERE workspace_id=$1`,[wid])).rows[0].n,200);
+      await event('bounce',0,6,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      await event('bounce',6,7,{bounceType:'Permanent'}); await checkHostedHealth(runtime); assert.match((await pause()).reason,/hard-bounce/);
+      await runtime.db.execute(resumeHostedSending(wid));
+      await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1 AND type='bounce'`,[wid]);
+      await event('complaint',0,1); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
+      error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
+    });
+  });
   test('MX: account shards isolate sends, stored templates, quota and feedback', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run, jobs }) => {
       const { SESv2Client, GetAccountCommand, SendEmailCommand, GetEmailTemplateCommand, TestRenderEmailTemplateCommand } = await import('@aws-sdk/client-sesv2');
@@ -4152,6 +4255,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(results.map(r=>r.ok),[true,false,false]);
       assert.deepEqual((await db.query('SELECT workspace_id FROM operation_sns_receipts WHERE topic_arn=$1',[byoTopic])).rows,[{workspace_id:byo}]);
       assert.deepEqual((await db.query('SELECT id FROM sending_emails WHERE workspace_id IN ($1,$2) AND status=\'delivered\'',[shared,byo])).rows,[{id:b.id}]);
+      runtime.config.hostedSendCaps.firstWeek=1;
+      error(await send(shared,{subject:'cap',text:'fixture'}),429,'SEND_LIMIT_REACHED');
+      const uncapped = ok(await send(byo,{to:['one@example.org','two@example.org'],subject:'uncapped',text:'fixture'}),202);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) SELECT gen_random_uuid()::text,$1,x,'complaint',false FROM unnest($2::text[]) x`,[byo,[b.id,uncapped.id]]);
+      await (await import('./src/maintenance.js')).checkHostedHealth(runtime);
+      assert.equal(ok(await local('GET','/v1/me',undefined,'live',{'x-opensend-workspace':byo})).connection.sendingPause,null);
     });
   });
   test('MX: 100 emails across 100 workspaces share account-scoped quota and bounded dispatcher statements', async t => {

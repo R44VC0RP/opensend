@@ -153,6 +153,14 @@ export const queueTenantJob = (source: SQL) => sql`INSERT INTO jobs(id,type,work
 export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
 
+// This is a sending hold, not a provisioning failure: claims and inbound routing keep working.
+// `unhealthy` supplies the shared connection id, workspace, counts, and reason from the hourly snapshot.
+export const pauseHostedSending = (unhealthy: SQL) => sql`UPDATE provider_connections pc SET paused_at=clock_timestamp(),pause_reason=h.reason
+  FROM (${unhealthy}) h WHERE pc.id=h.id AND pc.kind='shared' AND pc.paused_at IS NULL AND h.reason IS NOT NULL
+  RETURNING pc.workspace_id,pc.pause_reason,h.sends,h.bounces,h.complaints`;
+export const resumeHostedSending = (wid: string) => sql`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL
+  WHERE workspace_id=${wid} AND kind='shared' AND paused_at IS NOT NULL RETURNING workspace_id`;
+
 // Campaigns: one state for the draft, its frozen snapshot (sending_campaign_reviews, no status of its own) and its
 // delivery. `total`, `prepared` and `expanded` are cursors into the frozen recipient list, `canceled` counts
 // recipients released from the reservation; none of them is a second status. A launch snapshots the audience and
@@ -206,15 +214,20 @@ export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampa
   scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL`, editableRow);
 /** A new revision: draft, or failed with nothing released -> draft with no snapshot; a failed launch's counters and error go with it. */
 export const reviseCampaign = (ref: CampaignRef, set: SQL) => sql`UPDATE sending_campaigns SET state='draft',updated_at=now(),review_id=NULL,error=NULL,total=0,prepared=0,expanded=0,canceled=0,scheduled_at=NULL${set} WHERE ${campaignRow(ref)} AND ${editableRow} RETURNING *`;
-export const pauseCampaign = (ref: CampaignRef, reason: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'paused', sql`,paused_at=now(),pause_reason=${JSON.stringify(reason)}::jsonb,waiting_reason=NULL,waiting_until=NULL,health_checked_at=now()`);
+type PauseReason = { code: string; message: string };
+const pausedFields = (reason: PauseReason) => sql`,paused_at=now(),pause_reason=${JSON.stringify(reason)}::jsonb,health_checked_at=now()`;
+export const pauseCampaign = (ref: CampaignRef, reason: PauseReason) => moveCampaign(ref, CAMPAIGN_RUNNING, 'paused', sql`${pausedFields(reason)},waiting_reason=NULL,waiting_until=NULL`);
 /** paused, or failed after releasing some recipients, continues from its cursors on the same snapshot; the failure is cleared. */
 export const resumeCampaign = (ref: CampaignRef, to: RunningState) => moveCampaign(ref, ['paused', 'failed'], to, sql`,paused_at=NULL,pause_reason=NULL,error=NULL,health_checked_at=now()`, sql`(state='paused' OR expanded>0)`);
-export const cancelCampaign = (ref: CampaignRef, error: { code: string; message: string } | null) => moveCampaign(ref, [...CAMPAIGN_ACTIVE, 'failed'], 'canceled', sql`,canceled=canceled+(total-expanded),waiting_reason=NULL,waiting_until=NULL${error ? sql`,error=${JSON.stringify(error)}::jsonb` : sql``}`);
+export const cancelCampaign = (ref: CampaignRef, error: { code: string; message: string } | null) => moveCampaign(ref, [...CAMPAIGN_ACTIVE, 'failed'], 'canceled', sql`,canceled=canceled+(total-expanded),paused_at=NULL,pause_reason=NULL,waiting_reason=NULL,waiting_until=NULL${error ? sql`,error=${JSON.stringify(error)}::jsonb` : sql``}`);
 export const failCampaign = (ref: CampaignRef, error: { code: string; message: string }) => moveCampaign(ref, CAMPAIGN_RUNNING, 'failed', sql`,error=${JSON.stringify(error)}::jsonb,scheduled_at=NULL,waiting_reason=NULL,waiting_until=NULL`);
 /** Preparation advanced to `prepared`; when the whole list is validated the campaign moves to its schedule or straight to sending. */
 export const recordPrepared = (ref: CampaignRef, prepared: number, next: RunningState) => next === 'preparing' ? progressCampaign(ref, 'preparing', sql`,prepared=${prepared}`) : moveCampaign(ref, ['preparing'], next, sql`,prepared=${prepared}`);
 export const startSending = (ref: CampaignRef) => moveCampaign(ref, ['scheduled'], 'sending');
-export const recordExpanded = (ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number) => progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=NULL,waiting_until=NULL`);
+export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, pause?: PauseReason) {
+  const cursor = sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=NULL,waiting_until=NULL`;
+  return pause ? moveCampaign(ref, ['sending'], 'paused', sql`${cursor}${pausedFields(pause)}`) : progressCampaign(ref, 'sending', cursor);
+}
 export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
 export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
