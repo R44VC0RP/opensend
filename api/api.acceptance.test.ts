@@ -4035,7 +4035,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('MX: account shards isolate sends, stored templates, quota and feedback', async t => {
-    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run, jobs }) => {
       const { SESv2Client, GetAccountCommand, SendEmailCommand, GetEmailTemplateCommand, TestRenderEmailTemplateCommand } = await import('@aws-sdk/client-sesv2');
       const { STSClient, AssumeRoleCommand } = await import('@aws-sdk/client-sts');
       const { runDispatcher } = await import('./src/dispatcher.js'), { dispatchPartitions } = await import('./src/dispatch.js');
@@ -4057,6 +4057,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { Credentials:{ AccessKeyId:'fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture-session',Expiration:new Date(Date.now()+3600000) } };
       });
       const quotaReads: string[] = [], sends: string[] = []; let exhausted = true;
+      const bouncedAddress = address();
       const gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
       runtime.storage={put:async()=>{},get:async()=>({body:gif,contentType:'image/gif'}),delete:async()=>{}};
       t.mock.method(SESv2Client.prototype,'send', async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
@@ -4073,6 +4074,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         else if (input.Content?.Simple?.Subject?.Data === 'ordinary') assert.deepEqual(input.Content.Simple.Headers, [{Name:'X-Ticket',Value:'42'}]);
         sends.push(wid);
         if (input.Content?.Simple?.Subject?.Data==='paused') throw Object.assign(new Error('Sending for this tenant is paused'),{ name:'MessageRejected',$metadata:{httpStatusCode:400} });
+        if (!customer) {
+          const tag = input.EmailTags!.find(t=>t.Name==='opensend_email_id')!.Value!;
+          const early = { topicArn:poolTopic, region:REGION, messageId:unique('early-bounce'), message:{ eventType:'Bounce', mail:{messageId:'same-provider-id-in-both-accounts',sendingAccountId:pool,tags:{opensend_email_id:[tag]}}, bounce:{bounceType:'Permanent',bouncedRecipients:[{emailAddress:bouncedAddress}]} } };
+          const { settleFeedbackMessage } = await import('./src/adapters/feedback-queue.js');
+          for (const attempts of [1,2]) {
+            const [outcome] = await ingestFeedbackBatch(runtime,[early]);
+            assert.equal(outcome?.error,'SES_EMAIL_NOT_FOUND');
+            settleFeedbackMessage({attempts,ack:()=>assert.fail('Matched early feedback must not be dropped'),retry:opts=>assert.equal(opts?.delaySeconds,15*2**attempts)},outcome);
+          }
+          assert.equal((await jobs('operation.ses')).length,1,'The known owner gets one durable recovery job.');
+        }
         return {MessageId:'same-provider-id-in-both-accounts'};
       });
       const wakes: string[]=[]; runtime.dispatch=async (region, accountId)=>{ wakes.push(`${region}:${accountId}`); };
@@ -4080,7 +4092,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const headers=[{name:'X-Ticket',value:'42'}];
       const template={template:{name:'fixture',data:{}},headers}; error(await send(shared,template),422,'SHARED_STORED_TEMPLATE_UNSUPPORTED');
       const image=ok(await local('POST','/v1/attachments',{filename:'logo.gif',content:gif.toString('base64'),contentType:'image/gif',disposition:'inline',contentId:'logo'},'live',{'x-opensend-workspace':shared}),201);
-      const a=ok(await send(shared,{subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id],headers}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
+      const a=ok(await send(shared,{to:bouncedAddress,subject:'ordinary',html:'<img src="cid:logo">',attachments:[image.id],headers}),202), b=ok(await send(byo,template),202), paused=ok(await send(shared,{subject:'paused',text:'fixture'}),202);
       assert.deepEqual(wakes,[pool,account,pool].map(id=>`${REGION}:${id}`));
       assert.deepEqual((await dispatchPartitions(runtime)).map(p=>p.accountId).sort(),[pool,account]);
       const drain=(accountId:string)=>runDispatcher(runtime,{region:REGION,accountId,lanes:1});
@@ -4088,6 +4100,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Two independent cold shard gates race the same pool refresh, but cannot repeat GetAccount.
       const shards=await Promise.all([0,1].map(index=>runDispatcher(runtime,{region:REGION,accountId:pool,lanes:1,batchSize:1,shard:{index,count:2}})));
       assert.equal(shards.reduce((n,r)=>n+r.sent,0),1); assert.deepEqual(sends,[shared,shared]);
+      await run('operation.ses');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[a.id])).rows[0].status,'bounced');
+      assert.deepEqual((await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[shared,bouncedAddress])).rows,[{suppressed:true,suppression_reason:'hard_bounce'}]);
       assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[paused.id])).rows,[{status:'rejected',error_code:'SES_TENANT_SENDING_PAUSED'}]);
       assert.equal((await drain(account)).sent,0); assert.deepEqual(quotaReads,['fixture-customer','fixture-platform']);
       exhausted=false; await db.query("UPDATE provider_account_limits SET refresh_after='-infinity', checked_at='-infinity' WHERE aws_account_id=$1",[account]);
@@ -4740,7 +4755,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { settleFeedbackMessage } = await import('./src/adapters/feedback-queue.js');
       const unknown = { ...deliveries[0]!, message: { eventType:'Delivery', mail:{ messageId:`sim_${randomUUID()}` } } };
       const [unmatched] = await ingestFeedbackBatch(runtime, [unknown]);
-      assert.equal(unmatched?.error, 'SES_EMAIL_NOT_FOUND');
+      assert.equal(unmatched?.error, 'SES_FEEDBACK_UNMATCHED');
       const settled: (number | 'ack')[] = [];
       for (const [attempts, outcome] of [[1,unmatched],[2,unmatched],[2,outcomes[5]],[1,outcomes[0]]] as const) {
         settleFeedbackMessage({ attempts, ack:()=>settled.push('ack'), retry:opts=>settled.push(opts!.delaySeconds!) }, outcome);

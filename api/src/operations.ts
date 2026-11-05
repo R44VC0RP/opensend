@@ -1075,7 +1075,11 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       const results = await ingestRoutineSesEvents(runtime, group.map(entry => entry.input));
       for (const [position, entry] of group.entries()) {
         const result = results[position]!;
-        if (result.error || !result.workspaceId) { outcomes[entry.index] = { ok: false, error: result.error ?? 'SES_EMAIL_NOT_FOUND' }; continue; }
+        if (result.error || !result.workspaceId) {
+          const error = result.error ?? 'SES_EMAIL_NOT_FOUND';
+          outcomes[entry.index] = { ok: false, error: !result.workspaceId && error === 'SES_EMAIL_NOT_FOUND' ? 'SES_FEEDBACK_UNMATCHED' : error };
+          continue;
+        }
         if (entry.input.type === 'receipt') { other.push({ index: entry.index, item: items[entry.index]!, workspaceId: result.workspaceId }); continue; }
         outcomes[entry.index] = { ok: true };
         log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });

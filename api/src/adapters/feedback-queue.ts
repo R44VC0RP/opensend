@@ -8,7 +8,7 @@ export function feedbackSink(queue: Queue<FeedbackItem>): NonNullable<Runtime['f
 
 export function settleFeedbackMessage(message: Pick<Message, 'attempts' | 'retry' | 'ack'>, outcome?: { ok: boolean; error?: string }) {
   if (outcome?.ok) return message.ack();
-  if (outcome?.error === 'SES_EMAIL_NOT_FOUND') {
+  if (outcome?.error === 'SES_FEEDBACK_UNMATCHED') {
     // Allow one short dispatch/feedback race, not a full retry chain for an unknown message.
     return message.attempts === 1 ? message.retry({ delaySeconds: 15 }) : message.ack();
   }

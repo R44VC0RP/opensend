@@ -1189,6 +1189,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       GROUP BY s.workspace_id
     )`}, input AS (
       SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status,
+        coalesce(x.recovery_type, CASE WHEN x.type = 'receipt' AND l.status = 'attempting' AND l.provider_id IS NULL THEN 'operation.ses' END) AS job_type,
         CASE WHEN x.type <> 'receipt' AND (l.provider_id IS NOT NULL OR l.status = 'acceptance_unknown') THEN l.id END AS email_id,
         CASE WHEN l.id IS NULL AND x.job_workspace IS NULL THEN 'SES_EMAIL_NOT_FOUND'
              ${mx ? sql`WHEN NOT x.simulated AND (l.id IS NULL OR to_jsonb(split_part(x.topic_arn,':',5)) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}') THEN 'SES_ACCOUNT_MISMATCH'` : sql`
@@ -1201,10 +1202,10 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
        FROM input x WHERE x.error IS NULL ON CONFLICT DO NOTHING RETURNING topic_arn, message_id, workspace_id
     ), recovery AS (
       INSERT INTO jobs(id, workspace_id, type, payload, available_at)
-       SELECT DISTINCT ON (topic_arn, message_id) x.recovery_job_id, x.workspace_id, x.recovery_type, x.payload,
-         clock_timestamp() + CASE WHEN x.type = 'receipt' THEN interval '0 seconds' ELSE interval '15 seconds' END
+       SELECT DISTINCT ON (topic_arn, message_id) x.recovery_job_id, x.workspace_id, x.job_type, x.payload,
+         clock_timestamp() + CASE WHEN x.type = 'receipt' AND x.status <> 'attempting' THEN interval '0 seconds' ELSE interval '15 seconds' END
        FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id)
-      WHERE x.error IS NULL AND x.email_id IS NULL AND x.recovery_type IS NOT NULL RETURNING id
+      WHERE x.error IS NULL AND x.email_id IS NULL AND x.job_type IS NOT NULL RETURNING id
     ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
        SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
