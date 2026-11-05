@@ -1429,11 +1429,14 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             assert.equal(cmd.constructor.name,'CreateReceiptRuleCommand');assert.equal(cmd.input.RuleSetName,'customer-set');assert.deepEqual(cmd.input.Rule.Recipients,[domain]);return {};
           });
           const oversized = unique('oversized'), mime = Buffer.from('From: sender@example.org\r\nSubject: BYO\r\n\r\nBody');
+          let atHead!:()=>void, releaseHead!:()=>void;
+          const reading=new Promise<void>(r=>{atHead=r;}), released=new Promise<void>(r=>{releaseHead=r;});
           let copied='', oversizedHeads=0;bt.mock.method(S3Client.prototype,'send',async function(this:InstanceType<typeof S3Client>,cmd:any){
             assert.equal((await this.config.credentials()).accessKeyId,'synthetic-customer');
             if (cmd.input.Key === `staging/${oversized}`) {
               assert.equal(cmd.constructor.name,'HeadObjectCommand','Never download an oversized staging object.');
-              oversizedHeads++; return {ContentLength:40*1024*1024+1,ETag:'"oversized"'};
+              if (++oversizedHeads === 1) { atHead(); await released; }
+              return {ContentLength:40*1024*1024+1,ETag:'"oversized"'};
             }
             if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:mime.length,ETag:'"fixture"'};
             if(cmd.constructor.name==='GetObjectCommand'){assert.equal(cmd.input.IfMatch,'"fixture"');return {Body:{transformToByteArray:async()=>mime}};}
@@ -1454,6 +1457,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const sesMessageId=unique('byo'),recipient=`byo@${domain}`,other='hidden@unclaimed.invalid';
           const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
           const message={notificationType:'Received',mail:{messageId:sesMessageId},receipt:{timestamp:new Date().toISOString(),recipients:[recipient,other],action:{type:'S3',bucketName:r.bucket,topicArn:r.arn,objectKey:'staging/'+sesMessageId}}};
+          const {JobDeferred}=await import('./src/jobs.js');
           assert.equal(await acceptInboundNotification(runtime,{topicArn:r.arn,region,message}),1);
           await mailboxIngestJobs['mailbox.ingest']!(runtime,{sesMessageId},{id:unique('job'),attempts:1,workspaceId:wid});
           assert.equal(copied,`workspaces/${wid}/raw/${sesMessageId}.eml`);
@@ -1463,7 +1467,10 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           await runtime.db.transaction(async tx=>{
             const scoped={...runtime,db:tx};
             assert.equal(await acceptInboundNotification(scoped,{topicArn:r.arn,region,message}),1);
-            for (const attempts of [1,2]) await mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts,workspaceId:wid});
+            const ingest=()=>mailboxIngestJobs['mailbox.ingest']!(scoped,{sesMessageId:oversized},{id:unique('job'),attempts:1,workspaceId:wid});
+            const first=ingest(); await Promise.race([reading,first.then(()=>assert.fail('Expected staging metadata read'))]);
+            try { await assert.rejects(ingest(),JobDeferred); } finally {releaseHead(); await first;}
+            await ingest();
             assert.equal(oversizedHeads,1,'Even a duplicate ingest job does not revisit the failed receipt.');
           });
           assert.deepEqual((await pool.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,oversized])).rows,[{status:'failed',error:'RAW_MESSAGE_TOO_LARGE'}]);

@@ -4,7 +4,7 @@ import PostalMime, { type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Runtime } from './core.js';
-import { MAX_ATTEMPTS } from './jobs.js';
+import { JobDeferred, MAX_ATTEMPTS } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { pruneMailboxEvents } from './mailbox-events.js';
 import { mailboxS3, STAGING_PREFIX, workspacePrefix, refreshMailboxDns, storageBinding } from './mailbox-setup.js';
@@ -173,4 +173,11 @@ export async function mailboxHourly(runtime: Runtime) {
   }
 }
 
-export const mailboxIngestJobs: Record<string, JobHandler> = { 'mailbox.ingest': ingestJob };
+// One MIME working set per isolate, even across overlapping queue drains. Never share request I/O:
+// another job stays in Postgres and JobDeferred returns its attempt rather than waiting in memory.
+let ingestActive = false;
+export const mailboxIngestJobs: Record<string, JobHandler> = { 'mailbox.ingest': async (runtime, payload, job) => {
+  if (ingestActive) throw new JobDeferred(new Date(Date.now() + 15_000).toISOString());
+  ingestActive = true;
+  try { await ingestJob(runtime, payload, job); } finally { ingestActive = false; }
+} };
