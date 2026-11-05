@@ -76,11 +76,78 @@ function headersOf(email: Email | null): MailHeader[] {
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
   return out;
 }
-function automated(email: Email | null, from: string) {
-  const header = (name: string) => email?.headers.find(item => item.key === name)?.value.toLowerCase() ?? '';
+const AUTOMATED_HEADERS = new Set(['auto-submitted', 'precedence', 'x-autoreply', 'x-autorespond', 'content-type', 'from']);
+const RAW_HEADER_SCAN_LIMIT = 2 * 1024 * 1024;
+const rawHeaderDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+const trimWsp = (s: string) => {
+  let a = 0, b = s.length;
+  while (a < b && (s.charCodeAt(a) === 32 || s.charCodeAt(a) === 9)) a++;
+  while (b > a && (s.charCodeAt(b - 1) === 32 || s.charCodeAt(b - 1) === 9)) b--;
+  return s.slice(a, b);
+};
+function rawAutomatedHeaders(raw: Uint8Array) {
+  const out = new Map<string, string>();
+  const head = raw.subarray(0, Math.min(raw.byteLength, RAW_HEADER_SCAN_LIMIT));
+  let pos = 0;
+  while (pos < head.byteLength && out.size < AUTOMATED_HEADERS.size) {
+    const start = pos;
+    let nl = head.indexOf(10, pos);
+    const lineEnd = nl < 0 ? head.byteLength : nl;
+    let firstEnd = lineEnd;
+    while (firstEnd > pos && head[firstEnd - 1] === 13) firstEnd--;
+    if (firstEnd === pos || (nl < 0 && raw.byteLength > head.byteLength)) break;
+    pos = nl < 0 ? head.byteLength : nl + 1;
+    let truncated = false;
+    while (pos < head.byteLength && (head[pos] === 32 || head[pos] === 9)) {
+      nl = head.indexOf(10, pos);
+      if (nl < 0 && raw.byteLength > head.byteLength) { truncated = true; break; }
+      pos = nl < 0 ? head.byteLength : nl + 1;
+    }
+    if (truncated) break;
+    let k = start;
+    while (k < firstEnd && (head[k] === 32 || head[k] === 9)) k++;
+    let key = '';
+    while (k < pos && key.length <= 14) {
+      const b = head[k]!;
+      if (b === 58 || b === 32 || b === 9 || b === 13 || b === 10) break;
+      key += String.fromCharCode(b >= 65 && b <= 90 ? b + 32 : b);
+      k++;
+    }
+    if (!AUTOMATED_HEADERS.has(key) || out.has(key)) continue;
+    while (k < pos) {
+      if (head[k] === 32 || head[k] === 9 || head[k] === 10) { k++; continue; }
+      if (head[k] === 13) {
+        let cr = k;
+        while (cr < pos && head[cr] === 13) cr++;
+        if (cr < pos && head[cr] === 10) { k = cr + 1; continue; }
+      }
+      break;
+    }
+    if (k >= pos || head[k] !== 58) continue;
+    let v = k + 1;
+    while (v < pos && (head[v] === 32 || head[v] === 9 || head[v] === 13 || head[v] === 10)) {
+      if (head[v] === 13) {
+        let cr = v;
+        while (cr < pos && head[cr] === 13) cr++;
+        if (cr < pos && head[cr] === 10) { v = cr + 1; continue; }
+        v = cr;
+        continue;
+      }
+      v++;
+    }
+    const decoded = rawHeaderDecoder.decode(head.subarray(v, Math.min(pos, v + 4096))).replace(/\r*\n/g, '').replace(/\r+$/, '').replace(/\r+/g, ' ');
+    out.set(key, trimWsp(decoded).toLowerCase());
+  }
+  return out;
+}
+function automated(email: Email | null, raw: Uint8Array, from: string) {
+  const fallback = email ? null : rawAutomatedHeaders(raw);
+  const header = (name: string) => email ? (email.headers.find(item => item.key === name)?.value.toLowerCase() ?? '') : (fallback!.get(name) ?? '');
+  const rawFrom = fallback?.get('from') ?? '';
+  const rawSender = rawFrom ? (rawFrom.match(/<([^>]+)>/)?.[1] ?? rawFrom).trim() : '';
   const auto = header('auto-submitted');
   return (auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(header('precedence')) || !!header('x-autoreply') || !!header('x-autorespond')
-    || /^(?:mailer-daemon|postmaster)@/.test(from) || /multipart\/report/.test(header('content-type'));
+    || /^(?:mailer-daemon|postmaster)@/.test(from) || /^(?:mailer-daemon|postmaster)@/.test(rawSender) || /multipart\/report/.test(header('content-type'));
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 function withinLineLimit(raw: Uint8Array) {
@@ -215,7 +282,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes: raw.byteLength, rawBucket: receipt.bucket, rawKey,
-        verdicts, spam, automated: automated(email, from.address), status,
+        verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments);
   });
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED', status, bytes: raw.byteLength, attachments: attachments.length });

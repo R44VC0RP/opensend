@@ -4525,10 +4525,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
       const PostalMime = (await import('postal-mime')).default;
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
       const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
       const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-caps`;
       const domainId = unique('domain');
       runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
       await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)`, [domainId, scope, REGION]);
       await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,'example.com',$4,'active','store')`, [unique('mdom'), scope, domainId, REGION]);
@@ -4552,7 +4554,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         };
         assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
         await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
-        const { rows: [row] } = await db.query('SELECT id, status, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
+        const { rows: [row] } = await db.query('SELECT id, thread_id, status, automated, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
         return row;
       }
 
@@ -4648,6 +4650,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\n${altPlain}\r\n--alt\r\nContent-Type: text/html\r\n\r\n${altBody}\r\n--alt--\r\n`
       ), 'Alternative HTML', 'alt-html-ok@example.net');
       assert.equal(parsedAlt.status, 'received');
+
+      // Unparsed messages preserve header-based auto-reply detection from the raw header block so reply loop guards still hold.
+      const unparsedTail = 'x\r\n'.repeat(30_005);
+      const autoFolded = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted:\r\n auto-replied\r\n\r\n${unparsedTail}`), 'OOO unparsed', 'auto-folded@example.net');
+      assert.equal(autoFolded.status, 'unparsed');
+      assert.equal(autoFolded.automated, true);
+      error(await local('POST', `/v1/inbound/threads/${autoFolded.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoFolded.id, text: 'would loop' }, 'live'), 409, 'REPLY_TO_AUTOMATED');
+      ok(await local('POST', `/v1/inbound/threads/${autoFolded.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoFolded.id, text: 'explicit override', allowAutomated: true }, 'live'), 202);
+
+      const over6MibPrecedence = Buffer.concat([Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: bulk\r\n\r\n'), Buffer.alloc(6 * 1024 * 1024, 0x61)]);
+      const bulkUnparsed = await ingest(over6MibPrecedence, 'Bulk over 6 MiB', 'bulk-6m@example.net');
+      assert.equal(bulkUnparsed.status, 'unparsed');
+      assert.equal(bulkUnparsed.automated, true);
+      error(await local('POST', `/v1/inbound/threads/${bulkUnparsed.thread_id}/reply`, { addressId: box.id, replyToMessageId: bulkUnparsed.id, text: 'would loop' }, 'live'), 409, 'REPLY_TO_AUTOMATED');
+
+      const xAutoreply = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nX-Autoreply: yes\r\n\r\n${unparsedTail}`), 'X-Autoreply unparsed', 'x-auto@example.net');
+      assert.equal(xAutoreply.status, 'unparsed');
+      assert.equal(xAutoreply.automated, true);
+
+      const reportUnparsed = await ingest(Buffer.from(`From: bounce@isp.example\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type=delivery-status; boundary="r"\r\n\r\n${unparsedTail}`), 'DSN unparsed', 'dsn-unparsed@example.net');
+      assert.equal(reportUnparsed.status, 'unparsed');
+      assert.equal(reportUnparsed.automated, true);
+
+      const autoNo = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: NO\r\n\r\nAuto-Submitted: auto-replied\r\n${unparsedTail}`), 'Human over 30k', 'auto-no@example.net');
+      assert.equal(autoNo.status, 'unparsed');
+      assert.equal(autoNo.automated, false, 'Auto-Submitted: no and body text after the blank line must not flag a message as automated.');
+      ok(await local('POST', `/v1/inbound/threads/${autoNo.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoNo.id, text: 'normal reply allowed' }, 'live'), 202);
     });
   });
 
