@@ -4765,6 +4765,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const capLogs = capWarnSpy.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(entry => entry.code === 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE');
       assert.deepEqual(capLogs.map(entry => entry.count), [1, 2, 3]);
       capWarnSpy.mock.restore();
+
+      // Linear line-ending normalization: 16,000-byte internal CR runs across 5 headers (>1,000 ms under quadratic /\r*\n/g) complete in <100 ms.
+      const crRun16k = `no; x="${'\r'.repeat(16_000)}"`;
+      const crMime = Buffer.from([
+        'From: Sender <sender@example.net>',
+        'To: caps@example.com',
+        `Auto-Submitted: ${crRun16k}`,
+        `Precedence: normal\r${'\r'.repeat(16_000)}x`,
+        `Content-Type: text/plain; x="${'\r'.repeat(16_000)}"`,
+        '',
+        unparsedTail,
+      ].join('\r\n'));
+      const tCr0 = performance.now();
+      const crRes = await ingest(crMime, 'Internal CR run', 'cr-linear@example.net');
+      const crElapsedMs = performance.now() - tCr0;
+      assert.equal(crRes.status, 'unparsed');
+      assert.equal(crRes.automated, false);
+      assert.ok(crElapsedMs < 100, `Expected linear CR normalization (<100 ms including DB ingest), got ${crElapsedMs.toFixed(1)} ms.`);
     });
   });
 

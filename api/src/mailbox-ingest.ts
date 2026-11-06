@@ -89,6 +89,22 @@ const trimWsp = (s: string) => {
   while (b > a && (s.charCodeAt(b - 1) === 32 || s.charCodeAt(b - 1) === 9)) b--;
   return s.slice(a, b);
 };
+function unfoldHeaderValue(s: string): string {
+  const parts: string[] = [];
+  let copyFrom = 0, i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c !== 13 && c !== 10) { i++; continue; }
+    if (i > copyFrom) parts.push(s.slice(copyFrom, i));
+    while (i < s.length && s.charCodeAt(i) === 13) i++;
+    if (i < s.length && s.charCodeAt(i) === 10) i++;
+    else if (i < s.length) parts.push(' ');
+    copyFrom = i;
+  }
+  if (copyFrom === 0) return trimWsp(s);
+  if (copyFrom < s.length) parts.push(s.slice(copyFrom));
+  return trimWsp(parts.join(''));
+}
 function stripHeaderComments(input: string): string {
   let out = '', depth = 0, quote = false, esc = false, inParam = false, wsp = true;
   for (let i = 0; i < input.length; i++) {
@@ -189,8 +205,7 @@ function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
       v++;
     }
     if (pos - v > RAW_HEADER_FIELD_LIMIT) { capped = true; break; }
-    const decoded = rawHeaderDecoder.decode(head.subarray(v, pos)).replace(/\r*\n/g, '').replace(/\r+$/, '').replace(/\r+/g, ' ');
-    out.set(key, trimWsp(decoded));
+    out.set(key, unfoldHeaderValue(rawHeaderDecoder.decode(head.subarray(v, pos))));
   }
   return ended && !capped ? out : null;
 }
