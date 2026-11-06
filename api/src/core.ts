@@ -40,6 +40,8 @@ export interface Config {
   multiTenant: boolean;
   regionalSending?: boolean;
   byoTemplateUrl?: string;
+  byoV2?: boolean;
+  byoV5TemplateUrl?: string;
   domainConnect?: { privateKey: import('node:crypto').KeyObject; keyId: string };
   /** Regions offered for MX shared sending; defaults to us-east-2. */
   sharedRegions?: string[];
@@ -135,7 +137,7 @@ export function getSes(runtime: Runtime, selectedRegion: string, connection?: Re
   // a new provider. Never put a request-bound client or pending STS promise across invocations.
   const key = runClients && connection
     ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id])
-    : connection ? `${selectedRegion}:${connection.id}` : selectedRegion;
+    : connection ? `${selectedRegion}:${connection.id}:${connection.identitySession?.name??''}:${connection.identitySession?.purpose??''}` : selectedRegion;
   let client = clients.get(key);
   if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
   return client;

@@ -37,7 +37,7 @@ export type ConnectionSummary = {
     /**
      * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
-    state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
+    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed';
     /**
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
@@ -1135,7 +1135,7 @@ export type DomainReadiness = {
 export type CreateDomain = {
     name: string;
     /**
-     * Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.
+     * Regional BYO defaults to the first enabled region, otherwise Ohio.
      */
     region?: string;
 };
@@ -2166,7 +2166,7 @@ export type ProviderConnection = {
     /**
      * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
-    state: 'awaiting_role' | 'provisioning' | 'ready' | 'failed';
+    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed';
     /**
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
@@ -2179,6 +2179,72 @@ export type ProviderConnection = {
     roleArn: string | null;
     templateVersion: string | null;
     quickCreateUrl: string | null;
+    scan?: {
+        revision: number;
+        cursor: {
+            checked: number;
+            total: number;
+        };
+        state: 'awaiting_role' | 'failed' | 'scanning' | 'partial' | 'ready_to_import';
+        error: string | null;
+        alreadySendsEmail: boolean | null;
+        regions: Array<{
+            region: string;
+            regionLabel: string;
+            scanState: string;
+            scanError: string | null;
+            sendingState: string;
+            receivingState: string;
+            error: string | null;
+            facts: {
+                production?: boolean;
+                sendingEnabled?: boolean;
+                max24HourSend?: number;
+                maxSendRate?: number;
+                sentLast24Hours?: number;
+                configurationSets?: {
+                    [key: string]: {
+                        installation: boolean | null;
+                    };
+                };
+                receiving?: {
+                    supported: boolean;
+                    set: string | null;
+                    rules: Array<{
+                        name: string;
+                        enabled: boolean;
+                        recipients: Array<string>;
+                        actions: Array<string>;
+                    }>;
+                };
+            };
+            resources: Array<{
+                kind: string;
+                resource: string;
+                target?: string;
+                state?: 'creating' | 'created';
+            }>;
+            pending: Array<{
+                domain: string;
+                importing: boolean;
+                error: string | null;
+            }>;
+        }>;
+    };
+    candidates?: Array<{
+        id: string;
+        domain: string;
+        region: string;
+        regionLabel: string;
+        selectable: boolean;
+        status: 'verified' | 'signing_pending' | 'not_verified' | 'incomplete' | 'already_bound' | 'overlap';
+        sandbox: boolean | null;
+        defaultConfigurationSet: string | null;
+        dkimStatus: string | null;
+        signingOrigin: string | null;
+        mailFromDomain: string | null;
+        overlap: boolean;
+    }>;
 };
 
 export type ConnectionRegions = {
@@ -2189,6 +2255,7 @@ export type ConnectionRegions = {
 export type CreateConnection = {
     kind: 'shared' | 'byo';
     region?: string;
+    awsAccountId?: string;
 };
 
 export type ListMcpConnectionsData = {
@@ -7864,6 +7931,13 @@ export type CreateDomainResponses = {
      * Success
      */
     201: DomainReadiness;
+    /**
+     * Success
+     */
+    202: {
+        operationId: string;
+        regions: Array<string>;
+    };
 };
 
 export type CreateDomainResponse = CreateDomainResponses[keyof CreateDomainResponses];
@@ -12642,6 +12716,13 @@ export type CreateConnectionResponses = {
      * Success
      */
     201: ProviderConnection;
+    /**
+     * Success
+     */
+    202: ProviderConnection & {
+        operationId: string;
+        revision: number;
+    };
 };
 
 export type CreateConnectionResponse = CreateConnectionResponses[keyof CreateConnectionResponses];
@@ -12706,6 +12787,242 @@ export type ListConnectionRegionsResponses = {
 };
 
 export type ListConnectionRegionsResponse = ListConnectionRegionsResponses[keyof ListConnectionRegionsResponses];
+
+export type RefreshConnectionScanData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/connection/scan';
+};
+
+export type RefreshConnectionScanErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type RefreshConnectionScanError = RefreshConnectionScanErrors[keyof RefreshConnectionScanErrors];
+
+export type RefreshConnectionScanResponses = {
+    /**
+     * Success
+     */
+    202: {
+        operationId: string;
+        revision: number;
+    };
+};
+
+export type RefreshConnectionScanResponse = RefreshConnectionScanResponses[keyof RefreshConnectionScanResponses];
+
+export type ImportConnectionDomainsData = {
+    body: {
+        revision: number;
+        candidateIds: Array<string>;
+        confirm: true;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/connection/imports';
+};
+
+export type ImportConnectionDomainsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ImportConnectionDomainsError = ImportConnectionDomainsErrors[keyof ImportConnectionDomainsErrors];
+
+export type ImportConnectionDomainsResponses = {
+    /**
+     * Success
+     */
+    202: {
+        operationId: string;
+        regions: Array<string>;
+    };
+};
+
+export type ImportConnectionDomainsResponse = ImportConnectionDomainsResponses[keyof ImportConnectionDomainsResponses];
+
+export type GetConnectionRegionStatusData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/connection/regions/status';
+};
+
+export type GetConnectionRegionStatusErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetConnectionRegionStatusError = GetConnectionRegionStatusErrors[keyof GetConnectionRegionStatusErrors];
+
+export type GetConnectionRegionStatusResponses = {
+    /**
+     * Success
+     */
+    200: {
+        regions: Array<{
+            region: string;
+            regionLabel: string;
+            scanState: string;
+            scanError: string | null;
+            sendingState: string;
+            receivingState: string;
+            error: string | null;
+            facts: {
+                production?: boolean;
+                sendingEnabled?: boolean;
+                max24HourSend?: number;
+                maxSendRate?: number;
+                sentLast24Hours?: number;
+                configurationSets?: {
+                    [key: string]: {
+                        installation: boolean | null;
+                    };
+                };
+                receiving?: {
+                    supported: boolean;
+                    set: string | null;
+                    rules: Array<{
+                        name: string;
+                        enabled: boolean;
+                        recipients: Array<string>;
+                        actions: Array<string>;
+                    }>;
+                };
+            };
+            resources: Array<{
+                kind: string;
+                resource: string;
+                target?: string;
+                state?: 'creating' | 'created';
+            }>;
+            pending: Array<{
+                domain: string;
+                importing: boolean;
+                error: string | null;
+            }>;
+        }>;
+    };
+};
+
+export type GetConnectionRegionStatusResponse = GetConnectionRegionStatusResponses[keyof GetConnectionRegionStatusResponses];
 
 export type VerifyConnectionData = {
     body: {

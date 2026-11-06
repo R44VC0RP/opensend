@@ -4487,6 +4487,103 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('BYO v5 enrollment: read-only inventory and independent confirmed regional imports',async t=>{
+    const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
+      import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
+    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1', account='222288884444';
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',MX_REGIONAL_SENDING:'true',MX_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
+    await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
+    cleanup(t,async()=>{await db.query('DELETE FROM jobs WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM operation_domains WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM domain_claims WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM provider_feedback_history WHERE aws_account_id=$1',[account]);await db.query('DELETE FROM ses_installation_settings WHERE workspace_id=$1',[wid]);await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);});
+    await db.query("INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES($1,$2,$3,'owner')",[unique('member'),wid,user.userId]);
+    await ensureRegionSettings(runtime.db,{...runtime.config,workspaceId:wid});
+    const api=async(method:string,path:string,body?:Json,key?:string):Promise<Reply>=>{const res=await app.fetch(new Request(PUBLIC_ORIGIN+path,{method,headers:{cookie:user.cookie,origin:PUBLIC_ORIGIN,'x-opensend-workspace':wid,'content-type':'application/json',...(key?{'idempotency-key':key}:{})},body:body?JSON.stringify(body):undefined}),runtime);return {status:res.status,headers:res.headers,body:await res.json()};};
+    const signedKey=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey;
+    const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
+    const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
+    const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
+    let external='',failOnce=true,revoked=false;
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
+    t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
+      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
+      assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'OpenSendMX');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
+      if (!external || cmd.input.ExternalId!==external) throw denied();
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture',Expiration:new Date(Date.now()+900000)}};
+    });
+    t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
+    t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
+      switch(op){
+        case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
+        case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
+        case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
+        case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
+        case 'GetEmailIdentityCommand':assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example')throw missing();return {VerificationStatus:revoked?'FAILED':'SUCCESS',VerifiedForSendingStatus:!revoked,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);return {DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};
+        case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
+        case 'PutConfigurationSetSuppressionOptionsCommand':sets.get(key)!.SuppressionOptions=i;return {};
+        case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:sets.get(key)!.dest};
+        case 'CreateConfigurationSetEventDestinationCommand':sets.get(key)!.dest.push({Name:i.EventDestinationName,...i.EventDestination});return {};
+        default:throw Error('unexpected SES call '+op);
+      }
+    });
+    t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});
+      switch(op){
+        case 'CreateTopicCommand':assert.ok(!topic);assert.equal(JSON.parse(i.Attributes.Policy).Statement.length,1);topics.set(arn,{Tags:i.Tags,Attributes:{...i.Attributes,Owner:account,TopicArn:arn},subs:[]});return {TopicArn:arn};
+        case 'GetTopicAttributesCommand':if(!topic)throw missing();return {Attributes:topic.Attributes};
+        case 'ListTagsForResourceCommand':return {Tags:topic!.Tags};
+        case 'SetTopicAttributesCommand':assert.equal(i.AttributeName,'Policy');assert.ok(JSON.parse(i.AttributeValue).Statement.some((s:Json)=>s.Principal?.Service==='ses.amazonaws.com'&&s.Condition.StringEquals['AWS:SourceAccount']===account));topic!.Attributes.Policy=i.AttributeValue;return {};
+        case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
+        case 'SubscribeCommand':assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);topic!.subs.push({...i,Owner:account,SubscriptionArn:arn+':test'});return {SubscriptionArn:arn+':test'};
+        case 'GetSubscriptionAttributesCommand':return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:'false'}};
+        default:throw Error('unexpected SNS call '+op);
+      }
+    });
+    const path='/v1/connection',post=(suffix:string,b?:Json)=>api('POST',path+suffix,b),poll=async()=>ok(await api('GET',path)).connection;
+    const run=async(type:string,region?:string)=>{
+      const j=(await db.query(`UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type=$2 AND ($3::text IS NULL OR payload->>'region'=$3) AND status<>'completed' ORDER BY id LIMIT 1) RETURNING *`,[wid,type,region??null])).rows[0];assert.ok(j,type+':'+region);
+      try {await regionalByoJobs[type]!(runtime,j.payload,{workspaceId:wid,id:j.id,attempts:1});}
+      catch(e){if(!(e instanceof JobDeferred)) {await db.query("UPDATE jobs SET status='failed' WHERE id=$1",[j.id]);throw e;}await db.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour',payload=$2 WHERE id=$1",[j.id,e.payload??j.payload]);return false;}
+      await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return true;
+    };
+    runtime.config.byoV2=false;error(await post('/scan'),404);runtime.config.byoV2=true;
+    error(await post('',{kind:'byo',awsAccountId:'438095551154'}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
+    const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
+    assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'opensendmx-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
+    await run('byo.prove');assert.equal(policies.length,3);
+    const rs=(await db.query('SELECT region FROM provider_connection_regions WHERE connection_id=$1',[v5.id])).rows;assert.equal(rs.length,32);
+    for (const {region} of rs) for(let page=0;!await run('byo.scan',region);page++)assert.ok(page<8);
+    const initial=await poll(),rev=initial.scan.revision, rows=initial.candidates;
+    assert.deepEqual(initial.scan.cursor,{checked:32,total:32});assert.equal(initial.state,'ready_to_import');assert.equal(initial.scan.state,'partial');assert.equal(initial.scan.alreadySendsEmail,true);
+    assert.equal(rows.filter((v:Json)=>v.domain==='both.example'&&v.selectable).length,2);assert.equal(rows.find((v:Json)=>v.region===ie).status,'incomplete');assert.equal(rows.find((v:Json)=>v.region===oh).sandbox,true);
+    assert.ok(trace.every(({op})=>/^(?:List|Get|Describe)/.test(op)));assert.ok(policies.every(p=>!/(?:Create|Put|Subscribe|SendEmail)/.test(p)));assert.equal(initial.importedDomains,0);
+    const select=(...ids:string[])=>post('/imports',{revision:rev,confirm:true,candidateIds:ids}),ohId=oh+':both.example',vaId=va+':'+va+'.example';
+    error(await select(ohId,va+':both.example'),409,'DUPLICATE_DOMAIN_SELECTION');error(await select(ie+':both.example'),409,'SCAN_STALE');
+    revoked=true;error(await select(ohId),409,'CANDIDATE_NO_LONGER_VERIFIED');revoked=false;
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,0);
+    assert.deepEqual(ok(await api('POST','/v1/domains',{name:'first.example'}),202).regions,[oh]);
+    const concurrent=await Promise.all([select(ohId,vaId),select(ohId,vaId)]);assert.equal(ok(concurrent[0]!,202).operationId,ok(concurrent[1]!,202).operationId);
+    assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,2);
+    assert.equal(await run('byo.provision',oh),false);await assert.rejects(run('byo.provision',va),{code:'AWS_THROTTLED'});
+    assert.equal((await poll()).importedDomains,0);assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE workspace_id=$1',[wid])).rowCount,0);
+    const confirm=async(region:string)=>{const TopicArn=`arn:aws:sns:${region}:${account}:${params.get('param_ResourcePrefix')}-feedback`,host=`https://sns.${region}.amazonaws.com/`;
+      const signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn,Type:'SubscriptionConfirmation'};
+      const body={...signed,SignatureVersion:'2',SigningCertURL:host+'SimpleNotificationService-v5fixture.pem',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(signed).map(([k,v])=>k+'\n'+v+'\n').join('')),signedKey)).toString('base64')};
+      error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
+    };
+    await confirm(oh);assert.ok(await run('byo.provision',oh));await run('byo.bind',oh);await run('byo.bind',oh);assert.equal((await poll()).importedDomains,1);
+    const mark=trace.length;ok(await select(vaId),202);assert.equal(await run('byo.provision',va),false);await confirm(va);assert.ok(await run('byo.provision',va));await run('byo.bind',va);
+    assert.ok(trace.slice(mark).every(v=>v.region===va));assert.equal((await poll()).importedDomains,2);
+    for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,1);}
+    const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
+    assert.deepEqual(ok(await api('POST','/v1/domains',{name:'new.example'}),202).regions,[oh]);await run('byo.bind',oh);
+    assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,'new.example'])).rows[0].region,oh);
+    const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];
+    await assert.rejects((await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,verify.payload,{workspaceId:wid,id:verify.id,attempts:1}),JobDeferred);
+    assert.equal(trace.filter(t=>t.op==='CreateEmailIdentityCommand').length,1);assert.ok(policies.at(-1)!.includes(`arn:aws:ses:${oh}:${account}:identity/new.example`));
+    const selection={revision:rev,candidateIds:[ohId],confirm:true}, receipt=ok(await api('POST',path+'/imports',selection,'retry-selected'),202);
+    ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,2);
+  });
+
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');

@@ -1,6 +1,7 @@
 import { AssumeRoleCommand, GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { sql } from 'drizzle-orm';
+import { createHash } from 'node:crypto';
 import { ApiError, type Config, type Runtime } from './core.js';
 import { connectionReady } from './states.js';
 
@@ -18,13 +19,13 @@ export async function caller(region: string, credentials: Credentials) {
 }
 // Only completed credential values cross requests, never a Worker request's promise or SDK client.
 const sessions = new Map<string, Credentials & { expiration: Date }>();
-export async function assume(runtime: Runtime, region: string, roleArn: string, externalId: string, verify = false) {
-  const platform = platformCredentials(runtime), key = `${platform.accessKeyId}:${roleArn}:${externalId}`;
+export async function assume(runtime: Runtime, region: string, roleArn: string, externalId: string, verify = false, policy?: string) {
+  const platform = platformCredentials(runtime), key = `${platform.accessKeyId}:${roleArn}:${externalId}:${policy ? createHash('sha256').update(policy).digest('hex') : ''}`;
   const cached = sessions.get(key);
   if (!verify && cached && cached.expiration.getTime() - Date.now() > 60_000) return cached;
   const client = sts(region, platform);
   try {
-    const input = { RoleArn: roleArn, RoleSessionName: 'OpenSendMX', DurationSeconds: 3600 };
+    const input = { RoleArn: roleArn, RoleSessionName: 'OpenSendMX', DurationSeconds: policy ? 900 : 3600, Policy: policy };
     const opts = { abortSignal: AbortSignal.timeout(4000) };
     const probe = async (ExternalId?: string) => {
       try { await client.send(new AssumeRoleCommand({ ...input, ExternalId }), opts); }
@@ -47,10 +48,10 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
     return value;
   } finally { client.destroy(); }
 }
-export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; legacy?:boolean; legacy_names?:boolean; pool_tier?:'trusted'|'probation' };
+export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; legacy?:boolean; legacy_names?:boolean; template_version?:string; pool_tier?:'trusted'|'probation'; identitySession?:{name:string;purpose:'verify'|'read'|'delete'|'mailFrom'} };
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
-    SELECT id, kind, region, aws_account_id, role_arn, external_id ${region!==undefined ? sql`,legacy` : sql``} FROM ${region!==undefined ? sql`regional_connections` : sql`provider_connections`} pc
+    SELECT id, kind, region, aws_account_id, role_arn, external_id ${region!==undefined ? sql`,legacy` : sql`,template_version`} FROM ${region!==undefined ? sql`regional_connections` : sql`provider_connections`} pc
     WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region} AND (legacy OR sending_state='ready')` : sql``} AND ${connectionReady()}`);
   const row = result.rows[0];
   if (!row) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
@@ -58,5 +59,14 @@ export async function workspaceConnection(runtime: Runtime, region?: string) {
 }
 export async function workspaceCredentials(runtime: Runtime, region: string, connection?: ReadyConnection) {
   const row = connection ?? await workspaceConnection(runtime, region);
-  return row.kind === 'shared' ? platformCredentials(runtime) : assume(runtime, region, row.role_arn, row.external_id);
+  if (row.kind==='shared') return platformCredentials(runtime);
+  if (row.legacy===false || row.legacy_names===false || row.template_version==='v5') {
+    const scope=row.identitySession;
+    // A generic data-plane/mailbox caller must add its own narrowly scoped v5
+    // session before release; never silently hand it the customer's entire role.
+    if (!scope || !/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(scope.name)) throw new ApiError(409,'BYO_SESSION_SCOPE_REQUIRED','A purpose-scoped regional AWS session is required.');
+    const actions=['ses:GetEmailIdentity',...({read:[],verify:['ses:CreateEmailIdentity','ses:TagResource'],delete:['ses:DeleteEmailIdentity'],mailFrom:['ses:PutEmailIdentityMailFromAttributes']}[scope.purpose])];
+    return assume(runtime,region,row.role_arn,row.external_id,false,JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Action:actions,Resource:`arn:aws:ses:${region}:${row.aws_account_id}:identity/${scope.name}`}] }));
+  }
+  return assume(runtime,region,row.role_arn,row.external_id);
 }

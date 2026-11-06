@@ -13,6 +13,8 @@ const values = z.object({
   DEFAULT_WORKSPACE_OWNERS: z.string().trim().default('*'),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   MX_REGIONAL_SENDING: z.enum(['true','false']).default('false'),
+  MX_BYO_V2: z.enum(['true','false']).default('false'),
+  BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   BYO_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   DOMAIN_CONNECT_PRIVATE_KEY: optional(z.string().min(1)),
   DOMAIN_CONNECT_KEY_ID: optional(z.string().regex(/^_?[a-z0-9][a-z0-9-]{0,60}[a-z0-9]$/)),
@@ -84,6 +86,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.BETTER_AUTH_SECRET, previousAuthSecret: v.PREVIOUS_BETTER_AUTH_SECRET,
     byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.MX_REGIONAL_SENDING === 'true',
+    byoV2: v.MULTI_TENANT === 'true' && v.MX_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL,
     hostedSendCaps: { firstWeek: v.HOSTED_SEND_CAP_FIRST_WEEK, secondWeek: v.HOSTED_SEND_CAP_SECOND_WEEK, mature: v.HOSTED_SEND_CAP_MATURE },
     domainConnect,
     googleClientId: v.GOOGLE_CLIENT_ID, googleClientSecret: v.GOOGLE_CLIENT_SECRET, allowedEmails, allowedDomains, defaultWorkspaceOwners,

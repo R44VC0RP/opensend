@@ -9,7 +9,7 @@ import type { MxReport } from './db/mailbox.js';
 
 export const SENDING_STATES = ['pending', 'verified', 'lost', 'failed'] as const;
 export const RECEIVING_STATES = ['off', 'pending', 'active', 'lost'] as const;
-export const CONNECTION_STATES = ['awaiting_role', 'provisioning', 'ready', 'failed'] as const;
+export const CONNECTION_STATES = ['awaiting_role', 'scanning', 'ready_to_import', 'provisioning', 'ready', 'failed'] as const;
 export const TENANT_STATES = ['pending', 'ready', 'failed'] as const;
 export const POOL_STATES = ['pending', 'ready'] as const;
 export type SendingState = typeof SENDING_STATES[number];
@@ -143,7 +143,7 @@ export const noteReconcileFailure = (workspaceId: string, region: string, messag
 
 // Provider connections: `state` is the connection state; the tenant has its own.
 // provisioning -> provisioning is a retry taking over an expired lease; startProvisioning enforces the lease.
-export const connectionTransitions: Record<ConnectionState, ConnectionState[]> = { awaiting_role: ['provisioning'], provisioning: ['provisioning', 'ready', 'failed', 'awaiting_role'], failed: ['provisioning'], ready: [] };
+export const connectionTransitions: Record<ConnectionState, ConnectionState[]> = { awaiting_role: ['provisioning','scanning'], scanning:['ready_to_import','ready','failed'],ready_to_import:['scanning','ready'], provisioning: ['provisioning', 'ready', 'failed', 'awaiting_role'], failed: ['provisioning','scanning'], ready: [] };
 // Managed regions only. Legacy singleton rows remain a projection; a scan never changes
 // sending readiness. Replacing an expired lease or disabling a binding invalidates its generation.
 type RegionRef = { connectionId:string; region:string };
@@ -152,9 +152,9 @@ export const startRegionScan = (ref:RegionRef) => sql`UPDATE provider_connection
   WHERE ${managedRegion(ref)} RETURNING scan_revision`;
 export const finishRegionScan = (ref:RegionRef, revision:number, completed:boolean) => sql`UPDATE provider_connection_regions SET scan_state=${completed?'ready_to_import':'failed'}
   WHERE ${managedRegion(ref)} AND scan_revision=${revision} AND scan_state='scanning' RETURNING region`;
-export const acquireRegionProvisioning = (ref:RegionRef) => sql`UPDATE provider_connection_regions SET sending_state='provisioning',generation=generation+1,lease_until=clock_timestamp()+interval '4 minutes',
+export const acquireRegionProvisioning = (ref:RegionRef,guard:SQL=sql`true`,accepted:SQL=sql`false`) => sql`UPDATE provider_connection_regions SET sending_state='provisioning',generation=generation+1,lease_until=clock_timestamp()+interval '4 minutes',
   confirmed_generation=CASE WHEN confirmed_generation=generation AND confirmed_topic_arn=feedback_topic_arn THEN generation+1 END
-  WHERE ${managedRegion(ref)} AND (scan_state='ready_to_import' OR EXISTS (SELECT FROM provider_connections c WHERE c.id=connection_id AND c.kind='shared'))
+  WHERE ${managedRegion(ref)} AND ${guard} AND (scan_state='ready_to_import' OR ${accepted} OR EXISTS (SELECT FROM provider_connections c WHERE c.id=connection_id AND c.kind='shared'))
     AND (sending_state IN ('unprovisioned','failed') OR (sending_state='provisioning' AND lease_until<=clock_timestamp())) RETURNING generation`;
 export const finishRegionProvisioning = (ref:RegionRef,generation:number,confirmedTopic:string|null) => sql`WITH finished AS (
   UPDATE provider_connection_regions SET sending_state=${confirmedTopic?'ready':'failed'},lease_until=NULL

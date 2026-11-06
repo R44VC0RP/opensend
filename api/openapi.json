@@ -126,6 +126,8 @@
             "type": "string",
             "enum": [
               "awaiting_role",
+              "scanning",
+              "ready_to_import",
               "provisioning",
               "ready",
               "failed"
@@ -4422,7 +4424,7 @@
           },
           "region": {
             "type": "string",
-            "description": "Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted."
+            "description": "Regional BYO defaults to the first enabled region, otherwise Ohio."
           }
         },
         "required": [
@@ -8552,6 +8554,8 @@
             "type": "string",
             "enum": [
               "awaiting_role",
+              "scanning",
+              "ready_to_import",
               "provisioning",
               "ready",
               "failed"
@@ -8596,6 +8600,328 @@
               "null"
             ],
             "format": "uri"
+          },
+          "scan": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "number"
+              },
+              "cursor": {
+                "type": "object",
+                "properties": {
+                  "checked": {
+                    "type": "number"
+                  },
+                  "total": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "checked",
+                  "total"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "awaiting_role",
+                  "failed",
+                  "scanning",
+                  "partial",
+                  "ready_to_import"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "alreadySendsEmail": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "regions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "region": {
+                      "type": "string"
+                    },
+                    "regionLabel": {
+                      "type": "string"
+                    },
+                    "scanState": {
+                      "type": "string"
+                    },
+                    "scanError": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "sendingState": {
+                      "type": "string"
+                    },
+                    "receivingState": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "facts": {
+                      "type": "object",
+                      "properties": {
+                        "production": {
+                          "type": "boolean"
+                        },
+                        "sendingEnabled": {
+                          "type": "boolean"
+                        },
+                        "max24HourSend": {
+                          "type": "number"
+                        },
+                        "maxSendRate": {
+                          "type": "number"
+                        },
+                        "sentLast24Hours": {
+                          "type": "number"
+                        },
+                        "configurationSets": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "installation": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "installation"
+                            ]
+                          }
+                        },
+                        "receiving": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "set": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "rules": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "enabled": {
+                                    "type": "boolean"
+                                  },
+                                  "recipients": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "actions": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "name",
+                                  "enabled",
+                                  "recipients",
+                                  "actions"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "set",
+                            "rules"
+                          ]
+                        }
+                      }
+                    },
+                    "resources": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string"
+                          },
+                          "resource": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "creating",
+                              "created"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "resource"
+                        ]
+                      }
+                    },
+                    "pending": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "domain": {
+                            "type": "string"
+                          },
+                          "importing": {
+                            "type": "boolean"
+                          },
+                          "error": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "domain",
+                          "importing",
+                          "error"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "region",
+                    "regionLabel",
+                    "scanState",
+                    "scanError",
+                    "sendingState",
+                    "receivingState",
+                    "error",
+                    "facts",
+                    "resources",
+                    "pending"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "revision",
+              "cursor",
+              "state",
+              "error",
+              "alreadySendsEmail",
+              "regions"
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "domain": {
+                  "type": "string"
+                },
+                "region": {
+                  "type": "string"
+                },
+                "regionLabel": {
+                  "type": "string"
+                },
+                "selectable": {
+                  "type": "boolean"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "verified",
+                    "signing_pending",
+                    "not_verified",
+                    "incomplete",
+                    "already_bound",
+                    "overlap"
+                  ]
+                },
+                "sandbox": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "defaultConfigurationSet": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dkimStatus": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "signingOrigin": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "mailFromDomain": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "overlap": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "domain",
+                "region",
+                "regionLabel",
+                "selectable",
+                "status",
+                "sandbox",
+                "defaultConfigurationSet",
+                "dkimStatus",
+                "signingOrigin",
+                "mailFromDomain",
+                "overlap"
+              ]
+            }
           }
         },
         "required": [
@@ -8646,6 +8972,11 @@
             "type": "string",
             "maxLength": 32,
             "pattern": "^[a-z]{2}(?:-[a-z]+)+-\\d$"
+          },
+          "awsAccountId": {
+            "type": "string",
+            "pattern": "^\\d{12}$",
+            "example": "123456789012"
           }
         },
         "required": [
@@ -23578,6 +23909,31 @@
               }
             }
           },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string"
+                    },
+                    "regions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "regions"
+                  ]
+                }
+              }
+            }
+          },
           "400": {
             "description": "Request failed; use error.code and requestId to diagnose.",
             "content": {
@@ -35598,7 +35954,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Choose a sending provider. Hosted mail is ready immediately; its SES tenant is provisioned by a background job and `tenant` reports it (sends answer TENANT_NOT_READY until then). BYO returns a CloudFormation quick-create URL. Never sends mail.",
+        "description": "Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.",
         "requestBody": {
           "required": true,
           "content": {
@@ -35616,6 +35972,35 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProviderConnection"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ProviderConnection"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "operationId": {
+                          "type": "string"
+                        },
+                        "revision": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "operationId",
+                        "revision"
+                      ]
+                    }
+                  ]
                 }
               }
             }
@@ -36022,6 +36407,687 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request GET \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection/regions\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\""
+          }
+        ]
+      }
+    },
+    "/v1/connection/scan": {
+      "post": {
+        "operationId": "refreshConnectionScan",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Refresh regional inventory without changing AWS resources or selected domains.",
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string"
+                    },
+                    "revision": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { refreshConnectionScan } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await refreshConnectionScan({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection/scan\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\""
+          }
+        ]
+      }
+    },
+    "/v1/connection/imports": {
+      "post": {
+        "operationId": "importConnectionDomains",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Select verified regional candidates explicitly. Sending requires confirmed regional feedback. Imported identities are never modified.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "revision": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  },
+                  "candidateIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "minItems": 1,
+                    "maxItems": 100
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  }
+                },
+                "required": [
+                  "revision",
+                  "candidateIds",
+                  "confirm"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string"
+                    },
+                    "regions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "operationId",
+                    "regions"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { importConnectionDomains } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await importConnectionDomains({\n  client,\n  body: {\n    \"revision\": 1,\n    \"candidateIds\": [\n      \"candidate_123\"\n    ],\n    \"confirm\": true\n  },\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection/imports\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"revision\": 1,\n  \"candidateIds\": [\n    \"candidate_123\"\n  ],\n  \"confirm\": true\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/connection/regions/status": {
+      "get": {
+        "operationId": "getConnectionRegionStatus",
+        "tags": [
+          "Workspaces"
+        ],
+        "security": [
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Read regional AWS inventory, access, ownership journals and setup errors. Does not contact AWS.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "regions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "region": {
+                            "type": "string"
+                          },
+                          "regionLabel": {
+                            "type": "string"
+                          },
+                          "scanState": {
+                            "type": "string"
+                          },
+                          "scanError": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "sendingState": {
+                            "type": "string"
+                          },
+                          "receivingState": {
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "facts": {
+                            "type": "object",
+                            "properties": {
+                              "production": {
+                                "type": "boolean"
+                              },
+                              "sendingEnabled": {
+                                "type": "boolean"
+                              },
+                              "max24HourSend": {
+                                "type": "number"
+                              },
+                              "maxSendRate": {
+                                "type": "number"
+                              },
+                              "sentLast24Hours": {
+                                "type": "number"
+                              },
+                              "configurationSets": {
+                                "type": "object",
+                                "additionalProperties": {
+                                  "type": "object",
+                                  "properties": {
+                                    "installation": {
+                                      "type": [
+                                        "boolean",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "installation"
+                                  ]
+                                }
+                              },
+                              "receiving": {
+                                "type": "object",
+                                "properties": {
+                                  "supported": {
+                                    "type": "boolean"
+                                  },
+                                  "set": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "rules": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "name": {
+                                          "type": "string"
+                                        },
+                                        "enabled": {
+                                          "type": "boolean"
+                                        },
+                                        "recipients": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "actions": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        }
+                                      },
+                                      "required": [
+                                        "name",
+                                        "enabled",
+                                        "recipients",
+                                        "actions"
+                                      ]
+                                    }
+                                  }
+                                },
+                                "required": [
+                                  "supported",
+                                  "set",
+                                  "rules"
+                                ]
+                              }
+                            }
+                          },
+                          "resources": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string"
+                                },
+                                "resource": {
+                                  "type": "string"
+                                },
+                                "target": {
+                                  "type": "string"
+                                },
+                                "state": {
+                                  "type": "string",
+                                  "enum": [
+                                    "creating",
+                                    "created"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "resource"
+                              ]
+                            }
+                          },
+                          "pending": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "domain": {
+                                  "type": "string"
+                                },
+                                "importing": {
+                                  "type": "boolean"
+                                },
+                                "error": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "domain",
+                                "importing",
+                                "error"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "region",
+                          "regionLabel",
+                          "scanState",
+                          "scanError",
+                          "sendingState",
+                          "receivingState",
+                          "error",
+                          "facts",
+                          "resources",
+                          "pending"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "regions"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from 'opensend-js/client';\nimport { getConnectionRegionStatus } from 'opensend-js';\n\n// Run in the signed-in dashboard, on its own origin.\nconst client = createClient({ baseUrl: window.location.origin, credentials: 'same-origin' });\nconst result = await getConnectionRegionStatus({\n  client,\n  throwOnError: true,\n});\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url \"${OPENSEND_ORIGIN}/v1/connection/regions/status\" \\\n  --header \"Origin: $OPENSEND_ORIGIN\" \\\n  --cookie \"$OPENSEND_COOKIE_JAR\""
           }
         ]
       }
