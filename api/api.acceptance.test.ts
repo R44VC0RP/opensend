@@ -4123,6 +4123,31 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('an idle DispatcherShard dispatches inline and does not reprobe placement on eviction', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      // Node has no DO host; provide only its base constructor, storage and waitUntil.
+      const { registerHooks } = await import('node:module');
+      const hook = registerHooks({ resolve(specifier, context, next) {
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+      } });
+      const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
+      const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
+      const ctx = { storage: { get:(k:string)=>stored.get(k), put:(k:string,v:unknown)=>stored.set(k,v), getAlarm:()=>null, setAlarm:(at:number)=>alarms.push(at) }, waitUntil:(p:Promise<unknown>)=>pending.push(p) };
+      let probes = 0, statusAtProbe: string | undefined;
+      const receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      t.mock.method(globalThis, 'fetch', async () => {
+        probes++; statusAtProbe = (await db.query('SELECT status FROM sending_emails WHERE id=$1',[receipt.id])).rows[0].status;
+        return new Response('colo=TEST');
+      });
+      for (let i = 0; i < 2; i++) {
+        const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env);
+        Object.assign(shard, { runtime: async () => runtime });
+        assert.equal((await shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}`))).status, 200);
+        while (pending.length) await Promise.all(pending.splice(0));
+      }
+      assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];

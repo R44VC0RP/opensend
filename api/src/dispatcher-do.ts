@@ -37,12 +37,13 @@ export class DispatcherShard extends DurableObject<Env> {
   private identity?: Identity;
   private placementLogged = false;
 
-  // Once per object lifetime: where this shard runs and what one database round trip costs from there.
+  // Once per persisted shard, after its first dispatch: where it runs and the cost of one DB round trip.
   // The location hint is only honored at creation, so this is the record of where the object actually landed.
   private async logPlacement(identity: Identity, runtime: Runtime) {
     try {
+      if (await this.ctx.storage.get('placementLogged')) return;
       const { sql, log } = await loadDeps();
-      const trace = await (await fetch('https://cloudflare.com/cdn-cgi/trace')).text();
+      const trace = await (await fetch('https://cloudflare.com/cdn-cgi/trace', { signal: AbortSignal.timeout(2000) })).text();
       const colo = trace.match(/^colo=(\w+)/m)?.[1] ?? 'unknown';
       const timed = async (work: () => Promise<unknown>) => { const at = Date.now(); await work(); return Date.now() - at; };
       const dbPingMs = await timed(() => runtime.db.execute(sql`SELECT 1`));
@@ -52,6 +53,7 @@ export class DispatcherShard extends DurableObject<Env> {
       const dbPayloadMs = await timed(() => runtime.db.execute(sql`SELECT count(*) FROM jsonb_to_recordset(${payload}::jsonb) AS x(id text, snapshot text)`));
       const dbPayloadAgainMs = await timed(() => runtime.db.execute(sql`SELECT count(*) FROM jsonb_to_recordset(${payload}::jsonb) AS x(id text, snapshot text)`));
       log('info', { code: 'DISPATCHER_PLACEMENT', shard: dispatcherName(identity), colo, dbPingMs, dbPingAgainMs, dbPayloadMs, dbPayloadAgainMs, payloadBytes: payload.length });
+      await this.ctx.storage.put('placementLogged', true);
     } catch { /* diagnostics only */ }
   }
 
@@ -68,13 +70,17 @@ export class DispatcherShard extends DurableObject<Env> {
       await this.ctx.storage.put('identity', identity);
       this.identity = identity;
     }
-    if (this.running && url.searchParams.get('priority') === '1') {
-      const { dispatchWakeKey } = await loadDeps();
-      this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
+    if (!this.running) {
+      this.ctx.waitUntil(this.alarm());
+    } else {
+      if (url.searchParams.get('priority') === '1') {
+        const { dispatchWakeKey } = await loadDeps();
+        this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
+      }
+      // The running loop may already have taken its last lease. Keep a durable follow-up.
+      const alarm = await this.ctx.storage.getAlarm();
+      if (alarm === null || alarm > Date.now()) await this.ctx.storage.setAlarm(Date.now());
     }
-    // An alarm during a run is harmless: it re-checks for work after the current run returns.
-    const alarm = await this.ctx.storage.getAlarm();
-    if (alarm === null || (url.searchParams.get('priority') === '1' && alarm > Date.now())) await this.ctx.storage.setAlarm(Date.now());
     return Response.json({ ok: true, running: this.running });
   }
 
@@ -92,12 +98,12 @@ export class DispatcherShard extends DurableObject<Env> {
       const runtime = await this.runtime();
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
       if (runtime.config.multiTenant && !identity.accountId) return;
-      if (!this.placementLogged) { this.placementLogged = true; await this.logPlacement(identity, runtime); }
       const report = await runDispatcher(runtime, {
         ...identity, gate: this.gate, priorityWake: this.priorityWake,
         until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
+      if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
       // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
       if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
