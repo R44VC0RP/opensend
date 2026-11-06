@@ -19,6 +19,13 @@
 .keys-choice input { appearance: none; flex-shrink: 0; width: var(--space-16); height: var(--space-16); margin: 2px 0 0; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); cursor: inherit; transition: box-shadow var(--motion-duration), background var(--motion-duration); }
 .keys-choice input:checked { background: var(--color-on-accent); box-shadow: inset 0 0 0 5px var(--color-accent); }
 .keys-purpose:disabled .keys-choice { color: var(--color-muted); cursor: not-allowed; }
+/* Forced colors drop box-shadow, which draws both the ring and the dot; draw them with system colors instead. */
+@media (forced-colors: active) {
+  .keys-choice input { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
+  .keys-choice input:checked { background: Highlight; box-shadow: inset 0 0 0 1px Highlight, inset 0 0 0 4px Canvas; }
+  .keys-purpose:disabled .keys-choice input { box-shadow: inset 0 0 0 1px GrayText; }
+  .keys-purpose:disabled .keys-choice input:checked { background: GrayText; box-shadow: inset 0 0 0 1px GrayText, inset 0 0 0 4px Canvas; }
+}
 .keys-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-weight: var(--font-weight-bold); overflow-wrap: anywhere; }
 .keys-advanced > summary .muted { font-weight: var(--font-weight-regular); }
 .keys-advanced-body { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-16); min-width: 0; }
