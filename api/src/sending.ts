@@ -1,3 +1,4 @@
+import { cachedDashboardRead } from './dashboard-cache.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, isNotNull, lt, sql, type SQL } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
@@ -70,20 +71,20 @@ function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0) => sql`SELECT count(*)::int AS total, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0, incoming = 1, marketingRows = 0) => sql`SELECT projected, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
-  FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
-function assertPending(incoming: number, counts: { total: number; quota: number | string | null; hosted: HostedAllowance | null }) {
+  FROM direct_pending_load(${a.workspaceId},${incoming},${marketingRows})`;
+function assertPending(counts: { projected: number; quota: number | string | null; hosted: HostedAllowance | null }) {
   const cap = pendingCap(counts.quota, counts.hosted);
-  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
+  if (counts.projected > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
   await lockAdmission(db, a);
   const charge = isSimulatedSes(runtime) ? 0 : cost;
-  const { rows: [counts] } = await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
+  const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
   assertHostedAllowance(counts!.hosted, charge);
-  assertPending(1, counts!);
+  assertPending(counts!);
 }
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
@@ -155,7 +156,7 @@ const CampaignStats = z.object({
 const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true, state: true, scheduledAt: true, archivedAt: true }).describe('Compact state for draft sync polling. Compare all fields, not only revision: archival and delivery state can change without a new draft revision. Fetch the full campaign when state changes. No draft content or delivery counts.').openapi('CampaignState');
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
-const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject, status, region, email/campaign/provider IDs, error code, simulation state and timestamps (use kind to filter by stream). Sender name, Reply-To, message content and event payloads are not searched.').openapi('ListEmailsQuery');
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: Status.optional(), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: z.string().trim().min(1).max(200).optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
@@ -202,9 +203,12 @@ function campaignUrl(runtime: Runtime, row: { id: string; state: CampaignState; 
   return url.href;
 }
 type CampaignRow = Omit<typeof campaigns.$inferSelect, 'draft'> & { draft: unknown };
-async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[]) {
+async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], listOrigin?: string) {
   if (!rows.length) return [];
-  const grouped = await runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  const load = async () => runtime.db.select({ campaignId: emails.campaignId, status: emails.status, count: sql<number>`count(*)::int` }).from(emails).where(and(scope(emails, a), inArray(emails.campaignId, rows.map(row => row.id)))).groupBy(emails.campaignId, emails.status);
+  // Only dashboard lists may reuse counts. Detail, mutations and machine credentials stay exact.
+  const grouped = listOrigin && a.credential === 'dashboard'
+    ? (await cachedDashboardRead(listOrigin,JSON.stringify(['campaign-counts',a.workspaceId,rows.map(r=>[r.id,r.updatedAt])]),load)).value : await load();
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
@@ -248,7 +252,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
   const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
-    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)} AS verified
+    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
@@ -318,6 +322,18 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   const [row] = await db.select().from(emails).where(mailWhere(a, emailId));
   if (!row) notFound('Email');
   return row;
+}
+async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.$inferSelect) {
+  // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
+  const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(runtime, a, row) : row.snapshot;
+  const manage = a.permissions.includes('manage');
+  // App-owned capabilities only, not a general sanitizer for transactional bearer links.
+  // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
+  const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
+  return EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
+}
+function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
+  return Event.parse({ ...row, data: a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data) });
 }
 async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
@@ -593,10 +609,10 @@ function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
   const target = targets.get(region) ?? { count: 0, priority: false };
   target.count++; target.priority ||= kind === 'transactional'; targets.set(region, target);
 }
-type AdmissionState = { total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
-function checkCapacity(state: AdmissionState, n: number, cost: number, marketing: number) {
+type AdmissionState = { projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
+function checkCapacity(state: AdmissionState, cost: number, marketing: number) {
   assertHostedAllowance(state.hosted, cost, marketing);
-  assertPending(n, state);
+  assertPending(state);
   if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
 }
 function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest) {
@@ -639,11 +655,11 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       // ordinary API policy checks below succeed and COMMIT; errors roll back the whole batch.
       const {rows:[result]} = await db.execute<{inserted: number; state: AdmissionState | {previous: typeof receipt | null; hash: string}}>(sql`WITH state AS MATERIALIZED (
         SELECT direct_admission_state(${a.workspaceId},${a.keyId},${c.req.path},${key ?? null},${hash},${JSON.stringify(receipt)}::jsonb,
-          ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
+          ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region,kind:m.kind})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
       ), submitted AS (
         SELECT m.id,m.hash,m.email,jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region'))) snapshot
         FROM state,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb) WHERE s->>'default_region' IS NOT NULL
-          AND (s->>'total')::int + ${mails.length} <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
+          AND (s->>'projected')::int <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
             least(${SENDING_LIMITS.pendingCeiling}, greatest(${SENDING_LIMITS.pendingFloor}, floor((s->>'quota')::numeric))))
           AND s#>>'{hosted,pauseReason}' IS NULL AND (s#>>'{hosted,cap}' IS NULL OR ${cost}::int=0 OR (
             (s#>>'{hosted,used}')::bigint + ${cost} <= (s#>>'{hosted,cap}')::int AND (${marketing}::int=0 OR
@@ -661,7 +677,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         if (!state.previous) throw new ApiError(500, 'IDEMPOTENCY_RESULT_MISSING', 'The stored idempotency result is unavailable.');
         return state.previous;
       }
-      checkCapacity(state, mails.length, cost, marketing);
+      checkCapacity(state, cost, marketing);
       const locked = new Map(state.assets?.map(row => [row.id,row]));
       let bytes = 0;
       for (const [i,mail] of mails.entries()) {
@@ -698,12 +714,12 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       ORDER BY id FOR UPDATE) asset)` : sql`NULL`;
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
-      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
+      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
+    const state = (await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(c.env, a, cost, marketing)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
-    checkCapacity(state, mails.length, cost, marketing);
+      FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    checkCapacity(state, cost, marketing);
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
@@ -845,12 +861,7 @@ export function registerSending(app: App) {
       q.campaignId ? eq(emails.campaignId, q.campaignId) : undefined, q.status ? eq(emails.status, q.status) : undefined,
       q.region ? eq(emails.region, q.region) : undefined, q.kind ? sql`${emails.snapshot}->>'kind' = ${q.kind}` : undefined,
       q.from ? gte(emails.createdAt, q.from) : undefined, q.to ? lt(emails.createdAt, q.to) : undefined,
-      // Search only row columns: snapshot fields (sender name, stream, reply-to) detoasted every stored message body
-      // in scope (~800 MB). Stream has its own filter (kind).
-      search ? sql`(
-        concat_ws(' ', ${emails.id}, ${emails.campaignId}, ${emails.providerId}, ${emails.from}, ${emails.subject}, ${emails.status}, ${emails.region}, ${emails.errorCode}, ${emails.createdAt}::text, ${emails.updatedAt}::text, ${emails.scheduledAt}::text, ${emails.attemptStartedAt}::text, to_char(${emails.createdAt} AT TIME ZONE 'UTC', 'Mon DD YYYY HH24:MI:SS'), CASE WHEN ${emails.simulated} THEN 'simulated' ELSE 'live' END) ILIKE ${search}
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(${emails.to} || ${emails.cc} || ${emails.bcc}) AS recipient(address) WHERE recipient.address ILIKE ${search})
-      )` : undefined,
+      search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${search}` : undefined,
     )).orderBy(desc(emails.createdAt), desc(emails.id)).limit(q.limit + 1);
     return c.json({ data: rows.slice(0, q.limit).map(emailView), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
@@ -858,20 +869,30 @@ export function registerSending(app: App) {
     const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(actor(c), c.req.valid('param').id)).limit(1);
     return c.json(emailView(row ?? notFound('Email')), 200);
   });
+  app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
+    description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
+    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable()}).openapi('EmailDetail')),...errors} }),async c=>{
+    const a=actor(c), emailId=c.req.valid('param').id;
+    const [detail]=await c.env.db.select({mail:emails,
+      contact:sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
+        WHERE c.workspace_id=${emails.workspaceId} AND c.deleted_at IS NULL AND jsonb_array_length(${emails.to})=1 AND c.email=lower(${emails.to}->>0))`,
+      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t.id),'[]') FROM (
+        SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
+        WHERE workspace_id=${emails.workspaceId} AND email_id=${emails.id} ORDER BY id LIMIT 101) t)`
+    }).from(emails).where(mailWhere(a,emailId)).limit(1);
+    if(!detail) return notFound('Email');
+    const {mail,contact,timeline}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail);
+    const email=emailView({...mail,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:mail.snapshot.fromName ?? null,kind:mail.snapshot.kind});
+    return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:timeline.length>100 ? timeline[99]!.id : null}},200);
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
-    // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
-    const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(c.env, a, row) : row.snapshot;
-    const manage = a.permissions.includes('manage');
-    // App-owned capabilities only, not a general sanitizer for transactional bearer links.
-    // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
-    const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
-    return c.json(EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }), 200);
+    return c.json(await visibleEmailContent(c.env,a,row),200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query');
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse({ ...r, data: a.permissions.includes('manage') ? r.data : redactCapabilityData(r.data) })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
@@ -925,7 +946,7 @@ export function registerSending(app: App) {
     });
     return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null }), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: 'Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials and campaign detail remain exact.', tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
@@ -935,7 +956,7 @@ export function registerSending(app: App) {
       q.region ? sql`${campaigns.draft}->>'region' = ${q.region}` : undefined, q.state ? eq(campaigns.state, q.state) : undefined,
       search ? sql`(${campaigns.id} ILIKE ${search} OR ${campaigns.draft}->>'name' ILIKE ${search} OR ${campaigns.draft}->>'subject' ILIKE ${search})` : undefined,
     )).orderBy(desc(campaigns.createdAt), desc(campaigns.id)).limit(q.limit + 1));
-    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit)));
+    const views = await timed(c, 'campaign-counts-db', () => campaignViews(c.env, a, rows.slice(0, q.limit),new URL(c.req.url).origin));
     return c.json({ data: views.map(row => CampaignSummary.parse(row)), nextCursor: nextCursor(rows, q.limit, binding) }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}', operationId: 'getCampaign', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(Campaign), ...errors } }), async c => {
@@ -1227,29 +1248,31 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngr
     kind: input.type === 'send' ? 'Send' : 'Delivery', outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
   return result;
 }
-export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; type: 'send' | 'delivery' | 'receipt'; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt };
+export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt;
+  effects?: { reported: (string | null)[] | null; suppress: string | null; observe: string | null; receiptTime: boolean } };
 /** The opensend_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
 export function taggedEmailId(message: unknown): string | undefined {
   const tag = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags?.opensend_email_id;
   const value = Array.isArray(tag) ? tag[0] : undefined;
   return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
 }
-// One statement persists a whole batch of verified Send/Delivery callbacks: receipts, matched
-// events, monotonic status, public events and webhook deliveries. Other kinds only open their receipt.
+// One statement persists verified callbacks and their side effects. Only subscriptions and
+// non-routine callbacks deliberately deferred by HTTP ingress merely open their receipt.
 // Early callbacks with a known owner keep a recovery job; unresolved owners return an error for redelivery.
 export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIngress[]) {
   if (!inputs.length) return [];
   const mx = runtime.config.multiTenant;
+  const effects = inputs.some(input => input.effects);
   const topicMatch = mx ? sql`AND (x.simulated OR e.feedback_topic_arn=x.topic_arn)` : sql``;
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, simulated: input.ingress.topicArn === `urn:opensend:simulated-ses:${input.ingress.region}`, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
-    external_id: input.externalId ?? null, data: input.data ?? {}, created_at: input.createdAt ?? now(),
+    external_id: input.externalId ?? null, data: input.data ?? {}, effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
   const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH raw AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(ordinal int, job_workspace text, simulated boolean, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
+        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
       WHERE x.tagged_email_id IS NULL AND e.region = x.region AND e.simulated = x.simulated ${topicMatch}
@@ -1259,7 +1282,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       WHERE e.region = x.region AND e.simulated = x.simulated ${topicMatch}
         AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
     ), locked AS MATERIALIZED (
-      SELECT x.ordinal, e.id, e.workspace_id, e.simulated, e.status, e.provider_id FROM raw x
+      SELECT x.ordinal, e.id, e.workspace_id, e.simulated, e.status, e.provider_id ${effects ? sql`, e.to_addresses,e.cc_addresses,e.bcc_addresses` : sql``} FROM raw x
       JOIN (SELECT ordinal, min(id) AS id FROM candidates GROUP BY ordinal HAVING count(*) = 1) c USING (ordinal)
       JOIN sending_emails e ON e.id = c.id
       WHERE e.provider_id = x.provider_id OR (e.id = x.tagged_email_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown'))
@@ -1272,7 +1295,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':opensend-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
       GROUP BY s.workspace_id
     )`}, input AS (
-      SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status,
+      SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status, ${effects ? sql`l.to_addresses,l.cc_addresses,l.bcc_addresses,` : sql``}
         coalesce(x.recovery_type, CASE WHEN x.type = 'receipt' AND l.status = 'attempting' AND l.provider_id IS NULL THEN 'operation.ses' END) AS job_type,
         CASE WHEN x.type <> 'receipt' AND (l.provider_id IS NOT NULL OR l.status = 'acceptance_unknown') THEN l.id END AS email_id,
         CASE WHEN l.id IS NULL AND x.job_workspace IS NULL THEN 'SES_EMAIL_NOT_FOUND'
@@ -1280,28 +1303,64 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
              WHEN NOT x.simulated AND a.workspace_id IS NULL THEN 'REGION_SETTINGS_NOT_INITIALIZED'
              WHEN a.account IS NOT NULL AND to_jsonb(a.account) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}' THEN 'SES_ACCOUNT_MISMATCH'`} END AS error
       FROM raw x LEFT JOIN locked l USING (ordinal) ${mx ? sql`` : sql`LEFT JOIN accounts a ON a.workspace_id = l.workspace_id AND NOT x.simulated`}
+    ), distinct_receipts AS (
+      SELECT DISTINCT ON (topic_arn,message_id) * FROM input WHERE error IS NULL ORDER BY topic_arn,message_id,ordinal
     ), incoming AS (
-      INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, processed_at)
+      INSERT INTO operation_sns_receipts AS receipt(topic_arn, message_id, workspace_id, processed_at)
        SELECT x.topic_arn, x.message_id, x.workspace_id, CASE WHEN x.email_id IS NOT NULL THEN clock_timestamp() END
-       FROM input x WHERE x.error IS NULL ON CONFLICT DO NOTHING RETURNING topic_arn, message_id, workspace_id
+       FROM distinct_receipts x ON CONFLICT (topic_arn,message_id) DO UPDATE SET processed_at=excluded.processed_at
+       WHERE receipt.processed_at IS NULL AND excluded.processed_at IS NOT NULL AND receipt.workspace_id=excluded.workspace_id
+       RETURNING topic_arn, message_id, workspace_id, created_at
     ), recovery AS (
       INSERT INTO jobs(id, workspace_id, type, payload, available_at)
        SELECT DISTINCT ON (topic_arn, message_id) x.recovery_job_id, x.workspace_id, x.job_type, x.payload,
          clock_timestamp() + CASE WHEN x.type = 'receipt' AND x.status <> 'attempting' THEN interval '0 seconds' ELSE interval '15 seconds' END
-       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id)
+       FROM distinct_receipts x JOIN incoming i USING (topic_arn, message_id, workspace_id)
       WHERE x.error IS NULL AND x.email_id IS NULL AND x.job_type IS NOT NULL RETURNING id
-    ), inserted AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
+    ), matched AS (
+      SELECT x.*, CASE WHEN x.effects->>'receiptTime'='true' THEN i.created_at ELSE x.created_at END AS event_time
+      FROM distinct_receipts x JOIN incoming i USING (topic_arn,message_id,workspace_id) WHERE x.email_id IS NOT NULL
+    ) ${effects ? sql`, recipients AS MATERIALIZED (
+      SELECT DISTINCT x.event_id,lower(address) AS address FROM matched x,
+        jsonb_array_elements_text(x.to_addresses || x.cc_addresses || x.bcc_addresses) AS address
+      WHERE x.effects->'reported' ? lower(address) OR (x.effects->>'observe' IS NOT NULL AND jsonb_array_length(x.to_addresses)=1 AND x.cc_addresses='[]' AND x.bcc_addresses='[]')
+    )` : sql``}, inserted AS (
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
        SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.created_at
-       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id) WHERE x.error IS NULL AND x.email_id IS NOT NULL
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
+         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
+           AND EXISTS(SELECT FROM provider_pool_regions WHERE feedback_topic_arn=x.topic_arn) THEN ARRAY(
+           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
+           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
+       FROM matched x ORDER BY x.ordinal
       ON CONFLICT DO NOTHING RETURNING *
+    ) ${effects ? sql`, contact_events AS (
+      SELECT x.workspace_id,r.address,x.ordinal,x.event_time,x.effects->>'suppress' AS reason,x.effects->>'observe' AS observe,
+        min(x.ordinal) FILTER (WHERE x.effects->>'suppress' IS NOT NULL) OVER (PARTITION BY x.workspace_id,r.address) AS first_suppression
+      FROM matched x JOIN inserted ins ON ins.id=x.event_id JOIN recipients r USING(event_id)
+    ), contact_changes AS (
+      -- One write per address. A missing contact starts existing at its first suppression;
+      -- an earlier open must not create it or retroactively contribute engagement.
+      INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,last_open_at,last_click_at,open_observed_since,click_observed_since,observed_since)
+      SELECT 'con_'||replace(gen_random_uuid()::text,'-',''),v.workspace_id,v.address,bool_or(reason IS NOT NULL),
+        (array_agg(reason ORDER BY ordinal DESC) FILTER (WHERE reason IS NOT NULL))[1],
+        max(event_time) FILTER (WHERE observe='open'),max(event_time) FILTER (WHERE observe='click'),
+        min(event_time) FILTER (WHERE observe='open'),min(event_time) FILTER (WHERE observe='click'),min(event_time) FILTER (WHERE observe IS NOT NULL)
+      FROM contact_events v LEFT JOIN audience_contacts c ON c.workspace_id=v.workspace_id AND c.email=v.address
+      WHERE (reason IS NOT NULL OR observe IS NOT NULL) AND (c.id IS NOT NULL OR ordinal>=first_suppression)
+      GROUP BY v.workspace_id,v.address ORDER BY v.workspace_id,v.address ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET
+        suppressed=c.suppressed OR excluded.suppressed,suppression_reason=coalesce(excluded.suppression_reason,c.suppression_reason),
+        last_open_at=greatest(c.last_open_at,excluded.last_open_at),last_click_at=greatest(c.last_click_at,excluded.last_click_at),
+        open_observed_since=least(c.open_observed_since,excluded.open_observed_since),click_observed_since=least(c.click_observed_since,excluded.click_observed_since),
+        observed_since=least(c.observed_since,excluded.observed_since),updated_at=now()
+    )` : sql``}, ranked AS (
+      SELECT x.*,max(x.next_rank) OVER(PARTITION BY x.email_id ORDER BY x.ordinal) AS running_rank FROM matched x JOIN inserted ins ON ins.id=x.event_id
+      WHERE x.next_rank IS NOT NULL
     ), winner AS (
-      -- Send and Delivery for one email can share a batch; only the highest-ranked new event moves status.
-       SELECT DISTINCT ON (x.email_id) x.email_id, x.workspace_id, x.status, x.next_status, x.next_rank, x.provider_id
-      FROM input x JOIN inserted ins ON ins.id = x.event_id ORDER BY x.email_id, x.next_rank DESC
+      SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
+      FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), updated_at = clock_timestamp()
+      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
@@ -1318,7 +1377,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), webhook_jobs AS (
       INSERT INTO jobs(id, workspace_id, type, payload)
       SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
-    ) SELECT x.ordinal, x.workspace_id AS "workspaceId", x.error,
+    ) SELECT x.ordinal, x.workspace_id AS "workspaceId", coalesce(x.error,CASE WHEN x.effects IS NOT NULL AND x.email_id IS NULL THEN 'SES_EMAIL_NOT_FOUND' END) AS error,
       (SELECT row_to_json(e) FROM (SELECT ins.id, ins.workspace_id AS "workspaceId", ins.email_id AS "emailId", ins.type,
         ins.provider_id AS "providerId", ins.external_id AS "externalId", ins.data, ins.simulated, ins.created_at::text AS "createdAt" FROM inserted ins WHERE ins.id = x.event_id) e) AS event,
       ((SELECT count(*) FROM webhook_jobs) + (SELECT count(*) FROM recovery r WHERE r.id = x.recovery_job_id))::int AS runnable

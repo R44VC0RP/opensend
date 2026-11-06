@@ -597,7 +597,10 @@ export function createMockApi(): OpenSendApi {
     },
     emails: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); const rows = s.emails.filter(e => (!input.regionId || e.regionId === input.regionId) && (!input.campaignId || e.campaignId === input.campaignId) && (!input.status || e.status === input.status) && (!input.stream || e.stream === input.stream)).sort((a, b) => b.sentAt.localeCompare(a.sentAt)); return page(rows, input, e => `${e.id} ${e.to} ${e.from} ${e.fromName ?? ''} ${e.subject} ${e.status} ${e.stream} ${e.regionId} ${e.sentAt} ${e.simulated ? 'simulated test' : 'live'}`) }),
-      get: (emailId, signal) => run(signal, false, s => find(s.emails, emailId, 'Email')),
+      get: (emailId, signal) => run(signal, false, s => {
+        const email = find(s.emails, emailId, 'Email'), contact = s.contacts.find(c => c.email.toLowerCase() === email.to.toLowerCase())
+        return { ...email, contact: contact ? {id:contact.id, suppressed:contact.status === 'suppressed'} : null }
+      }),
     },
     campaigns: {
       list: (input, signal) => run(signal, false, s => { filterRegion(s, input.regionId); return page(s.campaigns.filter(c => (c.archivedAt != null) === (input.archived === true) && (!input.regionId || c.regionId === input.regionId) && (!input.status || c.status === input.status) && (!input.listId || c.listId === input.listId) && (!input.segmentId || c.segmentId === input.segmentId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(c => campaignTotals(s, c)), input, c => `${c.name} ${c.subject}`) }),

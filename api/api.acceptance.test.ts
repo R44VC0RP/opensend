@@ -3394,6 +3394,11 @@ describe('Dashboard API capabilities', () => {
     query.set('to', to); query.set('region', 'not-configured');
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'REGION_NOT_CONFIGURED');
     const metricQuery = new URLSearchParams({ from, to, region: REGION, stream: 'transactional' });
+    const historical=`/v1/metrics?from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z&region=${REGION}`;
+    await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
+    const cached=await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
+    assert.equal(cached.headers.get('x-opensend-metrics-cache'),'hit');
+    assert.equal((await http('GET',historical,key.secret)).headers.get('x-opensend-metrics-cache'),null);
     const before = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(before.basis, 'created-cohort');
     assert.equal(before.region, REGION);
@@ -3590,6 +3595,10 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const token = url.pathname.split('/').at(-1)!;
     assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
     const redacted = ok(await http('GET', `/v1/emails/${source.id}/content`, reader.secret));
+    const detail=ok(await http('GET',`/v1/emails/${source.id}/detail`,reader.secret));
+    assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
+    assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
+    assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
     assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');
@@ -4208,6 +4217,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
       ]);
 
+      await db.query(`UPDATE sending_emails SET snapshot='{"kind":"marketing"}' WHERE workspace_id=$1 AND actor_key_id='fixture'`,[wid]);
+      ok(await send(simulator),202);
+      const mixedBatch=await request('POST','/v1/emails/batch',key,{emails:[mail({from,to:simulator}),mail({from,to:simulator,kind:'marketing'})]});
+      error(mixedBatch,429,'PENDING_EMAIL_LIMIT_EXCEEDED');
+
       // The scale run freezes the physical two-million-contact audience. Normal CI uses a sparse
       // tail fixture; neither run needs to render the previous days' 1,999,599 messages.
       await limits('100000','10001');
@@ -4387,6 +4401,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(recipient_hashes.every((h:string)=>/^[0-9a-f]{64}$/.test(h)));
       const visible=JSON.stringify([ok(await local('GET',`/v1/emails/${email_id}/events`)),(await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1`,[wid])).rows]);
       assert.ok(!visible.includes('recipient_hashes') && !visible.includes(bcc[0]) && !recipient_hashes.some((h:string)=>visible.includes(h)));
+
+      const single='one@example.net';
+      await db.query(`UPDATE sending_emails SET to_addresses=$2, bcc_addresses='[]' WHERE provider_id=$1`,[wid+'3',JSON.stringify([single])]);
+      const callback=(eventType:string,detail:Json)=>({region:REGION,topicArn,messageId:unique('sns'),message:{eventType,mail:{messageId:wid+'3',sendingAccountId:account},[eventType.toLowerCase()]:detail}});
+      const open=callback('Open',{timestamp:'2026-01-03T00:00:00Z'}), click=callback('Click',{timestamp:'2026-01-02T00:00:00Z',link:'https://example.net/'});
+      const batch=[callback('Open',{timestamp:'2026-01-01T00:00:00Z'}),callback('Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:single},{emailAddress:'foreign@example.net'}]}),open,click,open,callback('Click',{isBotEvent:'Likely',timestamp:'2026-01-04T00:00:00Z'})];
+      ok(await local('POST','/v1/webhooks',{url:'https://example.com/fixture',eventTypes:['email.bounced','email.opened','email.clicked']}),201);
+      let wakes=0;runtime.wake=async()=>{wakes++};
+      for(let i=0;i<2;i++) assert.ok((await ingestFeedbackBatch(runtime,batch)).every(x=>x.ok));
+      assert.equal(wakes,1,'One batch wake; replay does not fan out.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM operation_deliveries WHERE workspace_id=$1',[wid])).rows[0].n,5);
+      const [observed]=(await db.query(`SELECT suppression_reason,last_click_at,last_open_at,observed_since FROM audience_contacts WHERE workspace_id=$1 AND email=$2`,[wid,single])).rows;
+      assert.deepEqual([observed.suppression_reason,...[observed.last_click_at,observed.last_open_at,observed.observed_since].map(d=>d.toISOString().slice(0,10))],['email_validation','2026-01-02','2026-01-03','2026-01-02']);
+      assert.equal((await db.query(`SELECT 1 FROM audience_contacts WHERE workspace_id=$1 AND email='foreign@example.net'`,[wid])).rowCount,0);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE provider_id=$1',[wid+'3'])).rows,[{status:'suppressed',error_code:'EMAIL_VALIDATION_SUPPRESSED'}]);
     });
   });
   test('MX: migration 060 preserves a mature ready workspace’s tier without provisioning-job history', async t => {
@@ -5250,9 +5279,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const marketing = ok(await local('POST', '/v1/emails/send', mail({ to: contact.email, kind: 'marketing' })), 202);
       await db.query("UPDATE sending_emails SET created_at = now() - interval '1 hour' WHERE id = $1", [marketing.id]);
       const transactional = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const future = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await db.query("UPDATE sending_emails SET created_at=now()-interval '2 hours',scheduled_at=now()+interval '1 day' WHERE id=$1",[future.id]);
+      await db.query("UPDATE sending_emails SET scheduled_at=now()-interval '1 second' WHERE id=$1",[transactional.id]);
       await dispatchDue(runtime, REGION, { batchSize: 1, until: Date.now() });
-      const { rows } = await db.query('SELECT id, status FROM sending_emails WHERE id = ANY($1)', [[transactional.id, marketing.id]]);
-      assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.status])), { [transactional.id]: 'accepted', [marketing.id]: 'queued' });
+      const { rows } = await db.query('SELECT id, status FROM sending_emails WHERE id = ANY($1)', [[transactional.id, marketing.id, future.id]]);
+      assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.status])), { [transactional.id]: 'accepted', [marketing.id]: 'queued', [future.id]:'queued' });
     });
   });
 

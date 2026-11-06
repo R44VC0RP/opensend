@@ -1,4 +1,4 @@
-import { getTableColumns, sql } from 'drizzle-orm';
+import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import { GetAccountCommand, SendEmailCommand, type Attachment, type SESv2Client, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
@@ -174,7 +174,7 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
 async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string, priorityOnly = false): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
-  const available = sql`(scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
+  const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
@@ -183,6 +183,14 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
     ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
       WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
+  // Look up each due stream separately: the immediate ordered index contains no future mail,
+  // and the scheduled index can stop at this statement's cutoff. Merge only bounded pages.
+  const page = (size: SQL, lock = false, exclude = sql``) => {
+    const arm = (schedule: SQL) => sql`SELECT * FROM (SELECT e.id,${transactional} AS transactional,e.created_at ${dueForOwner}
+      AND ${schedule} ${exclude} ${priority} LIMIT ${size} ${lock ? sql`FOR UPDATE SKIP LOCKED` : sql``}) arm`;
+    return sql`SELECT * FROM (${arm(sql`scheduled_at IS NULL`)} UNION ALL ${arm(sql`scheduled_at <= statement_timestamp()`)}) streams
+      ORDER BY transactional DESC,created_at,id LIMIT ${size}`;
+  };
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
   // Interleaving the bounded owner queues by turn gives every active owner a slot before any gets two.
   const mx = runtime.config.multiTenant;
@@ -193,8 +201,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       ) n`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE owners(workspace_id) AS (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
-        SELECT id, ${transactional} AS transactional, created_at, row_number() OVER (${priority}) AS turn
-        ${dueForOwner} ${priority} LIMIT ${limit}
+        SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p
       ) q
     ), shares AS MATERIALIZED (
       SELECT workspace_id, count(*) AS candidates, greatest(1, count(*) FILTER (WHERE place <= ${limit})) AS slots
@@ -203,15 +210,14 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       -- Allocate slots, not IDs: a competing shard can hold this owner's entire first page.
       -- Lock the next available rows in index order; later owners can fill slots skipped under contention.
       SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
-        SELECT id ${dueForOwner} ${priority} LIMIT o.slots FOR UPDATE SKIP LOCKED
+        ${page(sql`o.slots`,true)}
       ) e LIMIT ${limit}
     ), due AS (
       -- Consume the fair allocation first. A full lease skips the fallback; a short one only
       -- revisits owners with candidates beyond their share. Our own locks are not SKIPped.
       SELECT workspace_id, id FROM allocated UNION ALL
       SELECT o.workspace_id, e.id FROM shares o CROSS JOIN LATERAL (
-        SELECT id ${dueForOwner} AND e.id NOT IN (SELECT id FROM allocated)
-        ${priority} LIMIT ${limit} FOR UPDATE SKIP LOCKED
+        ${page(sql`${limit}`,true,sql`AND e.id NOT IN (SELECT id FROM allocated)`)}
       ) e WHERE o.candidates > o.slots LIMIT ${limit}
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*
@@ -410,7 +416,7 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
             AND (k.permissions ? 'manage' OR k.permissions ? 'send') AND (k.domains = '[]'::jsonb OR EXISTS (
               SELECT 1 FROM jsonb_array_elements_text(k.domains) d WHERE split_part(x.sender, '@', 2) = lower(d.value)
                 OR right(split_part(x.sender, '@', 2), length(d.value) + 1) = '.' || lower(d.value)))) END
-          ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${prepared[0]!.mail.region}`, sql`split_part(x.sender, '@', 2)`,runtime)}` : sql``} AS origin_ok,
+          ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${prepared[0]!.mail.region}`, sql`split_part(x.sender, '@', 2)`)}` : sql``} AS origin_ok,
         (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.state <> 'canceled')) AS campaign_allowed,
         NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (workspace_id, email)
           WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed

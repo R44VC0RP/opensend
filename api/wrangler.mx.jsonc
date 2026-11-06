@@ -51,8 +51,10 @@
       { "binding": "FEEDBACK_QUEUE", "queue": "opensend-mx-production-feedback" }
     ],
     "consumers": [
-      { "queue": "opensend-mx-production-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
-      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 10 }
+      // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
+      { "queue": "opensend-mx-production-work", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
+      // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
+      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 1 }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

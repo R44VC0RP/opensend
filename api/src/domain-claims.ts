@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
-import { claimSends, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
+import { connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
 // Registry suffixes have independently owned children. Platform-controlled DNS trees do not.
@@ -63,10 +63,6 @@ export const releaseConnectionClaims = (wid: string, target: SQL) => sql`target 
 // Used in the existing admission/dispatch statements. The connection join also fences
 // disconnects and verifies the region. Hosted sender proof is required even when SES is simulated.
 export const sendingConnections = (runtime: Runtime) => sql.identifier(isSimulatedSes(runtime) ? 'provider_simulated_connections' : 'provider_sending_connections');
-export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL, runtime: Runtime) => runtime.config.multiTenant
-  ? sql`EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=${workspace} AND v.region=${region} AND ${within(host,sql`v.name`)})`
-  : sql`EXISTS (SELECT 1 FROM domain_claims dc
-  JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
-  WHERE dc.workspace_id=${workspace} AND pc.region=${region} AND ${connectionReady()} ${!isSimulatedSes(runtime) ? sql`AND ${claimSends()}` : sql``}
-    AND ${within(host, sql`dc.name`)} FOR SHARE OF dc,pc)`;
+export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL) =>
+  sql`EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=${workspace} AND v.region=${region} AND ${within(host,sql`v.name`)})`;
 export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'Verify this sender domain or a parent domain in this workspace and region.', 'from');

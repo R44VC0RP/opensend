@@ -496,15 +496,21 @@ export type Email = {
     updatedAt: string;
 };
 
-export type EmailContent = {
-    subject: string;
-    html: string | null;
-    text: string | null;
-    raw: string | null;
-    attachments: Array<string>;
-    render: 'direct' | 'ses' | 'simulated';
-    templateName: string | null;
-    simulated: boolean;
+export type EmailDetail = {
+    email: Email;
+    content: {
+        html: string | null;
+        text: string | null;
+        attachments: Array<string>;
+    };
+    events: {
+        data: Array<EmailEvent>;
+        nextCursor: string | null;
+    };
+    contact: {
+        id: string;
+        suppressed: boolean;
+    } | null;
 };
 
 export type EmailEvent = {
@@ -517,6 +523,17 @@ export type EmailEvent = {
     data: {
         [key: string]: unknown;
     };
+};
+
+export type EmailContent = {
+    subject: string;
+    html: string | null;
+    text: string | null;
+    raw: string | null;
+    attachments: Array<string>;
+    render: 'direct' | 'ses' | 'simulated';
+    templateName: string | null;
+    simulated: boolean;
 };
 
 export type Attachment = {
@@ -5661,6 +5678,9 @@ export type ListEmailsData = {
         status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
         region?: string;
         kind?: 'transactional' | 'marketing';
+        /**
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.
+         */
         search?: string;
         from?: string;
         to?: string;
@@ -5787,6 +5807,69 @@ export type GetEmailResponses = {
 };
 
 export type GetEmailResponse = GetEmailResponses[keyof GetEmailResponses];
+
+export type GetEmailDetailData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/emails/{id}/detail';
+};
+
+export type GetEmailDetailErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetEmailDetailError = GetEmailDetailErrors[keyof GetEmailDetailErrors];
+
+export type GetEmailDetailResponses = {
+    /**
+     * Success
+     */
+    200: EmailDetail;
+};
+
+export type GetEmailDetailResponse = GetEmailDetailResponses[keyof GetEmailDetailResponses];
 
 export type GetEmailContentData = {
     body?: never;
