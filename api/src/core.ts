@@ -124,14 +124,19 @@ export const isSimulatedSes = (runtime: Runtime) => !runtime.config.liveEnabled 
 export function assertSesConfigured(runtime: Runtime) {
   if (isSimulatedSes(runtime)) throw new ApiError(503, 'SES_NOT_CONFIGURED', 'Live SES access is disabled or AWS credentials are missing.');
 }
-export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection): SESv2Client {
+export function getSes(runtime: Runtime, selectedRegion: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
   region(runtime, selectedRegion);
   assertSesConfigured(runtime);
-  let clients = sesClients.get(runtime);
+  let clients = runClients ?? sesClients.get(runtime);
   if (!clients) { clients = new Map(); sesClients.set(runtime, clients); }
-  const key = connection ? `${selectedRegion}:${connection.id}` : selectedRegion;
+  // The dispatcher leases the connection alongside the mail. One shared-account client can
+  // sign for all Hosted tenants (TenantName is on the command); BYO role rotations must get
+  // a new provider. Never put a request-bound client or pending STS promise across invocations.
+  const key = runClients && connection
+    ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id])
+    : connection ? `${selectedRegion}:${connection.id}` : selectedRegion;
   let client = clients.get(key);
-  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
+  if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
   return client;
 }
 export function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>) {

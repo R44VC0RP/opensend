@@ -64,8 +64,8 @@ const rankJson = () => rankJsonCache ??= JSON.stringify(rank);
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-export function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection): SESv2Client {
-  return isSimulatedSes(runtime) ? simulatedSes(runtime, region) : getSes(runtime, region, connection);
+export function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>): SESv2Client {
+  return isSimulatedSes(runtime) ? simulatedSes(runtime, region) : getSes(runtime, region, connection, runClients);
 }
 async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
   const account = await ses.send(new GetAccountCommand({})), quota = account.SendQuota;
@@ -173,7 +173,7 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number }): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number }): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
@@ -296,7 +296,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const pc = connection as (ReadyConnection & { feedback_topic_arn: string }) | undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region)], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
+      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc, runClients), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
@@ -914,6 +914,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   };
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
+  const runClients = new Map<string, SESv2Client>();
   const lane: Lane = { deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), record: outcomeRecorder(ready => recordBatch(runtime, lane, ready)), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
   const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
@@ -926,7 +927,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
       ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs) } : undefined;
-    return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
+    return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {
