@@ -593,19 +593,96 @@ function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
   const target = targets.get(region) ?? { count: 0, priority: false };
   target.count++; target.priority ||= kind === 'transactional'; targets.set(region, target);
 }
+type AdmissionState = { total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
+function checkCapacity(state: AdmissionState, n: number, cost: number, marketing: number) {
+  assertHostedAllowance(state.hosted, cost, marketing);
+  assertPending(n, state);
+  if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
+}
+function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest) {
+  const region = mail.region ?? state.default_region!;
+  if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
+  if (runtime.config.multiTenant) {
+    verifiedSender(a, mail.from, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
+    if (state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
+    assertTenantReady(state.connection, isSimulatedSes(runtime));
+  }
+  return region;
+}
 async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   const data = mails.map(() => ({ id: id('email'), status: 'queued' as const, simulated: isSimulatedSes(c.env) }));
   const receipt = batch ? { data } : data[0]!;
+  const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
+  let cost = 0, marketing = 0;
+  if (mx && !simulated) for (const mail of mails) {
+    const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing') marketing += n;
+  }
+  const assetIds = [...new Set(mails.flatMap(mail => mail.attachments))];
+  if (mx && mails.every(m => !m.template) && !assetIds.some(id => id.includes('\0'))) {
+    // Explicit bodies can be prepared before the workspace lock. Only the default region needs
+    // substitution under the lock. The transaction rechecks sizes against locked attachment metadata.
+    const key = c.req.header('Idempotency-Key');
+    if (key !== undefined && (key.length > 200 || !/^[\x21-\x7e]+$/.test(key))) throw new ApiError(422, 'INVALID_IDEMPOTENCY_KEY', 'Idempotency-Key must contain 1–200 printable ASCII characters.');
+    const hash = key === undefined ? null : await digest(canonical(input));
+    const rows: { id: string; snapshot: EmailSnapshot; hash?: string; email?: string }[] = []; let prepError: unknown;
+    for (const [i,mail] of mails.entries()) {
+      try {
+        const link = mail.kind === 'marketing' ? await createUnsubscribeLink(c.env, a.workspaceId, Array.isArray(mail.to) ? mail.to[0]! : mail.to) : undefined;
+        const snapshot = await prepare(c.env, c.env.db, a, { ...mail, region: mail.region ?? '' }, false, [], true, false, link?.url);
+        rows.push({ id: data[i]!.id, snapshot, hash: link?.record.tokenHash, email: link?.record.email });
+      } catch (error) { prepError = error; break; }
+    }
+    const {firstWeek,secondWeek,mature} = c.env.config.hostedSendCaps;
+    return c.env.db.transaction(async db => {
+      // One statement after BEGIN. No row or idempotency receipt becomes visible until the
+      // ordinary API policy checks below succeed and COMMIT; errors roll back the whole batch.
+      const {rows:[result]} = await db.execute<{inserted: number; state: AdmissionState | {previous: typeof receipt | null; hash: string}}>(sql`WITH state AS MATERIALIZED (
+        SELECT direct_admission_state(${a.workspaceId},${a.keyId},${c.req.path},${key ?? null},${hash},${JSON.stringify(receipt)}::jsonb,
+          ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
+      ), submitted AS (
+        SELECT m.id,m.hash,m.email,jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region'))) snapshot
+        FROM state,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb) WHERE s->>'default_region' IS NOT NULL
+          AND (s->>'total')::int + ${mails.length} <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
+            least(${SENDING_LIMITS.pendingCeiling}, greatest(${SENDING_LIMITS.pendingFloor}, floor((s->>'quota')::numeric))))
+          AND s#>>'{hosted,pauseReason}' IS NULL AND (s#>>'{hosted,cap}' IS NULL OR ${cost}::int=0 OR (
+            (s#>>'{hosted,used}')::bigint + ${cost} <= (s#>>'{hosted,cap}')::int AND (${marketing}::int=0 OR
+            (s#>>'{hosted,used}')::bigint + ${marketing} <= (s#>>'{hosted,marketingCap}')::int)))
+      ), ${assetIds.length ? sql`links AS (INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id)
+        SELECT ${a.workspaceId},asset.id,'email',m.id FROM submitted m,state,jsonb_to_recordset(coalesce(nullif(s->'assets','null'::jsonb),'[]')) asset(id text)
+        WHERE (m.snapshot->'attachments') ? asset.id),` : sql``}
+      tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email) SELECT ${a.workspaceId},hash,email FROM submitted WHERE hash IS NOT NULL),
+      inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT id,${a.workspaceId},${a.keyId},snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${simulated} FROM submitted RETURNING 1)
+      SELECT s AS state,(SELECT count(*)::int FROM inserted) AS inserted FROM state`);
+      const state = result!.state;
+      if ('previous' in state) {
+        if (state.hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used with a different request.');
+        if (!state.previous) throw new ApiError(500, 'IDEMPOTENCY_RESULT_MISSING', 'The stored idempotency result is unavailable.');
+        return state.previous;
+      }
+      checkCapacity(state, mails.length, cost, marketing);
+      const locked = new Map(state.assets?.map(row => [row.id,row]));
+      let bytes = 0;
+      for (const [i,mail] of mails.entries()) {
+        const region = checkSender(c.env, a, state, mail), row = rows[i];
+        const attached = distinctAttachmentIds(mail.attachments).flatMap(id => locked.get(id) ?? []);
+        validateAttachmentRows(mail.attachments, attached);
+        if (!row) throw prepError;
+        if (attached.length) sizeCheck(row.snapshot,attached);
+        row.snapshot.region = region;
+        if (batch && (bytes += Buffer.byteLength(JSON.stringify(row.snapshot))) > SENDING_LIMITS.expandedCampaignBytes) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Expanded batch content exceeds the ${SENDING_LIMITS.expandedCampaignBytes / 1024 / 1024} MiB limit. Submit smaller batches.`);
+      }
+      if (result!.inserted !== mails.length) throw new Error('Incomplete direct admission');
+      if (state.connection) a.dispatchAccount = { aws_account_id: state.connection.aws_account_id, kind: state.connection.kind };
+      for (const row of rows) noteDispatch(a, row.snapshot);
+      return receipt;
+    });
+  }
   return idempotent(c, a, input, async db => {
-    const attachmentIds = [...new Set(mails.flatMap(mail => mail.attachments))].filter(id => !id.includes('\0'));
+    const attachmentIds = assetIds.filter(id => !id.includes('\0'));
     // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
     // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
-    const mx = c.env.config.multiTenant;
-    let cost = 0, marketing = 0;
-    if (mx && !isSimulatedSes(c.env)) for (const mail of mails) {
-      const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing') marketing += n;
-    }
     const ready = !mx && !isSimulatedSes(c.env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
@@ -626,18 +703,12 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
       FROM (${pendingCounts(c.env, a, cost, marketing)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
-    assertHostedAllowance(state.hosted, cost, marketing);
-    assertPending(mails.length, state);
-    if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
+    checkCapacity(state, mails.length, cost, marketing);
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
     for (const [i, mail] of mails.entries()) {
-      const region = mail.region ?? state.default_region;
-      if (!state.enabled_regions.includes(region)) throw new ApiError(422, 'REGION_NOT_CONFIGURED', 'The requested SES region is not enabled.', 'region');
-      if (mx) verifiedSender(a, mail.from, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
-      if (mx && state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
-      if (mx) assertTenantReady(state.connection, isSimulatedSes(c.env));
+      const region = checkSender(c.env, a, state, mail);
       if (!mx && !isSimulatedSes(c.env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!mx) keySender(a, mail.from);
       const ids = distinctAttachmentIds(mail.attachments);

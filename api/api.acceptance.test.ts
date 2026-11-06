@@ -4243,13 +4243,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},()=>mail)});
       const thread = () => local('POST','/v1/inbound/threads',{addressId:box.id,to:[mail.to],subject:mail.subject,text:mail.text});
       const pause = async () => ok(await local('GET','/v1/me')).connection.sendingPause;
+      const keyed = (to:string) => local('POST','/v1/emails/send',{...mail,to},'live',{'Idempotency-Key':'hosted-zero-charge'});
+      const free = ok(await keyed(simulator),202);
+      assert.deepEqual(ok(await keyed(simulator),202),free);
+      error(await keyed('different@example.net'),409,'IDEMPOTENCY_CONFLICT');
+      assert.equal((await db.query('SELECT 1 FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rowCount,0);
       const recipients = ok(await batch(98),202).data;
       error(await batch(3),429,'SEND_LIMIT_REACHED'); // All or nothing: leave two slots.
       const mixed = ok(await send({to:simulator, cc:['cc@example.net'], bcc:['bcc@example.net']}),202);
       const limited = await send(); const limitError = error(limited,429,'SEND_LIMIT_REACHED');
       assert.ok(Date.parse(limitError.resetAt) > Date.now()+23*3600000); assert.ok(limited.headers.get('retry-after'));
       error(await thread(),429,'SEND_LIMIT_REACHED');
+      const hourTuple = async () => (await db.query('SELECT ctid::text,recipients FROM hosted_usage_hourly WHERE workspace_id=$1 ORDER BY hour',[wid])).rows;
+      const charged = await hourTuple();
       const sim = ok(await send({to:simulator}),202); // A deploy test cannot consume tenant capacity.
+      assert.deepEqual(await hourTuple(), charged, 'Even an existing hourly counter must not get a new +0 tuple.');
       error(await send({to:'fake@x.simulator.amazonses.com'}),429,'SEND_LIMIT_REACHED');
       runtime.config.liveEnabled=false;
       try { assert.equal(ok(await send(),202).simulated,true); } finally { runtime.config.liveEnabled=true; }
