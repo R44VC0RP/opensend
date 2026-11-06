@@ -43,12 +43,12 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   return (await runtime.db.execute<Partition>(sql`${recovery} ${partitions}`)).rows;
 }
 /** Jobs plus due mail for every account/region, in this process. Node runners and tests use this. */
-export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true) {
+export async function drain(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000, gates = new Map<string, GateState>(), recoverInterrupted = true, priorityWake?: EventTarget) {
   let processed = await drainJobs(runtime, limit, concurrency, maxDurationMs);
   const dispatch = async ({ accountId, region }: Partition) => {
     const key = `${accountId ? `${accountId}:` : ''}${region}`;
     const gate = gates.get(key) ?? initialGate(); gates.set(key, gate);
-    try { return (await runDispatcher(runtime, { accountId, region, gate, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
+    try { return (await runDispatcher(runtime, { accountId, region, gate, priorityWake, lanes: 1, until: Date.now() + Math.max(1, maxDurationMs) })).claimed; }
     catch (error) {
       log('warn', { code: error instanceof ApiError ? error.code : 'DISPATCHER_RUN_FAILED', accountId, region, message: error instanceof ApiError ? error.message : 'Dispatcher run failed; retrying next cycle.' });
       return 0;

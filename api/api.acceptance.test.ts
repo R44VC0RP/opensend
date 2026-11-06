@@ -510,7 +510,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1, dailyHeadroomPercent: 10 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const kid = unique('mock-google-signing-key');
@@ -5071,6 +5071,211 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(shardRate(gate, undefined, pacing), 22, 'The brake releases after its window.');
   });
 
+  test('transactional mail wins the next lease ahead of older non-campaign marketing', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'fixture', policyVersion: 'v1', evidence: 'Synthetic fixture.', occurredAt: new Date().toISOString() }));
+      const marketing = ok(await local('POST', '/v1/emails/send', mail({ to: contact.email, kind: 'marketing' })), 202);
+      await db.query("UPDATE sending_emails SET created_at = now() - interval '1 hour' WHERE id = $1", [marketing.id]);
+      const transactional = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await dispatchDue(runtime, REGION, { batchSize: 1, until: Date.now() });
+      const { rows } = await db.query('SELECT id, status FROM sending_emails WHERE id = ANY($1)', [[transactional.id, marketing.id]]);
+      assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.status])), { [transactional.id]: 'accepted', [marketing.id]: 'queued' });
+    });
+  });
+
+  test('a transactional admission takes the next paced slot during an already leased campaign', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { runDispatcher, dispatchWakeKey } = await import('./src/dispatcher.js');
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('priority') }), 201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT gen_random_uuid()::text,$1,'priority-'||n||'@example.net','subscribed' FROM generate_series(1,24)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('priority'), from: 'sender@example.com', subject: 'Campaign', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      runtime.config.simulatedSes.maxSendRate = 14;
+      await run('campaign.run');
+      const priorityWake = new EventTarget();
+      let admitted = 0;
+      runtime.dispatch = async (region, account, _count, _kind, priority) => {
+        if (priority) { admitted = Date.now(); priorityWake.dispatchEvent(new Event(dispatchWakeKey(region, account))); }
+      };
+      const calls: { id: string; at: number }[] = [];
+      let started!: () => void;
+      const first = new Promise<void>(resolve => { started = resolve; });
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype, 'send', function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof SendEmailCommand) { calls.push({ id: cmd.input.EmailTags!.find(t => t.Name === 'opensend_email_id')!.Value!, at: Date.now() }); started(); }
+        return Reflect.apply(send, this, [cmd]);
+      });
+      // The budget stops new normal leases; it must not disable hints while the last batch drains.
+      const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1, until: Date.now() });
+      await first;
+      let receipt: Json;
+      try {
+        assert.ok((await db.query("SELECT 1 FROM sending_emails WHERE campaign_id=$1 AND lease_until IS NOT NULL", [campaign.id])).rowCount);
+        receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      } finally { await draining; }
+      const next = calls.find(c => c.at >= admitted)!;
+      assert.ok(admitted > 0); assert.equal(next.id, receipt.id, 'Already-leased marketing must not own future slots.');
+      assert.ok(next.at - admitted < 100, `14/s slot + wake latency: ${next.at - admitted} ms`);
+      assert.equal(calls.length, 25);
+    });
+  });
+
+  test('a low-rate shard returns queued work instead of holding attempts behind a 50-recipient envelope', async t => {
+    await simulatedSesFixture(t, async ({runtime,local,db}) => {
+      const {dispatchDue,initialGate}=await import('./src/dispatcher.js');
+      runtime.config.simulatedSes.maxSendRate=1;
+      const big=ok(await local('POST','/v1/emails/send',mail({to:Array.from({length:50},(_,i)=>`bulk-${i}@example.net`)})),202);
+      await db.query("UPDATE sending_emails SET created_at=now()-interval '1 hour' WHERE id=$1",[big.id]);
+      const next=ok(await local('POST','/v1/emails/send',mail()),202);
+      const gate=initialGate(), started=Date.now();
+      const r=await dispatchDue(runtime,REGION,{gate,shard:{index:0,count:4}});
+      assert.equal(r.sent,1); assert.ok(Date.now()-started<4000); assert.ok(r.paceRetryAt!-Date.now()>190_000);
+      assert.deepEqual((await db.query('SELECT status,attempt_started_at,lease_until FROM sending_emails WHERE id=$1',[next.id])).rows,[{status:'queued',attempt_started_at:null,lease_until:null}]);
+      assert.equal((await db.query("SELECT 1 FROM sending_email_events WHERE email_id=$1 AND type='dispatch_attempt'",[next.id])).rowCount,0);
+      assert.equal((await dispatchDue(runtime,REGION,{gate,shard:{index:0,count:4}})).claimed,0);
+      assert.equal((await dispatchDue(runtime,REGION,{shard:{index:1,count:4}})).sent,1);
+
+      // Now make the distant slot *unpredictable* at claim time: a 50-recipient transactional
+      // admission preempts an already-attempting marketing sibling on a six-recipient/s gate.
+      await db.query('UPDATE sending_region_limits SET max_send_rate=6 WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
+      const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      ok(await local('POST','/v1/emails/batch',{emails:[1,2].map(()=>mail({to:contact.email,kind:'marketing'}))}),202);
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'), orig=SESv2Client.prototype.send;
+      const {dispatchWakeKey}=await import('./src/dispatcher.js'), priorityWake=new EventTarget();
+      runtime.dispatch=async (region,account,_count,_kind,priority)=>{if(priority)priorityWake.dispatchEvent(new Event(dispatchWakeKey(region,account)));};
+      let startedSend!:()=>void; const first=new Promise<void>(r=>{startedSend=r;});
+      t.mock.method(SESv2Client.prototype,'send',function(this:InstanceType<typeof SESv2Client>,cmd:any){if(cmd instanceof SendEmailCommand)startedSend(); return Reflect.apply(orig,this,[cmd]);});
+      const draining=dispatchDue(runtime,REGION,{priorityWake}); await first;
+      try { ok(await local('POST','/v1/emails/send',mail({to:Array.from({length:50},(_,i)=>`priority-${i}@example.net`)})),202); }
+      finally { await draining; }
+      assert.equal((await draining).sent,2);
+      assert.equal((await db.query(`SELECT e.id FROM sending_emails e JOIN sending_email_events v ON v.email_id=e.id
+        WHERE e.workspace_id=$1 AND e.status='queued' AND e.attempt_started_at IS NULL AND v.type='dispatch_deferred' AND v.data->>'providerCalled'='false'`,[runtime.config.workspaceId])).rowCount,1);
+    });
+  });
+
+  test('a definitive daily denial and a known uncalled sibling survive an interrupted-attempt sweep', async t => {
+    await simulatedSesFixture(t,async({runtime,local,db,run})=>{
+      const {dispatchDue}=await import('./src/dispatcher.js'), {dispatchPartitions}=await import('./src/dispatch.js');
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
+      runtime.config.simulatedSes.maxSendRate=4;
+      const list=ok(await local('POST','/v1/lists',{name:unique('late-denial')}),201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT gen_random_uuid()::text,$1,'late-'||n||'@example.net','subscribed' FROM generate_series(1,2)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`,[runtime.config.workspaceId,list.id]);
+      const c=ok(await local('POST','/v1/campaigns',{name:unique('late-denial'),from:'sender@example.com',subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201);
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202); await run('campaign.run');
+      const orig=SESv2Client.prototype.send; let calls=0;
+      const provider=t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if (!(cmd instanceof SendEmailCommand)) return Reflect.apply(orig,this,[cmd]);
+        calls++;
+        await db.query("UPDATE sending_emails SET attempt_started_at=now()-interval '4 minutes' WHERE campaign_id=$1 AND status='attempting'",[c.id]);
+        await dispatchPartitions(runtime,true);
+        assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'done');
+        throw Object.assign(new Error('Daily message quota exceeded.'),{$metadata:{httpStatusCode:429}});
+      });
+      const held=await dispatchDue(runtime,REGION);
+      assert.equal(calls,1); assert.equal(held.deferred,2);
+      assert.equal((await db.query("SELECT id FROM sending_emails WHERE campaign_id=$1 AND status='queued' AND dispatch_version=1 AND attempt_started_at IS NULL",[c.id])).rowCount,2);
+      assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'sending');
+      provider.mock.restore(); await db.query('UPDATE sending_emails SET scheduled_at=clock_timestamp() WHERE campaign_id=$1',[c.id]);
+      assert.equal((await dispatchDue(runtime,REGION)).sent,2);
+      assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'done');
+    });
+  });
+
+  test('a host ahead of Postgres cannot refill a spent daily sample or spin quota alarms', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const { rows: [sample] } = await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+        VALUES($1,$2,100,100,99,clock_timestamp()) ON CONFLICT(workspace_id,region) DO UPDATE SET max_send_rate=100,max_24_hour_send=100,sent_last_24_hours=99,checked_at=clock_timestamp() RETURNING checked_at`,[runtime.config.workspaceId,REGION]);
+      const gate = initialGate(); gate.quota = { maxSendRate:100,max24HourSend:100,sentLast24Hours:99,checkedAt:sample.checked_at.getTime() }; gate.sentSinceRefresh=1;
+      const now=Date.now.bind(Date); t.mock.method(Date,'now',() => now()+300_000);
+      for (let i=0; i<2; i++) {
+        gate.refreshAt=0; // A restarted host reads the *same* still-fresh database snapshot.
+        const report=await dispatchDue(runtime,REGION,{gate});
+        assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1); assert.ok(report.quotaRetryAt! - Date.now() > 50_000);
+      }
+    });
+  });
+
+  test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
+      const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:9},()=>mail({to:contact.email,kind:'marketing'}))}),202);
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES($1,$2,1000,100,82,clock_timestamp())
+        ON CONFLICT(workspace_id,region) DO UPDATE SET max_send_rate=1000,max_24_hour_send=100,sent_last_24_hours=82,checked_at=clock_timestamp()`,[ws,REGION]);
+      const drain=(index:number)=>dispatchDue(runtime,REGION,{shard:{index,count:4}});
+      assert.equal((await drain(3)).sent,2);
+      assert.equal((await db.query("SELECT id FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND lease_until IS NULL",[ws])).rowCount,7);
+      assert.equal((await drain(0)).sent,2,'Sibling can lease immediately.');
+      await db.query('UPDATE sending_region_limits SET sent_last_24_hours=89,checked_at=clock_timestamp() WHERE workspace_id=$1',[ws]);
+      assert.equal((await drain(3)).sent,1,'Sharding must not round a positive global remainder to zero.');
+      assert.equal((await drain(2)).sent,0,'A separate cold shard cannot spend the same last credit twice.');
+    });
+  });
+
+  test('rolling daily headroom holds a sending campaign, admits transactional recipients and drains after quota refresh', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const gate = initialGate(), opts = { gate, lanes: 2, batchSize: 6, quotaRefreshMs: 650 };
+      const list = ok(await local('POST', '/v1/lists', { name: unique('rolling-quota') }), 201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT gen_random_uuid()::text,$1,'rolling-'||n||'@example.net','subscribed' FROM generate_series(1,15)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: unique('rolling-quota'), from: 'sender@example.com', subject: 'Quota fixture', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+      await run('campaign.run');
+      let used = 87, reads = 0, calls = 0, deny = false;
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype, 'send', function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof GetAccountCommand) { reads++; return { SendingEnabled: true, SendQuota: { Max24HourSend: 100, SentLast24Hours: used, MaxSendRate: 1000 } }; }
+        calls++;
+        if (deny) throw Object.assign(new Error('Daily message quota exceeded.'), { name: 'TooManyRequestsException', $metadata: { httpStatusCode: 429 } });
+        return Reflect.apply(send, this, [cmd]);
+      });
+      const drain = () => dispatchDue(runtime, REGION, opts), view = async () => ok(await local('GET', `/v1/campaigns/${c.id}`));
+      // Expansion ran with ample capacity. The next sample seen at dispatch reflects later account use.
+      await db.query("UPDATE sending_region_limits SET checked_at=clock_timestamp()-interval '2 minutes' WHERE workspace_id=$1 AND region=$2",[runtime.config.workspaceId,REGION]);
+      const hold = await drain();
+      assert.equal(hold.sent, 3, 'Concurrent lanes together leave the last ten recipients unused by marketing.');
+      assert.ok(hold.quotaRetryAt! > Date.now()); assert.equal((await view()).state, 'sending');
+      const tx = ok(await local('POST', '/v1/emails/send', mail({ to: [address(), address()] })), 202);
+      assert.equal((await drain()).sent, 1);
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [tx.id])).rows[0].status, 'accepted');
+      assert.equal(gate.sentSinceRefresh, 5); assert.equal((await view()).counts.byStatus.queued, 12);
+      assert.deepEqual([reads,calls],[1,4], 'Only the cached refresh and the affordable sends reach SES.');
+      // SES may report exhaustion before the cache reflects other senders. It is a retryable
+      // daily hold, not the five-attempt rate error or a campaign failure.
+      deny = true;
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await drain(); await drain();
+      assert.deepEqual([reads,calls],[1,5]);
+      const row = (await db.query('SELECT status,error_code,scheduled_at FROM sending_emails WHERE id=$1',[later.id])).rows[0];
+      assert.equal(row.status,'queued'); assert.equal(row.error_code,'SES_DAILY_QUOTA_EXHAUSTED');
+      used = 100; deny = false;
+      await new Promise(r => setTimeout(r, Math.max(0, new Date(row.scheduled_at).getTime() - Date.now()) + 5));
+      const exhausted = await drain(); assert.equal(exhausted.sent,0); assert.deepEqual([reads,calls],[2,5]);
+      await drain(); assert.deepEqual([reads,calls],[2,5], 'No GetAccount or SendEmail loop during a daily hold.');
+      assert.equal((await view()).state,'sending');
+      used = 20;
+      await new Promise(r => setTimeout(r, Math.max(0, exhausted.quotaRetryAt! - Date.now()) + 5));
+      assert.equal((await drain()).sent,13);
+      const final = await view(); assert.equal(final.state,'done'); assert.equal(final.counts.byStatus.accepted,15); assert.equal(final.counts.total,15);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[later.id])).rows,[{status:'accepted',error_code:null}]);
+      assert.equal(reads,3,'Capacity returns through the normal quota refresh; no resume or provider retry storm.');
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
@@ -5848,19 +6053,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
-      // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      // 2,000/day with 1,700 sent and a 10% reserve leaves exactly 100 for campaigns.
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 1700, checked_at=clock_timestamp() WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.delivery.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
       await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
-      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.delivery.expanded, 1200, 'Nothing is released into the reserved SES quota.');
       assert.equal(view.delivery.waiting.reason, 'ses_daily_quota');
-      // With quota available, the rest of the new 200/day window (100 already released) goes out, and the run then waits for the next window.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      // No email is needed as a refresh probe. Expiry alone cannot release recipients, and a
+      // full buffer cannot override the published SES hold with a short buffer-drain retry.
+      assert.ok(Date.parse(view.delivery.waiting.until) <= Date.now() + 60_000);
+      const {SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'); let used=1900,quotaReads=0;
+      t.mock.method(SESv2Client.prototype,'send',(cmd:unknown)=>{
+        assert.ok(cmd instanceof GetAccountCommand);quotaReads++;
+        return {SendingEnabled:true,SendQuota:{MaxSendRate:20,Max24HourSend:2000,SentLast24Hours:used}};
+      });
+      await db.query(`UPDATE sending_region_limits SET checked_at = clock_timestamp() - interval '2 minutes' WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      await run('campaign.run');
+      view=ok(await local('GET',`/v1/campaigns/${campaign.id}`)); assert.equal(view.delivery.expanded,1200); assert.equal(view.delivery.waiting.reason,'ses_daily_quota'); assert.equal(quotaReads,1);
+      await db.query("UPDATE sending_emails SET status='queued' WHERE campaign_id=$1 AND review_ordinal BETWEEN 1 AND 400",[campaign.id]);
+      await run('campaign.run');
+      pending=(await jobs('campaign.run')).filter(job=>job.status==='pending');
+      assert.ok(new Date(pending[0]!.available_at).getTime()-Date.now()>50_000); assert.equal(quotaReads,1);
+      assert.equal(ok(await local('GET',`/v1/campaigns/${campaign.id}`)).delivery.waiting.reason,'ses_daily_quota');
+      await db.query("UPDATE sending_emails SET status='delivered' WHERE campaign_id=$1 AND status='queued'",[campaign.id]);
+      await db.query(`UPDATE sending_region_limits SET checked_at = clock_timestamp() - interval '2 minutes' WHERE workspace_id = $1 AND region = $2`, [ws,REGION]);
+      used=0;
       pending = (await jobs('campaign.run')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
       await run('campaign.run');
@@ -5924,14 +6146,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('dispatch retries definitive throttling once but never replays rejection or uncertain provider acceptance', async t => {
+  test('dispatch retries definitive rate throttles independently of daily holds but never replays rejection or uncertain acceptance', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
         import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
       ]);
       const faultClient = new SESv2Client({ region: REGION, endpoint: 'https://ses-simulator.invalid', maxAttempts: 1,
         credentials: { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' },
-        requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 1000, outcomes: ['throttle', 'accept', 'reject', 'timeout'] }),
+        requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 1000, outcomes: ['throttle', 'throttle', 'accept', 'reject', 'timeout'] }),
       });
       cleanup(t, async () => { faultClient.destroy(); });
       // Preserve the real SDK serializer, signer and error decoder. Only select
@@ -5971,12 +6193,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('email.dispatch');
       assert.equal(providerCalls.length, 1, 'A dispatch pass before the retry is due must not call the provider.');
       assert.equal((await stored(first.id)).dispatch_version, 1);
+      // Model an intervening day hold. A version bump fences stale results, but only actual
+      // per-second throttles consume the five retries and advance their exponential backoff.
+      await db.query(`UPDATE sending_emails SET dispatch_version=2,error_code='SES_DAILY_QUOTA_EXHAUSTED',scheduled_at=clock_timestamp() WHERE id=$1`,[first.id]);
+      const secondStart = Date.now();
+      await run('email.dispatch');
+      const second = await stored(first.id), secondWait = new Date(second.scheduled_at).getTime();
+      assert.equal(second.status,'queued'); assert.ok(secondWait >= secondStart + 4000 && secondWait <= Date.now() + 4000);
       await db.query('UPDATE sending_emails SET scheduled_at = clock_timestamp() WHERE id = $1', [first.id]);
       await run('email.dispatch');
       const accepted = ok(await local('GET', `/v1/emails/${first.id}`));
       assert.equal(accepted.status, 'accepted');
       assert.match(accepted.providerId, /^sim_/);
-      assert.equal((await events(first.id)).filter(event => event.type === 'dispatch_attempt').length, 2);
+      assert.equal((await events(first.id)).filter(event => event.type === 'dispatch_attempt').length, 3);
       assert.equal((await events(first.id)).filter(event => event.type === 'accepted').length, 1);
 
       const terminal: Array<{ id: string; to: string }> = [];
@@ -6000,14 +6229,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await events(email.id), recorded);
       }
       assert.deepEqual(providerCalls, [
-        { emailId: first.id, to: [retryAddress] }, { emailId: first.id, to: [retryAddress] },
+        ...Array.from({ length: 3 }, () => ({ emailId: first.id, to: [retryAddress] })),
         ...terminal.map(email => ({ emailId: email.id, to: [email.to] })),
       ]);
       const callbacks = await jobs('operation.simulatedFeedback');
       assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
       const versions = (await db.query('SELECT dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
-      assert.deepEqual(versions, [{ dispatch_version: 1 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
+      assert.deepEqual(versions, [{ dispatch_version: 3 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
     });
   });
 

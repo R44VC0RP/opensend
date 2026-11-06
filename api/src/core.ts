@@ -14,7 +14,7 @@ export interface Actor {
   workspaceId: string; permissions: Permission[]; domains: string[]; keyId: string; credential?: 'dashboard' | 'apiKey' | 'mcp' | 'agentToken'; email?: string; name?: string;
   role?: string;
   // Number of emails queued per region, for a bounded post-commit wake.
-  dispatchTargets?: Map<string, number>;
+  dispatchTargets?: Map<string, { count: number; priority: boolean }>;
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
   wakeJobs?: number;
@@ -49,7 +49,7 @@ export interface Config {
   liveEnabled: boolean;
   simulatedSes: { latencyMs: number; maxSendRate: number; deliveryDelayMs: number };
   // Pacing target relative to the provider quota: factor (1.1 aims 10% above) and an optional absolute live rate.
-  dispatch: { rateFactor: number; targetRate?: number };
+  dispatch: { rateFactor: number; targetRate?: number; dailyHeadroomPercent: number };
   encryptionKey: string;
   previousEncryptionKey?: string;
   awsAccountId?: string;
@@ -71,7 +71,7 @@ export interface Runtime {
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
-  dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind']) => Promise<void>;
+  dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };

@@ -241,6 +241,10 @@ export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number
 export const finishCampaigns = (refs: SQL, leaving: SQL = sql`SELECT NULL::text AS id WHERE false`) => sql`UPDATE sending_campaigns c SET state='done',updated_at=clock_timestamp()
   FROM (${refs}) x WHERE c.workspace_id=x.workspace_id AND c.id=x.campaign_id AND c.state='sending' AND c.expanded=c.total
     AND NOT EXISTS (SELECT 1 FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.campaign_id=c.id AND e.status IN ('queued','attempting') AND NOT EXISTS (SELECT 1 FROM (${leaving}) l WHERE l.id=e.id))`;
+// A late definitive refusal can disprove an interrupted attempt after recovery settled its
+// campaign. Reopen only an actually requeued member's done campaign, in that same statement.
+export const reopenQueuedCampaigns = (refs: SQL) => sql`UPDATE sending_campaigns c SET state='sending',updated_at=clock_timestamp()
+  FROM (${refs}) x WHERE c.workspace_id=x.workspace_id AND c.id=x.campaign_id AND c.state='done'`;
 /**
  * The campaign's one job: keyed by campaign so launch, resume and pacing changes requeue the same row instead of adding
  * one per step. Every (re)queue carries a fresh `run` token in the payload and the job runner fences its completion on it,

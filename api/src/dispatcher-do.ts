@@ -8,8 +8,8 @@ function initDeps() {
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
     import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher }, { ApiError, log }, { feedbackSink }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, ApiError, log, feedbackSink,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey }, { ApiError, log }, { feedbackSink }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey, ApiError, log, feedbackSink,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -32,6 +32,7 @@ export function shardCount(value: unknown) { const n = Number(value); return Num
 export class DispatcherShard extends DurableObject<Env> {
   private pool?: Pool;
   private running = false;
+  private priorityWake = new EventTarget();
   private gate?: GateState;
   private identity?: Identity;
   private placementLogged = false;
@@ -67,8 +68,13 @@ export class DispatcherShard extends DurableObject<Env> {
       await this.ctx.storage.put('identity', identity);
       this.identity = identity;
     }
+    if (this.running && url.searchParams.get('priority') === '1') {
+      const { dispatchWakeKey } = await loadDeps();
+      this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
+    }
     // An alarm during a run is harmless: it re-checks for work after the current run returns.
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now());
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || (url.searchParams.get('priority') === '1' && alarm > Date.now())) await this.ctx.storage.setAlarm(Date.now());
     return Response.json({ ok: true, running: this.running });
   }
 
@@ -88,13 +94,17 @@ export class DispatcherShard extends DurableObject<Env> {
       if (runtime.config.multiTenant && !identity.accountId) return;
       if (!this.placementLogged) { this.placementLogged = true; await this.logPlacement(identity, runtime); }
       const report = await runDispatcher(runtime, {
-        ...identity, gate: this.gate,
+        ...identity, gate: this.gate, priorityWake: this.priorityWake,
         until: started + RUN_MS, lanes: 2, batchSize: 24, sendConcurrency: 6,
         onGate: async state => { await this.ctx.storage.put('gate', state); },
       });
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
       // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
       if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
+      else {
+        const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
+        if ((await this.ctx.storage.getAlarm() ?? Infinity) > retry) await this.ctx.storage.setAlarm(retry);
+      }
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error('DISPATCHER_DEPS_FAILED', error);

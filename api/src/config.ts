@@ -33,6 +33,7 @@ const values = z.object({
   // Aim the dispatcher at a share of the provider quota (1 = exactly the quota). Overshoot is self-correcting:
   // a throttled response drops the target back to the quota for ten seconds.
   DISPATCH_RATE_FACTOR: z.coerce.number().min(0.1).max(10).default(1),
+  DISPATCH_DAILY_HEADROOM_PERCENT: z.coerce.number().min(0).max(100).default(10),
   // Absolute live SES target in recipients per second; replaces the quota-derived rate when set.
   DISPATCH_TARGET_RATE: optional(z.coerce.number().int().min(1).max(100000)),
   AWS_ACCESS_KEY_ID: optional(z.string()), AWS_SECRET_ACCESS_KEY: optional(z.string()), AWS_SESSION_TOKEN: optional(z.string()),
@@ -89,7 +90,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     previousEncryptionKey: v.PREVIOUS_BETTER_AUTH_SECRET ? deriveEncryptionKey(v.PREVIOUS_BETTER_AUTH_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
-    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE },
+    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT },
     aws: v.AWS_ACCESS_KEY_ID && v.AWS_SECRET_ACCESS_KEY ? { accessKeyId: v.AWS_ACCESS_KEY_ID, secretAccessKey: v.AWS_SECRET_ACCESS_KEY, sessionToken: v.AWS_SESSION_TOKEN } : undefined,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],

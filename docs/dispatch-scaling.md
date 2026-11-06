@@ -75,7 +75,16 @@ Commits `be8076e` → `7f82248` on `main`.
 ### 3.3 Pacing (`GateState`, `reserve`, `brake`)
 - Target per shard = `MaxSendRate × DISPATCH_RATE_FACTOR ÷ shards` (or an absolute live
   `DISPATCH_TARGET_RATE`). Production uses factor `1.1` → 22/s at a 20/s quota. Slots are spaced
-  evenly per message, not per group.
+  evenly per recipient. The shared gate assigns each slot only when it opens: ready transactional
+  mail goes before waiting marketing, without reserving rate for either stream. A transactional API
+  admission nudges the active shard (Node: `LISTEN/NOTIFY`; Cloudflare: the existing DO wake) to
+  lease fresh transactional work without polling between sends. Existing provider calls finish;
+  missed wakes and scheduled rows are still picked up by the ordinary fair per-owner batch lease.
+  Grouped claims have a five-second pre-provider deadline. Longer waits stay queued; if preemption
+  moves a slot beyond the deadline after claim, the uncalled message is requeued for another shard.
+- Marketing leaves `DISPATCH_DAILY_HEADROOM_PERCENT` of the rolling 24-hour quota unused (default
+  10%); transactional mail may use it. Quota holds leave the campaign `sending` and its rows queued.
+  The dispatcher rechecks at the next quota-cache refresh, not on every send or via a manual resume.
 - Any `429` sets `brakeUntil = now + 10 s` (target falls to the raw quota) and yields the slots the
   shard ran ahead by. Throttled rows requeue with 2 s, 4 s, 8 s, 16 s, 32 s backoff (five attempts).
 - `sending_region_limits` is the shared one-minute quota cache; only a shard that finds it stale calls
@@ -224,7 +233,7 @@ Benchmark artifacts live in `api/.benchmark-results/` (gitignored).
   jobs; each inserts its own rows; completion when all partitions report).
 - `campaign.finish` still polls every 2 s while a campaign has queued mail; the dispatcher could
   complete the campaign when it records the last row.
-- `sending_region_limits.reserved` / `next_allowed_at` are unused since the in-memory gate; drop in a
-  later migration.
+- `sending_region_limits.reserved` is unused since the in-memory gate. `next_allowed_at` now fences
+  self-hosted quota refreshes; it is not the provider pacing clock.
 - Node runners hold one in-process gate each; running several against one region overshoots the quota
   unless the factor is split. Document or coordinate via `sending_region_limits` if Node replicas matter.
