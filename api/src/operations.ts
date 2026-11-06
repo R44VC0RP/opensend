@@ -1,3 +1,4 @@
+import { cachedDashboardRead } from './dashboard-cache.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
@@ -888,8 +889,9 @@ function registerMetrics(app: App) {
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
   app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive results cached for up to 60 seconds; API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity.', tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
-    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.'); if (q.region) region(c.env, q.region);
+    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.');
     const compute = async () => {
+    if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
     const extras = new Set((q.include ?? '').split(',').filter(Boolean));
     const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     // Outcomes come from the per-email flags kept by the operation_events trigger (migration 031): the same
@@ -973,44 +975,14 @@ function registerMetrics(app: App) {
     // ends as well, or it never hits the cache.
     const length = endMs - startMs, back = nowMs - endMs;
     const window = Math.abs(back) <= 120_000 || Math.abs(back - length) <= 120_000 ? `rel:${Math.floor(nowMs / 60_000)}:${Math.round(back / 60_000)}:${Math.round(length / 60_000)}` : `abs:${start}:${end}`;
-    const body = await cachedMetrics(new URL(c.req.url).origin, [a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
+    const body = await cachedDashboardRead(new URL(c.req.url).origin, ['metrics', a.workspaceId, q.region ?? '', q.stream ?? '', q.granularity, [...new Set((q.include ?? '').split(',').filter(Boolean))].sort().join(','), window].join('|'), compute);
     c.header('x-opensend-metrics-cache', body.hit ? 'hit' : 'miss');
-    return c.json(body.value as Awaited<ReturnType<typeof compute>>, 200);
+    return c.json(body.value, 200);
   });
 }
 
 // Bits of sending_emails.event_outcomes, set by the operation_events trigger in migration 031.
 const OUTCOME = { accepted: 1, delivered: 2, bounced: 4, complained: 8, opened: 16, clicked: 32, failed: 64, delayed: 128 } as const;
-const METRICS_CACHE_SECONDS = 60;
-const metricsMemory = new Map<string, { expires: number; value: unknown }>();
-const metricsInflight = new Map<string, Promise<unknown>>();
-// Per-isolate memory first, then the colo-wide Workers Cache API when present (absent on Node).
-// Concurrent identical requests in one isolate share a single database query.
-async function cachedMetrics(origin: string, key: string, compute: () => Promise<unknown>): Promise<{ value: unknown; hit: boolean }> {
-  const now = Date.now(), memory = metricsMemory.get(key);
-  if (memory && memory.expires > now) return { value: memory.value, hit: true };
-  const pending = metricsInflight.get(key);
-  if (pending) return { value: await pending, hit: true };
-  const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
-  const request = new Request(`${origin}/__cache/metrics/${await digest(key)}`);
-  const remember = (value: unknown) => {
-    if (metricsMemory.size >= 500) metricsMemory.delete(metricsMemory.keys().next().value!);
-    metricsMemory.set(key, { expires: Date.now() + METRICS_CACHE_SECONDS * 1000, value });
-  };
-  if (cache) {
-    const hit = await cache.match(request).catch(() => undefined);
-    if (hit) { const value = await hit.json(); remember(value); return { value, hit: true }; }
-  }
-  const work = compute();
-  metricsInflight.set(key, work);
-  try {
-    const value = await work;
-    remember(value);
-    if (cache) await cache.put(request, new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${METRICS_CACHE_SECONDS}` } })).catch(() => undefined);
-    return { value, hit: false };
-  } finally { metricsInflight.delete(key); }
-}
-
 const webhookJob: JobHandler = async (runtime, payload, job) => {
   const delivery = job.webhook !== undefined ? job.webhook : (await runtime.db.execute<{webhook: import('./core.js').ClaimedWebhook | null}>(sql`WITH claimed AS (
     SELECT ${job.id}::text id,${job.workspaceId}::text workspace_id,${JSON.stringify(payload)}::jsonb payload,'operation.webhook'::text type

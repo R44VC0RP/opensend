@@ -3394,6 +3394,11 @@ describe('Dashboard API capabilities', () => {
     query.set('to', to); query.set('region', 'not-configured');
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'REGION_NOT_CONFIGURED');
     const metricQuery = new URLSearchParams({ from, to, region: REGION, stream: 'transactional' });
+    const historical=`/v1/metrics?from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z&region=${REGION}`;
+    await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
+    const cached=await http('GET',historical,undefined,undefined,{cookie:manager!.cookie});
+    assert.equal(cached.headers.get('x-opensend-metrics-cache'),'hit');
+    assert.equal((await http('GET',historical,key.secret)).headers.get('x-opensend-metrics-cache'),null);
     const before = ok(await http('GET', `/v1/metrics?${metricQuery}`, key.secret));
     assert.equal(before.basis, 'created-cohort');
     assert.equal(before.region, REGION);

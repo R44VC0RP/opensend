@@ -19500,7 +19500,7 @@
       },
       "get": {
         "operationId": "listCampaigns",
-        "description": "Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions.",
+        "description": "Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials and campaign detail remain exact.",
         "tags": [
           "Campaigns"
         ],
