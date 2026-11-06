@@ -1294,7 +1294,7 @@ export const listCampaigns = <ThrowOnError extends boolean = false>(options?: Op
 });
 
 /**
- * Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.
+ * Create a campaign draft; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace. With regional MX delivery, drafts can be edited before sender setup is complete; the sender and region are checked when sending a test or launching. Returns a dashboard URL so an agent and user can continue editing together.
  */
 export const createCampaign = <ThrowOnError extends boolean = false>(options: Options<CreateCampaignData, ThrowOnError>): RequestResult<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError> => (options.client ?? client).post<CreateCampaignResponses, CreateCampaignErrors, ThrowOnError>({
     security: [

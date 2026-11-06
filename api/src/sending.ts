@@ -124,12 +124,12 @@ const AttachmentInfo = z.object({ id: z.string(), filename: z.string(), contentT
 const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('DeletedSendingResource');
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
-const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
+const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
 // Stored drafts predating block HTML remain readable; they are revalidated when saved or reviewed.
 const CampaignDraftView = z.object({ ...CampaignDraftFields, html: z.string().optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraft');
-const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation’s persisted default region when omitted.'), tracking: z.boolean().optional(), templateId: z.string().regex(/^tpl_[0-9a-f]{32}$/).optional().describe('Copies the active published revision of this global campaign template into a new independent campaign draft.') }).strict().openapi('CreateCampaignInput');
+const CampaignCreate = z.object({ ...CampaignInput.shape, region: Region.optional().describe('Defaults to the installation region. With regional MX delivery, omitting region follows the From domain.'), tracking: z.boolean().optional(), templateId: z.string().regex(/^tpl_[0-9a-f]{32}$/).optional().describe('Copies the active published revision of this global campaign template into a new independent campaign draft.') }).strict().openapi('CreateCampaignInput');
 const CampaignReady = CampaignInput.extend({ from: Address, subject: Subject, audience: AudienceSpec }).refine(v => !!v.html?.trim(), { message: 'Provide html before reviewing.', path: ['html'] });
 const CampaignStateValue = z.enum(CAMPAIGN_STATES).describe('draft: editable. preparing: the audience is frozen and every message is being validated in the background. scheduled: validated and waiting for scheduledAt. sending: recipients are being released into the dispatch queue. paused: releasing stopped by the user or the health check; queued mail still dispatches. done: every recipient was released and dispatched. failed: preparation or releasing failed (delivery.error); edit or launch again. canceled: terminal.');
 const emptyCounts = () => ({ total: 0, byStatus: Object.fromEntries(Status.options.map(status => [status, 0])) as Record<EmailStatus, number> });
@@ -160,7 +160,7 @@ const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional()
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional() }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
 const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
-const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Keeps the campaign’s current region when omitted.') }).strict() }).strict().openapi('CampaignUpdateInput');
+const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
 const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
 const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
@@ -273,13 +273,30 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   return {region:state.region};
 }
 function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
-  region(runtime, draft.region);
+  if (!regionalSending(runtime)) region(runtime, draft.region);
   if (draft.from) keySender(a, draft.from);
 }
-async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,from:string,requested?:string,previous?:string) {
-  if (regionalSending(runtime) && from) return (await sendingRegion(runtime,db,a,from,requested)).region;
-  return assertRegionEnabled(db,a.workspaceId,requested ?? previous);
+async function draftRegion(runtime:Runtime,db:DbExecutor,a:Actor,input:{from:string;region?:string;regionPinned?:boolean},previous?:CampaignDraft) {
+  if (!regionalSending(runtime)) return {region:await assertRegionEnabled(db,a.workspaceId,input.region ?? previous?.region),regionPinned:previous?.regionPinned};
+  // A whole-draft PATCH often echoes the displayed region. Preserve its provenance, not
+  // just its value. Pre-rollout drafts with a sender or a nondefault selection retain it.
+  const fallback=runtime.config.regions[0]!;
+  const changed=previous!==undefined && input.region!==undefined && input.region!==previous.region;
+  const inherited=previous ? previous.regionPinned ?? (!!previous.from || previous.region!==fallback) : input.region!==undefined;
+  const pinned=changed || (input.regionPinned ?? inherited);
+  if (pinned) {
+    const selected=input.region ?? previous?.region ?? fallback;
+    if (!regionPattern.test(selected)) throw new ApiError(422,'INVALID_REGION','Use a valid AWS region.','region');
+    return {region:selected,regionPinned:true};
+  }
+  // Draft hints are not send authorization: a pending or disabled closest claim still wins,
+  // and an unbound claim shadows its parent. No proof, pool readiness or tenant hold check.
+  const host=input.from.split('@')[1]?.toLowerCase();
+  const hint=host && (await db.execute<{region:string|null}>(sql`SELECT b.region FROM domain_claims dc LEFT JOIN domain_sending_bindings b USING(workspace_id,name,connection_id)
+    WHERE dc.workspace_id=${a.workspaceId} AND right('.'||${host},length(dc.name)+1)='.'||dc.name ORDER BY length(dc.name) DESC LIMIT 1`)).rows[0]?.region;
+  return {region:hint || fallback,regionPinned:false};
 }
+const campaignSendRegion=(runtime:Runtime,draft:CampaignDraft)=>regionalSending(runtime) && draft.regionPinned===false ? undefined : draft.region;
 function readyCampaign(draft: CampaignDraft) {
   const parsed = CampaignReady.safeParse(draft);
   if (!parsed.success) {
@@ -840,7 +857,7 @@ async function campaignMessage(runtime: Runtime, db: DbExecutor, a: Actor, draft
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
     const rendered = prepared ?? renderCampaignContent(runtime, draft);
-    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated), draft.previewText), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
+    const parsed = SendInput.safeParse({ from: draft.from, fromName: draft.fromName, to: contact.email, replyTo: draft.replyTo, region: test ? campaignSendRegion(runtime,draft) : draft.region, kind: test ? 'transactional' : 'marketing', subject: interpolate(draft.subject, values, false, templateValidated), html: withPreheader(interpolate(rendered.html, values, true, templateValidated), draft.previewText), text: interpolate(rendered.text, values, false, templateValidated), attachments: draft.attachments, tracking: test ? false : draft.tracking });
     if (!parsed.success) {
       const fields = [...new Set(parsed.error.issues.map(issue => issue.path.join('.') || 'content'))].join(', ');
       throw new ApiError(422, 'CAMPAIGN_RECIPIENT_INVALID', `Recipient or rendered message is invalid (${fields}).`);
@@ -958,12 +975,12 @@ export function registerSending(app: App) {
       await db.delete(attachments).where(and(scope(attachments, a), eq(attachments.id, attachmentId)));
     }); return c.json({ id: attachmentId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.', tags: ['Campaigns'], security, request: { headers: IdempotencyHeaders, body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns', operationId: 'createCampaign', description: 'Create a campaign draft; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace. With regional MX delivery, drafts can be edited before sender setup is complete; the sender and region are checked when sending a test or launching. Returns a dashboard URL so an agent and user can continue editing together.', tags: ['Campaigns'], security, request: { headers: IdempotencyHeaders, body: json(CampaignCreate) }, responses: { 201: response(Campaign), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     assertBlockContent(input.html);
     const result = await idempotent(c, a, input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await instantiateTemplate(c.env, db, a, input.templateId) : null;
-      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], region: await draftRegion(c.env,db,a,input.from,input.region), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}) };
+      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}) };
       draftSender(c.env, a, draft);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -1062,13 +1079,12 @@ export function registerSending(app: App) {
     assertBlockContent(input.draft.html);
     const row = await c.env.db.transaction(async db => {
       const current = await findCampaign(db, a, campaignId, true);
-      const selectedRegion = await draftRegion(c.env,db,a,input.draft.from,input.draft.region,current.draft.region);
-      draftSender(c.env, a, { ...input.draft, region: selectedRegion });
+      const draft = {...input.draft,...await draftRegion(c.env,db,a,input.draft,current.draft)};
+      draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
-      const draft = { ...input.draft, region: selectedRegion };
       const revised = await db.execute<typeof campaigns.$inferSelect>(reviseCampaign(campaignRef(a, campaignId), sql`,draft=${JSON.stringify(draft)}::jsonb,revision=${current.revision + 1}`));
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
@@ -1200,11 +1216,11 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
   if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.');
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
-  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, draft.region);
+  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft));
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
   const rendered = renderCampaignContent(runtime, draft);
   const reviewId = id('review');
-  const reviewed=route.binding ? {...row.draft,binding:route.binding} : row.draft;
+  const reviewed=route.binding ? {...row.draft,region:route.region,binding:route.binding} : row.draft;
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered });
   const propertyKeys = [...new Set([draft.subject, rendered.html ?? '', rendered.text ?? ''].flatMap(value => [...value.matchAll(/{{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*}}/g)].map(match => match[1]!)))];
@@ -1213,7 +1229,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const lockedAttachments = await attachmentRows(db, a, draft.attachments, true);
   await linkAttachments(db, a, draft.attachments, 'review', reviewId, lockedAttachments);
   const ref = campaignRef(a, campaignId);
-  const moved = await db.execute(launchCampaign(ref, { reviewId, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: counts.eligible, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
+  const moved = await db.execute(launchCampaign(ref, { reviewId, resolvedRegion:route.region!==row.draft.region ? route.region : undefined, actorKeyId: a.keyId, simulated: isSimulatedSes(runtime), total: counts.eligible, requestId: requestId ?? null, scheduledAt: input.scheduledAt ?? null,
     pacePerDay: input.pacing?.perDay ?? null, autoPause: input.pacing?.autoPause ?? true, rateShare: input.pacing ? input.pacing.rateShare ?? 0.5 : null }));
   if (!moved.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being sent; fetch it and try again.');
   await db.execute(queueCampaignRun(ref, requestId ? { requestId } : {}));
@@ -1578,12 +1594,12 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Pro
   return null;
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
-type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null };
+type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null; generation:number };
 type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; quotaCheckedAt: string | null; dbNow: string; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
-    account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
+    account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason,'generation',generation) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
@@ -1591,6 +1607,12 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
     dbNow: sql<string>`clock_timestamp()::text`,
   }).from(campaigns).leftJoin(campaignReviews, eq(campaignReviews.id, campaigns.reviewId)).where(campaignWhere(a, campaignId));
   return row;
+}
+const staleReview = () => new ApiError(409,'SENDER_BINDING_CHANGED','The reviewed sending binding is no longer ready.');
+async function assertReviewBinding(runtime:Runtime,db:DbExecutor,a:Actor,draft:CampaignDraft) {
+  if (!(await db.execute(sql`SELECT 1 FROM regional_sender(${a.workspaceId},${draft.from.split('@')[1]!.toLowerCase()},${isSimulatedSes(runtime)}) r
+    WHERE r.verified AND r.region=${draft.region} AND r.connection IS NOT NULL AND r.binding=${JSON.stringify(draft.binding)}::jsonb
+      AND (${isSimulatedSes(runtime)} OR r.connection->>'kind'<>'shared' OR r.connection->>'tenant_state'='ready')`)).rowCount) throw staleReview();
 }
 // preparing: validate the next chunk of frozen recipients (every substitution, URL and MIME size) and keep only each
 // message's digest; when the whole list is validated the campaign moves to its schedule or straight to sending.
@@ -1601,10 +1623,8 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     if (campaign.state !== 'preparing' || campaign.reviewId !== row.reviewId) return;
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: review.draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return; }
-    if (review.draft.binding) {
-      if (!(await db.execute(sql`SELECT 1 FROM regional_sender(${a.workspaceId},${review.draft.from.split('@')[1]!.toLowerCase()},${isSimulatedSes(runtime)}) r
-        WHERE r.verified AND r.region=${review.draft.region} AND r.connection IS NOT NULL AND r.binding=${JSON.stringify(review.draft.binding)}::jsonb`)).rowCount) throw new ApiError(409,'SENDER_BINDING_CHANGED','The reviewed sending binding is no longer ready.');
-    } else await assertRegionEnabled(db, a.workspaceId, review.draft.region);
+    if (review.draft.binding) await assertReviewBinding(runtime,db,a,review.draft);
+    else await assertRegionEnabled(db, a.workspaceId, review.draft.region);
     if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, review.draft.region, 'marketing', true, a.workspaceId);
     const lockedAttachments = await attachmentRows(db, a, review.draft.attachments, true);
     const recipients = await recipientChunk(db, campaign.reviewId!, campaign.prepared);
@@ -1648,6 +1668,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   const ref = campaignRef(a, row.id), nowMs = Date.now();
   // Every recipient is released: the dispatcher marks the campaign done when its last row leaves the queue.
   if (row.expanded >= row.total) return 'done';
+  // Do not turn a retired generation into a pacing/quota wait, or refresh its provider quota.
+  if (row.reviewDraft?.binding && row.account?.generation!==row.reviewDraft.binding.generation) throw staleReview();
   // Poll a full buffer with one bounded count, before the locks and origin checks; the transaction rechecks capacity under the admission lock.
   const limits = { campaign: campaignBuffer(row.rate), total: workspaceBuffer(row.rate) };
   const [buffered] = (await runtime.db.execute<{ total: number; campaign: number }>(sql`SELECT
@@ -1708,6 +1730,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     await lockAdmission(db, a);
     const authorized = await originAllowed(runtime, db, { ...a, actorKeyId: a.keyId, campaignId: campaign.id, snapshot: { from: draft.from } });
     if (!authorized) { await cancelCampaignWork(db, a, campaign, 'ORIGIN_KEY_REVOKED'); return null; }
+    if (draft.binding) await assertReviewBinding(runtime,db,a,draft); // Fence the actual insert against disable/reclaim after the precheck.
     const [buffer] = await db.select({ total: sql<number>`count(*)::int`, campaign: sql<number>`count(*) FILTER (WHERE ${emails.campaignId} = ${campaign.id})::int`,
       hosted: hostedAllowance(runtime.config, a.workspaceId, campaign.simulated ? 0 : 1),
       rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits_} WHERE workspace_id=${a.workspaceId} AND region=${draft.region}),0)`,

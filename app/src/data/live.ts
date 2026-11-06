@@ -175,10 +175,12 @@ export function createLiveApi(): OpenSendApi {
       preview: (id, signal) => call(`/campaigns/${idPath(id)}/preview`, 'GET', undefined, signal),
       setArchived: async (input, signal) => mapCampaign(await call(`/campaigns/${idPath(input.id)}/archive`, 'PATCH', {archived: input.archived}, signal)),
       save: async (input, signal) => {
-        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region: input.regionId}, signal, idempotencyKey: input.idempotencyKey}))
+        // The MX dashboard's current region is a navigation filter, not a delivery pin.
+        const region = selectedWorkspace() ? undefined : input.regionId
+        if (!input.id && input.templateId) return mapCampaign(await request('/v1/campaigns', {method: 'POST', body: {templateId: input.templateId, name: input.name, region}, signal, idempotencyKey: input.idempotencyKey}))
         const existing = input.draft ?? {}
         const {listId: _oldList, segmentId: _oldSegment, ...audience} = existing.audience ?? {}
-        const draft = { ...existing, name: input.name, region: input.regionId, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
+        const draft = { ...existing, name: input.name, region, from: input.fromEmail, fromName: input.fromName, replyTo: input.replyTo ?? existing.replyTo ?? [], previewText: input.previewText, subject: input.subject, html: input.html, attachments: input.attachments ?? existing.attachments ?? [], audience: {...audience, ...(input.listId ? {listId: input.listId} : {}), ...(input.segmentId ? {segmentId: input.segmentId} : {})} }
         if (input.id && !input.revision) throw new ApiError('Reload this campaign before saving.', 'REVISION_REQUIRED')
         return mapCampaign(await request(input.id ? `/v1/campaigns/${idPath(input.id)}` : '/v1/campaigns', {method: input.id ? 'PATCH' : 'POST', body: input.id ? {revision: input.revision, draft} : {...draft, ...(input.templateId ? {templateId: input.templateId} : {})}, signal, idempotencyKey: input.id ? undefined : input.idempotencyKey}))
       },

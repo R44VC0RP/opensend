@@ -4364,6 +4364,88 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX regional campaign editing, controls and disabled queue recovery', async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+      const {acquireRegionProvisioning,finishHostedRegion,toggleRegionSending}=await import('./src/states.js');
+      const {dispatchPartitions}=await import('./src/dispatch.js');
+      const wid=runtime.config.workspaceId,oh='us-east-2',va='us-east-1',acct='111122223333',host='virginia.example',from=`sender@${host}`;
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true});
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[va,acct,`arn:aws:sns:${va}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region) VALUES($1,$2)`,[wid,va]);
+      const ref={connectionId:wid,region:va},generation=Number((await runtime.db.execute(acquireRegionProvisioning(ref))).rows[0]!.generation);
+      const create=async(draft:Json)=>ok(await local('POST','/v1/campaigns',draft),201);
+      const edit=async(c:Json,overrides:Json={})=>ok(await local('PATCH',`/v1/campaigns/${c.id}`,{revision:c.revision,draft:{...c.draft,...overrides}}));
+      const list=ok(await local('POST','/v1/lists',{name:'Regional controls'}),201);
+      const fields={subject:'Fixture',html:'<p>Test</p>',audience:{listId:list.id}};
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT 'regional-'||i,$1,'fixture'||i||'@example.net','subscribed' FROM generate_series(1,101)i RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`,[wid,list.id]);
+      // No claim yet: editing is not a send. A full-document PATCH echoes the displayed default.
+      let c=await create({name:'Follow From',...fields});assert.equal(c.draft.region,oh);
+      c=await edit(c,{from});assert.equal(c.draft.region,oh);
+      const launch=(c:Json,action='send',extra:Json={})=>local('POST',`/v1/campaigns/${c.id}/${action}`,{revision:c.revision,...extra});
+      error(await launch(c),403,'SENDER_DOMAIN_NOT_VERIFIED');
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES($1,$2,$2)`,[host,wid]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES('regional-controls',$1,$2,$3)`,[wid,host,va]);
+      c=await edit(c);assert.equal(c.draft.region,va,'An automatic region follows the pending domain.');
+      const switched=await edit(await create({name:'Change From',...fields}),{from});assert.equal(switched.draft.region,va);
+      let pinned=await create({name:'Pinned Ohio',...fields,from,region:oh});assert.equal(pinned.draft.region,oh);
+      await runtime.db.execute(finishHostedRegion(ref,generation));
+      assert.equal((await db.query(`SELECT enabled_regions ? $2 AS enabled FROM ses_installation_settings WHERE workspace_id=$1`,[wid,va])).rows[0].enabled,true);
+      const emptyVa=await create({name:'Empty Virginia',region:va});assert.equal(emptyVa.draft.region,va);
+      // Before pin metadata existed, an empty draft in a non-default region was an explicit selection.
+      await db.query(`UPDATE sending_campaigns SET draft=draft-'regionPinned' WHERE id=$1`,[emptyVa.id]);
+      assert.equal((await edit(ok(await local('GET',`/v1/campaigns/${emptyVa.id}`)),{from:'a@unbound.example'})).draft.region,va);
+      await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1 AND name=$2`,[wid,host]);
+      await db.query(`UPDATE provider_connection_regions SET tenant_state='pending' WHERE connection_id=$1 AND region=$2`,[wid,va]);
+      // Live-readiness checks with synthetic credentials; no SDK call is permitted by this fixture.
+      const saved=runtime.config;runtime.config={...saved,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}};
+      try {c=await edit(c);error(await launch(c),409,'TENANT_NOT_READY');} finally {runtime.config=saved;}
+      await db.query(`UPDATE provider_connection_regions SET tenant_state='ready' WHERE connection_id=$1 AND region=$2`,[wid,va]);
+      await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='test hold' WHERE id=$1`,[wid]);
+      c=await edit(c);error(await launch(c),409,'HOSTED_SENDING_PAUSED');
+      await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1`,[wid]);
+      pinned=await edit(pinned);error(await launch(pinned),422,'SENDER_REGION_MISMATCH');
+      error(await local('POST',`/v1/campaigns/${pinned.id}/test`,{to:'test@example.net'}),422,'SENDER_REGION_MISMATCH');
+      assert.equal((await edit(pinned,{regionPinned:false,region:undefined})).draft.region,va);
+      // The launch itself resolves again: the former unbound sender now belongs to Virginia.
+      const late=await create({name:'Bound after save',...fields,from:'sender@new.example'});
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('new.example',$1,$1,'verified')`,[wid]);
+      await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES('regional-late',$1,'new.example',$2)`,[wid,va]);
+      ok(await launch(late,'schedule',{scheduledAt:new Date(Date.now()+86400000).toISOString()}),202);
+      assert.equal((await db.query(`SELECT draft->>'region' r FROM sending_campaign_reviews WHERE campaign_id=$1`,[late.id])).rows[0].r,va);
+      assert.equal(ok(await local('GET',`/v1/campaigns/${late.id}`)).draft.region,va);
+      ok(await launch(switched,'schedule',{scheduledAt:new Date(Date.now()+86400000).toISOString()}),202);
+      ok(await launch(c,'send',{pacing:{perDay:100,rateShare:1}}),202);await run('campaign.run');
+      const status=async()=>ok(await local('GET',`/v1/campaigns/${c.id}`));assert.equal((await status()).delivery.expanded,100);
+      // A healthy region with unchanged generation is not sufficient: proof lost AFTER
+      // preparation must also prevent the first release. Advance only this fixture schedule.
+      await db.query(`UPDATE sending_campaigns SET scheduled_at=now()-interval '1 second' WHERE id=$1`,[late.id]);
+      await db.query(`UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name='new.example'`,[wid]);
+      await run('campaign.run');const revoked=ok(await local('GET',`/v1/campaigns/${late.id}`));
+      assert.equal(revoked.delivery.error.code,'SENDER_BINDING_CHANGED');assert.equal(revoked.delivery.expanded,0);
+      const direct=async()=>ok(await local('POST','/v1/emails/send',{from,to:'a@example.net',subject:'Fixture',text:'Fixture'}),202).id;
+      const queued=await direct(),inFlight=await direct();
+      await db.query(`UPDATE sending_emails SET status='attempting',attempt_started_at=now() WHERE id=$1`,[inFlight]);
+      await db.query(`UPDATE sending_emails SET scheduled_at=now()+interval '1 day',lease_until=now()+interval '2 minutes' WHERE id=$1`,[queued]);
+      await runtime.db.execute(toggleRegionSending(ref,false,generation));
+      for(const path of ['/v1/emails','/v1/campaigns'])assert.ok(ok(await local('GET',`${path}?region=${va}`)).data.length);
+      const disposable=await edit(await create({name:'Disabled draft',...fields,from}));
+      const endpoint=`/v1/campaigns/${disposable.id}`;
+      ok(await local('PATCH',endpoint+'/archive',{archived:true}));ok(await local('PATCH',endpoint+'/archive',{archived:false}));ok(await local('DELETE',endpoint));
+      ok(await local('POST',`/v1/campaigns/${switched.id}/pause`,{}));ok(await local('POST',`/v1/campaigns/${switched.id}/cancel`));
+      await run('campaign.run');const failed=await status();assert.equal(failed.delivery.error.code,'SENDER_BINDING_CHANGED');assert.equal(failed.delivery.expanded,100);
+      assert.equal((await db.query(`SELECT 1 FROM sending_emails WHERE campaign_id=$1`,[c.id])).rowCount,100);
+      await dispatchPartitions(runtime,true);await dispatchPartitions(runtime,true);
+      const rows=(await db.query(`SELECT id,status,error_code FROM sending_emails WHERE workspace_id=$1`,[wid])).rows;
+      assert.deepEqual(rows.filter(m=>m.id!==inFlight).map(m=>[m.status,m.error_code]),Array(101).fill(['canceled','SENDER_BINDING_CHANGED']));
+      assert.equal(rows.find(m=>m.id===inFlight).status,'attempting');
+      ok(await local('POST',`/v1/campaigns/${c.id}/cancel`));
+    });
+  });
+
   test('MX regional BYO: a rescan is not authorization and first-ready regions provision independently',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local})=>{
       const {startRegionScan,finishRegionScan,acquireRegionProvisioning,finishRegionProvisioning,toggleRegionSending}=await import('./src/states.js');
