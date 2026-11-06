@@ -2229,6 +2229,11 @@ export type ProviderConnection = {
                 importing: boolean;
                 error: string | null;
             }>;
+            failedIntents: Array<{
+                domain: string;
+                importing: boolean;
+                error: string;
+            }>;
         }>;
     };
     candidates?: Array<{
@@ -13017,6 +13022,11 @@ export type GetConnectionRegionStatusResponses = {
                 domain: string;
                 importing: boolean;
                 error: string | null;
+            }>;
+            failedIntents: Array<{
+                domain: string;
+                importing: boolean;
+                error: string;
             }>;
         }>;
     };

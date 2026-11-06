@@ -8816,6 +8816,28 @@
                           "error"
                         ]
                       }
+                    },
+                    "failedIntents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "domain": {
+                            "type": "string"
+                          },
+                          "importing": {
+                            "type": "boolean"
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "domain",
+                          "importing",
+                          "error"
+                        ]
+                      }
                     }
                   },
                   "required": [
@@ -8828,7 +8850,8 @@
                     "error",
                     "facts",
                     "resources",
-                    "pending"
+                    "pending",
+                    "failedIntents"
                   ]
                 }
               }
@@ -36953,6 +36976,28 @@
                                 "error"
                               ]
                             }
+                          },
+                          "failedIntents": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "domain": {
+                                  "type": "string"
+                                },
+                                "importing": {
+                                  "type": "boolean"
+                                },
+                                "error": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "domain",
+                                "importing",
+                                "error"
+                              ]
+                            }
                           }
                         },
                         "required": [
@@ -36965,7 +37010,8 @@
                           "error",
                           "facts",
                           "resources",
-                          "pending"
+                          "pending",
+                          "failedIntents"
                         ]
                       }
                     }

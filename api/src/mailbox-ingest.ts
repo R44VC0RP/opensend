@@ -52,7 +52,7 @@ export async function acceptInboundNotification(runtime: Runtime, input: { topic
   const at=receivedAt && Number.isFinite(Date.parse(receivedAt)) ? new Date(receivedAt).toISOString() : null;
   const binding=hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions p WHERE aws_account_id=${account} AND region=${input.region} AND inbound_topic_arn=${input.topicArn} AND inbound_bucket=${action.bucketName} AND ${poolReceives()}
     UNION ALL SELECT c.workspace_id,'byo' FROM provider_connections c JOIN mailbox_regions r ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
-    WHERE c.kind='byo' AND ${connectionReady(sql`c`)} AND c.region=${input.region} AND c.aws_account_id=${account} AND r.topic_arn=${input.topicArn} AND r.bucket=${action.bucketName}` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions WHERE region=${input.region} AND topic_arn=${input.topicArn} AND bucket=${action.bucketName}`;
+    WHERE c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND c.region=${input.region} AND c.aws_account_id=${account} AND r.topic_arn=${input.topicArn} AND r.bucket=${action.bucketName}` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions WHERE region=${input.region} AND topic_arn=${input.topicArn} AND bucket=${action.bucketName}`;
   const result=await runtime.db.execute<{trusted:boolean;n:number}>(sql`WITH binding AS (${binding}), env AS (
     SELECT addr,split_part(addr,'@',2) AS host FROM jsonb_array_elements_text(${JSON.stringify(recipients)}::jsonb) e(addr)
   ), matched AS (

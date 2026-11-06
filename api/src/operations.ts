@@ -21,7 +21,7 @@ import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
-import { awsError, mxOwnerTag, mxResourceName } from './ses-setup.js';
+import { awsError, byoFeedback, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -339,6 +339,7 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
 }
 // A retried/reconnected creation or a verifier can recover an old claim right at its deadline.
 // Recheck and hold the row across Create so recovery cannot recreate the identity after expiry cleanup.
+const identityJournalEntry=(row:Pick<HostedDomain,'connection'|'region'|'name'|'token'>)=>({kind:'identity',resource:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`,claim:row.token});
 function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
@@ -346,7 +347,7 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
       const identity=await ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo);
       if (regionalByo) {
-        const entry=JSON.stringify([{kind:'identity',resource:`arn:aws:ses:${current.region}:${current.connection.aws_account_id}:identity/${current.name}`,claim:token}]);
+        const entry=JSON.stringify([identityJournalEntry(current)]);
         await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=ownership_journal||${entry}::jsonb WHERE connection_id=${current.connection.id} AND region=${current.region} AND NOT ownership_journal @> ${entry}::jsonb`);
       }
       return identity;
@@ -713,7 +714,12 @@ export function registerOperations(app: App) {
         allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached); return;
       }
       allowedDomain(a,row.name);
-      if (!row.identity?.imported) await deleteClaimIdentity(c.env,a.workspaceId,row);
+      if (!row.identity?.imported) {
+        await deleteClaimIdentity(c.env,a.workspaceId,row);
+        if (row.connection.kind==='byo' && row.connection.legacy===false) await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=(
+          SELECT coalesce(jsonb_agg(e ORDER BY n),'[]') FROM jsonb_array_elements(ownership_journal) WITH ORDINALITY entries(e,n) WHERE NOT e @> ${JSON.stringify(identityJournalEntry(row))}::jsonb)
+          WHERE connection_id=${row.connection.id} AND region=${row.region} AND NOT legacy`);
+      }
       await releaseClaim(db,a.workspaceId,row);
       if (row.connection.kind==='byo' && row.receiving_host) await queueReconcile(db,a.workspaceId,row.region);
     }); return c.json({deleted:true as const},200);
@@ -840,14 +846,16 @@ function registerPublicEvents(app: App) {
     if (!confirming && cached && cached.expires > Date.now()) return cached.binding;
     const binding = (await runtime.db.execute<TopicBinding>(sql`
       SELECT r.region,c.aws_account_id,c.kind,r.sending_state='ready' AS ready,false AS inbound,CASE WHEN NOT r.legacy THEN c.id END AS managed_id,r.generation
-        FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state IN ('ready','provisioning'))
+        FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state='ready' OR
+          (r.sending_state='provisioning' AND r.ownership_journal @> ${JSON.stringify([{kind:'subscription',resource:arn,target:byoFeedback}])}::jsonb))
       UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,NULL,NULL FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
       UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
-      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}
+      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' AND c.template_version<>'v5' WHERE r.topic_arn=${arn}
       ${!confirming ? sql`UNION ALL SELECT region,aws_account_id,kind,true,false,NULL,NULL FROM provider_feedback_history WHERE topic_arn=${arn}` : sql``} ORDER BY ready DESC LIMIT 1`)).rows[0];
     if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
     // A pending topic may confirm its subscription but must never prime trust for notifications.
     if (!binding.ready) return confirming ? binding : undefined;
+    if (binding.inbound && binding.kind==='byo') return binding; // A reconnect must not inherit cached receipt trust.
     if (sendingTopics.size >= 1024) sendingTopics.delete(sendingTopics.keys().next().value!);
     sendingTopics.set(arn, { binding, expires: Date.now() + 60_000 });
     return binding;
@@ -891,11 +899,15 @@ function registerPublicEvents(app: App) {
             if (error.retryable || error.code==='AWS_ACCESS_DENIED') throw new ApiError(503,error.code,error.message,undefined,true);
             throw error;
           }
-        } else {
-          await confirm();
-          if (binding?.managed_id) await c.env.db.execute(sql`UPDATE provider_connection_regions SET confirmed_topic_arn=${envelope.TopicArn},confirmed_generation=generation
-            WHERE connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`);
-        }
+        } else if (binding?.managed_id && !binding.ready) {
+          const fence=sql`connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`;
+          // Lock only this topic generation across the bounded confirmation GET. If
+          // it changed during signature verification, retry BEFORE consuming the token.
+          await c.env.db.transaction(async db=>{
+            if (!(await db.execute(sql`SELECT FROM provider_connection_regions WHERE ${fence} FOR UPDATE`)).rowCount) throw new ApiError(503,'PROVISION_LEASE_LOST','The confirmation raced a new regional setup generation. Retry the signed callback.',undefined,true);
+            await confirm();await db.execute(sql`UPDATE provider_connection_regions SET confirmed_topic_arn=feedback_topic_arn,confirmed_generation=generation WHERE ${fence}`);
+          });
+        } else await confirm();
       }
       // An authenticated UnsubscribeConfirmation is acknowledged, never automatically resubscribed.
       return c.json({ accepted: true }, 202);

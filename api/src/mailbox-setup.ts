@@ -37,11 +37,11 @@ function awsConfig(region:string, credentials:NonNullable<Runtime['config']['aws
 }
 export function storageBinding(wid:string,region:string|SQLWrapper,bucket:string|SQLWrapper) {
   return sql<ReadyConnection|null>`(SELECT to_jsonb(matched) FROM (
-      SELECT 'shared' AS kind,NULL AS id,aws_account_id,NULL AS role_arn,NULL::uuid AS external_id FROM provider_pool_regions
+      SELECT 'shared' AS kind,NULL AS id,aws_account_id,NULL AS role_arn,NULL::uuid AS external_id,NULL::text AS template_version FROM provider_pool_regions
       WHERE region=${region} AND inbound_bucket=${bucket}
-      UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id FROM provider_connections c JOIN mailbox_regions r
+      UNION ALL SELECT c.kind,c.id,c.aws_account_id,c.role_arn,c.external_id,c.template_version FROM provider_connections c JOIN mailbox_regions r
       ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
-      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND ${connectionReady(sql`c`)} AND r.bucket=${bucket}) matched)`;
+      WHERE c.workspace_id=${wid} AND c.region=${region} AND c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND r.bucket=${bucket}) matched)`;
 }
 export async function mailboxS3(runtime: Runtime, wid:string, region: string, bucket:string, db:DbExecutor=runtime.db, resolved?:ReadyConnection|null) {
   let credentials=platformCredentials(runtime);

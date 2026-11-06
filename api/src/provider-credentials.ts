@@ -51,7 +51,7 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
 export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; legacy?:boolean; legacy_names?:boolean; template_version?:string; pool_tier?:'trusted'|'probation'; identitySession?:{name:string;purpose:'verify'|'read'|'delete'|'mailFrom'} };
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
-    SELECT id, kind, region, aws_account_id, role_arn, external_id ${region!==undefined ? sql`,legacy` : sql`,template_version`} FROM ${region!==undefined ? sql`regional_connections` : sql`provider_connections`} pc
+    SELECT id, kind, region, aws_account_id, role_arn, external_id, template_version ${region!==undefined ? sql`,legacy` : sql``} FROM ${region!==undefined ? sql`regional_connections` : sql`provider_connections`} pc
     WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region} AND (legacy OR sending_state='ready')` : sql``} AND ${connectionReady()}`);
   const row = result.rows[0];
   if (!row) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
@@ -60,7 +60,10 @@ export async function workspaceConnection(runtime: Runtime, region?: string) {
 export async function workspaceCredentials(runtime: Runtime, region: string, connection?: ReadyConnection) {
   const row = connection ?? await workspaceConnection(runtime, region);
   if (row.kind==='shared') return platformCredentials(runtime);
-  if (row.legacy===false || row.legacy_names===false || row.template_version==='v5') {
+  // Missing metadata is not evidence of a legacy stack. An explicit managed
+  // marker always wins over a contradictory legacy marker or naming convention.
+  const legacy=row.template_version!=='v5' && row.legacy!==false && row.legacy_names!==false && (row.legacy===true || !!row.template_version);
+  if (!legacy) {
     const scope=row.identitySession;
     // A generic data-plane/mailbox caller must add its own narrowly scoped v5
     // session before release; never silently hand it the customer's entire role.

@@ -150,14 +150,17 @@ const scan=runV5(async(r,c,p)=>{
 const Candidate=z.object({id:z.string(),domain:z.string(),region:z.string(),regionLabel:z.string(),selectable:z.boolean(),status:z.enum(['verified','signing_pending','not_verified','incomplete','already_bound','overlap']),sandbox:z.boolean().nullable(),defaultConfigurationSet:z.string().nullable(),dkimStatus:z.string().nullable(),signingOrigin:z.string().nullable(),mailFromDomain:z.string().nullable(),overlap:z.boolean()});
 const Facts=z.object({production:z.boolean().optional(),sendingEnabled:z.boolean().optional(),max24HourSend:z.number().optional(),maxSendRate:z.number().optional(),sentLast24Hours:z.number().optional(),configurationSets:z.record(z.string(),z.object({installation:z.boolean().nullable()})).optional(),receiving:z.object({supported:z.boolean(),set:z.string().nullable(),rules:z.array(z.object({name:z.string(),enabled:z.boolean(),recipients:z.array(z.string()),actions:z.array(z.string())}))}).optional()});
 const Pending=z.object({domain:z.string(),importing:z.boolean(),error:z.string().nullable()});
-const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending)});
+const FailedIntent=Pending.extend({error:z.string()});
+const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending),failedIntents:z.array(FailedIntent)});
 export const RegionStatus=z.object({regions:z.array(Region)});
 export const ScanView=z.object({revision:z.number(),cursor:z.object({checked:z.number(),total:z.number()}),state:z.enum(['awaiting_role','failed','scanning','partial','ready_to_import']),error:z.string().nullable(),alreadySendsEmail:z.boolean().nullable(),regions:z.array(Region)});
 export const InventoryFields={scan:ScanView.optional(),candidates:z.array(Candidate).optional()};
 export async function statuses(db:DbExecutor,cid:string) {
-  const rows=(await db.execute<ScanRow & {pending:z.infer<typeof Pending>[]}>(sql`SELECT r.*,coalesce((SELECT jsonb_agg(jsonb_build_object('domain',i.name,'importing',i.importing,'error',j.last_error) ORDER BY i.name)
-    FROM byo_domain_intents i LEFT JOIN jobs j ON j.id='byo.bind:'||i.id WHERE i.connection_id=r.connection_id AND i.region=r.region),'[]') AS pending FROM provider_connection_regions r WHERE r.connection_id=${cid} ORDER BY region`)).rows;
-  return rows.map(s=>({region:s.region,regionLabel:regionLabels[s.region]!,scanState:s.scan_state,scanError:s.scan_error,sendingState:s.sending_state,receivingState:s.receiving_state,error:s.provision_error,facts:s.scan_facts,resources:s.ownership_journal.map(({kind,resource,target,state})=>({kind,resource,target,state})),pending:s.pending}));
+  const rows=(await db.execute<ScanRow & {pending:z.infer<typeof Pending>[];failed:z.infer<typeof FailedIntent>[]}>(sql`SELECT r.*,i.pending,i.failed FROM provider_connection_regions r CROSS JOIN LATERAL (SELECT
+    coalesce(jsonb_agg(jsonb_build_object('domain',i.name,'importing',i.importing,'error',j.last_error) ORDER BY i.name) FILTER(WHERE i.closed_reason IS NULL),'[]') AS pending,
+    coalesce(jsonb_agg(jsonb_build_object('domain',i.name,'importing',i.importing,'error',i.closed_reason) ORDER BY i.name) FILTER(WHERE i.closed_reason IS NOT NULL),'[]') AS failed
+    FROM byo_domain_intents i LEFT JOIN jobs j ON j.id='byo.bind:'||i.id WHERE i.connection_id=r.connection_id AND i.region=r.region) i WHERE r.connection_id=${cid} ORDER BY r.region`)).rows;
+  return rows.map(s=>({region:s.region,regionLabel:regionLabels[s.region]!,scanState:s.scan_state,scanError:s.scan_error,sendingState:s.sending_state,receivingState:s.receiving_state,error:s.provision_error,facts:s.scan_facts,resources:s.ownership_journal.map(({kind,resource,target,state})=>({kind,resource,target,state})),pending:s.pending,failedIntents:s.failed}));
 }
 async function candidates(db:DbExecutor,c:V5Connection) {
   const rows=(await db.execute<{name:string;region:string;identity:CandidateIdentity;complete:boolean;sandbox:boolean|null;overlap:boolean;bound:boolean}>(sql`SELECT i.name,i.region,i.identity,(r.scan_state='ready_to_import') AS complete,NOT (r.scan_facts->>'production')::boolean AS sandbox,exclusive_domain_overlap(${c.workspace_id},i.name) AS overlap,
@@ -191,11 +194,12 @@ async function saveIntent(db:DbExecutor,c:V5Connection,region:string,name:string
   }
   if ((await db.execute(sql`SELECT FROM (SELECT exclusive_domain_overlap(${c.workspace_id},${name}) AS overlap) e WHERE overlap`)).rowCount) throw conflict('DOMAIN_CLAIMED','The domain overlaps an existing exclusive claim.');
   const intent=(await db.execute<Intent>(sql`INSERT INTO byo_domain_intents AS i(id,connection_id,region,name,importing) VALUES(${id('dom')},${c.id},${region},${name},${importing})
-    ON CONFLICT(connection_id,name) DO UPDATE SET name=excluded.name WHERE i.region=excluded.region AND i.importing=excluded.importing RETURNING *`)).rows[0];
+    ON CONFLICT(connection_id,name) DO UPDATE SET id=CASE WHEN i.closed_reason IS NULL THEN i.id ELSE excluded.id END,region=excluded.region,importing=excluded.importing,closed_reason=NULL
+    WHERE i.closed_reason IS NOT NULL OR (i.region=excluded.region AND i.importing=excluded.importing) RETURNING *`)).rows[0];
   if (!intent) throw conflict('DOMAIN_REGION_CONFLICT','Only one sending region may be selected for a domain.');
   const cap=(await db.execute<{total:number;unproven:number}>(sql`SELECT
-    (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id})+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id}) AS total,
-    (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id} AND NOT ever_proven)+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id} AND NOT importing) AS unproven`)).rows[0]!;
+    (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id})+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id} AND closed_reason IS NULL) AS total,
+    (SELECT count(*) FROM domain_claims WHERE workspace_id=${c.workspace_id} AND NOT ever_proven)+(SELECT count(*) FROM byo_domain_intents WHERE connection_id=${c.id} AND closed_reason IS NULL AND NOT importing) AS unproven`)).rows[0]!;
   if (Number(cap.total)>100 || !importing && Number(cap.unproven)>10) throw conflict('DOMAIN_LIMIT_REACHED','The workspace domain limit would be exceeded.');
   if (row.sending_state==='ready') await queueBinding(db,c,intent);
   else await job(db,c,'byo.provision',regionJobId(c,region),{region});
@@ -232,7 +236,7 @@ export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:b
   return r.db.transaction(async db=>{
     await getRegionSettings(db,wid,'update');await connection(db,wid,true);
     const op=receipt<Op>(c,'domain',key,JSON.stringify([name,override])),prior=await op.read(db);if(prior)return prior;
-    const current=(await db.execute<{region:string}>(sql`SELECT region FROM domain_sending_bindings WHERE workspace_id=${wid} AND name=${name} UNION ALL SELECT region FROM byo_domain_intents WHERE connection_id=${c.id} AND name=${name} LIMIT 1`)).rows[0];
+    const current=(await db.execute<{region:string}>(sql`SELECT region FROM domain_sending_bindings WHERE workspace_id=${wid} AND name=${name} UNION ALL SELECT region FROM byo_domain_intents WHERE connection_id=${c.id} AND name=${name} AND closed_reason IS NULL LIMIT 1`)).rows[0];
     const first=(await db.execute<{region:string}>(sql`SELECT region FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready' ORDER BY ready_at,region LIMIT 1`)).rows[0];
     const region=override??current?.region??first?.region??'us-east-2';
     if (!Object.hasOwn(regionLabels,region)) throw new ApiError(422,'INVALID_REGION','Choose a commercial SES sending region.','region');
@@ -249,7 +253,7 @@ const provision=runV5(async(r,c,p,attempt)=>{
   if (!row) return;
   let gen=Number(p.generation??0);
   if (!gen || !(await r.db.execute(sql`UPDATE provider_connection_regions SET lease_until=clock_timestamp()+interval '4 minutes' WHERE ${target} AND ${active} AND sending_state='provisioning' AND generation=${gen} AND lease_until>clock_timestamp()`)).rowCount) {
-    const accepted=sql`EXISTS(SELECT FROM byo_domain_intents i WHERE i.connection_id=${c.id} AND i.region=${region})`;
+    const accepted=sql`EXISTS(SELECT FROM byo_domain_intents i WHERE i.connection_id=${c.id} AND i.region=${region} AND i.closed_reason IS NULL)`;
     const claimed=(await r.db.execute(acquireRegionProvisioning(ref,sql`${active} AND ${accepted}`,accepted))).rows[0];
     if (!claimed) throw defer(15_000,p);
     gen=Number(claimed.generation);
@@ -260,10 +264,28 @@ const provision=runV5(async(r,c,p,attempt)=>{
   if (!journal) return;
   try {
     if (!journal.ownership_journal.length) {
-      const pending=(await r.db.execute<{name:string;importing:boolean}>(sql`SELECT name,importing FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region}`)).rows;
+      const pending=(await r.db.execute<Intent>(sql`SELECT * FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL`)).rows;
       if (!pending.length) throw conflict('NO_SELECTED_DOMAINS','No domains were selected for this region.');
-      const imports=pending.filter(i=>i.importing).map(i=>i.name);
-      if (imports.length) await readSelectedDomains(await scoped(r,c,region,'scan'),region,imports);
+      const imports=new Map(pending.filter(i=>i.importing).map(i=>[i.name,i.id]));
+      if (imports.size) {
+        let retired=false;
+        const verified=await readSelectedDomains(await scoped(r,c,region,'scan'),region,[...imports.keys()],async name=>{
+          await r.db.transaction(async db=>{
+            await connection(db,c.workspace_id,true); // Serialize last-intent retirement with accepting a new selection.
+            fenced((await db.execute(sql`UPDATE byo_domain_intents SET closed_reason='CANDIDATE_NO_LONGER_VERIFIED' WHERE id=${imports.get(name)!} AND closed_reason IS NULL
+              AND EXISTS(SELECT FROM provider_connection_regions WHERE ${owned})`)).rowCount);
+            if ((await db.execute(sql`UPDATE provider_connection_regions SET sending_state='unprovisioned',lease_until=NULL,provision_error=NULL WHERE ${owned}
+              AND NOT EXISTS(SELECT FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL)`)).rowCount) {
+              // Make the queue row reusable before releasing the connection lock; the
+              // runner's settlement is fenced by run and cannot overwrite its successor.
+              fenced((await db.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL WHERE id=${task} AND status='running' AND attempts=${attempt} AND payload->>'run'=${p.run}`)).rowCount);
+              retired=true;
+            }
+          });
+        });
+        if (retired) return;
+        if (!verified.size && imports.size===pending.length) throw defer(1000,{...p,generation:gen}); // Recheck selections added during the SES reads.
+      }
     }
     const result=await provisionByoRegion(await scoped(r,c,region,'provision'),region,c.id,journal.ownership_journal,
       async()=>fenced((await r.db.execute(sql`SELECT FROM provider_connection_regions WHERE ${owned}`)).rowCount),
@@ -277,7 +299,7 @@ const provision=runV5(async(r,c,p,attempt)=>{
         await db.execute(sql`UPDATE provider_connection_regions SET ready_at=coalesce(ready_at,clock_timestamp()),provision_error=NULL WHERE ${target}`);
         await db.execute(sql`UPDATE ses_installation_settings SET installation_id=${c.id},default_region=(SELECT region FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready' ORDER BY ready_at,region LIMIT 1),
           enabled_regions=(SELECT jsonb_agg(region ORDER BY ready_at,region) FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready') WHERE workspace_id=${c.workspace_id}`);
-        const pending=(await db.execute<Intent>(sql`SELECT * FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region}`)).rows;
+        const pending=(await db.execute<Intent>(sql`SELECT * FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL`)).rows;
         for (const i of pending) await queueBinding(db,c,i);
         return true;
       });
@@ -288,13 +310,19 @@ const provision=runV5(async(r,c,p,attempt)=>{
   } catch(e) {
     if (e instanceof JobDeferred) throw e;
     const err=awsError(e);
+    if (err.retryable) {
+      // Keep the journaled topic eligible for signed confirmations during backoff,
+      // including when SNS accepted Subscribe but its response never reached us.
+      await r.db.execute(sql`UPDATE provider_connection_regions SET provision_error=${err.code} WHERE ${owned}`);
+      throw defer(30_000,{...p,generation:gen});
+    }
     await r.db.execute(sql`UPDATE provider_connection_regions SET sending_state='failed',lease_until=NULL,provision_error=${err.code} WHERE ${owned}`);
     throw err;
   }
 });
 
-const bind=runV5(async(r,c,p)=>{
-  const guard=sql`i.connection_id=${c.id} AND i.id=${p.intent} AND i.region=${p.region} AND cr.sending_state='ready' AND cr.confirmed_topic_arn=cr.feedback_topic_arn AND cr.confirmed_generation=cr.generation`;
+async function bindIntent(r:Runtime,c:V5Connection,p:Record<string,unknown>) {
+  const guard=sql`i.connection_id=${c.id} AND i.id=${p.intent} AND i.region=${p.region} AND i.closed_reason IS NULL AND cr.sending_state='ready' AND cr.confirmed_topic_arn=cr.feedback_topic_arn AND cr.confirmed_generation=cr.generation`;
   const select=sql`SELECT i.* FROM byo_domain_intents i JOIN provider_connection_regions cr USING(connection_id,region) WHERE ${guard}`;
   const i=(await r.db.execute<Intent>(select)).rows[0];if (!i) return;
   let ses:CandidateIdentity|undefined;
@@ -312,5 +340,15 @@ const bind=runV5(async(r,c,p)=>{
     }
     await db.execute(sql`DELETE FROM byo_domain_intents WHERE connection_id=${c.id} AND id=${i.id}`);
   });
+}
+const bind=runV5(async(r,c,p,attempt)=>{
+  try {await bindIntent(r,c,p);} catch(e) {
+    // Preserve transient failures for retry. Closing only this attempt's intent
+    // frees the name and capacity; a new selection gets a distinct ID and job.
+    if (e instanceof ApiError && !e.retryable) await r.db.execute(sql`UPDATE byo_domain_intents i SET closed_reason=${e.code}
+      FROM jobs j WHERE i.connection_id=${c.id} AND i.id=${p.intent} AND i.closed_reason IS NULL AND j.id='byo.bind:'||i.id AND j.workspace_id=${c.workspace_id}
+        AND j.status='running' AND j.attempts=${attempt} AND j.payload->>'run'=${p.run}`);
+    throw e;
+  }
 });
 export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind};
