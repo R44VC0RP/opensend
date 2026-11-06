@@ -1,0 +1,62 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Deny", "Action": "ses:SendEmail", "Resource": "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/*@*"},
+    {
+      "Effect": "Allow", "Action": "ses:SendEmail",
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:identity/?*.??*", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-marketing"],
+      "Condition": {"StringLike": {"ses:TenantName": "opensendmx-trusted-ws_????????????????????????????????"}, "StringEquals": {"ses:ApiVersion": "2"}, "Null": {"ses:MultiRegionEndpointId": "true"}}
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:GetConfigurationSet", "sns:GetTopicAttributes", "sns:ListTagsForResource", "sns:ListSubscriptionsByTopic", "sns:GetSubscriptionAttributes"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:opensendmx-trusted-feedback"]
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "sns:CreateTopic"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:opensendmx-trusted-feedback"],
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "ses-feedback"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+      }
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:TagResource", "sns:TagResource"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:opensendmx-trusted-feedback"],
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "ses-feedback", "aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "ses-feedback"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+      }
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:GetConfigurationSetEventDestinations", "ses:CreateConfigurationSetEventDestination", "ses:UpdateConfigurationSetEventDestination", "ses:PutConfigurationSetSuppressionOptions", "ses:CreateTenantResourceAssociation", "sns:SetTopicAttributes"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-transactional", "arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-marketing", "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:opensendmx-trusted-feedback"],
+      "Condition": {"StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "ses-feedback"}}
+    },
+    {
+      "Effect": "Allow", "Action": "sns:Subscribe", "Resource": "arn:aws:sns:us-east-1:YOUR_AWS_ACCOUNT_ID:opensendmx-trusted-feedback",
+      "Condition": {"StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "ses-feedback", "sns:Protocol": "https", "sns:Endpoint": "https://opensend.mx/v1/events/ses"}}
+    },
+    {
+      "Effect": "Allow", "Action": "ses:CreateTenant", "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-trusted-ws_????????????????????????????????/*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-probation-ws_????????????????????????????????/*"],
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "workspace-tenant"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+      }
+    },
+    {
+      "Effect": "Allow", "Action": "ses:TagResource", "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-trusted-ws_????????????????????????????????/*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-probation-ws_????????????????????????????????/*"],
+      "Condition": {
+        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "workspace-tenant", "aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "workspace-tenant"},
+        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:owner", "opensend:installation-id", "opensend:purpose"]}
+      }
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:GetTenant", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:PutTenantSuppressionAttributes", "ses:UpdateReputationEntityPolicy"],
+      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-trusted-ws_????????????????????????????????/*", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:tenant/opensendmx-probation-ws_????????????????????????????????/*"],
+      "Condition": {"StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "workspace-tenant"}}
+    },
+    {
+      "Effect": "Allow", "Action": "ses:UpdateReputationEntityPolicy", "Resource": "arn:aws:ses:us-east-1:aws:reputation-policy/strict"
+    }
+  ]
+}
