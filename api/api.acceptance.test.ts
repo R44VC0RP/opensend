@@ -3944,7 +3944,7 @@ describe('Operational configuration and public event boundaries', () => {
   });
 
   test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {
-    const [{ createServer }, { once }, { createApp }, { nodeRuntime }, { drizzle }, { drain }, regional, { setupResources }, { sesRegions }] = await Promise.all([
+    const [{ createServer }, { once }, { createApp }, { nodeRuntime }, { drizzle }, { drainJobs }, regional, { setupResources }, { sesRegions }] = await Promise.all([
       import('node:http'), import('node:events'), import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'),
       import('./src/dispatch.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js'),
     ]);
@@ -4011,7 +4011,10 @@ describe('Operational configuration and public event boundaries', () => {
         // These rows never commit: the external runner cannot see or deliver this
         // synthetic endpoint test. Only this normal drain uses the loopback transport.
         const queued = ok(await local('POST', `/v1/webhooks/${endpoint.id}/test`), 202);
-        await drain(runtime);
+        const wire = t.mock.method(db, 'query');
+        await drainJobs(runtime,1,1);
+        assert.equal(wire.mock.callCount(),2,'Claim plus atomic attempt/delivery/job settlement, including a retry.');
+        wire.mock.restore();
         const delivery = ok(await local('GET', `/v1/webhooks/${endpoint.id}/deliveries/${queued.id}`));
         assert.equal(delivery.status, 'pending');
         assert.equal(delivery.lastStatusCode, 302);
@@ -4022,6 +4025,14 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
         const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
+        // A normal delivery (unlike the synthetic test POST above) parks under the endpoint
+        // lock. Resuming discovers it and queues exactly one new generation.
+        await db.query('UPDATE operation_deliveries SET synthetic=false WHERE id=$1',[queued.id]);
+        await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND payload->>'deliveryId'=$2",[runtime.config.workspaceId,queued.id]);
+        await drainJobs(runtime,1,1);
+        assert.equal((await db.query('SELECT status FROM operation_deliveries WHERE id=$1',[queued.id])).rows[0].status,'paused');
+        ok(await local('PATCH', `/v1/webhooks/${endpoint.id}`, {paused:false}));
+        assert.equal((await db.query("SELECT 1 FROM jobs WHERE payload->>'deliveryId'=$1 AND payload->>'generation'='1' AND status='pending'",[queued.id])).rowCount,1);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         throw rollback;
       });
@@ -4123,6 +4134,32 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
 }
 
 describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
+  test('an idle DispatcherShard dispatches inline and does not reprobe placement on eviction', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      // Node has no DO host; provide only its base constructor, storage and waitUntil.
+      const { registerHooks } = await import('node:module');
+      const hook = registerHooks({ resolve(specifier, context, next) {
+        return specifier === 'cloudflare:workers' ? { shortCircuit:true, url:'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
+      } });
+      const { DispatcherShard } = await import('./src/dispatcher-do.js').finally(() => hook.deregister());
+      const stored = new Map<string, unknown>(), pending: Promise<unknown>[] = [], alarms: number[] = [];
+      const ctx = { storage: { get:(k:string)=>stored.get(k), put:(k:string,v:unknown)=>stored.set(k,v), getAlarm:()=>null, setAlarm:(at:number)=>alarms.push(at) }, waitUntil:(p:Promise<unknown>)=>pending.push(p) };
+      let probes = 0, statusAtProbe: string | undefined;
+      const receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const previousFetch = globalThis.fetch;
+      globalThis.fetch = async () => {
+        probes++; statusAtProbe = (await db.query('SELECT status FROM sending_emails WHERE id=$1',[receipt.id])).rows[0].status;
+        return new Response('colo=TEST');
+      };
+      try { for (let i = 0; i < 2; i++) {
+        const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env);
+        Object.assign(shard, { runtime: async () => runtime });
+        assert.equal((await shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}`))).status, 200);
+        while (pending.length) await Promise.all(pending.splice(0));
+      } } finally { globalThis.fetch = previousFetch; }
+      assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
+    });
+  });
   test('request logs identify a rejected field without disclosing an address in its error message', async t => {
     await simulatedSesFixture(t, async ({ local }) => {
       const logs: string[] = [];
@@ -4218,13 +4255,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const batch = (n:number) => local('POST','/v1/emails/batch',{emails:Array.from({length:n},()=>mail)});
       const thread = () => local('POST','/v1/inbound/threads',{addressId:box.id,to:[mail.to],subject:mail.subject,text:mail.text});
       const pause = async () => ok(await local('GET','/v1/me')).connection.sendingPause;
+      const keyed = (to:string) => local('POST','/v1/emails/send',{...mail,to},'live',{'Idempotency-Key':'hosted-zero-charge'});
+      const free = ok(await keyed(simulator),202);
+      assert.deepEqual(ok(await keyed(simulator),202),free);
+      error(await keyed('different@example.net'),409,'IDEMPOTENCY_CONFLICT');
+      assert.equal((await db.query('SELECT 1 FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rowCount,0);
       const recipients = ok(await batch(98),202).data;
       error(await batch(3),429,'SEND_LIMIT_REACHED'); // All or nothing: leave two slots.
       const mixed = ok(await send({to:simulator, cc:['cc@example.net'], bcc:['bcc@example.net']}),202);
       const limited = await send(); const limitError = error(limited,429,'SEND_LIMIT_REACHED');
       assert.ok(Date.parse(limitError.resetAt) > Date.now()+23*3600000); assert.ok(limited.headers.get('retry-after'));
       error(await thread(),429,'SEND_LIMIT_REACHED');
+      const hourTuple = async () => (await db.query('SELECT ctid::text,recipients FROM hosted_usage_hourly WHERE workspace_id=$1 ORDER BY hour',[wid])).rows;
+      const charged = await hourTuple();
       const sim = ok(await send({to:simulator}),202); // A deploy test cannot consume tenant capacity.
+      assert.deepEqual(await hourTuple(), charged, 'Even an existing hourly counter must not get a new +0 tuple.');
       error(await send({to:'fake@x.simulator.amazonses.com'}),429,'SEND_LIMIT_REACHED');
       runtime.config.liveEnabled=false;
       try { assert.equal(ok(await send(),202).simulated,true); } finally { runtime.config.liveEnabled=true; }
@@ -4353,6 +4398,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
         CREATE TABLE provider_connections AS SELECT id,workspace_id,kind,region,aws_account_id,role_arn,external_id,feedback_topic_arn,tenant_state,state FROM public.provider_connections WITH NO DATA;
         CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
+        CREATE TABLE domain_claims (LIKE public.domain_claims);
         CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated,data FROM public.sending_email_events WITH NO DATA;
         CREATE TABLE sending_emails (LIKE public.sending_emails INCLUDING DEFAULTS);
         CREATE TABLE sending_campaigns (LIKE public.sending_campaigns INCLUDING CONSTRAINTS);
@@ -4363,6 +4409,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         VALUES('backfill','mature','us-east-1','key','a@example.org','["b@example.org"]','["c@example.org"]','["success@simulator.amazonses.com"]','fixture','{}',false,'accepted','ses-id');
         INSERT INTO sending_email_events(created_at,workspace_id,email_id,type,simulated,data) SELECT now(),'mature','backfill',v,false,'{}' FROM unnest(array['accepted','send','complaint']) v`);
       await db.query(await readFile(new URL('./migrations/062_hosted_limit_overrides.sql',import.meta.url),'utf8'));
+      await db.query(await readFile(new URL('./migrations/063_direct_admission.sql',import.meta.url),'utf8'));
       assert.deepEqual((await db.query('SELECT recipients::int FROM hosted_usage_hourly')).rows,[{recipients:2}]);
       assert.deepEqual((await db.query('SELECT accepted::int, complaints::int FROM hosted_health_hourly')).rows,[{accepted:2,complaints:1}]);
       runtime.config.multiTenant=true;
@@ -5209,7 +5256,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('a transactional admission takes the next paced slot during an already leased campaign', async t => {
+  test('a transactional admission borrows one slot from an already leased campaign', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { runDispatcher, dispatchWakeKey } = await import('./src/dispatcher.js');
       const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
@@ -5219,7 +5266,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('priority'), from: 'sender@example.com', subject: 'Campaign', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
-      runtime.config.simulatedSes.maxSendRate = 14;
+      runtime.config.simulatedSes.maxSendRate = 6;
       await run('campaign.run');
       const priorityWake = new EventTarget();
       let admitted = 0;
@@ -5235,6 +5282,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return Reflect.apply(send, this, [cmd]);
       });
       // The budget stops new normal leases; it must not disable hints while the last batch drains.
+      const dbExecute = runtime.db.execute.bind(runtime.db);
+      const leaseSizes: number[] = [];
+      t.mock.method(runtime.db, 'execute', async (...args: Parameters<typeof dbExecute>) => {
+        const result = await dbExecute(...args);
+        if (result.rows.length === 24 && result.rows[0]?.campaignId === campaign.id) {
+          leaseSizes.push(result.rows.filter(r => r.review_draft && r.review_rendered).length);
+        }
+        return result;
+      });
       const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1, until: Date.now() });
       await first;
       let receipt: Json;
@@ -5244,8 +5300,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       } finally { await draining; }
       const next = calls.find(c => c.at >= admitted)!;
       assert.ok(admitted > 0); assert.equal(next.id, receipt.id, 'Already-leased marketing must not own future slots.');
-      assert.ok(next.at - admitted < 100, `14/s slot + wake latency: ${next.at - admitted} ms`);
+      assert.ok(next.at - calls[0]!.at < 140, 'Priority should start before the next normal slot.');
+      assert.ok(calls[2]!.at - calls[0]!.at >= 290, 'The next marketing send repays the borrowed slot.');
       assert.equal(calls.length, 25);
+      assert.deepEqual(leaseSizes, [1], 'All 24 campaign emails materialize from one returned review.');
     });
   });
 
@@ -6391,6 +6449,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       const marker = unique('CASINO-BONUS');
       let classifierDown = false;
+      let sibling = '', siblingSentAtAbort = false, timeoutMs = 0;
       const classified: string[] = [];
       const passthrough = globalThis.fetch;
       t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
@@ -6403,7 +6462,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(request.questions.spam.type, 'noul');
         assert.equal(request.state.signals.recipients, 1);
         classified.push(request.state.email.subject);
-        if (classifierDown) throw new Error('Synthetic classifier outage');
+        if (request.state.email.subject === 'Unresponsive classifier') {
+          const at = Date.now();
+          return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => {
+            timeoutMs = Date.now() - at; siblingSentAtAbort = sent.includes(sibling); reject(new Error('Timed out'));
+          }, { once: true }));
+        }
+        if (classifierDown) return new Response(null, { status: 429 });
         return Response.json({ model: 'jev-test', answers: { spam: { noul: request.state.email.subject.includes(marker) ? 0.97 : 0.02 } } });
       });
       const send = async (extra: Json) => ok(await local('POST', '/v1/emails/send', mail(extra), 'live'), 202).id as string;
@@ -6436,6 +6501,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
       assert.ok(sent.includes(outage));
       assert.equal(classified.length, 3);
+      const slow = await send({ subject: 'Unresponsive classifier', screen: true });
+      sibling = await send({ subject: 'Unrelated receipt' });
+      await dispatchDue(runtime, REGION);
+      assert.ok(siblingSentAtAbort, 'The sibling was sent while the slow screen was still pending.');
+      assert.ok(timeoutMs < 1000, `Classifier aborted after ${timeoutMs} ms`);
+      assert.ok(sent.includes(slow));
+      t.diagnostic(`Unresponsive classifier failed open in ${timeoutMs} ms; sibling already sent.`);
     });
   });
 });

@@ -178,7 +178,9 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
-    ${priorityOnly ? sql`AND ${transactional} = true` : sql``}
+    -- A boolean range is an index condition on 061's expression. Equality to true is
+    -- simplified to a text comparison and can scan the kind index over delivered mail.
+    ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
     ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
       WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
@@ -213,6 +215,10 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       ) e WHERE o.candidates > o.slots LIMIT ${limit}
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*
+    ), reviews AS (
+      SELECT carrier, r.draft, r.rendered FROM (
+        SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM leased WHERE review_id IS NOT NULL GROUP BY 1,2,3
+      ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     ), settings AS MATERIALIZED (
       SELECT p.*, s.installation_id, s.default_region, s.enabled_regions, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection, ${mx || isSimulatedSes(runtime) ? sql`true` : sql`(
         d.report->'provisioned' = 'true'::jsonb AND d.report #> '{account,sendingEnabled}' = 'true'::jsonb
@@ -228,10 +234,15 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
-    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id
+    LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
+  const reviews = new Map<string, Pick<Review, 'draft' | 'rendered'>>();
+  const reviewKey = (row: Record<string, unknown>) => JSON.stringify([row.workspaceId, row.campaignId, row.reviewId]);
+  for (const row of result.rows) if (row.review_draft && row.review_rendered) {
+    reviews.set(reviewKey(row), { draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
+  }
   return result.rows.map(row => {
     const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
@@ -253,7 +264,8 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
-    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    const shared = mail.reviewId && reviews.get(reviewKey(row));
+    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
 
@@ -543,7 +555,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM simulated_callbacks r RETURNING id
     ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`);
   const readyJobs = result.rows[0]!.webhooks;
-  if (readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
+  if (readyJobs > 0) try { await runtime.wake?.(readyJobs, 'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
   // With a feedback sink, simulated Send/Delivery callbacks travel the same queue live SNS feedback does.
   if (simulated && runtime.feedback) {
     const recorded = new Date().toISOString();
@@ -589,13 +601,17 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
   function pump() {
     if (timer) { clearTimeout(timer); timer = undefined; }
     const now = Date.now(); let earliest = Infinity;
+    // A transaction can use the next single-recipient slot early. reserve() still charges
+    // its full cost against the original clock; no accumulating credit and no bypass of a brake.
+    const rate = shardRate(gate, options.shard, pacing);
+    const priorityAt = gate.nextAllowedAt - ((gate.brakeUntil ?? 0) <= now && rate > 0 ? 1000 / rate : 0);
     for (const queue of [queues.transactional, queues.marketing]) for (let i = queue.length - 1; i >= 0; i--) {
       const entry = queue[i]!;
-      if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, gate.nextAllowedAt)) { queue.splice(i, 1); entry.defer(); }
+      if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, queue === queues.transactional ? priorityAt : gate.nextAllowedAt)) { queue.splice(i, 1); entry.defer(); }
       else earliest = Math.min(earliest, entry.deadline);
     }
     if (earliest === Infinity) return;
-    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, gate.nextAllowedAt);
+    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, queues.transactional.length ? priorityAt : gate.nextAllowedAt);
     if (wakeAt > now) { timer = setTimeout(pump, Math.ceil(wakeAt - now)); return; }
     (queues.transactional.shift() ?? queues.marketing.shift())!.start();
     pump();
@@ -662,11 +678,36 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
-  const prepared = (await phase('prepare', () => Promise.all(ready.map(async item => {
+  const prepare = async (item: typeof ready[number]) => {
     try { return await prepareMail(item, loadAttachments); }
     catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.owner.a, item.mail, error); }
-  })))).filter((item): item is Prepared => item !== undefined);
-  if (!prepared.length) return { processed: leased.length, blocked: false };
+  };
+  if (ready.some(({mail, owner}) => mail.snapshot.screen && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
+    // Start every preflight together, but don't gate unrelated sends on the slowest classifier.
+    // Drain completions in groups; those arriving during a claim/send form the next group.
+    const available: Prepared[] = [];
+    let notify: (() => void) | undefined, finished = false;
+    const preparing = Promise.allSettled(ready.map(async item => {
+      const p = await prepare(item);
+      if (p) { available.push(p); notify?.(); }
+    })).then(results => { finished = true; notify?.(); return results; });
+    try {
+      while (!finished || available.length) {
+        if (available.length) await dispatchPrepared(base, lane, available.splice(0));
+        else await new Promise<void>(resolve => { notify = resolve; });
+      }
+    } finally {
+      for (const result of await preparing) if (result.status === 'rejected') throw result.reason;
+    }
+  } else {
+    const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
+    await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
+  }
+  return { processed: leased.length, blocked: false };
+}
+async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
+  if (!prepared.length) return;
+  const {gate, options, counters, phase} = lane;
   const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
   const delayed: Mail[] = [], unpaced: Mail[] = [];
@@ -731,7 +772,6 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   if (marketing.length || unpaced.length) await releaseLeases(base, [...marketing, ...unpaced]);
   if (direct.length) await releaseLeases(base, direct, counters.quotaRetryAt);
   await Promise.all(pendingRecords);
-  return { processed: leased.length, blocked: false };
 }
 async function flushFinishing(runtime: Runtime, lane: Lane) {
   if (!lane.finishing.size) return;
