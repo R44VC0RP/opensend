@@ -77,47 +77,31 @@ function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number,
   if (gate.dailyBlockedUntil) gate.dailyBlockedUntil = gate.refreshAt;
   return true;
 }
-// Self-hosted workspace cache.
-async function ensureQuota(runtime: Runtime, a: Actor, region: string, gate: GateState, ses: SESv2Client, refreshMs: number): Promise<boolean> {
-  const cached = await runtime.db.execute<{ max_send_rate: number; max_24_hour_send: number; sent_last_24_hours: number; checked_at: string; age_ms: number }>(sql`
-    SELECT max_send_rate, max_24_hour_send, sent_last_24_hours, checked_at::text, extract(epoch FROM clock_timestamp()-checked_at)::float8*1000 AS age_ms FROM sending_region_limits
-    WHERE workspace_id = ${a.workspaceId} AND region = ${region} AND checked_at > clock_timestamp() - (${refreshMs}::int * interval '1 millisecond')`);
-  const row = cached.rows[0];
-  if (row && Number(row.max_send_rate) > 0) {
-    // A cached row without a daily figure (0) means unknown, not exhausted; SES enforces the real cap.
-    return observeQuota(gate, { maxSendRate: Number(row.max_send_rate), max24HourSend: Number(row.max_24_hour_send) || -1, sentLast24Hours: Number(row.sent_last_24_hours) || 0, checkedAt: Date.parse(row.checked_at) }, refreshMs, row.age_ms);
-  }
-  const quota = await fetchQuota(ses);
-  const saved = await runtime.db.execute<{ checked: string }>(sql`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, max_24_hour_send, sent_last_24_hours, reserved, checked_at)
-    VALUES (${a.workspaceId}, ${region}, ${quota.maxSendRate}, ${quota.max24HourSend}, ${quota.sentLast24Hours}, 0, clock_timestamp())
-    ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = excluded.max_send_rate, max_24_hour_send = excluded.max_24_hour_send,
-      sent_last_24_hours = excluded.sent_last_24_hours, reserved = 0, next_allowed_at = NULL, checked_at = excluded.checked_at
-    WHERE sending_region_limits.checked_at IS NULL OR sending_region_limits.checked_at <= clock_timestamp() - (${refreshMs}::int * interval '1 millisecond') RETURNING checked_at::text AS checked`);
-  if (!saved.rows[0]) return ensureQuota(runtime, a, region, gate, ses, refreshMs); // Adopt the winning database sample, never the local fetch time.
-  return observeQuota(gate, { ...quota, checkedAt: Date.parse(saved.rows[0].checked) }, refreshMs);
-}
-
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
 // interrupted fetch keeps its fence until the next cache period; no DB lock is held over AWS I/O.
-async function ensureAccountQuota(owner: Owner, account: string, region: string, gate: GateState, refreshMs: number) {
-  const { runtime, ses } = owner;
-  const key = sql`aws_account_id=${account} AND region=${region}`;
-  const period = sql`(${Math.max(1000, refreshMs)}::int * interval '1 millisecond')`;
+async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: string | undefined, region: string, gate: GateState, refreshMs: number) {
+  const { runtime, ses, a } = owner;
+  const table = sql.identifier(account ? 'provider_account_limits' : 'sending_region_limits');
+  const subject = sql.identifier(account ? 'aws_account_id' : 'workspace_id'), fence = sql.identifier(account ? 'refresh_after' : 'next_allowed_at');
+  const key = sql`${subject}=${account ?? a.workspaceId} AND region=${region}`;
+  if (account) refreshMs = Math.max(1000, refreshMs);
+  const period = sql`(${refreshMs}::int * interval '1 millisecond')`;
   type Row = { fence: string | null; checked: string; rate: number; max: number; sent: number; age_ms: number };
   const cached = sql`SELECT NULL::text AS fence, checked_at::text AS checked, max_send_rate AS rate, max_24_hour_send AS max, sent_last_24_hours AS sent, extract(epoch FROM clock_timestamp()-checked_at)::float8*1000 AS age_ms
-    FROM provider_account_limits WHERE ${key} AND checked_at > clock_timestamp()-${period}`;
+    FROM ${table} WHERE ${key} AND max_send_rate > 0 AND checked_at > clock_timestamp()-${period}`;
   const result = await runtime.db.execute<Row>(sql`WITH elected AS (
-    INSERT INTO provider_account_limits(aws_account_id,region,refresh_after) VALUES (${account},${region},clock_timestamp()+${period})
-    ON CONFLICT ON CONSTRAINT provider_account_limits_pkey DO UPDATE SET refresh_after=clock_timestamp()+${period} WHERE provider_account_limits.refresh_after <= clock_timestamp()
-    RETURNING refresh_after::text AS fence)
+    INSERT INTO ${table}(${subject},region,${fence}) VALUES (${account ?? a.workspaceId},${region},clock_timestamp()+${period})
+    ON CONFLICT (${subject},region) DO UPDATE SET ${fence}=clock_timestamp()+${period}
+      WHERE (${table}.${fence} IS NULL OR ${table}.${fence} <= clock_timestamp()) AND (${table}.checked_at IS NULL OR ${table}.max_send_rate <= 0 OR ${table}.checked_at <= clock_timestamp()-${period})
+    RETURNING ${fence}::text AS fence)
     SELECT fence,NULL::text AS checked,NULL::float8 AS rate,NULL::float8 AS max,NULL::float8 AS sent,NULL::float8 AS age_ms FROM elected UNION ALL ${cached} LIMIT 1`);
   let row = result.rows[0];
   if (row?.fence) {
     const q = await fetchQuota(ses);
-    const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE provider_account_limits SET checked_at=clock_timestamp(), refresh_after=clock_timestamp()+${period},
-      max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND refresh_after=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
+    const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
+      max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
     if (!saved.rowCount) return false;
-    return observeQuota(gate, { ...q, checkedAt: Date.parse(saved.rows[0]!.checked) }, Math.max(1000, refreshMs));
+    return observeQuota(gate, { ...q, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs);
   } else {
     // A concurrent shard won a cold refresh. Give its single control-plane request time to publish.
     for (const delay of [100, 400, 1000]) {
@@ -125,8 +109,17 @@ async function ensureAccountQuota(owner: Owner, account: string, region: string,
       await sleep(delay); row = (await runtime.db.execute<Row>(cached)).rows[0];
     }
     if (!row) return false;
-    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: row.max, sentLast24Hours: row.sent, checkedAt: Date.parse(row.checked) }, Math.max(1000, refreshMs), row.age_ms);
+    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms);
   }
+}
+
+// A held campaign can outlive its last queued email. Refresh the same fenced provider cache
+// without manufacturing a queued message just to wake a dispatcher.
+export async function campaignQuota(runtime: Runtime, a: Actor, region: string, account?: string) {
+  const connection = runtime.config.multiTenant ? (await runtime.db.execute<ReadyConnection>(sql`SELECT * FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region} AND aws_account_id=${account ?? ''} AND paused_at IS NULL`)).rows[0] : undefined;
+  if (runtime.config.multiTenant && !connection) return null;
+  const gate = initialGate();
+  return await ensureQuota({ runtime, a, ses: providerClient(runtime, region, connection) }, account, region, gate, QUOTA_REFRESH_MS) ? gate.quota : null;
 }
 
 /**
@@ -640,8 +633,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   if (options.accountId && !first.tenantName) lane.pacing.targetRate = undefined;
   // Quota is loaded lazily so idle regions never touch the provider control plane.
   if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
-    lane.refresh ??= phase('quota', () => options.accountId ? ensureAccountQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs)
-      : ensureQuota(first.runtime, first.a, options.region, gate, first.ses, options.quotaRefreshMs)).finally(() => { lane.refresh = undefined; });
+    lane.refresh ??= phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs)).finally(() => { lane.refresh = undefined; });
     if (!await lane.refresh) { await releaseLeases(base, ready.map(item => item.mail)); return { processed: 0, blocked: true }; }
     await options.onGate?.(gate);
   }

@@ -5095,8 +5095,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('priority'), from: 'sender@example.com', subject: 'Campaign', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
-      await run('campaign.run');
       runtime.config.simulatedSes.maxSendRate = 14;
+      await run('campaign.run');
       const priorityWake = new EventTarget();
       let admitted = 0;
       runtime.dispatch = async (region, account, _count, _kind, priority) => {
@@ -5179,6 +5179,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return Reflect.apply(send, this, [cmd]);
       });
       const drain = () => dispatchDue(runtime, REGION, opts), view = async () => ok(await local('GET', `/v1/campaigns/${c.id}`));
+      // Expansion ran with ample capacity. The next sample seen at dispatch reflects later account use.
+      await db.query("UPDATE sending_region_limits SET checked_at=clock_timestamp()-interval '2 minutes' WHERE workspace_id=$1 AND region=$2",[runtime.config.workspaceId,REGION]);
       const hold = await drain();
       assert.equal(hold.sent, 3, 'Concurrent lanes together leave the last ten recipients unused by marketing.');
       assert.ok(hold.quotaRetryAt! > Date.now()); assert.equal((await view()).state, 'sending');
@@ -5997,10 +5999,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.delivery.expanded, 1200, 'Nothing is released into the reserved SES quota.');
       assert.equal(view.delivery.waiting.reason, 'ses_daily_quota');
-      // Even with no outstanding rows to refresh the expired quota, expansion must not wait on
-      // yesterday's snapshot forever. It releases a bounded buffer for the dispatcher to check.
+      // No email is needed as a refresh probe. Expiry alone cannot release recipients, and a
+      // full buffer cannot override the published SES hold with a short buffer-drain retry.
       assert.ok(Date.parse(view.delivery.waiting.until) <= Date.now() + 60_000);
+      const {SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'); let used=1900,quotaReads=0;
+      t.mock.method(SESv2Client.prototype,'send',(cmd:unknown)=>{
+        assert.ok(cmd instanceof GetAccountCommand);quotaReads++;
+        return {SendingEnabled:true,SendQuota:{MaxSendRate:20,Max24HourSend:2000,SentLast24Hours:used}};
+      });
       await db.query(`UPDATE sending_region_limits SET checked_at = clock_timestamp() - interval '2 minutes' WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      await run('campaign.run');
+      view=ok(await local('GET',`/v1/campaigns/${campaign.id}`)); assert.equal(view.delivery.expanded,1200); assert.equal(view.delivery.waiting.reason,'ses_daily_quota'); assert.equal(quotaReads,1);
+      await db.query("UPDATE sending_emails SET status='queued' WHERE campaign_id=$1 AND review_ordinal BETWEEN 1 AND 400",[campaign.id]);
+      await run('campaign.run');
+      pending=(await jobs('campaign.run')).filter(job=>job.status==='pending');
+      assert.ok(new Date(pending[0]!.available_at).getTime()-Date.now()>50_000); assert.equal(quotaReads,1);
+      assert.equal(ok(await local('GET',`/v1/campaigns/${campaign.id}`)).delivery.waiting.reason,'ses_daily_quota');
+      await db.query("UPDATE sending_emails SET status='delivered' WHERE campaign_id=$1 AND status='queued'",[campaign.id]);
+      await db.query(`UPDATE sending_region_limits SET checked_at = clock_timestamp() - interval '2 minutes' WHERE workspace_id = $1 AND region = $2`, [ws,REGION]);
+      used=0;
       pending = (await jobs('campaign.run')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
       await run('campaign.run');
