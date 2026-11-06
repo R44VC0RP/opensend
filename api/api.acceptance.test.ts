@@ -4341,12 +4341,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
         CREATE TABLE provider_connections AS SELECT id,workspace_id,kind,region,aws_account_id,role_arn,external_id,feedback_topic_arn,tenant_state,state FROM public.provider_connections WITH NO DATA;
         CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
-        CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated FROM public.sending_email_events WITH NO DATA;
-        CREATE TABLE sending_emails (LIKE public.sending_emails);
+        CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated,data FROM public.sending_email_events WITH NO DATA;
+        CREATE TABLE sending_emails (LIKE public.sending_emails INCLUDING DEFAULTS);
         INSERT INTO workspaces VALUES('mature',now()-interval '45 days');
         INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('mature','mature','shared','ready','ready');`);
       await db.query(await readFile(new URL('./migrations/060_hosted_sending_guardrails.sql',import.meta.url),'utf8'));
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id)
+        VALUES('backfill','mature','us-east-1','key','a@example.org','["b@example.org"]','["c@example.org"]','["success@simulator.amazonses.com"]','fixture','{}',false,'accepted','ses-id');
+        INSERT INTO sending_email_events(created_at,workspace_id,email_id,type,simulated,data) SELECT now(),'mature','backfill',v,false,'{}' FROM unnest(array['accepted','send','complaint']) v`);
       await db.query(await readFile(new URL('./migrations/062_hosted_limit_overrides.sql',import.meta.url),'utf8'));
+      assert.deepEqual((await db.query('SELECT recipients::int FROM hosted_usage_hourly')).rows,[{recipients:2}]);
+      assert.deepEqual((await db.query('SELECT accepted::int, complaints::int FROM hosted_health_hourly')).rows,[{accepted:2,complaints:1}]);
       runtime.config.multiTenant=true;
       const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
       assert.equal(await getCap('mature'),10000);
@@ -4365,6 +4370,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await connect(),201);
       const allowance=(await runtime.db.execute<{a:{cap:number;pendingCapOverride:number}}>(sql`SELECT ${hostedAllowance(runtime.config,wid,1)} a`)).rows[0].a;
       assert.deepEqual([allowance.cap,allowance.pendingCapOverride],[2,3]);
+    });
+  });
+  test('MX: admission reads only hourly totals even with a full day of Hosted mail', async t => {
+    await simulatedSesFixture(t, async ({runtime,db}) => {
+      const {sql}=await import('drizzle-orm'), {hostedAllowance}=await import('./src/hosted-sending.js');
+      const wid=runtime.config.workspaceId, total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 2400;
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state) VALUES ($1,$1,'shared',$2,'ready','ready')`,[wid,REGION]);
+      for(let start=1;start<=total;start+=20000) await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
+      const allowance=hostedAllowance(runtime.config,wid,1);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
+      const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT ${allowance}`)).rows[0]['QUERY PLAN'] as Json[];
+      const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
+      assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
+      assert.equal(all.find(n=>n['Relation Name']==='hosted_usage_hourly')?.['Actual Rows'],24);
+      assert.ok(plan[0]['Execution Time']<100,`Allowance took ${plan[0]['Execution Time']}ms for ${total} messages.`);
+      t.diagnostic(`Allowance on ${total} envelopes: 24 hourly rows, ${plan[0]['Execution Time']} ms.`);
+      await db.query(`UPDATE sending_emails SET status='rejected' WHERE id=$1`,[wid+'1']);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
+      await db.query(`UPDATE sending_emails SET status='rejected',provider_id='accepted-before-rejection' WHERE id=$1`,[wid+'2']);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
     });
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {
