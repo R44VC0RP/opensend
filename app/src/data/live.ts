@@ -77,7 +77,7 @@ const mapDomain = (r: Json): Domain => {
   return { ...r, regionId: r.region, status: r.ready ? 'verified' : r.verificationStatus === 'FAILED' ? 'issue' : 'pending', dkimStatus, mailFromStatus, sending: r.sending ?? (r.ready ? 'verified' : 'pending'), receiving: r.receiving ?? 'pending', records: (r.dns ?? []).map((d: Json, i: number) => ({ ...d, id: String(i), value: d.priority === undefined ? d.value : `${d.priority} ${d.value}`, status: recordStatus(d) })) } as Domain
 }
 const mapDelivery = (r: Json): WebhookDelivery => ({ id: r.id, at: r.createdAt, regionId: r.payload.region ?? 'Workspace', event: r.payload.type, response: r.lastStatusCode, attempts: r.attemptCount, status: r.status, payload: r.payload })
-const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Signing secret is hidden', deliveries: [] })
+const mapWebhook = (r: Json): Webhook => ({ id: r.id, name: r.description || r.url, url: r.url, regionIds: r.regions ?? 'all', events: r.eventTypes, status: r.paused ? 'paused' : 'active', secretHint: 'Signing secret is hidden', headers: r.headers ?? [], deliveries: [] })
 function regionCatalog(value: unknown): RegionCatalog {
   const record = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
   const nullableString = (v: unknown) => v === null || typeof v === 'string'
@@ -285,7 +285,7 @@ export function createLiveApi(): OpenSendApi {
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
       get: async (id, signal) => { const [row, history] = await Promise.all([call(`/webhooks/${idPath(id)}`, 'GET', undefined, signal), deliveries(id)]); return {...mapWebhook(row), deliveries: history.items, nextCursor: history.nextCursor} },
-      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url, regions: input.regionIds === 'all' ? null : input.regionIds, eventTypes: input.events}, signal)),
+      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url, regions: input.regionIds === 'all' ? null : input.regionIds, eventTypes: input.events, headers: input.headers}, signal)),
       setStatus: async (id, status, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', {paused: status === 'paused'}, signal)),
       test: async (id, signal) => { const queued = await call(`/webhooks/${idPath(id)}/test`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(queued.id)}`, 'GET', undefined, signal)) },
       retry: async (id, deliveryId, signal) => { await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}/retry`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}`, 'GET', undefined, signal)) },

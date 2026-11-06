@@ -53,6 +53,29 @@
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
+/* Webhook headers: hairline rows like aliases; values stay masked unless shown, and narrow containers stack each row. */
+.webhook-headers { container: webhook-headers / inline-size; }
+.webhook-headers__current, .webhook-headers__rows { max-width: 640px; margin: 0; padding: 0; list-style: none; }
+.webhook-headers__current { border-top: 1px solid var(--color-border-muted); }
+.webhook-headers__current li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--space-12); min-width: 0; padding-block: var(--space-6); border-bottom: 1px solid var(--color-border-muted); line-height: var(--leading-sm); }
+.webhook-headers__current code { max-width: 100%; overflow-wrap: break-word; }
+.webhook-headers__current code.muted { flex-shrink: 0; }
+.webhook-headers__rows { display: flex; flex-direction: column; gap: var(--space-8); }
+.webhook-header-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto; grid-template-areas: "name value remove" "error error error"; align-items: center; gap: var(--space-4) var(--space-8); }
+.webhook-header-row__name { grid-area: name; }
+.webhook-header-row__value { grid-area: value; position: relative; min-width: 0; }
+.webhook-header-row__value .ui-input { padding-inline-end: var(--space-32); }
+.webhook-header-row__value .ui-icon-button { position: absolute; inset-block: 0; inset-inline-end: 2px; margin-block: auto; }
+.webhook-header-row > .ui-icon-button { grid-area: remove; }
+.webhook-header-row__error { grid-area: error; }
+.webhook-headers__actions:empty { display: none; }
+.webhook-headers__actions > .ui-button--ghost:first-child { margin-inline-start: -9px; }
+.webhook-header-names { display: flex; gap: var(--space-6); min-width: 0; white-space: nowrap; }
+.webhook-header-names > :first-child { overflow: hidden; text-overflow: ellipsis; }
+@container webhook-headers (max-width: 420px) {
+  .webhook-headers__rows { gap: var(--space-12); }
+  .webhook-header-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name remove" "value value" "error error"; row-gap: var(--space-8); }
+}
 .settings-issues { margin: 0; padding-left: var(--space-20); }
 .settings-issues li + li { margin-top: var(--space-6); }
 .settings-job-state { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); font-size: var(--text-xs); }

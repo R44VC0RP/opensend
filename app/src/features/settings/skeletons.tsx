@@ -3,6 +3,7 @@ import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
 import './api-keys.css'
+import { HEADERS_HINT } from './webhook-headers'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 export const settingsColumns = {
@@ -37,9 +38,10 @@ export const settingsColumns = {
     {key: 'wired', label: 'Connection', width: '12%'},
   ],
   webhooks: [
-    { key: 'name', label: 'Name / Endpoint URL', width: '44%', skeleton: twoLines },
-    { key: 'scope', label: 'Region scope', width: '22%' },
-    { key: 'events', label: 'Events', width: '14%' },
+    { key: 'name', label: 'Name / Endpoint URL', width: '38%', skeleton: twoLines },
+    { key: 'scope', label: 'Region scope', width: '18%' },
+    { key: 'events', label: 'Events', width: '10%' },
+    { key: 'headers', label: 'Headers', width: '18%' },
     { key: 'status', label: 'Status' },
   ],
   deliveries: [
@@ -78,6 +80,7 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
     <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton />{!selectedRegions && <div className="ui-field__hint">{isNew ? 'Includes future regions.' : <SkeletonText width={350} lineHeight={18} />}</div>}</div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>
     <div className="stack"><div>Events</div><div className="settings-choices">{['Send', 'Delivered', 'Bounced', 'Complaint', 'Rejected', 'Delivery delayed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
+    <div className="ui-field webhook-headers"><span className="ui-field__label">Headers</span><div className="ui-field__hint">{HEADERS_HINT}</div><div className="webhook-headers__actions"><Skeleton width={isNew ? 100 : 124} height={24} /></div></div>
   </div>
 }
 

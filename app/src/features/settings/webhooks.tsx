@@ -9,6 +9,7 @@ import { date, label, number, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
 import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './skeletons'
+import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...events] }
@@ -23,7 +24,7 @@ function validate(input: WebhookInput) {
   return errors
 }
 
-function EndpointFields({ input, onChange, regions, errors, apiError, disabled }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean }) {
+function EndpointFields({ input, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
@@ -32,6 +33,7 @@ function EndpointFields({ input, onChange, regions, errors, apiError, disabled }
     <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
     {input.regionIds !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = input.regionIds !== 'all' && input.regionIds.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: next ? [...selected, region.region] : selected.filter(id => id !== region.region) }) }} /> })}</div>}</div>
     <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={eventLabel(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
+    <WebhookHeadersField current={headers.current} draft={headers.draft} onChange={headers.onChange} errors={errors} apiError={apiError} disabled={disabled} />
   </div>
 }
 
@@ -46,7 +48,8 @@ export function WebhooksSection() {
       { ...settingsColumns.webhooks[0], render: webhook => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
       { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
       { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(eventLabel).join(', ')}>{number(webhook.events.length)}</span> },
-      { ...settingsColumns.webhooks[3], render: webhook => <StatusBadge status={label(webhook.status)} /> },
+      { ...settingsColumns.webhooks[3], render: webhook => <HeaderNames headers={webhook.headers} /> },
+      { ...settingsColumns.webhooks[4], render: webhook => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
   </section>
@@ -57,19 +60,20 @@ function NewWebhook() {
   const regions = useRegionCatalog()
   const save = useApiMutation((api, input: WebhookInput) => api.webhooks.save(input), 'Webhook endpoint created')
   const [input, setInput] = useState<WebhookInput>(blankEndpoint)
+  const [headers, setHeaders] = useState<HeaderDraft>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const nextErrors = validate(input)
+    const nextErrors = { ...validate(input), ...headerDraftErrors(headers) }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    try { const endpoint = await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim() }); navigate(`/settings/webhooks/${endpoint.id}`) } catch { /* Shown inline. */ }
+    try { const endpoint = await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers) }); navigate(`/settings/webhooks/${endpoint.id}`) } catch { /* Shown inline. */ }
   }
   return <div className="stack settings-page">
     <PageHeader title="Add webhook" backTo="/settings#webhooks" />
     {regions.isPending ? <WebhookBodySkeleton isNew /> : regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
-      <EndpointFields input={input} onChange={setInput} regions={regions.data.data} errors={errors} apiError={save.error} disabled={save.isPending} />
+      <EndpointFields input={input} onChange={setInput} regions={regions.data.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
       <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add endpoint</Button></div>
     </form>}
   </div>
@@ -86,6 +90,7 @@ function ExistingWebhook({ id }: { id: string }) {
 function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: RegionCatalogEntry[] }) {
   const navigate = useNavigate()
   const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: webhook.url, regionIds: webhook.regionIds, events: webhook.events })
+  const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [action, setAction] = useState<'pause' | 'resume' | 'rotate' | 'delete' | null>(null)
   const [secret, setSecret] = useState<string | null>(null)
@@ -112,12 +117,14 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     catch (error) { setHistoryError(error) }
     finally { setHistoryBusy(false) }
   }
+  // The saved response is newer than the cached endpoint until the refetch lands.
+  const currentHeaders = save.data?.headers ?? webhook.headers
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const nextErrors = validate(input)
+    const nextErrors = { ...validate(input), ...headerDraftErrors(headers) }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length) return
-    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim() }) } catch { /* Shown inline. */ }
+    try { await save.mutateAsync({ ...input, name: input.name.trim(), url: input.url.trim(), headers: headerPayload(headers, currentHeaders) }); setHeaders(null) } catch { /* Shown inline. */ }
   }
   async function confirm() {
     if (action === 'pause' || action === 'resume') {await status.mutateAsync({ id: webhook.id, status: action === 'pause' ? 'paused' : 'active' }); setHistory(null); historyPagination.reset()}
@@ -128,7 +135,7 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
   const actionDescription = action === 'rotate' ? 'The current secret stops working. The new one is shown once.' : action === 'delete' ? 'Future deliveries to this endpoint stop.' : action === 'pause' ? 'Stops deliveries to this endpoint.' : 'Resumes deliveries to this endpoint.'
   return <div className="stack settings-page">
     <PageHeader title={webhook.name} backTo="/settings#webhooks" actions={<><StatusBadge status={label(webhook.status)} /><Button disabled={pending} onClick={() => setAction(webhook.status === 'active' ? 'pause' : 'resume')}>{webhook.status === 'active' ? 'Pause' : 'Resume'}</Button><Button variant="primary" form="edit-webhook" type="submit" loading={save.isPending} disabled={pending}>Save changes</Button></>} />
-    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} /></form>
+    <form id="edit-webhook" className="stack" onSubmit={submit} noValidate><MutationError error={save.error} /><EndpointFields input={input} onChange={setInput} regions={regions} errors={errors} apiError={save.error} disabled={pending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} /></form>
     <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
