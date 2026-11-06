@@ -900,6 +900,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
           const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
           let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false, existingMx=false;
+          let deployedVersion:number|undefined;
           const requests:string[]=[];
           dc.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
             const url=new URL(String(input)); requests.push(url.href);
@@ -907,6 +908,8 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const q=url.searchParams.get('name'), type=url.searchParams.get('type');
               if(type==='MX') return Response.json({Status:0,Answer:existingMx && q===name?[{name:q,type:15,data:'10 existing.invalid.'}]:[]});
               if(q===`_opensend.${name}`) return Response.json({Status:3});
+              if(q===`_dmarc.${name}`) return Response.json({Status:3});
+              if(q===`_dmarc.${zone}`) return Response.json({Status:0,Answer:[{name:q,type:16,data:'v=DMARC1; p=reject'}]});
               assert.equal(type,'TXT'); assert.equal(init?.redirect,'manual');
               if(q===`_domainconnect.${name}`) return Response.json({Status:3,Authority:[{name:zone,type:6,data:'ns.invalid. hostmaster.invalid. 1 2 3 4 5'}]});
               assert.equal(q,`_domainconnect.${zone}`);
@@ -914,7 +917,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             }
             assert.equal(init?.redirect,'manual');
             if(url.href===`${settingsHost}/v2/${zone}/settings`) return Response.json({providerId,providerName,urlAPI:api,urlSyncUX:sync});
-            assert.equal(url.href,api+providerPath); return new Response(null,{status:supportStatus});
+            assert.equal(url.href,api+providerPath); return deployedVersion ? Response.json({version:deployedVersion},{status:supportStatus}) : new Response(null,{status:supportStatus});
           });
           const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
           dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
@@ -931,6 +934,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             await assert.rejects(operationJobs['domain.verify']!(runtime,vjob.payload,{id:vjob.id,attempts:1,workspaceId:b.org.id}),JobDeferred);
           };
           await checkMx();
+          const inherited=ok(await local('GET',detail,undefined,b.cookie));
+          assert.equal(inherited.dmarc.status,'reject'); assert.equal(inherited.dmarc.source,zone,'The registrable parent is not co.uk.');
+          assert.ok(!inherited.dns.some((r:Json)=>r.purpose==='dmarc'));
           assert.deepEqual((await getSetup('?groups=receiving,receivingReply')).groups,['receiving'],'An empty domain needs only the MX at @.');
           existingMx=true; await checkMx();
           // Do not let this extra fixture take the next scenario's account-wide SES slot.
@@ -1007,10 +1013,25 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           settingsHost=api='https://api.domainconnect.ionos.com'; sync='https://domainconnect.ionos.de/sync'; providerId='ionos.com'; providerName='IONOS'; alias=true;
           clock+=301_000; assert.equal(new URL((await getSetup()).applyUrl).origin,'https://domainconnect.ionos.de');
           api='https://unexpected.invalid'; clock+=301_000; assert.equal((await getSetup()).applyUrl,null); assert.ok(!requests.some(r=>r.startsWith(api)),'An advertised URL outside the provider allowlist is never requested.');
+          api=settingsHost;
+          for(const version of [1,2]) {
+            deployedVersion=version; clock+=301_000;
+            const signed=new URL((await getSetup()).applyUrl).searchParams;
+            assert.equal(signed.get('region'),region); assert.equal(signed.get('inboundRegion'),version===2?region:null);
+            assert.ok(!signed.get('groupId')!.includes('tracking'));
+          }
+          const {pendingGroups}=await import('./src/domain-connect.js');
+          const split={...manual,region:'us-east-1',dns:manual.dns.map((r:Json)=>r.type==='MX'?{...r,value:r.purpose==='receiving'?'inbound-smtp.us-east-2.amazonaws.com':'feedback-smtp.us-east-1.amazonses.com'}:r)};
+          for(const version of [1,undefined,2]) {
+            const selected=pendingGroups(split,true,true,['receivingReply','mailfrom'],version);
+            assert.deepEqual(selected,version===2?{groups:['receivingReply','mailfrom'],vars:{inboundRegion:'us-east-2',region:'us-east-1'}}:{groups:['mailfrom'],vars:{region:'us-east-1'}});
+          }
+          assert.ok(!template.records.some((r:Json)=>r.host==='_dmarc'));
         });
         // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {
           let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>();
+          const policies=new Map<string,string[]>(); let dmarcQueries=0,dmarcFailure=false;
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
             const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
             if (fault===url.searchParams.get('type')+'-servfail') return Response.json({Status:2});
@@ -1021,6 +1042,11 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               return Response.json({Status:0,Answer:host?[{name,type:15,data:`10 ${host}.`},...(fault==='mixed' && activeMx.has(name)?[{name,type:15,data:'20 other.invalid.'}]:[])]:[]});
             }
             assert.equal(url.searchParams.get('type'),'TXT');
+            const q=url.searchParams.get('name')!;
+            if(q.startsWith('_dmarc.')) {
+              dmarcQueries++; const records=policies.get(q.slice(7));
+              return Response.json(dmarcFailure ? {Status:2} : records ? {Status:0,Answer:records.map(data=>({name:q,type:16,data}))} : {Status:3});
+            }
             lookups++; return Response.json(answer ? { Status:0, Answer:[{ name:`${url.searchParams.get('name')}.`, type:16, data:JSON.stringify(answer) }] } : {Status:3});
           });
           const before = calls.length;
@@ -1076,7 +1102,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const pace=()=>pool.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
           const identity=identities.get(`${platform}:${domain}`)!, dkim=identity.DkimAttributes;
           identity.DkimAttributes={...dkim,Status:'PENDING'}; answer=proof.value;
-          await assert.rejects(check(40),JobDeferred); assert.equal(lookups,0,'Even a real poll must not ask for TXT before DKIM succeeds.');
+          await assert.rejects(check(40),JobDeferred); assert.equal(lookups,0,'Even a real poll must not ask for ownership TXT before DKIM succeeds.');
 
           const park=()=>pool.query("UPDATE jobs SET created_at=now()-interval '21 seconds',available_at=now()+interval '16 minutes',payload=payload||'{\"poll\":40}'::jsonb WHERE id=$1",[job.id]);
           await park(); const firstWake=wakes;
@@ -1129,6 +1155,41 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             error(race.find(r=>r.status===429)!,429,'SEND_LIMIT_REACHED');
             await pool.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND id=$2',[b.org.id,race.find(r=>r.status===202)!.body.id]);
           } finally { runtime.config.hostedSendCaps.firstWeek = firstWeek; }
+          await dt.test('DMARC policies, inheritance and alignment are cached; the opt-in Hosted gate rejects only bulk',async()=>{
+            const from=`bulk@${domain}`, originalMailFrom=identity.MailFromAttributes, originalFlag=runtime.config.requireDmarcForBulk;
+            const inspect=async()=>ok(await local('GET',detail,undefined,b.cookie));
+            const observe=async()=>{await pace();await check().catch(e=>assert.ok(e instanceof JobDeferred));return inspect();};
+            const marketing=(host=domain)=>local('POST','/v1/emails/send',mail({region,from:`bulk@${host}`,kind:'marketing'}),undefined,{authorization:`Bearer ${key}`});
+            const accepted=async(result:Awaited<ReturnType<typeof local>>)=>{const {id}=ok(result,202);await pool.query('DELETE FROM sending_emails WHERE workspace_id=$1 AND id=$2',[b.org.id,id]);};
+            const recommended=(d:Json)=>d.dns.filter((r:Json)=>r.purpose==='dmarc').map((r:Json)=>r.value);
+            try {
+              const {loadConfig}=await import('./src/config.js'), env={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:origin,MULTI_TENANT:'true'};
+              assert.equal(loadConfig(env).requireDmarcForBulk,false);assert.equal(loadConfig({...env,MX_REQUIRE_DMARC_FOR_BULK:'true'}).requireDmarcForBulk,true);
+              assert.equal(checked.dmarc.status,'missing');assert.deepEqual(recommended(checked),['v=DMARC1; p=none']);
+              await accepted(await marketing());runtime.config.requireDmarcForBulk=true;
+              const count=dmarcQueries; error(await marketing(),409,'BULK_DMARC_REQUIRED');await accepted(await send(from));assert.equal(dmarcQueries,count);
+              const list=ok(await local('POST','/v1/lists',{name:'DMARC fixture'},b.cookie),201);
+              const draft=ok(await local('POST','/v1/campaigns',{name:'DMARC fixture',region,from,subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}},b.cookie),201);
+              error(await local('POST',`/v1/campaigns/${draft.id}/send`,{revision:draft.revision},b.cookie),409,'BULK_DMARC_REQUIRED');
+              policies.set('invalid',['v=DMARC1; p=reject; psd=y']);const protectedSuffix=await observe();
+              assert.equal(protectedSuffix.dmarc,null);assert.deepEqual(recommended(protectedSuffix),[]);policies.delete('invalid');
+              policies.set(root,['"v=DMARC1; p=reject; sp=quarantine; " "aspf=s; adkim=s"']);
+              identity.MailFromAttributes={MailFromDomain:`email.${domain}`,MailFromDomainStatus:'SUCCESS'};
+              let d=await observe();assert.equal(d.dmarc.status,'quarantine');assert.equal(d.dmarc.source,root);assert.equal(d.dmarc.aspf,'s');
+              assert.deepEqual(d.dmarc.alignment,{dkim:true,spf:false});assert.deepEqual(recommended(d),[]);await accepted(await marketing());
+              error(await marketing(`sub.${domain}`),409,'BULK_DMARC_REQUIRED'); // A parent check cannot establish the exact From policy.
+              policies.set(domain,['v=DMARC1; p=none']);d=await observe();assert.equal(d.dmarc.source,domain);assert.equal(d.dmarc.status,'none');assert.deepEqual(d.dmarc.alignment,{dkim:true,spf:true});await accepted(await marketing());
+              policies.set(domain,['v=DMARC1; p=reject']);d=await observe();assert.equal(d.dmarc.status,'reject');assert.deepEqual(recommended(d),[]);
+              for(const records of [['v=DMARC1; p=bogus'],['v=DMARC1; p=none; p=reject'],['v=DMARC1; p=reject','v=DMARC1; p=none'],['v=DMARC1; p=reject; adkim=x']]) {
+                policies.set(domain,records);d=await observe();assert.equal(d.dmarc.status,'invalid');assert.deepEqual(recommended(d),[]);error(await marketing(),409,'BULK_DMARC_REQUIRED');
+              }
+              identity.DkimAttributes={...dkim,SigningEnabled:false};policies.set(domain,['v=DMARC1; p=reject']);d=await observe();
+              assert.deepEqual(d.dmarc.alignment,{dkim:false,spf:true});await accepted(await marketing());
+              identity.MailFromAttributes={MailFromDomain:`email.${domain}`,MailFromDomainStatus:'FAILED'};d=await observe();assert.deepEqual(d.dmarc.alignment,{dkim:false,spf:false});error(await marketing(),409,'BULK_DMARC_REQUIRED');
+              dmarcFailure=true; d=await observe();assert.equal(d.dmarc,null);assert.deepEqual(recommended(d),[]);error(await marketing(),409,'BULK_DMARC_REQUIRED');
+              const staleCount=dmarcQueries;assert.equal((await inspect()).dmarc,null); assert.equal(dmarcQueries,staleCount);
+            } finally {runtime.config.requireDmarcForBulk=originalFlag;policies.clear();dmarcFailure=false;identity.MailFromAttributes=originalMailFrom;identity.DkimAttributes=dkim;await observe();}
+          });
           await dt.test('MX inbound routes only MX-verified customer hosts, independently of DKIM, and splits private Bcc',async it=>{
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');
             const otherHost=`${unique('receiving')}.invalid`,blind=`private@${otherHost}`,custom=`support@reply.${domain}`,dropped='drop@unknown.invalid';
@@ -1146,7 +1207,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               const mxCheck=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
             const awsBefore=calls.length,txtBefore=lookups;
             activeMx.add(mx.name);await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
-            assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly MX-only job must use neither SES nor TXT.');
+            assert.equal(calls.length,awsBefore);assert.equal(lookups,txtBefore,'Hourly DNS upkeep must use neither SES nor ownership TXT.');
             const stable=ok(await local('GET',detail,undefined,b.cookie));
             fault='mixed';for(let i=0;i<3;i++)await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified','Additional MX records are not proof that the verified record disappeared.');fault='';await mxCheck();
             for (fault of ['MX-timeout','MX-503','TXT-servfail','TXT-503']) {
@@ -1391,6 +1452,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               runtime.db=save;
               const key=ok(await local('POST','/v1/api-keys',{name:'Import probe',permissions:['send']},a.cookie),201).secret;
               ok(await local('POST','/v1/emails/send',mail({region,from:`hello@${imported}`}),undefined,{authorization:`Bearer ${key}`}),202);
+              const previous=runtime.config.requireDmarcForBulk;runtime.config.requireDmarcForBulk=true;
+              try {ok(await local('POST','/v1/emails/send',mail({region,kind:'marketing',from:`hello@${imported}`}),undefined,{authorization:`Bearer ${key}`}),202);}
+              finally {runtime.config.requireDmarcForBulk=previous;}
               for(const name of [reserved,'mail.'+reserved])error(await local('POST','/v1/emails/send',mail({region,from:`hello@${name}`}),undefined,{authorization:`Bearer ${key}`}),403,'SENDER_DOMAIN_NOT_VERIFIED');
               throw rollback;
             }),e=>e===rollback);
@@ -4466,6 +4530,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await send(child),403,'SENDER_DOMAIN_NOT_VERIFIED'); // A verified parent cannot override an unready child.
       await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE token=$1`,[reserved.token]);
       const before=(await db.query(`SELECT count(*) FROM sending_emails WHERE workspace_id=$1`,[wid])).rows;
+      runtime.config.requireDmarcForBulk=true;
+      try {error(await batch(parent,{...child,kind:'marketing'}),409,'BULK_DMARC_REQUIRED');}
+      finally {runtime.config.requireDmarcForBulk=false;}
+      assert.deepEqual((await db.query(`SELECT count(*) FROM sending_emails WHERE workspace_id=$1`,[wid])).rows,before,'A DMARC rejection rolls back the entire regional batch.');
       error(await batch(parent,{...child,region:oh}),422,'SENDER_REGION_MISMATCH');
       assert.deepEqual((await db.query(`SELECT count(*) FROM sending_emails WHERE workspace_id=$1`,[wid])).rows,before);
       const mixed=ok(await batch(parent,child),202).data;

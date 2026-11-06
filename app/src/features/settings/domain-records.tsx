@@ -12,13 +12,13 @@ import './settings.css'
 import './domain-records.css'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
-export function useDomain(id: string) {
+export function useDomain(id: string, recheckUntil = 0) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
     queryKey: ['opensend', api.mode, 'domain', id],
     queryFn: ({ signal }) => api.domains.get(id, signal),
-    refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' ? multiTenant ? 3000 : 60_000 : false,
+    refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: multiTenant ? 'always' : false,
   })
@@ -35,7 +35,7 @@ export type DnsSetup = { provider: { id: string; name: string } | null; applyUrl
 export function useDnsSetup(domain: Domain | undefined) {
   const api = useApi()
   const { multiTenant, canAdminister } = useWorkspaceAccess()
-  const needed = !!domain && domain.records.some(record => record.status !== 'verified')
+  const needed = !!domain && domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')
   const enabled = api.mode !== 'demo' && multiTenant && canAdminister && needed
   const query = useQuery({
     queryKey: ['opensend', api.mode, 'domain', domain?.id, 'dns-setup'],
@@ -84,13 +84,27 @@ export function zoneLines(records: DnsRecord[]) {
   }).join('\n')
 }
 
-export function DnsRecordTable({ domain, records }: { domain: string; records: DnsRecord[] }) {
+export function DnsRecordTable({ domain, records, status }: { domain: string; records: DnsRecord[]; status?: string }) {
   return <DataTable className="domain-records" rows={records} rowKey={record => record.id} columns={[
     { ...settingsColumns.dns[0], render: record => record.type },
     { ...settingsColumns.dns[1], width: '44%', render: record => <div className="settings-copy-cell"><code title={record.name}>{relativeHost(record.name, domain)}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div> },
-    { ...settingsColumns.dns[2], render: record => <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> },
-    { key: 'status', label: 'Status', width: 112, render: record => <StatusBadge status={record.status === 'verified' ? 'Verified' : 'Pending'} /> },
+    { ...settingsColumns.dns[2], render: record => record.value ? <div className="settings-copy-cell"><code title={record.value}>{record.value}</code><CopyButton value={record.value} label={`Copy ${record.type} value`} /></div> : '—' },
+    { key: 'status', label: 'Status', width: 112, render: record => <StatusBadge status={status ?? (record.status === 'verified' ? 'Verified' : 'Pending')} /> },
   ]} />
+}
+
+function DmarcRecords({ domain }: { domain: Domain }) {
+  const policy = domain.dmarc, recommendation = recordsFor(domain, 'dmarc')[0]
+  const mode = (value: 's' | 'r') => value === 's' ? 'strict' : 'relaxed'
+  const alignment = (aligned: boolean) => aligned ? 'aligned' : 'not aligned'
+  // One table row in every state, including the first background check. Never present an
+  // observed or inherited policy as an instruction to publish a new TXT record.
+  const row: DnsRecord = recommendation ?? { id: 'policy', type: 'TXT', name: `_dmarc.${policy?.source ?? domain.name}`, value: policy?.record ?? '', status: 'not_checked' }
+  return <div className="stack domain-group">
+    <div className="ui-section-header"><div className="domain-group-title"><h3>DMARC <span className="muted">· {policy?.status ?? 'not checked'}</span></h3>
+      <p className="muted dmarc-alignment"><span>DKIM {policy ? `${alignment(policy.alignment.dkim)} (${mode(policy.adkim)})` : 'not checked'}</span> <span>SPF {policy ? `${alignment(policy.alignment.spf)} (${mode(policy.aspf)})` : 'not checked'}</span></p></div></div>
+    <DnsRecordTable domain={domain.name} records={[row]} status={recommendation ? 'Recommended' : !policy ? 'Not checked' : policy.status === 'invalid' ? 'Invalid' : policy.source && policy.source !== domain.name ? 'Inherited' : policy.record ? 'Published' : 'Missing'} />
+  </div>
 }
 
 function RecordGroup({ title, optional = false, description, notes = [], domain, records }: { title: string; optional?: boolean; description: string; notes?: string[]; domain: string; records: DnsRecord[] }) {
@@ -144,7 +158,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null }:
   const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
   const receivingVerified = (domain.receiving ?? (allVerified(receiving) ? 'verified' : 'pending')) === 'verified'
   // Stays in place (invisible) once every record verifies, so nothing below moves.
-  const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.status !== 'verified')} />
+  const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')} />
   if (guided) return <section className="dns-guided" aria-label="DNS records">
     {connect}
     <div className="dns-guided-bar"><h2>DNS records</h2>{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>
@@ -160,5 +174,6 @@ export function DomainRecords({ domain, actions, guided = false, setup = null }:
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || 'DNS records are not available yet.'}</p>}
     {sending.length > 0 && <RecordGroup title="Sending" description="Signs your mail and proves the domain is yours." domain={domain.name} records={sending} />}
     {receiving.length > 0 && <RecordGroup title="Receiving" optional description="Add to receive mail on this domain." notes={notes} domain={domain.name} records={receiving} />}
+    <DmarcRecords domain={domain} />
   </section>
 }

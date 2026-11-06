@@ -12,6 +12,8 @@ import { AudienceSpec, countCampaignAudience, snapshotCampaignAudience } from '.
 import { getMcpGrantActor } from './mcp-auth.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 import { checkRoute, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
+import { dmarcView } from './dmarc.js';
+import type { IdentityFacts } from './states.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { assertHostedAllowance, hostedAllowance, hostedCost, type HostedAllowance } from './hosted-sending.js';
@@ -244,23 +246,37 @@ function verifiedSender(a: Actor, from: string, verified: boolean) {
   keySender(a, from);
   if (!verified) throw unverifiedSender();
 }
+// Check the exact From claim, not its nearest verified parent: a child can publish
+// a conflicting policy or strict alignment. Batch all indexed lookups in the admission statement.
+type BulkFacts=Record<string,IdentityFacts|null>|null;
+function bulkColumns(runtime:Runtime,wid:string,hosts:string[]) {
+  return runtime.config.multiTenant && runtime.config.requireDmarcForBulk && hosts.length ? sql`,(SELECT jsonb_object_agg(dc.name,dc.identity - 'mx' - 'note') FROM domain_claims dc
+    WHERE dc.workspace_id=${wid} AND dc.name IN (SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb)) AND dc.sending_state IN ('verified','lost')) AS bulk` : sql``;
+}
+function checkBulk(runtime:Runtime,kind:string|undefined,marketing:boolean,host:string,facts?:BulkFacts) {
+  if(!runtime.config.requireDmarcForBulk || !marketing || kind!=='shared') return;
+  const identity=facts?.[host], policy=identity && dmarcView(identity.dmarc,identity.ses);
+  if(!policy || policy.status==='missing' || policy.status==='invalid' || !(policy.alignment.dkim || policy.alignment.spf))
+    throw new ApiError(409,'BULK_DMARC_REQUIRED',`Hosted marketing requires a valid DMARC policy and aligned DKIM or SPF. Add or recheck the exact From domain ${host}.`,'from');
+}
 // Reuse the existing region-lock round trip for non-batch admission (including mailbox replies).
-async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string):Promise<{region:string;binding?:SendingBinding}> {
+async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: string, requested?: string, marketing=false):Promise<{region:string;binding?:SendingBinding}> {
   if (!runtime.config.multiTenant) {
     const selected = await assertRegionEnabled(db, a.workspaceId, requested);
     keySender(a, from); return {region:selected};
   }
+  const host=from.split('@')[1]!.toLowerCase(), bulk=bulkColumns(runtime,a.workspaceId,marketing?[host]:[]);
   if (regionalSending(runtime)) {
     keySender(a,from);
-    const host=from.split('@')[1]!.toLowerCase();
-    const row=(await db.execute<SenderRoute>(sql`SELECT r.* FROM ses_installation_settings s CROSS JOIN LATERAL regional_sender(s.workspace_id,${host},${isSimulatedSes(runtime)}) r WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
+    const row=(await db.execute<SenderRoute & {bulk?:BulkFacts}>(sql`SELECT r.* ${bulk} FROM ses_installation_settings s CROSS JOIN LATERAL regional_sender(s.workspace_id,${host},${isSimulatedSes(runtime)}) r WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
     const route=checkRoute(runtime,row,requested);
+    checkBulk(runtime,route.connection!.kind,marketing,host,row?.bulk);
     a.dispatchAccount={aws_account_id:route.connection!.aws_account_id,kind:route.connection!.kind};
     return {region:route.region,binding:route.binding};
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
-  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
-    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
+  const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; bulk?:BulkFacts; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
+    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${host}::text`)} AS verified ${bulk}
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
@@ -269,6 +285,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   if (!state.aws_account_id) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
   if (state.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', state.pause_reason);
   assertTenantReady(state, isSimulatedSes(runtime));
+  checkBulk(runtime,state.kind,marketing,host,state.bulk);
   a.dispatchAccount = { aws_account_id: state.aws_account_id, kind: state.kind };
   return {region:state.region};
 }
@@ -662,10 +679,12 @@ function checkCapacity(state: AdmissionState, cost: number, marketing: number) {
   assertPending(state);
   if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
 }
-function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest) {
+function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest, bulk?:BulkFacts) {
+  const host=mail.from.split('@')[1]!.toLowerCase();
   if (regionalSending(runtime)) {
     keySender(a,mail.from);
-    const route=checkRoute(runtime,state.routes?.[mail.from.split('@')[1]!.toLowerCase()],mail.region);
+    const route=checkRoute(runtime,state.routes?.[host],mail.region);
+    checkBulk(runtime,route.connection!.kind,mail.kind==='marketing',host,bulk);
     a.dispatchAccount={aws_account_id:route.connection!.aws_account_id,kind:route.connection!.kind};
     return route.region;
   }
@@ -675,6 +694,7 @@ function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: Se
     verifiedSender(a, mail.from, state.verified.includes(`${mail.from.split('@')[1]!.toLowerCase()}:${region}`));
     if (state.connection?.region !== region) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
     assertTenantReady(state.connection, isSimulatedSes(runtime));
+    checkBulk(runtime,state.connection.kind,mail.kind==='marketing',host,bulk);
   }
   return region;
 }
@@ -684,6 +704,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
   const receipt = batch ? { data } : data[0]!;
   const mx = c.env.config.multiTenant, simulated = isSimulatedSes(c.env);
   const regional=regionalSending(c.env), hosts=mails.map(m=>m.from.split('@')[1]!.toLowerCase());
+  const bulk=bulkColumns(c.env,a.workspaceId,c.env.config.requireDmarcForBulk ? hosts.filter((_,i)=>mails[i]!.kind==='marketing') : []);
   let cost = 0, marketing = 0;
   if (mx && !simulated) for (const mail of mails) {
     const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing') marketing += n;
@@ -707,7 +728,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     return c.env.db.transaction(async db => {
       // One statement after BEGIN. No row or idempotency receipt becomes visible until the
       // ordinary API policy checks below succeed and COMMIT; errors roll back the whole batch.
-      const {rows:[result]} = await db.execute<{inserted: number; state: AdmissionState | {previous: typeof receipt | null; hash: string}}>(sql`WITH ${regional ? sql`base` : sql`state`} AS MATERIALIZED (
+      const {rows:[result]} = await db.execute<{inserted: number; bulk?:BulkFacts; state: AdmissionState | {previous: typeof receipt | null; hash: string}}>(sql`WITH ${regional ? sql`base` : sql`state`} AS MATERIALIZED (
         SELECT direct_admission_state(${a.workspaceId},${a.keyId},${c.req.path},${key ?? null},${hash},${JSON.stringify(receipt)}::jsonb,
           ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region,kind:m.kind})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
       ) ${regional ? sql`,state AS MATERIALIZED (SELECT CASE WHEN s ? 'previous' THEN s ELSE s||jsonb_build_object('routes',${senderRoutes(c.env,a.workspaceId,hosts)},'quota',(SELECT max(l.max_24_hour_send) FROM regional_workspace_limits l JOIN provider_connections pc USING(workspace_id) WHERE l.workspace_id=${a.workspaceId} AND pc.kind='byo')) END AS s FROM base)` : sql``}, submitted AS (
@@ -724,7 +745,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email) SELECT ${a.workspaceId},hash,email FROM submitted WHERE hash IS NOT NULL),
       inserted AS (INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
         SELECT id,${a.workspaceId},${a.keyId},snapshot->>'region',snapshot->>'from',snapshot->'to',snapshot->'cc',snapshot->'bcc',snapshot->>'subject',snapshot,${simulated} FROM submitted RETURNING 1)
-      SELECT s AS state,(SELECT count(*)::int FROM inserted) AS inserted FROM state`);
+       SELECT s AS state,(SELECT count(*)::int FROM inserted) AS inserted ${bulk} FROM state`);
       const state = result!.state;
       if ('previous' in state) {
         if (state.hash !== hash) throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used with a different request.');
@@ -735,7 +756,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       const locked = new Map(state.assets?.map(row => [row.id,row]));
       let bytes = 0;
       for (const [i,mail] of mails.entries()) {
-        const region = checkSender(c.env, a, state, mail), row = rows[i];
+        const region = checkSender(c.env, a, state, mail,result!.bulk), row = rows[i];
         const attached = distinctAttachmentIds(mail.attachments).flatMap(id => locked.get(id) ?? []);
         validateAttachmentRows(mail.attachments, attached);
         if (!row) throw prepError;
@@ -769,16 +790,16 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = mx && !regional ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection']}>(sql`
+    const state = (await db.execute<AdmissionState & {ready:string[];connection:SenderRoute['connection'];bulk?:BulkFacts}>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
-      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(c.env,a.workspaceId,hosts)} AS routes` : sql``}
+      SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx && !regional ? sql`to_jsonb(pc)` : sql`NULL`} AS connection ${regional ? sql`,${senderRoutes(c.env,a.workspaceId,hosts)} AS routes` : sql``} ${bulk}
       FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length)}) counts LEFT JOIN settings ON true ${mx && !regional ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
     checkCapacity(state, cost, marketing);
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
     for (const [i, mail] of mails.entries()) {
-      const region = checkSender(c.env, a, state, mail);
+      const region = checkSender(c.env, a, state, mail,state.bulk);
       if (!mx && !isSimulatedSes(c.env) && !state.ready.includes(`${region}:${mail.kind}`)) throw new ApiError(409, 'SES_SETUP_REQUIRED', 'Run discovery and complete provisioning for this region before live sending.', 'region');
       if (!mx) keySender(a, mail.from);
       const ids = distinctAttachmentIds(mail.attachments);
@@ -1232,7 +1253,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // Campaign mail is never dispatched for a member origin (approvedOriginUser); refuse here instead of canceling later.
   if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.');
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
-  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft));
+  const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft),true);
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
   const rendered = renderCampaignContent(runtime, draft);
   const reviewId = id('review');

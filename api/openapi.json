@@ -4305,6 +4305,75 @@
           "dkimStatus": {
             "type": "string"
           },
+          "dmarc": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "missing",
+                  "invalid",
+                  "none",
+                  "quarantine",
+                  "reject"
+                ]
+              },
+              "record": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Domain publishing the effective TXT record; may be the organizational domain."
+              },
+              "adkim": {
+                "type": "string",
+                "enum": [
+                  "r",
+                  "s"
+                ]
+              },
+              "aspf": {
+                "type": "string",
+                "enum": [
+                  "r",
+                  "s"
+                ]
+              },
+              "alignment": {
+                "type": "object",
+                "properties": {
+                  "dkim": {
+                    "type": "boolean"
+                  },
+                  "spf": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "dkim",
+                  "spf"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "record",
+              "source",
+              "adkim",
+              "aspf",
+              "alignment"
+            ],
+            "description": "Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict."
+          },
           "ready": {
             "type": "boolean"
           },
@@ -4374,7 +4443,8 @@
                   "enum": [
                     "sending",
                     "receiving",
-                    "mail_from"
+                    "mail_from",
+                    "dmarc"
                   ]
                 },
                 "status": {
@@ -4405,6 +4475,7 @@
           "verificationStatus",
           "verified",
           "dkimStatus",
+          "dmarc",
           "ready",
           "sending",
           "receiving",

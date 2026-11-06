@@ -4,6 +4,7 @@ import { domainToUnicode } from 'node:url';
 import { z } from 'zod';
 import type { Runtime } from './core.js';
 import { rdapBase } from './domain-registry.js';
+import { boundedJson, dns, fqdn } from './public-dns.js';
 
 const day = 86_400_000;
 const hostSyntax = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -17,16 +18,6 @@ export function brandLookalike(host:string) {
     [label.replaceAll('-',''),...label.split('-')].includes(official.split('.')[0]!)));
 }
 
-async function boundedJson(url:string,accept:string,signal:AbortSignal,limit:number) {
-  const res=await fetch(url,{headers:{accept},redirect:'manual',signal});
-  if(!res.ok || !res.body) { await res.body?.cancel(); throw new Error('Probe unavailable'); }
-  const reader=res.body.getReader(), chunks:Uint8Array[]=[]; let size=0;
-  try {
-    for(;;) { const next=await reader.read(); if(next.done) break;
-      size+=next.value.length; if(size>limit) { await reader.cancel(); throw new Error('Probe response too large'); } chunks.push(next.value); }
-  } finally { reader.releaseLock(); }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
-}
 const registrations = new Map<string,{created:number;expires:number}>(); // Public dates only, no cross-request I/O.
 async function rdapAge(root:string,signal:AbortSignal) {
   const now=Date.now(), cached=registrations.get(root);
@@ -41,21 +32,6 @@ async function rdapAge(root:string,signal:AbortSignal) {
   registrations.set(root,{created,expires:now+3_600_000}); return Math.floor((now-created)/day);
 }
 
-const rr=z.object({name:z.string(),type:z.number(),data:z.string()});
-const dnsResponse=z.object({Status:z.number(),TC:z.boolean().optional(),Answer:z.array(rr).default([]),Authority:z.array(rr).default([])});
-const fqdn=(s:string)=>s.toLowerCase().replace(/\.$/,'');
-async function dns(name:string,type:'A'|'AAAA'|'MX'|'TXT',signal:AbortSignal) {
-  const url=new URL('https://cloudflare-dns.com/dns-query');url.search=new URLSearchParams({name,type}).toString();
-  const result=dnsResponse.parse(await boundedJson(url.href,'application/dns-json',signal,64*1024));
-  if(result.TC || ![0,3].includes(result.Status)) throw new Error('Incomplete DNS');
-  const aliases=new Set<string>(); let at=name;
-  for(;;) {
-    if(aliases.has(at) || aliases.size>12) throw new Error('Invalid alias chain'); aliases.add(at);
-    const records=result.Answer.filter(r=>fqdn(r.name)===at), alias=records.find(r=>r.type===5);
-    if(!alias) return {status:result.Status,authority:result.Authority,aliases:[...aliases],values:records.filter(r=>r.type==={A:1,AAAA:28,MX:15,TXT:16}[type]).map(r=>r.data)};
-    at=fqdn(alias.data);
-  }
-}
 // Abort the transport AND settle each signal by the common deadline; even a stalled
 // body reader must not make already-completed sibling observations disappear.
 function observe<T>(signal:AbortSignal,work:()=>Promise<T>):Promise<T|null> {
