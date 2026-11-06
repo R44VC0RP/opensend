@@ -5661,6 +5661,9 @@ export type ListEmailsData = {
         status?: 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
         region?: string;
         kind?: 'transactional' | 'marketing';
+        /**
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.
+         */
         search?: string;
         from?: string;
         to?: string;

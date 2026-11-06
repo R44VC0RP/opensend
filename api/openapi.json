@@ -18021,9 +18021,11 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 200
+              "maxLength": 200,
+              "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID."
             },
             "required": false,
+            "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID.",
             "name": "search",
             "in": "query"
           },
