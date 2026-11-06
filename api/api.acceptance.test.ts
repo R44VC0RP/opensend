@@ -4906,7 +4906,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
     const path='/v1/connection',post=(suffix:string,b?:Json)=>api('POST',path+suffix,b),poll=async()=>ok(await api('GET',path)).connection;
     const run=async(type:string,region?:string)=>{
-      const j=(await db.query(`UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type=$2 AND ($3::text IS NULL OR payload->>'region'=$3) AND status='pending' ORDER BY id LIMIT 1) RETURNING *`,[wid,type,region??null])).rows[0];assert.ok(j,type+':'+region);
+      // The standalone harness runner may own a short, flag-off deferral of this exact job.
+      // Wait for its durable settlement; don't steal an active lease or mistake it for a missing job.
+      let j;for(let n=0;n<100;n++){
+        j=(await db.query(`UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type=$2 AND ($3::text IS NULL OR payload->>'region'=$3) AND status='pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`,[wid,type,region??null])).rows[0];
+        if(j)break;await new Promise(r=>setTimeout(r,10));
+      }assert.ok(j,type+':'+region);
       try {await regionalByoJobs[type]!(runtime,j.payload,{workspaceId:wid,id:j.id,attempts:1});}
       catch(e){if(!(e instanceof JobDeferred)) {await db.query("UPDATE jobs SET status='failed' WHERE id=$1",[j.id]);throw e;}await db.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour',payload=$2 WHERE id=$1",[j.id,e.payload??j.payload]);return false;}
       await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return true;
@@ -4964,6 +4969,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,region===va?2:1);}
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
     await t.test('v5 dispatch signs a rendered template with separate quota, template and selected-identity sessions',async()=>{
+      // Keep the envelope invisible to the independent simulated runner until THIS mocked
+      // customer's regional dispatcher has recorded the provider response.
+      const previous=runtime.db;try {await (await import('drizzle-orm/node-postgres')).drizzle(db).transaction(async tx=>{runtime.db=tx;
       const {dispatchDue}=await import('./src/dispatcher.js');const scoped={...runtime,config:{...runtime.config,workspaceId:wid,regions:[oh,va]}};
       const sendSubject=(subject:string)=>api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{subject}}});
       error(await sendSubject('Fixture\rSender: x@evil'),422,'INVALID_RENDERED_MIME');
@@ -4978,6 +4986,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,va]);
       try {assert.equal(ok(await api('GET','/v1/settings/ses')).region,va);assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===va;}));}
       finally {await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,oh]);}
+      });} finally {runtime.db=previous;}
     });
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
