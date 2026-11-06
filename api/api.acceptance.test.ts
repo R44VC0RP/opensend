@@ -4575,6 +4575,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(trace.slice(mark).every(v=>v.region===va));assert.equal((await poll()).importedDomains,2);
     for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,1);}
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
+    await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
+      const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
+      const scoped={...runtime,config:{...runtime.config,workspaceId:wid}}, bucket='retained-v4-mail',topicArn=`arn:aws:sns:${oh}:${account}:opensend-legacy-inbound`;
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,account_id,bucket,topic_arn) VALUES($1,$2,$3,$4,$5)',[wid,oh,account,bucket,topicArn]);
+      try {
+        const keyReads=policies.length,binding=await workspaceConnection(scoped,oh);assert.equal(binding.template_version,'v5');
+        assert.equal((await db.query('SELECT template_version FROM regional_sending_connections WHERE id=$1 AND region=$2',[v5.id,oh])).rows[0].template_version,'v5');
+        const bare={id:v5.id,kind:'byo' as const,aws_account_id:account,role_arn:binding.role_arn,external_id:external};
+        for(const b of [bare,{...bare,legacy_names:true},{...bare,legacy:true,template_version:'v5'}]) await assert.rejects(workspaceCredentials(scoped,oh,b),{code:'BYO_SESSION_SCOPE_REQUIRED'});
+        await assert.rejects(mailboxS3(scoped,wid,oh,bucket),{code:'MAILBOX_OBJECT_NOT_FOUND'});assert.equal(policies.length,keyReads);
+        error(await api('POST','/v1/events/ses',{Type:'SubscriptionConfirmation',MessageId:randomUUID(),Message:'fixture',TopicArn:topicArn,Timestamp:new Date().toISOString(),Token:'fixture',SignatureVersion:'2',Signature:'invalid',SigningCertURL:`https://sns.${oh}.amazonaws.com/SimpleNotificationService-fixture.pem`}),403,'SNS_TOPIC_NOT_ALLOWED');
+        await assert.rejects(acceptInboundNotification(scoped,{topicArn,region:oh,message:{notificationType:'Received',mail:{messageId:'fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['a@both.example'],action:{type:'S3',topicArn,bucketName:bucket,objectKey:'staging/fixture'}}}}),{code:'MAILBOX_NOTIFICATION_UNTRUSTED'});
+      } finally {await db.query('DELETE FROM mailbox_regions WHERE workspace_id=$1 AND region=$2',[wid,oh]);}
+    });
     assert.deepEqual(ok(await api('POST','/v1/domains',{name:'new.example'}),202).regions,[oh]);await run('byo.bind',oh);
     assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,'new.example'])).rows[0].region,oh);
     const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];

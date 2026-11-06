@@ -843,11 +843,12 @@ function registerPublicEvents(app: App) {
         FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state IN ('ready','provisioning'))
       UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,NULL,NULL FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
       UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
-      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}
+      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' AND c.template_version<>'v5' WHERE r.topic_arn=${arn}
       ${!confirming ? sql`UNION ALL SELECT region,aws_account_id,kind,true,false,NULL,NULL FROM provider_feedback_history WHERE topic_arn=${arn}` : sql``} ORDER BY ready DESC LIMIT 1`)).rows[0];
     if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
     // A pending topic may confirm its subscription but must never prime trust for notifications.
     if (!binding.ready) return confirming ? binding : undefined;
+    if (binding.inbound && binding.kind==='byo') return binding; // A reconnect must not inherit cached receipt trust.
     if (sendingTopics.size >= 1024) sendingTopics.delete(sendingTopics.keys().next().value!);
     sendingTopics.set(arn, { binding, expires: Date.now() + 60_000 });
     return binding;
