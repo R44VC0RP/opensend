@@ -74,12 +74,16 @@ async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
 }
 // checkedAt identifies the sample on the database clock; refreshAt is a deadline on this host.
 // Re-reading the same snapshot (including after restoring an old gate) cannot mint more capacity.
-function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number, ageMs = 0) {
+function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number, ageMs = 0, overlappingSends = 0) {
   if (!gate.quota || sample.checkedAt > gate.quota.checkedAt) {
-    gate.quota = sample; gate.sentSinceRefresh = 0; delete gate.dailyBlockedUntil; delete gate.tailExhausted; delete gate.staleSampleUsed;
+    // Even our own post-send GetAccount can lag SES. Carry provisional sends and a
+    // definitive denial into that sample once; an ordinary later refresh releases them.
+    gate.quota = sample; gate.sentSinceRefresh = overlappingSends;
+    if (!overlappingSends) delete gate.dailyBlockedUntil;
+    delete gate.tailExhausted; delete gate.staleSampleUsed;
   }
   gate.refreshAt = Date.now() + Math.max(Math.min(1000, refreshMs), refreshMs - Math.max(0, ageMs));
-  if (gate.dailyBlockedUntil) gate.dailyBlockedUntil = gate.refreshAt;
+  if (gate.dailyBlockedUntil) gate.refreshAt = gate.dailyBlockedUntil = Math.max(gate.refreshAt, gate.dailyBlockedUntil);
   return true;
 }
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
@@ -106,7 +110,7 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
     const saved = await runtime.db.execute<{ checked: string }>(sql`UPDATE ${table} SET checked_at=clock_timestamp(), ${fence}=${account ? sql`clock_timestamp()+${period}` : sql`NULL`},
       max_send_rate=${q.maxSendRate},max_24_hour_send=${q.max24HourSend},sent_last_24_hours=${q.sentLast24Hours} WHERE ${key} AND ${fence}=${row.fence}::timestamptz RETURNING checked_at::text AS checked`);
     if (!saved.rowCount) return false;
-    return observeQuota(gate, { ...q, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs);
+    return observeQuota(gate, { ...q, checkedAt: Date.parse(saved.rows[0]!.checked) }, refreshMs, 0, overlappingSends);
   } else {
     // A concurrent shard won a cold refresh. Give its single control-plane request time to publish.
     for (const delay of [100, 400, 1000]) {
@@ -114,12 +118,7 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
       await sleep(delay); row = (await runtime.db.execute<Row>(cached)).rows[0];
     }
     if (!row) return false;
-    const checkedAt = Date.parse(row.checked), advanced = !gate.quota || checkedAt > gate.quota.checkedAt, denied = gate.dailyBlockedUntil;
-    observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt }, refreshMs, row.age_ms);
-    // A peer may have sampled before our provisional sends reached SES. Conservatively
-    // carry those recipients (and a daily denial) into its sample, never twice on a reread.
-    if (advanced && overlappingSends) { gate.sentSinceRefresh += overlappingSends; if (denied) gate.dailyBlockedUntil = gate.refreshAt; }
-    return true;
+    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms, overlappingSends);
   }
 }
 
@@ -678,7 +677,8 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         if (outcome.type === 'provider_throttled') brake(gate);
         if (outcome.errorCode === 'SES_DAILY_QUOTA_EXHAUSTED') {
-          gate.dailyBlockedUntil = quotaRetry(gate, options.quotaRefreshMs ?? QUOTA_REFRESH_MS);
+          const period = Math.max(options.accountId ? 1000 : 0, options.quotaRefreshMs ?? QUOTA_REFRESH_MS);
+          gate.refreshAt = gate.dailyBlockedUntil = Math.ceil(Math.max(Date.now() + period, gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
           outcome.requeueAt = new Date(gate.dailyBlockedUntil).toISOString(); counters.quotaRetryAt = gate.dailyBlockedUntil;
         }
         resolve(outcome);
@@ -741,7 +741,11 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
         await options.onGate?.(gate); // Keep the spent sample marked even if the refresh fails.
         return refresh(spent);
       }).finally(() => { lane.refresh = undefined; });
-      if (!await lane.refresh) { if (rest.length) await releaseLeases(base, rest.map(item => item.mail)); return { processed: tx.length, blocked: true }; }
+      if (!await lane.refresh || gate.dailyBlockedUntil) {
+        if (gate.dailyBlockedUntil) counters.quotaRetryAt = gate.dailyBlockedUntil;
+        if (rest.length) { await releaseLeases(base, rest.map(item => item.mail)); counters.claimed -= rest.length; counters.deferred += rest.length; }
+        return { processed: tx.length, blocked: true };
+      }
       if (rest.length) await dispatchReady(base,lane,rest);
       return { processed: leased.length, blocked: false };
     }

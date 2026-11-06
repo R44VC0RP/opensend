@@ -5495,6 +5495,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('an elected post-send refresh with lagging SES usage cannot clear a daily denial', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const contact = ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      const marketing = ok(await local('POST','/v1/emails/send',mail({to:contact.email,kind:'marketing'})),202).id;
+      const tx = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+        VALUES($1,$2,1000,1000,0,clock_timestamp()-interval '90 seconds') ON CONFLICT(workspace_id,region) DO UPDATE SET
+        max_send_rate=1000,max_24_hour_send=1000,sent_last_24_hours=0,checked_at=excluded.checked_at,next_allowed_at=NULL`,[runtime.config.workspaceId,REGION]);
+      const calls: string[] = [];
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) { calls.push('quota'); return { SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:1000,SentLast24Hours:0} }; }
+        const id = cmd.input.EmailTags.find((t:any)=>t.Name==='opensend_email_id').Value; calls.push(id);
+        if (id===tx) throw Object.assign(new Error('Daily message quota exceeded.'),{$metadata:{httpStatusCode:429}});
+        return {MessageId:'unexpected-marketing'};
+      });
+      const gate=initialGate(), start=Date.now(), report=await dispatchDue(runtime,REGION,{gate});
+      assert.deepEqual(calls,[tx,'quota']); assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1);
+      assert.ok(gate.dailyBlockedUntil! >= start+60_000); assert.ok(report.quotaRetryAt! >= gate.dailyBlockedUntil!);
+      const { rows:[denied] } = await db.query('SELECT status,error_code,scheduled_at FROM sending_emails WHERE id=$1',[tx]);
+      assert.equal(denied.status,'queued'); assert.equal(denied.error_code,'SES_DAILY_QUOTA_EXHAUSTED'); assert.ok(denied.scheduled_at.getTime() >= start+59_900);
+      assert.deepEqual((await db.query('SELECT status,attempt_started_at,lease_until FROM sending_emails WHERE id=$1',[marketing])).rows,[{status:'queued',attempt_started_at:null,lease_until:null}]);
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,0); assert.deepEqual(calls,[tx,'quota']);
+    });
+  });
+
   test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
