@@ -323,6 +323,18 @@ async function findEmail(db: DbExecutor, a: Actor, emailId: string) {
   if (!row) notFound('Email');
   return row;
 }
+async function visibleEmailContent(runtime: Runtime,a: Actor,row: typeof emails.$inferSelect) {
+  // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
+  const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(runtime, a, row) : row.snapshot;
+  const manage = a.permissions.includes('manage');
+  // App-owned capabilities only, not a general sanitizer for transactional bearer links.
+  // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
+  const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
+  return EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated });
+}
+function visibleEmailEvent(a: Actor, row: z.input<typeof Event>) {
+  return Event.parse({ ...row, data: a.permissions.includes('manage') ? row.data : redactCapabilityData(row.data) });
+}
 async function findCampaign(db: DbExecutor, a: Actor, campaignId: string, lock: boolean | 'share' = false) {
   const query = db.select().from(campaigns).where(campaignWhere(a, campaignId));
   const [row] = await (lock ? query.for(lock === 'share' ? 'share' : 'update') : query);
@@ -857,20 +869,30 @@ export function registerSending(app: App) {
     const [row] = await c.env.db.select(emailColumns).from(emails).where(mailWhere(actor(c), c.req.valid('param').id)).limit(1);
     return c.json(emailView(row ?? notFound('Email')), 200);
   });
+  app.openapi(createRoute({ method:'get', path:'/v1/emails/{id}/detail', operationId:'getEmailDetail', tags:['Emails'], security,
+    description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
+    request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable()}).openapi('EmailDetail')),...errors} }),async c=>{
+    const a=actor(c), emailId=c.req.valid('param').id;
+    const [detail]=await c.env.db.select({mail:emails,
+      contact:sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
+        WHERE c.workspace_id=${emails.workspaceId} AND c.deleted_at IS NULL AND jsonb_array_length(${emails.to})=1 AND c.email=lower(${emails.to}->>0))`,
+      timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t.id),'[]') FROM (
+        SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
+        WHERE workspace_id=${emails.workspaceId} AND email_id=${emails.id} ORDER BY id LIMIT 101) t)`
+    }).from(emails).where(mailWhere(a,emailId)).limit(1);
+    if(!detail) return notFound('Email');
+    const {mail,contact,timeline}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail);
+    const email=emailView({...mail,subject:a.permissions.includes('manage') ? mail.subject : redactCapabilityText(mail.subject),fromName:mail.snapshot.fromName ?? null,kind:mail.snapshot.kind});
+    return c.json({email,content:{html,text,attachments},contact,events:{data:timeline.slice(0,100).map(r=>visibleEmailEvent(a,r)),nextCursor:timeline.length>100 ? timeline[99]!.id : null}},200);
+  });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/content', operationId: 'getEmailContent', description: 'Manage keys receive full snapshots. Other readers receive app unsubscribe tokens redacted from subject/HTML/text and raw MIME withheld (null), since MIME encodings can conceal capabilities. Other transactional bearer links are not sanitized; grant content-read access only to trusted integrations.', tags: ['Emails'], security, request: { params: IdParams }, responses: { 200: response(EmailContent), ...errors } }), async c => {
     const a = actor(c); const row = await findEmail(c.env.db, a, c.req.valid('param').id);
-    // Sent campaign emails store a stub; queued ones have no body yet (html/text null, as before).
-    const s = row.snapshot.deferredCampaign && row.snapshot.unsubscribeUrl ? await sentCampaignContent(c.env, a, row) : row.snapshot;
-    const manage = a.permissions.includes('manage');
-    // App-owned capabilities only, not a general sanitizer for transactional bearer links.
-    // Raw MIME can hide tokens inside encodings/folding; only managers receive that opaque content.
-    const visible = (value: string | undefined) => value === undefined ? null : manage ? value : redactCapabilityText(value);
-    return c.json(EmailContent.parse({ subject: visible(s.subject), html: visible(s.html), text: visible(s.text), raw: manage ? s.raw ?? null : null, attachments: s.attachments, render: s.template?.render ?? 'direct', templateName: s.template?.name ?? null, simulated: row.simulated }), 200);
+    return c.json(await visibleEmailContent(c.env,a,row),200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/emails/{id}/events', operationId: 'listEmailEvents', tags: ['Emails'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Event)), ...errors } }), async c => {
     const a = actor(c); const emailId = c.req.valid('param').id; await findEmail(c.env.db, a, emailId); const q = c.req.valid('query');
     const rows = await c.env.db.select().from(emailEvents).where(and(scope(emailEvents, a), eq(emailEvents.emailId, emailId), q.cursor ? gt(emailEvents.id, q.cursor) : undefined)).orderBy(asc(emailEvents.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(r => Event.parse({ ...r, data: a.permissions.includes('manage') ? r.data : redactCapabilityData(r.data) })), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    return c.json({ data: rows.slice(0, q.limit).map(r => visibleEmailEvent(a,r)), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');

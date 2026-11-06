@@ -3595,6 +3595,10 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const token = url.pathname.split('/').at(-1)!;
     assert.ok(content.html.includes(token) && content.text.includes(token), 'Manage-authorized content retrieval must preserve the usable HTML and text capability.');
     const redacted = ok(await http('GET', `/v1/emails/${source.id}/content`, reader.secret));
+    const detail=ok(await http('GET',`/v1/emails/${source.id}/detail`,reader.secret));
+    assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
+    assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
+    assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
     assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');

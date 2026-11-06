@@ -164,7 +164,10 @@ export function createLiveApi(): OpenSendApi {
     } },
     emails: {
       list: (input, signal) => page('/emails', input, mapEmail, { region: input.regionId, campaignId: input.campaignId, kind: input.stream, status: input.status, search: input.search, to: input.to, from: input.from }, signal),
-      get: async (id, signal) => { const path = `/emails/${idPath(id)}`; const [row, content, events] = await Promise.all([call(path, 'GET', undefined, signal), call(`${path}/content`, 'GET', undefined, signal), call(`${path}/events?limit=100`, 'GET', undefined, signal)]); return { ...mapEmail(row), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor } }
+      get: async (id, signal) => {
+        const { email, content, events, contact } = await call(`/emails/${idPath(id)}/detail`, 'GET', undefined, signal)
+        return { ...mapEmail(email), html: content.html ?? '', text: content.text, attachments: content.attachments, events: events.data.map(mapEmailEvent), eventsNextCursor: events.nextCursor, contact }
+      }
     },
     campaigns: {
       list: (input, signal) => page('/campaigns', input, mapCampaignSummary, {region: input.regionId, state: input.status, search: input.search, archived: input.archived === true ? 'true' : 'false'}, signal), get: getCampaign,
