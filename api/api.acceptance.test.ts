@@ -4392,6 +4392,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(recipient_hashes.every((h:string)=>/^[0-9a-f]{64}$/.test(h)));
       const visible=JSON.stringify([ok(await local('GET',`/v1/emails/${email_id}/events`)),(await db.query(`SELECT data FROM operation_events WHERE workspace_id=$1`,[wid])).rows]);
       assert.ok(!visible.includes('recipient_hashes') && !visible.includes(bcc[0]) && !recipient_hashes.some((h:string)=>visible.includes(h)));
+
+      const single='one@example.net';
+      await db.query(`UPDATE sending_emails SET to_addresses=$2, bcc_addresses='[]' WHERE provider_id=$1`,[wid+'3',JSON.stringify([single])]);
+      const callback=(eventType:string,detail:Json)=>({region:REGION,topicArn,messageId:unique('sns'),message:{eventType,mail:{messageId:wid+'3',sendingAccountId:account},[eventType.toLowerCase()]:detail}});
+      const open=callback('Open',{timestamp:'2026-01-03T00:00:00Z'}), click=callback('Click',{timestamp:'2026-01-02T00:00:00Z',link:'https://example.net/'});
+      const batch=[callback('Open',{timestamp:'2026-01-01T00:00:00Z'}),callback('Bounce',{bounceType:'Permanent',bounceSubType:'EmailValidationSuppressed',bouncedRecipients:[{emailAddress:single},{emailAddress:'foreign@example.net'}]}),open,click,open,callback('Click',{isBotEvent:'Likely',timestamp:'2026-01-04T00:00:00Z'})];
+      ok(await local('POST','/v1/webhooks',{url:'https://example.com/fixture',eventTypes:['email.bounced','email.opened','email.clicked']}),201);
+      let wakes=0;runtime.wake=async()=>{wakes++};
+      for(let i=0;i<2;i++) assert.ok((await ingestFeedbackBatch(runtime,batch)).every(x=>x.ok));
+      assert.equal(wakes,1,'One batch wake; replay does not fan out.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM operation_deliveries WHERE workspace_id=$1',[wid])).rows[0].n,5);
+      const [observed]=(await db.query(`SELECT suppression_reason,last_click_at,last_open_at,observed_since FROM audience_contacts WHERE workspace_id=$1 AND email=$2`,[wid,single])).rows;
+      assert.deepEqual([observed.suppression_reason,...[observed.last_click_at,observed.last_open_at,observed.observed_since].map(d=>d.toISOString().slice(0,10))],['email_validation','2026-01-02','2026-01-03','2026-01-02']);
+      assert.equal((await db.query(`SELECT 1 FROM audience_contacts WHERE workspace_id=$1 AND email='foreign@example.net'`,[wid])).rowCount,0);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE provider_id=$1',[wid+'3'])).rows,[{status:'suppressed',error_code:'EMAIL_VALIDATION_SUPPRESSED'}]);
     });
   });
   test('MX: migration 060 preserves a mature ready workspace’s tier without provisioning-job history', async t => {

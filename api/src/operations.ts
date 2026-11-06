@@ -1049,16 +1049,29 @@ function routineInput(item: FeedbackItem, enqueueOther = false): RoutineIngress 
   const type = kind === 'Send' ? 'send' : kind === 'Delivery' ? 'delivery' : 'receipt';
   const simulated = item.topicArn === `urn:opensend:simulated-ses:${item.region}`;
   if (type === 'receipt' && simulated) throw new ApiError(422, 'SIMULATED_FEEDBACK_UNSUPPORTED', 'The simulator emits Send and Delivery callbacks only.');
-  const timestamp = type !== 'receipt' ? data[type]?.timestamp : undefined;
+  // HTTP without a queue still defers these to its durable job. The queue can apply the
+  // same facts to a whole batch; subscription changes keep their distinct consent workflow.
+  const detail = data[kind === 'RenderingFailure' ? 'failure' : kind === 'DeliveryDelay' ? 'deliveryDelay' : kind.toLowerCase()] ?? {};
+  const extended = type === 'receipt' && !enqueueOther && kind !== 'Subscription';
+  const timestamp = detail.timestamp;
   const createdAt = typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp)) ? new Date(timestamp).toISOString() : now();
   const payload = { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region };
-  return { type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`, data: { providerId },
-    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther ? undefined : simulated ? 'operation.simulatedFeedbackRecovery' : 'operation.ses' } };
+  const validation = kind === 'Bounce' && detail.bounceSubType === 'EmailValidationSuppressed';
+  const engagement = kind === 'Open' || kind === 'Click';
+  const reported = kind === 'Bounce' ? detail.bouncedRecipients : kind === 'Complaint' ? detail.complainedRecipients : undefined;
+  return { type: extended ? validation ? 'validation_suppressed' : sesEvents[kind]!.rawType : type, providerId, taggedEmailId: taggedEmailId(item.message), createdAt, externalId: `${item.topicArn}:${item.messageId}`,
+    data: { providerId, ...(engagement ? { isBotEvent: detail.isBotEvent ?? 'Unknown' } : {}), ...(kind === 'Click' && typeof detail.link === 'string' ? { link: detail.link } : {}),
+      ...(kind === 'Bounce' ? { bounceType: detail.bounceType ?? 'Unknown', bounceSubType: detail.bounceSubType ?? 'Unknown' } : {}) },
+    ...(extended ? { effects: { reported: Array.isArray(reported) && reported.length ? reported.map(r => typeof r?.emailAddress === 'string' ? r.emailAddress.toLowerCase() : null) : null,
+      suppress: kind === 'Complaint' ? 'complaint' : kind === 'Bounce' && detail.bounceType === 'Permanent' ? validation ? 'email_validation' : 'hard_bounce' : null,
+      observe: engagement && detail.isBotEvent !== true && detail.isBotEvent !== 'Likely' ? kind.toLowerCase() : null,
+      receiptTime: !(typeof timestamp === 'string' && Number.isFinite(Date.parse(timestamp))) } } : {}),
+    ingress: { topicArn: item.topicArn, messageId: item.messageId, region: item.region, payload, recoveryType: type === 'receipt' && !enqueueOther && !extended ? undefined : simulated ? 'operation.simulatedFeedbackRecovery' : 'operation.ses' } };
 }
 /**
- * Batch feedback ingestion for the feedback queue consumer. Routine Send/Delivery callbacks are
- * persisted in one statement per batch; everything else (bounce, complaint, engagement,
- * subscription) is processed inline with its receipt. Returns one outcome per input so the caller
+ * Batch feedback ingestion for the feedback queue consumer. Mail status, reputation, engagement
+ * and delivery jobs commit in one statement per batch; subscription changes use the consent
+ * workflow after opening a receipt. Returns one outcome per input so the caller
  * can acknowledge or retry messages individually. Live items are trusted only after the SNS
  * signature check at ingress; simulated items must carry the simulator's synthetic identity.
  */
@@ -1093,7 +1106,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
       for (const entry of group) outcomes[entry.index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PERSIST_FAILED' };
     }
   }
-  // The feedback consumer has one connection; finish each non-routine receipt before starting the next.
+  // Subscription changes include separate consent audit records; preserve their input order.
   for (const { index, item, workspaceId } of other) {
     try {
       await processSesReceipt(runtime, { message: item.message, topicArn: item.topicArn, messageId: item.messageId, region: item.region }, { id: `feedback:${item.topicArn}:${item.messageId}`, attempts: 1, workspaceId });

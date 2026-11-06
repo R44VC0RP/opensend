@@ -1227,29 +1227,31 @@ export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngr
     kind: input.type === 'send' ? 'Send' : 'Delivery', outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
   return result;
 }
-export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; type: 'send' | 'delivery' | 'receipt'; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt };
+export type RoutineIngress = Omit<EmailEventInput, 'workspaceId'> & { workspaceId?: string; providerId: string; taggedEmailId?: string; ingress: IncomingReceipt;
+  effects?: { reported: (string | null)[] | null; suppress: string | null; observe: string | null; receiptTime: boolean } };
 /** The opensend_email_id tag the dispatcher stamps on every SES message (only meaningful after SNS signature verification). */
 export function taggedEmailId(message: unknown): string | undefined {
   const tag = (message as { mail?: { tags?: Record<string, unknown> } } | undefined)?.mail?.tags?.opensend_email_id;
   const value = Array.isArray(tag) ? tag[0] : undefined;
   return typeof value === 'string' && /^email_[a-z0-9]{8,64}$/.test(value) ? value : undefined;
 }
-// One statement persists a whole batch of verified Send/Delivery callbacks: receipts, matched
-// events, monotonic status, public events and webhook deliveries. Other kinds only open their receipt.
+// One statement persists verified callbacks and their side effects. Only subscriptions and
+// non-routine callbacks deliberately deferred by HTTP ingress merely open their receipt.
 // Early callbacks with a known owner keep a recovery job; unresolved owners return an error for redelivery.
 export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIngress[]) {
   if (!inputs.length) return [];
   const mx = runtime.config.multiTenant;
+  const effects = inputs.some(input => input.effects);
   const topicMatch = mx ? sql`AND (x.simulated OR e.feedback_topic_arn=x.topic_arn)` : sql``;
   const rows = inputs.map((input, index) => ({
     ordinal: index, job_workspace: input.workspaceId, simulated: input.ingress.topicArn === `urn:opensend:simulated-ses:${input.ingress.region}`, topic_arn: input.ingress.topicArn, message_id: input.ingress.messageId, region: input.ingress.region, provider_id: input.providerId,
     type: input.type, next_status: statusForEvent[input.type]!, next_rank: rank[statusForEvent[input.type]!], public_type: publicEventType[input.type] ?? null,
-    external_id: input.externalId ?? null, data: input.data ?? {}, created_at: input.createdAt ?? now(),
+    external_id: input.externalId ?? null, data: input.data ?? {}, effects: input.effects, created_at: input.createdAt ?? now(),
     event_id: id('event'), recovery_job_id: id('job'), recovery_type: input.ingress.recoveryType, payload: input.ingress.payload, tagged_email_id: input.taggedEmailId ?? null,
   }));
   const result = await runtime.db.execute<{ ordinal: number; workspaceId: string | null; error: string | null; event: typeof emailEvents.$inferSelect | null; runnable: number }>(sql`WITH raw AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS x(ordinal int, job_workspace text, simulated boolean, topic_arn text, message_id text, region text, provider_id text,
-        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
+        type text, next_status text, next_rank int, public_type text, external_id text, data jsonb, effects jsonb, created_at timestamptz, event_id text, recovery_job_id text, recovery_type text, payload jsonb, tagged_email_id text)
     ), candidates AS (
       SELECT x.ordinal, e.id FROM raw x JOIN sending_emails e ON e.provider_id = x.provider_id
       WHERE x.tagged_email_id IS NULL AND e.region = x.region AND e.simulated = x.simulated ${topicMatch}
@@ -1259,7 +1261,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
       WHERE e.region = x.region AND e.simulated = x.simulated ${topicMatch}
         AND (x.job_workspace IS NULL OR e.workspace_id = x.job_workspace)
     ), locked AS MATERIALIZED (
-      SELECT x.ordinal, e.id, e.workspace_id, e.simulated, e.status, e.provider_id FROM raw x
+      SELECT x.ordinal, e.id, e.workspace_id, e.simulated, e.status, e.provider_id ${effects ? sql`, e.to_addresses,e.cc_addresses,e.bcc_addresses` : sql``} FROM raw x
       JOIN (SELECT ordinal, min(id) AS id FROM candidates GROUP BY ordinal HAVING count(*) = 1) c USING (ordinal)
       JOIN sending_emails e ON e.id = c.id
       WHERE e.provider_id = x.provider_id OR (e.id = x.tagged_email_id AND e.provider_id IS NULL AND e.status IN ('attempting','acceptance_unknown'))
@@ -1272,7 +1274,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
         AND r.trusted_topic_arn = 'arn:aws:sns:' || r.region || ':' || r.trusted_account_id || ':opensend-' || left(encode(sha256(convert_to(s.installation_id, 'UTF8')), 'hex'), 20) || '-feedback'
       GROUP BY s.workspace_id
     )`}, input AS (
-      SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status,
+      SELECT x.*, coalesce(l.workspace_id, x.job_workspace) AS workspace_id, l.status, ${effects ? sql`l.to_addresses,l.cc_addresses,l.bcc_addresses,` : sql``}
         coalesce(x.recovery_type, CASE WHEN x.type = 'receipt' AND l.status = 'attempting' AND l.provider_id IS NULL THEN 'operation.ses' END) AS job_type,
         CASE WHEN x.type <> 'receipt' AND (l.provider_id IS NOT NULL OR l.status = 'acceptance_unknown') THEN l.id END AS email_id,
         CASE WHEN l.id IS NULL AND x.job_workspace IS NULL THEN 'SES_EMAIL_NOT_FOUND'
@@ -1280,28 +1282,64 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
              WHEN NOT x.simulated AND a.workspace_id IS NULL THEN 'REGION_SETTINGS_NOT_INITIALIZED'
              WHEN a.account IS NOT NULL AND to_jsonb(a.account) IS DISTINCT FROM x.payload #> '{message,mail,sendingAccountId}' THEN 'SES_ACCOUNT_MISMATCH'`} END AS error
       FROM raw x LEFT JOIN locked l USING (ordinal) ${mx ? sql`` : sql`LEFT JOIN accounts a ON a.workspace_id = l.workspace_id AND NOT x.simulated`}
+    ), distinct_receipts AS (
+      SELECT DISTINCT ON (topic_arn,message_id) * FROM input WHERE error IS NULL ORDER BY topic_arn,message_id,ordinal
     ), incoming AS (
-      INSERT INTO operation_sns_receipts(topic_arn, message_id, workspace_id, processed_at)
+      INSERT INTO operation_sns_receipts AS receipt(topic_arn, message_id, workspace_id, processed_at)
        SELECT x.topic_arn, x.message_id, x.workspace_id, CASE WHEN x.email_id IS NOT NULL THEN clock_timestamp() END
-       FROM input x WHERE x.error IS NULL ON CONFLICT DO NOTHING RETURNING topic_arn, message_id, workspace_id
+       FROM distinct_receipts x ON CONFLICT (topic_arn,message_id) DO UPDATE SET processed_at=excluded.processed_at
+       WHERE receipt.processed_at IS NULL AND excluded.processed_at IS NOT NULL AND receipt.workspace_id=excluded.workspace_id
+       RETURNING topic_arn, message_id, workspace_id, created_at
     ), recovery AS (
       INSERT INTO jobs(id, workspace_id, type, payload, available_at)
        SELECT DISTINCT ON (topic_arn, message_id) x.recovery_job_id, x.workspace_id, x.job_type, x.payload,
          clock_timestamp() + CASE WHEN x.type = 'receipt' AND x.status <> 'attempting' THEN interval '0 seconds' ELSE interval '15 seconds' END
-       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id)
+       FROM distinct_receipts x JOIN incoming i USING (topic_arn, message_id, workspace_id)
       WHERE x.error IS NULL AND x.email_id IS NULL AND x.job_type IS NOT NULL RETURNING id
-    ), inserted AS (
-      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
+    ), matched AS (
+      SELECT x.*, CASE WHEN x.effects->>'receiptTime'='true' THEN i.created_at ELSE x.created_at END AS event_time
+      FROM distinct_receipts x JOIN incoming i USING (topic_arn,message_id,workspace_id) WHERE x.email_id IS NOT NULL
+    ) ${effects ? sql`, recipients AS MATERIALIZED (
+      SELECT DISTINCT x.event_id,lower(address) AS address FROM matched x,
+        jsonb_array_elements_text(x.to_addresses || x.cc_addresses || x.bcc_addresses) AS address
+      WHERE x.effects->'reported' ? lower(address) OR (x.effects->>'observe' IS NOT NULL AND jsonb_array_length(x.to_addresses)=1 AND x.cc_addresses='[]' AND x.bcc_addresses='[]')
+    )` : sql``}, inserted AS (
+      INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
        SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.created_at
-       FROM input x JOIN incoming i USING (topic_arn, message_id, workspace_id) WHERE x.error IS NULL AND x.email_id IS NOT NULL
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
+         ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
+           AND EXISTS(SELECT FROM provider_pool_regions WHERE feedback_topic_arn=x.topic_arn) THEN ARRAY(
+           SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
+           FROM recipients r WHERE r.event_id=x.event_id AND r.address NOT LIKE '%@simulator.amazonses.com' ORDER BY r.address) END` : sql`NULL`}
+       FROM matched x ORDER BY x.ordinal
       ON CONFLICT DO NOTHING RETURNING *
+    ) ${effects ? sql`, contact_events AS (
+      SELECT x.workspace_id,r.address,x.ordinal,x.event_time,x.effects->>'suppress' AS reason,x.effects->>'observe' AS observe,
+        min(x.ordinal) FILTER (WHERE x.effects->>'suppress' IS NOT NULL) OVER (PARTITION BY x.workspace_id,r.address) AS first_suppression
+      FROM matched x JOIN inserted ins ON ins.id=x.event_id JOIN recipients r USING(event_id)
+    ), contact_changes AS (
+      -- One write per address. A missing contact starts existing at its first suppression;
+      -- an earlier open must not create it or retroactively contribute engagement.
+      INSERT INTO audience_contacts AS c(id,workspace_id,email,suppressed,suppression_reason,last_open_at,last_click_at,open_observed_since,click_observed_since,observed_since)
+      SELECT 'con_'||replace(gen_random_uuid()::text,'-',''),v.workspace_id,v.address,bool_or(reason IS NOT NULL),
+        (array_agg(reason ORDER BY ordinal DESC) FILTER (WHERE reason IS NOT NULL))[1],
+        max(event_time) FILTER (WHERE observe='open'),max(event_time) FILTER (WHERE observe='click'),
+        min(event_time) FILTER (WHERE observe='open'),min(event_time) FILTER (WHERE observe='click'),min(event_time) FILTER (WHERE observe IS NOT NULL)
+      FROM contact_events v LEFT JOIN audience_contacts c ON c.workspace_id=v.workspace_id AND c.email=v.address
+      WHERE (reason IS NOT NULL OR observe IS NOT NULL) AND (c.id IS NOT NULL OR ordinal>=first_suppression)
+      GROUP BY v.workspace_id,v.address ORDER BY v.workspace_id,v.address ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET
+        suppressed=c.suppressed OR excluded.suppressed,suppression_reason=coalesce(excluded.suppression_reason,c.suppression_reason),
+        last_open_at=greatest(c.last_open_at,excluded.last_open_at),last_click_at=greatest(c.last_click_at,excluded.last_click_at),
+        open_observed_since=least(c.open_observed_since,excluded.open_observed_since),click_observed_since=least(c.click_observed_since,excluded.click_observed_since),
+        observed_since=least(c.observed_since,excluded.observed_since),updated_at=now()
+    )` : sql``}, ranked AS (
+      SELECT x.*,max(x.next_rank) OVER(PARTITION BY x.email_id ORDER BY x.ordinal) AS running_rank FROM matched x JOIN inserted ins ON ins.id=x.event_id
+      WHERE x.next_rank IS NOT NULL
     ), winner AS (
-      -- Send and Delivery for one email can share a batch; only the highest-ranked new event moves status.
-       SELECT DISTINCT ON (x.email_id) x.email_id, x.workspace_id, x.status, x.next_status, x.next_rank, x.provider_id
-      FROM input x JOIN inserted ins ON ins.id = x.event_id ORDER BY x.email_id, x.next_rank DESC
+      SELECT DISTINCT ON (email_id) *,bool_or(type='validation_suppressed' AND next_rank>=greatest(running_rank,(${JSON.stringify(rank)}::jsonb->>status)::int)) OVER(PARTITION BY email_id) AS validation
+      FROM ranked ORDER BY email_id,next_rank DESC,ordinal DESC
     ), updated AS (
-      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), updated_at = clock_timestamp()
+      UPDATE sending_emails e SET status = w.next_status, provider_id = coalesce(w.provider_id, e.provider_id), error_code=CASE WHEN w.validation THEN 'EMAIL_VALIDATION_SUPPRESSED' ELSE e.error_code END, updated_at = clock_timestamp()
        FROM winner w WHERE e.id = w.email_id AND e.workspace_id = w.workspace_id AND w.next_rank >= (${JSON.stringify(rank)}::jsonb ->> w.status)::int
     ), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
@@ -1318,7 +1356,7 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), webhook_jobs AS (
       INSERT INTO jobs(id, workspace_id, type, payload)
       SELECT 'job_' || replace(gen_random_uuid()::text, '-', ''), workspace_id, 'operation.webhook', jsonb_build_object('deliveryId', id, 'generation', 0) FROM deliveries RETURNING id
-    ) SELECT x.ordinal, x.workspace_id AS "workspaceId", x.error,
+    ) SELECT x.ordinal, x.workspace_id AS "workspaceId", coalesce(x.error,CASE WHEN x.effects IS NOT NULL AND x.email_id IS NULL THEN 'SES_EMAIL_NOT_FOUND' END) AS error,
       (SELECT row_to_json(e) FROM (SELECT ins.id, ins.workspace_id AS "workspaceId", ins.email_id AS "emailId", ins.type,
         ins.provider_id AS "providerId", ins.external_id AS "externalId", ins.data, ins.simulated, ins.created_at::text AS "createdAt" FROM inserted ins WHERE ins.id = x.event_id) e) AS event,
       ((SELECT count(*) FROM webhook_jobs) + (SELECT count(*) FROM recovery r WHERE r.id = x.recovery_job_id))::int AS runnable
