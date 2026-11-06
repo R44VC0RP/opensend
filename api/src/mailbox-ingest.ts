@@ -81,6 +81,9 @@ function headersOf(email: Email | null): MailHeader[] {
 const AUTOMATED_HEADERS = new Set(['auto-submitted', 'precedence', 'x-autoreply', 'x-autorespond', 'content-type', 'from']);
 const RAW_HEADER_SCAN_LIMIT = 2 * 1024 * 1024;
 const RAW_HEADER_FIELD_LIMIT = 16 * 1024;
+const utf8 = new TextEncoder();
+// UTF-16 length bounds UTF-8 bytes from below and a third of them from above, so encoding only runs in the narrow middle band.
+const withinFieldLimit = (value: string) => value.length * 3 <= RAW_HEADER_FIELD_LIMIT || (value.length <= RAW_HEADER_FIELD_LIMIT && utf8.encode(value).byteLength <= RAW_HEADER_FIELD_LIMIT);
 const rawHeaderDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 let incompleteAutomatedHeaderScans = 0;
 const trimWsp = (s: string) => {
@@ -218,7 +221,7 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   const header = (name: string) => {
     if (!email) return fallback!.get(name) ?? '';
     const value = email.headers.find(item => item.key === name)?.value ?? '';
-    if (value.length <= RAW_HEADER_FIELD_LIMIT) return value;
+    if (withinFieldLimit(value)) return value;
     parsedCapped = true;
     return '';
   };
@@ -356,7 +359,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
-  const commonFrom = common.from?.[0] && common.from[0].length <= RAW_HEADER_FIELD_LIMIT ? flatten(addressParser(common.from[0]))[0] : undefined;
+  const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';
