@@ -502,10 +502,16 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
         const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:arn.topic,NextToken:next}),request);
         if (!page.Subscriptions) throw drift();
         for (const s of page.Subscriptions) {
+          if (++count>1 || !sub || s.TopicArn!==arn.topic || s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback) throw drift();
+          // SNS can list our exact journaled endpoint before it exposes a usable
+          // subscription ARN. DeleteTopic removes it; no confirmation or repair is needed.
+          if (pending(s)) continue;
           const subscription=subscriptionArn(s,arn.topic);
-          if (++count>1 || !sub || !subscription || s.TopicArn!==arn.topic || s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback) throw drift();
+          if (!subscription) throw drift();
           const v=(await c.sns.send(new GetSubscriptionAttributesCommand({SubscriptionArn:subscription}),request)).Attributes;
-          if (v?.TopicArn!==arn.topic || v.Owner!==account || v.Protocol!=='https' || v.Endpoint!==byoFeedback || v.PendingConfirmation!=='false' || v.RawMessageDelivery!=='false' || v.FilterPolicy && v.FilterPolicy!=='{}' || v.RedrivePolicy || v.DeliveryPolicy) throw drift();
+          if (v?.TopicArn!==arn.topic || v.Owner!==account || v.Protocol!=='https' || v.Endpoint!==byoFeedback) throw drift();
+          const isPending=v.PendingConfirmation==='true';
+          if ((!isPending && v.PendingConfirmation!=='false') || (v.RawMessageDelivery!=='false' && !(isPending && v.RawMessageDelivery===undefined)) || v.FilterPolicy && v.FilterPolicy!=='{}' || v.RedrivePolicy || v.DeliveryPolicy) throw drift();
         }
         next=page.NextToken;if (next && (seen.has(next)||seen.size>=10)) throw drift();if (next) seen.add(next);
       } while(next);

@@ -4635,7 +4635,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('BYO v5 enrollment: read-only inventory and independent confirmed regional imports',async t=>{
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
-    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1', account='222288884444';
+    const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444';
     const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BETTER_AUTH_SECRET:AUTH_SECRET,GOOGLE_CLIENT_ID:'fixture',GOOGLE_CLIENT_SECRET:'fixture',AUTH_ALLOWED_DOMAINS:'example.com',PUBLIC_URL:PUBLIC_ORIGIN,MULTI_TENANT:'true',DEFAULT_WORKSPACE_OWNERS:'',MX_REGIONAL_SENDING:'true',MX_BYO_V2:'true',ENABLE_LIVE_SES:'true',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -4668,11 +4668,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);
           assert.equal(Buffer.from(i.Content.Raw.Data).toString(),'From: pilot@sub.both.example\r\nTo: success@simulator.amazonses.com\r\nSubject: Fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nBody line.\r\nSender: body text');return {MessageId:randomUUID()};
         }
-        case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
+        case 'GetAccountCommand':if(![oh,ie,va,west].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
-        case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
+        case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
@@ -4692,9 +4692,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'SetTopicAttributesCommand':assert.equal(i.AttributeName,'Policy');assert.ok(JSON.parse(i.AttributeValue).Statement.some((s:Json)=>s.Principal?.Service==='ses.amazonaws.com'&&s.Condition.StringEquals['AWS:SourceAccount']===account));topic!.Attributes.Policy=i.AttributeValue;return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
         case 'SubscribeCommand':assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);
-          if (!topic!.subs.length) topic!.subs.push({...i,Owner:account,SubscriptionArn:arn+':test'}); // Same endpoint, protocol and topic: SNS idempotent Subscribe.
+          if (!topic!.subs.length) topic!.subs.push({...i,Owner:account,SubscriptionArn:region===west?'PendingConfirmation':arn+':test'}); // List may return a sentinel even with ReturnSubscriptionArn.
           if(region===oh && loseSubscribe){loseSubscribe=false;throw Object.assign(Error('accepted before timeout'),{name:'TimeoutError'});}return {SubscriptionArn:arn+':test'};
-        case 'GetSubscriptionAttributesCommand':if(throttlePoll){throttlePoll=false;throw Object.assign(Error('poll throttled'),{name:'ThrottlingException'});}return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:'false'}};
+        case 'GetSubscriptionAttributesCommand':if(throttlePoll){throttlePoll=false;throw Object.assign(Error('poll throttled'),{name:'ThrottlingException'});}return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:region===west&&!topic!.confirmed?undefined:'false'}};
         default:throw Error('unexpected SNS call '+op);
       }
     });
@@ -4817,6 +4817,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE domain_id=$1',[verify.payload.domainId])).rowCount,0);
     });
     const selection={revision:rev,candidateIds:[ohId],confirm:true}, receipt=ok(await api('POST',path+'/imports',selection,'retry-selected'),202);
+    ok(await api('POST','/v1/domains',{name:'pending.example',region:west}),202);assert.equal(await run('byo.provision',west),false);
+    assert.equal((await regionStatus(west)).error,'SNS_CONFIRMATION_PENDING'); // Disconnect before this region ever receives the signed callback.
     ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,3);
     await t.test('disconnect fences admission, refuses drift and checkpoints only owned regional resources',async()=>{
       const del=()=>api('DELETE',path),resource=params.get('param_ResourcePrefix')!,vset=sets.get(va+':'+resource+'-transactional')!,varn=`arn:aws:sns:${va}:${account}:${resource}-feedback`,vtopic=topics.get(varn)!;
@@ -4835,14 +4837,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       vset.dest.push({Name:'foreign',Enabled:true});await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vset.dest.pop();await retry();
       vtopic.subs.push({...vtopic.subs[0],Endpoint:'https://foreign.invalid/events'});await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vtopic.subs.pop();await retry();
       const tags=vset.Tags;vset.Tags=[];await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vset.Tags=tags;assert.ok(!trace.slice(start).some(e=>e.op.startsWith('Delete')));await retry();
+      const sub=vtopic.subs[0];vtopic.subs[0]={...sub,SubscriptionArn:'PendingConfirmation',Owner:'999999999999'};
+      await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vtopic.subs[0]=sub;await retry();
       loseSetDelete=true;await assert.rejects(run('byo.disconnect'),{code:'AWS_SETUP_TIMEOUT'});await retry();
       assert.equal(await run('byo.disconnect'),false); // Explicit NotFound reconciles the lost response without repeating Delete.
       denyCleanup=true;await assert.rejects(run('byo.disconnect'),{code:'AWS_ACCESS_DENIED'});const manifest=(await poll()).cleanup;
-      assert.deepEqual(manifest.lastError,{region:va,code:'AWS_ACCESS_DENIED'});assert.equal(manifest.remaining.length,2);assert.ok(!manifest.remaining.find((r:Json)=>r.region===va).resources.some((e:Json)=>e.resource.endsWith('-transactional')));
+      assert.deepEqual(manifest.lastError,{region:va,code:'AWS_ACCESS_DENIED'});assert.equal(manifest.remaining.length,3);assert.ok(!manifest.remaining.find((r:Json)=>r.region===va).resources.some((e:Json)=>e.resource.endsWith('-transactional')));
       const foreign='opensend-self-hosted-fixture';sets.set(va+':'+foreign,{ConfigurationSetName:foreign});topics.set(varn.replace(resource+'-feedback',foreign),{});
-      denyCleanup=false;await retry();for(let steps=0;!await run('byo.disconnect');steps++)assert.ok(steps<7);
+      const pendingArn=varn.replace(va,west),pendingSub=topics.get(pendingArn)!.subs[0];
+      denyCleanup=false;await retry();for(let steps=0;!await run('byo.disconnect');steps++){
+        assert.ok(steps<8);
+        if(pendingSub.SubscriptionArn==='PendingConfirmation' && trace.slice(start).some(e=>e.region===west && e.op==='DeleteConfigurationSetCommand')) {
+          assert.ok(!trace.slice(start).some(e=>e.region===west && e.op==='GetSubscriptionAttributesCommand'));
+          pendingSub.SubscriptionArn=pendingArn+':test'; // Attributes are now readable, but the HTTPS subscription still hasn't confirmed.
+        }
+      }
       assert.equal(await poll(),null);assert.ok(sets.has(va+':'+foreign));assert.ok(topics.has(varn.replace(resource+'-feedback',foreign)));
-      const deletes=trace.slice(start).filter(e=>e.op.startsWith('Delete'));assert.equal(deletes.filter(e=>e.op==='DeleteConfigurationSetCommand').length,4);assert.equal(deletes.filter(e=>e.op==='DeleteTopicCommand').length,2);assert.equal(deletes.length,6);
+      const deletes=trace.slice(start).filter(e=>e.op.startsWith('Delete'));assert.equal(deletes.filter(e=>e.op==='DeleteConfigurationSetCommand').length,6);assert.equal(deletes.filter(e=>e.op==='DeleteTopicCommand').length,3);assert.equal(deletes.length,9);
+      assert.ok(trace.slice(start).some(e=>e.region===west && e.op==='GetSubscriptionAttributesCommand'));assert.ok(deletes.some(e=>e.region===west && e.op==='DeleteTopicCommand'));
       assert.equal((await db.query("SELECT FROM domain_claims WHERE workspace_id=$1 AND name='first.example' AND connection_id IS NULL",[wid])).rowCount,1);
       assert.equal((await db.query("SELECT FROM domain_claims WHERE workspace_id=$1 AND claim_scope='account'",[wid])).rowCount,0);await setByoV2(db,[wid,'disable']);
     });
