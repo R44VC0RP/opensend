@@ -3932,6 +3932,69 @@ describe('Operational configuration and public event boundaries', () => {
     error(await http('GET', `/v1/webhooks/${endpoint.id}`, key.secret), 404, 'NOT_FOUND');
   });
 
+  test('both webhook kinds encrypt custom headers and expose only permission-appropriate metadata', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const logs = ['info','warn','error'].map(level => t.mock.method(console, level as 'info' | 'warn' | 'error', () => {}));
+      const reader = ok(await local('POST', '/v1/api-keys', { name: 'Webhook reader', permissions: ['read'] }), 201).secret;
+      const inboxKey = ok(await local('POST', '/v1/inbound/keys', { name: 'Mailbox reader', permissions: ['read'] }), 201).secret;
+      const value = 'Bearer ' + unique('header-canary'), replacement = unique('replacement');
+      const rekeyFixtures: { path: string; table: string }[] = [];
+      function noValues(data: unknown) { const text = JSON.stringify(data); assert.ok(!text.includes(value) && !text.includes(replacement), 'Plaintext webhook credential escaped.'); }
+      for (const [base, table] of [['/v1/webhooks', 'operation_webhooks'], ['/v1/inbound/webhooks', 'mailbox_webhooks']]) {
+        const url = 'https://example.com/headers', hdr = (name: string, v = value) => ({ name, value: v });
+        const endpoint = ok(await local('POST', base, { url, headers: [hdr('Authorization'), hdr('X-Short', 'abc')], paused: true }), 201);
+        const path = `${base}/${endpoint.id}`, timestamp = endpoint.headers[0].updatedAt;
+        rekeyFixtures.push({ path, table });
+        assert.ok(Number.isFinite(Date.parse(timestamp)));
+        assert.deepEqual(endpoint.headers, [{ name: 'Authorization', hint: '••••' + value.slice(-4), updatedAt: timestamp }, { name: 'X-Short', hint: '••••', updatedAt: timestamp }]);
+        noValues(endpoint);
+        const stored = (await db.query(`SELECT * FROM ${table} WHERE id=$1`, [endpoint.id])).rows[0];
+        noValues(stored);
+        assert.match(stored.encrypted_headers, /^v1\.[0-9a-f]{16}\.[0-9a-f]{24}\.[0-9a-f]+$/);
+        const { decrypt } = await import('./src/operations.js');
+        const binding = `${runtime.config.workspaceId}:live:${table === 'mailbox_webhooks' ? 'mailbox:' : ''}${endpoint.id}`;
+        assert.deepEqual(JSON.parse(await decrypt(runtime, stored.encrypted_headers, binding + ':headers')).headers, [hdr('Authorization'), hdr('X-Short', 'abc')]);
+        await assert.rejects(decrypt(runtime, stored.encrypted_headers, binding), { code: 'KEY_ROTATION_REQUIRED' });
+        for (const key of [MANAGER, reader]) {
+          const detail = ok(await request('GET', path, key)), list = ok(await request('GET', base, key)).data;
+          noValues(detail); noValues(list);
+          const expected = key === reader ? [{ name: 'Authorization' }, { name: 'X-Short' }] : endpoint.headers;
+          assert.deepEqual(detail.headers, expected); assert.deepEqual(list.find((item: Json) => item.id === endpoint.id)?.headers, expected);
+        }
+        assert.equal((await request('PATCH', path, reader, { headers: [] })).status, 403);
+        if (table === 'mailbox_webhooks') {
+          error(await request('GET', base, inboxKey), 403, 'ADMIN_REQUIRED');
+          error(await request('GET', path + '/deliveries', reader), 403, 'ADMIN_REQUIRED');
+        }
+        error(await local('POST', base, { url, headers: [hdr('HOST')] }), 422, 'VALIDATION_FAILED');
+        for (const invalid of [
+          ...['content-TYPE','Content-Length','Content-Encoding','Transfer-Encoding','Connection','Keep-Alive','TE','Trailer','Upgrade','HTTP2-Settings','Expect','pRoXy-Authorization','Cookie','User-Agent','wEbHoOk-iD','Webhook-Timestamp','Webhook-Signature','OpenSend-Test','not a token','x'.repeat(65)].map(name => [hdr(name)]),
+          ...['\r','\n','\x00'].map(bad => [hdr('X-Test', value + bad)]), [hdr('Authorization', 'a'.repeat(2049))],
+          [hdr('X-Dup'), hdr('x-DUP')], Array.from({ length: 11 }, (_, i) => hdr(`X-${i}`)),
+          Array.from({ length: 4 }, (_, i) => hdr(`X-${i}`, 'é'.repeat(1024))),
+        ]) noValues(error(await local('PATCH', path, { headers: invalid }), 422, 'VALIDATION_FAILED'));
+        assert.deepEqual(ok(await local('PATCH', path, { description: 'keep headers' })).headers, endpoint.headers);
+        const changed = ok(await local('PATCH', path, { headers: [hdr('X-Routing_Key', replacement)] }));
+        assert.deepEqual(changed.headers, [{ name: 'X-Routing_Key', hint: '••••' + replacement.slice(-4), updatedAt: changed.headers[0].updatedAt }]);
+        assert.ok(Date.parse(changed.headers[0].updatedAt) > Date.parse(timestamp)); noValues(changed);
+        assert.deepEqual(ok(await local('PATCH', path, { headers: [] })).headers, []);
+        assert.deepEqual(ok(await local('GET', path)).headers, []);
+        assert.equal((await db.query(`SELECT encrypted_headers FROM ${table} WHERE id=$1`, [endpoint.id])).rows[0].encrypted_headers, null);
+      }
+      // Keep the installer-wide key rotation strictly within this scenario's two fixture rows.
+      for (const { table, path } of rekeyFixtures) {
+        await db.query(`CREATE TEMP TABLE ${table} ON COMMIT DROP AS SELECT * FROM public.${table} WHERE workspace_id=$1`, [runtime.config.workspaceId]);
+        ok(await local('PATCH', path, { headers: [{ name: 'Authorization', value }] }));
+      }
+      const { reencryptWebhookSecrets } = await import('./src/operations.js');
+      runtime.config = { ...runtime.config, encryptionKey: createHash('sha256').update(unique('new-root')).digest('hex'), previousEncryptionKey: runtime.config.encryptionKey };
+      assert.deepEqual(await reencryptWebhookSecrets(runtime.db, runtime.config), { scanned: 2, reencrypted: 2, skipped: 0, conflicted: 0 });
+      delete runtime.config.previousEncryptionKey;
+      for (const { path } of rekeyFixtures) assert.equal(ok(await local('GET', path)).headers[0].hint, '••••' + value.slice(-4));
+      noValues(logs.flatMap(log => log.mock.calls.map(call => call.arguments)));
+    });
+  });
+
   test('unsigned or untrusted SNS envelopes fail publicly without trusting arbitrary certificate URLs', async () => {
     // http serializes strings as JSON (two extra quotes). Exactly 512 KiB reaches envelope validation.
     error(await http('POST', '/v1/events/ses', undefined, 'x'.repeat(512 * 1024 - 2)), 422, 'VALIDATION_FAILED');
@@ -3964,10 +4027,16 @@ describe('Operational configuration and public event boundaries', () => {
       import('./src/dispatch.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js'),
     ]);
     const requests: Array<{ path: string; method: string }> = [];
+    const callbacks: Array<{ headers: import('node:http').IncomingHttpHeaders; body: string }> = [];
     // Real loopback 302 responses exercise fetch's redirect behavior. No AWS or
     // public webhook endpoint is contacted, even if redirect refusal regresses.
-    const server = createServer((request, response) => {
+    const server = createServer(async (request, response) => {
       requests.push({ path: request.url!, method: request.method! });
+      if (request.url === '/webhook') {
+        let body = ''; for await (const chunk of request) body += chunk;
+        callbacks.push({ headers: request.headers, body });
+        if (callbacks.length > 1) { response.writeHead(204); response.end(); return; }
+      }
       if (request.url === '/certificate' || request.url === '/webhook') {
         response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by OpenSend.');
       } else { response.writeHead(200); response.end('The redirect target must never be requested.'); }
@@ -4022,7 +4091,17 @@ describe('Operational configuration and public event boundaries', () => {
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }]);
         assert.equal((await db.query('SELECT count(*)::int AS count FROM operation_sns_receipts WHERE workspace_id = $1', [runtime.config.workspaceId])).rows[0].count, 0);
 
-        const endpoint = ok(await local('POST', '/v1/webhooks', { url: webhookUrl, paused: true }), 201);
+        const auth = 'Bearer ' + unique('callback'), replaced = 'Bearer ' + unique('replacement');
+        const logs = ['info','warn','error'].map(level => t.mock.method(console, level as 'info' | 'warn' | 'error', () => {}));
+        const endpoint = ok(await local('POST', '/v1/webhooks', { url: webhookUrl, paused: true, headers: [{ name: 'Authorization', value: auth }] }), 201);
+        const path = `/v1/webhooks/${endpoint.id}`, secret = ok(await local('GET', path + '/secret')).secret;
+        function checkCallback(index: number, value: string | undefined, synthetic: boolean) {
+          const { headers, body } = callbacks[index];
+          assert.equal(headers.authorization, value); assert.equal(headers['content-type'], 'application/json');
+          assert.equal(headers['opensend-test'], synthetic ? 'true' : undefined); assert.equal(headers['webhook-id'], JSON.parse(body).id);
+          assert.match(String(headers['webhook-timestamp']), /^\d+$/);
+          assert.equal(headers['webhook-signature'], 'v1,' + createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${headers['webhook-id']}.${headers['webhook-timestamp']}.${body}`).digest('base64'));
+        }
         // These rows never commit: the external runner cannot see or deliver this
         // synthetic endpoint test. Only this normal drain uses the loopback transport.
         const queued = ok(await local('POST', `/v1/webhooks/${endpoint.id}/test`), 202);
@@ -4038,6 +4117,7 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts.length, 1);
         assert.equal(delivery.attempts[0].statusCode, 302);
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
+        checkCallback(0, auth, true);
         const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
         // A normal delivery (unlike the synthetic test POST above) parks under the endpoint
@@ -4046,9 +4126,19 @@ describe('Operational configuration and public event boundaries', () => {
         await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND payload->>'deliveryId'=$2",[runtime.config.workspaceId,queued.id]);
         await drainJobs(runtime,1,1);
         assert.equal((await db.query('SELECT status FROM operation_deliveries WHERE id=$1',[queued.id])).rows[0].status,'paused');
-        ok(await local('PATCH', `/v1/webhooks/${endpoint.id}`, {paused:false}));
+        ok(await local('PATCH', path, { paused:false, headers: [{ name: 'Authorization', value: replaced }] }));
         assert.equal((await db.query("SELECT 1 FROM jobs WHERE payload->>'deliveryId'=$1 AND payload->>'generation'='1' AND status='pending'",[queued.id])).rowCount,1);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
+        await drainJobs(runtime,1,1);
+        checkCallback(1, replaced, false);
+        ok(await local('PATCH', path, { headers: [] }));
+        ok(await local('POST', `${path}/deliveries/${queued.id}/retry`), 202);
+        await drainJobs(runtime,1,1);
+        checkCallback(2, undefined, false);
+        const detail = ok(await local('GET', `${path}/deliveries/${queued.id}`));
+        assert.equal(detail.attempts.length, 3); assert.equal(detail.status, 'delivered');
+        const serialized = JSON.stringify([ok(await local('GET', `${path}/deliveries`)), detail, logs.flatMap(log => log.mock.calls.map(call => call.arguments))]);
+        assert.ok(!serialized.includes(auth) && !serialized.includes(replaced));
         throw rollback;
       });
     } catch (cause) { if (cause !== rollback) throw cause; }
@@ -5043,7 +5133,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const inbox = `${base}/messages?addressId=${box.id}`;
       const agent = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'support agent', addressIds: [box.id], permissions: ['read','send'] }), 201).secret}` };
       const reader = { authorization: `Bearer ${ok(await post(`${base}/keys`, { name: 'all mailbox reader', permissions: ['read'] }), 201).secret}` };
-      const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'] }), 201);
+      const callbackAuth = 'Bearer ' + unique('inbound-callback'), updatedAuth = 'Bearer ' + unique('retry-callback');
+      const allHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/all', eventTypes: ['message.stored'], headers: [{ name: 'Authorization', value: callbackAuth }] }), 201);
       const boxHook = ok(await post(`${base}/webhooks`, { url: 'https://example.com/support', addressIds: [box.id], eventTypes: ['message.received'] }), 201);
       const raw = new Map<string,string>();
       t.mock.method(S3Client.prototype,'send', async (cmd: any) => { if(cmd.constructor.name==='HeadObjectCommand') return {ContentLength:Buffer.byteLength(raw.get(cmd.input.Key)!),ETag:'"fixture"'};if(cmd.constructor.name==='CopyObjectCommand') return {};if(cmd.constructor.name==='PutObjectCommand') {assert.doesNotMatch(Buffer.from(cmd.input.Body).toString(),/^bcc:/im);return {};}assert.ok(cmd instanceof GetObjectCommand); const mime = raw.get(cmd.input.Key!); assert.ok(mime); return { Body: { transformToByteArray: async () => Buffer.from(mime) } }; });
@@ -5082,17 +5173,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(deliveries.filter(d=>d.webhook_id===allHook.id).length,4); assert.equal(deliveries.filter(d=>d.webhook_id===boxHook.id).length,3);
       assert.equal((await jobs('mailbox.webhook')).length,7);
       const delivery = deliveries.find(d => d.webhook_id === allHook.id && d.payload.messageId === unrouted.id)!;
+      error(await get(`${base}/webhooks/${allHook.id}`, agent), 403, 'ADMIN_REQUIRED');
       const { mailboxEventJobs } = await import('./src/mailbox-events.js');
       let attempts = 0;
       const transport = runtime.webhookFetch;
       runtime.webhookFetch = async (url, init) => {
         const h = new Headers(init.headers), body = String(init.body), event = JSON.parse(body);
         assert.equal(url, 'https://example.com/all'); assert.equal(event.type, 'message.stored'); assert.equal(event.addressId, null); assert.equal(event.id, delivery.payload.id);
+        assert.equal(h.get('authorization'), attempts === 0 ? callbackAuth : updatedAuth); assert.equal(h.get('content-type'), 'application/json');
         assert.equal(h.get('webhook-id'), event.id); assert.equal(h.get('webhook-signature'), 'v1,' + createHmac('sha256', Buffer.from(allHook.secret.slice(6),'base64')).update(`${event.id}.${h.get('webhook-timestamp')}.${body}`).digest('base64'));
-        return { status: ++attempts === 1 ? 503 : 204 };
+        if (++attempts === 1) return { status: 503 };
+        if (attempts === 2) throw new Error(updatedAuth); // Transport diagnostics may contain request data.
+        return { status: 204 };
       };
       const deliver = (attempt: number) => mailboxEventJobs['mailbox.webhook']!(runtime,{ deliveryId:delivery.id },{ id:delivery.id,workspaceId:scope,attempts:attempt });
-      try { await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' }); await deliver(2); await deliver(3); assert.equal(attempts,2); } finally { runtime.webhookFetch = transport; }
+      try {
+        await assert.rejects(deliver(1), { code:'WEBHOOK_HTTP_ERROR' });
+        ok(await local('PATCH', `${base}/webhooks/${allHook.id}`, { headers: [{ name: 'Authorization', value: updatedAuth }] }));
+        await assert.rejects(deliver(2), { code:'WEBHOOK_NETWORK_ERROR' });
+        const failed = ok(await get(`${base}/webhooks/${allHook.id}/deliveries`));
+        assert.equal(failed.data.find((d: Json) => d.id === delivery.id).lastError, 'WEBHOOK_NETWORK_ERROR');
+        assert.ok(!JSON.stringify(failed).includes(callbackAuth) && !JSON.stringify(failed).includes(updatedAuth));
+        await deliver(3); await deliver(4); assert.equal(attempts,3);
+        assert.ok(!JSON.stringify(ok(await get(`${base}/webhooks/${allHook.id}/deliveries`))).includes(updatedAuth));
+      } finally { runtime.webhookFetch = transport; }
       const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
       // Headers are denylisted, not X- only: structural headers OpenSend/SES own are refused, everything else passes through.

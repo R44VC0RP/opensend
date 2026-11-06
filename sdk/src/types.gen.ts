@@ -1153,6 +1153,14 @@ export type Webhook = {
     eventTypes: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
     regions: Array<string> | null;
     paused: boolean;
+    /**
+     * Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.
+     */
+    headers: Array<{
+        name: string;
+        hint?: string;
+        updatedAt?: string;
+    }>;
     createdAt: string;
     updatedAt: string;
 };
@@ -1163,6 +1171,13 @@ export type CreateWebhook = {
     eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
     regions?: Array<string> | null;
     paused?: boolean;
+    /**
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
 };
 
 export type UpdateWebhook = {
@@ -1171,6 +1186,13 @@ export type UpdateWebhook = {
     eventTypes?: Array<'email.sent' | 'email.delivered' | 'email.bounced' | 'email.complained' | 'email.rejected' | 'email.rendering_failed' | 'email.delivery_delayed' | 'email.opened' | 'email.clicked' | 'contact.subscription_changed'>;
     regions?: Array<string> | null;
     paused?: boolean;
+    /**
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
 };
 
 export type WebhookDeleted = {
@@ -2022,6 +2044,14 @@ export type InboundWebhook = {
     description: string;
     eventTypes: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused: boolean;
+    /**
+     * Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.
+     */
+    headers: Array<{
+        name: string;
+        hint?: string;
+        updatedAt?: string;
+    }>;
     createdAt: string;
     updatedAt: string;
     addressIds: Array<string> | null;
@@ -2032,6 +2062,13 @@ export type CreateInboundWebhook = {
     description?: string;
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
+    /**
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
     /**
      * Only events for these receiving addresses; null for all.
      */
@@ -2047,6 +2084,13 @@ export type UpdateInboundWebhook = {
     description?: string;
     eventTypes?: Array<'message.received' | 'message.stored' | 'message.queued' | 'message.sent' | 'message.delivered' | 'message.delayed' | 'message.bounced' | 'message.complained' | 'message.failed' | 'thread.updated' | 'address.created' | 'address.deleted'>;
     paused?: boolean;
+    /**
+     * Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.
+     */
+    headers?: Array<{
+        name: string;
+        value: string;
+    }>;
     /**
      * Only events for these receiving addresses; null for all.
      */

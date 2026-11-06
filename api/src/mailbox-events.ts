@@ -66,10 +66,10 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
     const url = webhookUrl(runtime, endpoint.url);
-    const secret = await decrypt(runtime, endpoint.encryptedSecret, webhookSecretBinding(job.workspaceId, endpoint.id));
+    const binding = webhookSecretBinding(job.workspaceId, endpoint.id), secret = await decrypt(runtime, endpoint.encryptedSecret, binding);
     const body = JSON.stringify(delivery.payload), timestamp = String(Math.floor(Date.now() / 1000)), eventId = String(delivery.payload.id);
     const signature = await hmac(secret, `${eventId}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Mailbox-Webhooks/1.0' }, body, endpoint.encryptedHeaders, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;

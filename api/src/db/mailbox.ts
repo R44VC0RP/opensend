@@ -131,7 +131,7 @@ export const mailboxEvents = pgTable('mailbox_events', {
 export const mailboxWebhooks = pgTable('mailbox_webhooks', {
   id: text('id').primaryKey(), ...scope(), url: text('url').notNull(), description: text('description').notNull().default(''),
   eventTypes: jsonb('event_types').$type<string[]>().notNull(), mailboxIds: jsonb('mailbox_ids').$type<string[] | null>(), paused: boolean('paused').notNull().default(false),
-  encryptedSecret: text('encrypted_secret').notNull(), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
+  encryptedSecret: text('encrypted_secret').notNull(), encryptedHeaders: text('encrypted_headers'), createdAt: ts('created_at').notNull().defaultNow(), updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
 export const mailboxWebhookDeliveries = pgTable('mailbox_webhook_deliveries', {

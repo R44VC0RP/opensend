@@ -25,8 +25,9 @@ import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, tagged
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
 import { acceptInboundNotification } from './mailbox-ingest.js';
+import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
 import { queueReconcile } from './mailbox-setup.js';
-import { mailboxDomains, type MxReport } from './db/mailbox.js';
+import { mailboxDomains, mailboxWebhooks, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, workspaceSettings, type PublishedEvent, type EventType } from './db/operations.js';
 export type { PublishedEvent } from './db/operations.js';
@@ -34,8 +35,18 @@ export type { PublishedEvent } from './db/operations.js';
 const now = () => new Date().toISOString();
 const scoped = (table: { workspaceId: AnyPgColumn }, a: Pick<Actor, 'workspaceId'>) => eq(table.workspaceId, a.workspaceId);
 const eventSchema = z.object({ id: z.string(), type: z.enum(eventTypes), createdAt: z.string(), workspaceId: z.string(), region: z.string().nullable(), data: z.record(z.string(), z.unknown()) }).openapi('Event');
-const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
-const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false) }).openapi('CreateWebhook');
+const reservedHeader = /^(?:host|content-length|content-type|content-encoding|transfer-encoding|connection|keep-alive|te|trailer|upgrade|http2-settings|expect|cookie|user-agent|webhook-id|webhook-timestamp|webhook-signature|opensend-test)$|^proxy-/i;
+export const WebhookHeaders = z.array(z.object({
+  name: z.string().min(1).max(64).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/).refine(name => !reservedHeader.test(name), 'Reserved webhook header.'),
+  value: z.string().max(2048).regex(/^[\t\x20-\x7e\x80-\xff]*$/, 'Use single-line HTTP field bytes.'),
+}).strict()).max(10).superRefine((headers, ctx) => {
+  const names = new Set(headers.map(h => h.name.toLowerCase()));
+  if (names.size !== headers.length) ctx.addIssue({ code: 'custom', message: 'Header names must be unique regardless of case.' });
+  if (headers.reduce((size, h) => size + h.name.length + Buffer.byteLength(h.value), 0) > 8192) ctx.addIssue({ code: 'custom', message: 'Header names and values exceed 8 KiB.' });
+}).describe('Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved.');
+export const WebhookHeaderViews = z.array(z.object({ name: z.string(), hint: z.string().optional(), updatedAt: z.string().datetime().optional() })).describe('Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced.');
+const webhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(eventTypes)), regions: z.array(z.string()).nullable(), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string() }).openapi('Webhook');
+const webhookInput = z.object({ url: z.string().url().max(2048), description: z.string().max(500).default(''), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).default(['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed']), regions: z.array(z.string()).min(1).max(40).nullable().optional(), paused: z.boolean().default(false), headers: WebhookHeaders.optional() }).openapi('CreateWebhook');
 const webhookPatch = webhookInput.partial().extend({ description: z.string().max(500).optional(), eventTypes: z.array(z.enum(eventTypes)).min(1).max(10).optional(), paused: z.boolean().optional() }).openapi('UpdateWebhook');
 const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
@@ -64,7 +75,10 @@ async function sesCall<T>(operation: () => Promise<T>): Promise<T> {
     throw new ApiError(503, 'SES_UNAVAILABLE', 'SES could not complete the operation. Check service availability and deployment connectivity.', undefined, true);
   }
 }
-function metadata(row: typeof webhooks.$inferSelect) { const { encryptedSecret: _, workspaceId: _w, ...value } = row; return value; }
+async function metadata(runtime: Runtime, row: typeof webhooks.$inferSelect, a: Actor) {
+  const { encryptedSecret: _, encryptedHeaders, workspaceId: _w, ...value } = row;
+  return { ...value, headers: await webhookHeaderViews(runtime, encryptedHeaders, secretBinding(row, row.id), a.permissions.includes('manage')) };
+}
 
 // The single endpoint rule for sending and inbound webhooks: public HTTPS DNS names only, never
 // credentials, IP literals, internal TLDs or this installation itself.
@@ -77,8 +91,13 @@ export function webhookUrl(runtime: Pick<Runtime, 'config'>, value: string) {
   return url.toString();
 }
 /** The one outbound transport for sending and inbound webhooks: no redirects, five-second budget, response bodies discarded. */
-export async function postWebhook(runtime: Pick<Runtime, 'webhookFetch'>, url: string, headers: Record<string, string>, body: string) {
-  const init = { method: 'POST' as const, headers: { 'Content-Type': 'application/json', ...headers }, body, signal: AbortSignal.timeout(5000) };
+export async function postWebhook(runtime: Runtime, url: string, headers: Record<string, string>, body: string, encryptedHeaders: string | null, binding: string) {
+  const custom = await readWebhookHeaders(runtime, encryptedHeaders, binding);
+  const merged = new Headers();
+  for (const { name, value } of custom.headers) if (!reservedHeader.test(name)) merged.set(name, value);
+  for (const [name, value] of Object.entries(headers)) merged.set(name, value);
+  merged.set('Content-Type', 'application/json');
+  const init = { method: 'POST' as const, headers: Object.fromEntries(merged), body, signal: AbortSignal.timeout(5000) };
   if (runtime.webhookFetch) return runtime.webhookFetch(url, init);
   const result = await fetch(url, { ...init, redirect: 'manual' }); await result.body?.cancel();
   return { status: result.status };
@@ -109,6 +128,18 @@ export async function decrypt(runtime: Pick<Runtime, 'config'>, ciphertext: stri
   throw rotationRequired();
 }
 export function webhookSecret() { return `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')}`; }
+type HeaderList = z.infer<typeof WebhookHeaders>;
+export async function encryptWebhookHeaders(runtime: Runtime, headers: HeaderList | undefined, binding: string) {
+  if (headers === undefined) return undefined; // PATCH omission leaves the column untouched.
+  return headers.length ? encrypt(runtime, JSON.stringify({ headers, updatedAt: now() }), `${binding}:headers`) : null;
+}
+async function readWebhookHeaders(runtime: Runtime, ciphertext: string | null, binding: string): Promise<{ headers: HeaderList; updatedAt: string }> {
+  return ciphertext === null ? { headers: [], updatedAt: '' } : JSON.parse(await decrypt(runtime, ciphertext, `${binding}:headers`));
+}
+export async function webhookHeaderViews(runtime: Runtime, ciphertext: string | null, binding: string, manage: boolean) {
+  const { headers, updatedAt } = await readWebhookHeaders(runtime, ciphertext, binding);
+  return headers.map(({ name, value }) => manage ? { name, hint: '••••' + (value.length > 8 ? value.slice(-4) : ''), updatedAt } : { name });
+}
 export async function hmac(secret: string, value: string) { const bytes = Buffer.from(secret.slice('whsec_'.length), 'base64'); if (!secret.startsWith('whsec_') || bytes.length !== 32) throw new ApiError(503, 'WEBHOOK_SECRET_ROTATION_REQUIRED', 'Rotate this endpoint secret to enable Standard Webhooks signatures.'); const key = await crypto.subtle.importKey('raw', bytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return Buffer.from(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))).toString('base64'); }
 const secretBinding = (a: Pick<Actor, 'workspaceId'>, webhookId: string) => `${a.workspaceId}:live:${webhookId}`;
 
@@ -117,23 +148,26 @@ const secretBinding = (a: Pick<Actor, 'workspaceId'>, webhookId: string) => `${a
 export async function reencryptWebhookSecrets(db: Database, config: Config): Promise<{ scanned: number; reencrypted: number; skipped: number; conflicted: number }> {
   const runtime = { config }, current = await encryptionKey(config.encryptionKey);
   const counts = { scanned: 0, reencrypted: 0, skipped: 0, conflicted: 0 };
-  let cursor: string | undefined;
-  for (;;) {
-    const rows = await db.select({ id: webhooks.id, workspaceId: webhooks.workspaceId, encryptedSecret: webhooks.encryptedSecret }).from(webhooks).where(cursor ? lt(webhooks.id, cursor) : undefined).orderBy(desc(webhooks.id)).limit(100);
-    if (!rows.length) return counts;
-    for (const row of rows) {
-      counts.scanned++;
-      const parts = row.encryptedSecret.split('.');
-      if (parts.length === 4 && parts[0] === 'v1' && parts[1] === current.id && /^[a-f0-9]{24}$/i.test(parts[2]!) && /^(?:[a-f0-9]{2}){16,}$/i.test(parts[3]!)) { counts.skipped++; continue; }
-      const binding = secretBinding(row, row.id);
-      const encryptedSecret = await encrypt(runtime, await decrypt(runtime, row.encryptedSecret, binding), binding);
-      // Concurrent deletion or secret rotation must never be overwritten by this scan.
-      const updated = await db.update(webhooks).set({ encryptedSecret, updatedAt: now() }).where(and(eq(webhooks.id, row.id), scoped(webhooks, row), eq(webhooks.encryptedSecret, row.encryptedSecret))).returning({ id: webhooks.id });
-      if (updated.length) counts.reencrypted++; else counts.conflicted++;
+  const currentEnvelope = new RegExp(`^v1\\.${current.id}\\.[a-f0-9]{24}\\.(?:[a-f0-9]{2}){16,}$`, 'i');
+  const rewrap = async (ciphertext: string | null, aad: string) => ciphertext !== null && !currentEnvelope.test(ciphertext) ? encrypt(runtime, await decrypt(runtime, ciphertext, aad), aad) : undefined;
+  for (const table of [webhooks, mailboxWebhooks]) {
+    let cursor: string | undefined;
+    for (;;) {
+      const rows = await db.select({ id: table.id, workspaceId: table.workspaceId, encryptedSecret: table.encryptedSecret, encryptedHeaders: table.encryptedHeaders }).from(table).where(cursor ? lt(table.id, cursor) : undefined).orderBy(desc(table.id)).limit(100);
+      for (const row of rows) {
+        counts.scanned++;
+        const binding = table === webhooks ? secretBinding(row, row.id) : mailboxSecretBinding(row.workspaceId, row.id);
+        const encryptedSecret = await rewrap(row.encryptedSecret, binding), encryptedHeaders = await rewrap(row.encryptedHeaders, `${binding}:headers`);
+        if (!encryptedSecret && !encryptedHeaders) { counts.skipped++; continue; }
+        // Neither a concurrent secret rotation nor a header replacement may be overwritten.
+        const updated = await db.update(table).set({ encryptedSecret, encryptedHeaders, updatedAt: now() }).where(and(eq(table.id, row.id), scoped(table, row), eq(table.encryptedSecret, row.encryptedSecret), row.encryptedHeaders === null ? isNull(table.encryptedHeaders) : eq(table.encryptedHeaders, row.encryptedHeaders))).returning({ id: table.id });
+        if (updated.length) counts.reencrypted++; else counts.conflicted++;
+      }
+      if (rows.length < 100) break;
+      cursor = rows[rows.length - 1]!.id;
     }
-    cursor = rows[rows.length - 1]!.id;
-    if (rows.length < 100) return counts;
   }
+  return counts;
 }
 
 function visibleDelivery(row: typeof deliveries.$inferSelect, a: Actor) {
@@ -666,21 +700,23 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'); const rows = await c.env.db.select().from(webhooks).where(and(scoped(webhooks, a), q.cursor ? lt(webhooks.id, q.cursor) : undefined)).orderBy(desc(webhooks.id)).limit(q.limit + 1);
-    return c.json({ data: rows.slice(0, q.limit).map(metadata), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
+    return c.json({ data: await Promise.all(rows.slice(0, q.limit).map(row => metadata(c.env, row, a))), nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/webhooks', operationId: 'createWebhook', tags: ['Webhooks'], security, request: { body: json(webhookInput) }, responses: { 201: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), body = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url);
+    const a = workspaceActor(c, 'manage'), { headers, ...body } = c.req.valid('json'), webhookId = id('wh'); const url = webhookUrl(c.env, body.url), binding = secretBinding(a, webhookId);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
-    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), secretBinding(a, webhookId)) }).returning();
-    return c.json(metadata(row!), 201);
+    const [row] = await c.env.db.insert(webhooks).values({ ...body, id: webhookId, workspaceId: a.workspaceId, url, regions: body.regions ?? null, encryptedSecret: await encrypt(c.env, webhookSecret(), binding), encryptedHeaders: await encryptWebhookHeaders(c.env, headers, binding) }).returning();
+    return c.json(await metadata(c.env, row!, a), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => c.json(metadata(await getWebhook(c.env, workspaceActor(c), c.req.valid('param').id)), 200));
+  app.openapi(createRoute({ method: 'get', path: '/v1/webhooks/{id}', operationId: 'getWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
+    const a = workspaceActor(c); return c.json(await metadata(c.env, await getWebhook(c.env, a, c.req.valid('param').id), a), 200);
+  });
   app.openapi(createRoute({ method: 'patch', path: '/v1/webhooks/{id}', operationId: 'updateWebhook', tags: ['Webhooks'], security, request: { params: IdParams, body: json(webhookPatch) }, responses: { 200: response(webhookSchema), ...errors } }), async c => {
-    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), body = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url);
+    const a = workspaceActor(c, 'manage'), current = await getWebhook(c.env, a, c.req.valid('param').id), { headers, ...body } = c.req.valid('json'); if (body.url) body.url = webhookUrl(c.env, body.url);
     if (body.regions?.length) { const runtime = await withRegionSettings(c.env, a.workspaceId); body.regions.forEach(r => region(runtime, r)); }
     const row = await c.env.db.transaction(async tx => {
       const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).for('update'); if (!locked) return notFound('Webhook');
-      const [updated] = await tx.update(webhooks).set({ ...body, updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
+      const [updated] = await tx.update(webhooks).set({ ...body, encryptedHeaders: await encryptWebhookHeaders(c.env, headers, secretBinding(a, current.id)), updatedAt: now() }).where(and(scoped(webhooks, a), eq(webhooks.id, current.id))).returning();
       if (locked.paused && body.paused === false) {
         const paused = await tx.select().from(deliveries).where(and(scoped(deliveries, a), eq(deliveries.webhookId, current.id), eq(deliveries.status, 'paused'))).for('update');
         for (const delivery of paused) {
@@ -690,7 +726,7 @@ export function registerOperations(app: App) {
         }
       }
       return updated!;
-    }); return c.json(metadata(row), 200);
+    }); return c.json(await metadata(c.env, row, a), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/webhooks/{id}', operationId: 'deleteWebhook', tags: ['Webhooks'], security, request: { params: IdParams }, responses: { 200: response(deletedSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), row = await getWebhook(c.env, a, c.req.valid('param').id); await c.env.db.delete(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, row.id))); return c.json({ deleted: true }, 200);
@@ -990,10 +1026,10 @@ const webhookJob: JobHandler = async (runtime, payload, job) => {
   if (!delivery) return;
   const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
-    const url = webhookUrl(runtime, delivery.url), secret = await decrypt(runtime, delivery.encrypted_secret, secretBinding(job, delivery.webhook_id));
+    const url = webhookUrl(runtime, delivery.url), binding = secretBinding(job, delivery.webhook_id), secret = await decrypt(runtime, delivery.encrypted_secret, binding);
     const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body, delivery.encrypted_headers, binding);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;

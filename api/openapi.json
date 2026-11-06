@@ -4542,6 +4542,28 @@
           "paused": {
             "type": "boolean"
           },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            },
+            "description": "Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced."
+          },
           "createdAt": {
             "type": "string"
           },
@@ -4556,6 +4578,7 @@
           "eventTypes",
           "regions",
           "paused",
+          "headers",
           "createdAt",
           "updatedAt"
         ]
@@ -4616,6 +4639,32 @@
           "paused": {
             "type": "boolean",
             "default": false
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved."
           }
         },
         "required": [
@@ -4667,6 +4716,32 @@
           },
           "paused": {
             "type": "boolean"
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved."
           }
         }
       },
@@ -8007,6 +8082,28 @@
           "paused": {
             "type": "boolean"
           },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "hint": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            },
+            "description": "Configured names only for readers. Managers also see a masked hint and the time the header list was last replaced."
+          },
           "createdAt": {
             "type": "string"
           },
@@ -8029,6 +8126,7 @@
           "description",
           "eventTypes",
           "paused",
+          "headers",
           "createdAt",
           "updatedAt",
           "addressIds"
@@ -8075,6 +8173,32 @@
           "paused": {
             "type": "boolean",
             "default": false
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved."
           },
           "addressIds": {
             "type": [
@@ -8147,6 +8271,32 @@
           },
           "paused": {
             "type": "boolean"
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "pattern": "^[\\t\\x20-\\x7e\\x80-\\xff]*$"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10,
+            "description": "Write-only custom HTTP request headers, e.g. Authorization. Up to 10 unique names (case-insensitive) and 8192 UTF-8 bytes of names and values. Omit on update to keep, supply the complete list to replace, or [] to clear. Transport, Cookie and OpenSend delivery headers are reserved."
           },
           "addressIds": {
             "type": [

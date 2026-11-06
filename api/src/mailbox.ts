@@ -10,7 +10,7 @@ import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, webhookSecretBinding } from './mailbox-events.js';
 import { queueReconcile,saveMailboxMx } from './mailbox-setup.js';
 import { attachToMailboxes, checkTemporaryMailboxRouting, createMailbox, htmlToPlain, lockMailboxLane, ruleMatches, validateRule, ADDRESS, type Scope } from './mailbox-store.js';
-import { encrypt, webhookSecret, webhookUrl } from './operations.js';
+import { encrypt, encryptWebhookHeaders, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
 import { assertRegisteredSender, assertReplyable, DEFAULT_SEND_LIMITS, safeForwardHtml, replyParentId, replyRecipients, replyReferences, replySubject, resolveAttachments, sendLimitsFor } from './mailbox-send.js';
@@ -50,6 +50,11 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   return authenticate(c, async () => {
     const actor = c.get('actor');
     if (actor.domains.length) throw new ApiError(403, 'UNRESTRICTED_KEY_REQUIRED', 'Use an address-scoped inbound key or an unrestricted live manage credential.');
+    // An unrestricted read API key can inspect endpoint metadata, not mail or delivery history.
+    if (!actor.permissions.includes('manage') && actor.credential === 'apiKey' && actor.permissions.includes('read') && c.req.method === 'GET' && /^\/v1\/inbound\/webhooks(?:\/[^/]+)?$/.test(c.req.path)) {
+      c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: [] });
+      return next();
+    }
     if (actor.role === 'member' && actor.credential === 'dashboard') {
       c.set('mailboxAccess', { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: ['read', 'send'] });
       return next();
@@ -93,7 +98,7 @@ const InboundAddressSchema = z.object({
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: z.record(z.string(), z.unknown()),
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
 const KeySchema = z.object({ id: z.string(), name: z.string(), prefix: z.string(), addressIds: z.array(z.string()).nullable(), permissions: z.array(z.enum(['read', 'send', 'modify'])), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('InboundKey');
-const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).openapi('InboundWebhook');
+const InboundWebhookSchema = z.object({ id: z.string(), url: z.string(), description: z.string(), eventTypes: z.array(z.enum(inboundEventTypes)), paused: z.boolean(), headers: WebhookHeaderViews, createdAt: z.string(), updatedAt: z.string(), addressIds: z.array(z.string()).nullable() }).openapi('InboundWebhook');
 const DeliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), status: z.enum(['pending', 'delivered', 'failed']), attemptCount: z.number().int(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('InboundWebhookDelivery');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
@@ -156,7 +161,7 @@ async function mailboxViews(runtime: Runtime, rows: (typeof mailboxes.$inferSele
 }
 type MessageRow = typeof mailMessages.$inferSelect;
 const keyView = (row: typeof mailboxKeys.$inferSelect) => ({ id: row.id, name: row.name, prefix: row.prefix, addressIds: row.mailboxIds, permissions: row.permissions, createdAt: iso(row.createdAt)!, lastUsedAt: iso(row.lastUsedAt), revokedAt: iso(row.revokedAt) });
-const webhookView = (row: typeof mailboxWebhooks.$inferSelect) => ({ id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
+const webhookView = async (c: Ctx, row: typeof mailboxWebhooks.$inferSelect) => ({ id: row.id, url: row.url, description: row.description, eventTypes: row.eventTypes as (typeof inboundEventTypes[number])[], addressIds: row.mailboxIds, paused: row.paused, headers: await webhookHeaderViews(c.env, row.encryptedHeaders, webhookSecretBinding(row.workspaceId, row.id), access(c).admin), createdAt: iso(row.createdAt)!, updatedAt: iso(row.updatedAt)! });
 async function refreshThread(tx: Runtime['db'] | Parameters<Parameters<Runtime['db']['transaction']>[0]>[0], mailboxId: string, threadId: string) {
   await tx.execute(sql`UPDATE mailbox_threads SET unread_count = (SELECT count(*) FROM mailbox_messages WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId} AND NOT read AND direction = 'inbound') WHERE mailbox_id = ${mailboxId} AND thread_id = ${threadId}`);
 }
@@ -615,14 +620,14 @@ function registerInboundKeys(app: App) {
 function registerInboundWebhooks(app: App) {
   const path = '/v1/inbound/webhooks', tags = ['Inbound webhooks'];
   const idFilter = z.array(z.string().min(1).max(120)).min(1).max(500).nullable().describe('Only events for these receiving addresses; null for all.');
-  const getWebhook = async (c: Ctx, webhookId: string, tx?: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0]) => {
-    const value = admin(c);
+  const readAccess = (c: Ctx) => c.get('actor')?.credential === 'apiKey' ? access(c) : admin(c);
+  const getWebhook = async (c: Ctx, webhookId: string, value = admin(c), tx?: Parameters<Parameters<Runtime['db']['transaction']>[0]>[0]) => {
     const query = (tx ?? c.env.db).select().from(mailboxWebhooks).where(and(eq(mailboxWebhooks.workspaceId, value.workspaceId), eq(mailboxWebhooks.id, webhookId)));
     const [row] = await (tx ? query.for('update') : query);
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Webhook was not found.');
     return { value, row };
   };
-  const webhookFields = { url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).min(1).max(inboundEventTypes.length), paused: z.boolean() };
+  const webhookFields = { url: z.string().url().max(2048), description: z.string().max(500), eventTypes: z.array(z.enum(inboundEventTypes)).min(1).max(inboundEventTypes.length), paused: z.boolean(), headers: WebhookHeaders.optional() };
   const createFields = { ...webhookFields, description: webhookFields.description.default(''), eventTypes: webhookFields.eventTypes.default(['message.received']), paused: webhookFields.paused.default(false) };
   const create = z.object({ ...createFields, addressIds: idFilter.default(null) }).strict();
   const patch = z.object({ ...webhookFields, addressIds: idFilter }).partial().strict();
@@ -634,29 +639,29 @@ function registerInboundWebhooks(app: App) {
     const value = admin(c), input = c.req.valid('json');
     const mailboxIds = input.addressIds;
     checkScope(mailboxIds, input.eventTypes);
-    const webhookId = id('mwh'), secret = webhookSecret();
-    const [row] = await c.env.db.insert(mailboxWebhooks).values({ id: webhookId, workspaceId: value.workspaceId, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, webhookSecretBinding(value.workspaceId, webhookId)) }).returning();
+    const webhookId = id('mwh'), secret = webhookSecret(), binding = webhookSecretBinding(value.workspaceId, webhookId);
+    const [row] = await c.env.db.insert(mailboxWebhooks).values({ id: webhookId, workspaceId: value.workspaceId, url: webhookUrl(c.env, input.url), description: input.description, eventTypes: [...new Set(input.eventTypes)], mailboxIds, paused: input.paused, encryptedSecret: await encrypt(c.env, secret, binding), encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, binding) }).returning();
     c.header('Cache-Control', 'no-store');
-    return c.json({ ...webhookView(row!), secret }, 201);
+    return c.json({ ...await webhookView(c, row!), secret }, 201);
   });
   app.openapi(createRoute({ method: 'get', path, operationId: 'listInboundWebhooks', security, tags, responses: { 200: response(z.object({ data: z.array(InboundWebhookSchema) }).openapi('InboundWebhookList')), ...errors } }), async c => {
-    const value = admin(c);
+    const value = readAccess(c);
     const rows = await c.env.db.select().from(mailboxWebhooks).where(eq(mailboxWebhooks.workspaceId, value.workspaceId)).orderBy(desc(mailboxWebhooks.id)).limit(100);
-    return c.json({ data: rows.map(webhookView) }, 200);
+    return c.json({ data: await Promise.all(rows.map(row => webhookView(c, row))) }, 200);
   });
-  app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(webhookView((await getWebhook(c, c.req.valid('param').id)).row), 200));
+  app.openapi(createRoute({ method: 'get', path: `${path}/{id}`, operationId: 'getInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => c.json(await webhookView(c, (await getWebhook(c, c.req.valid('param').id, readAccess(c))).row), 200));
   app.openapi(createRoute({ method: 'patch', path: `${path}/{id}`, operationId: 'updateInboundWebhook', security, tags, request: { params: IdParam, body: json(patch.openapi('UpdateInboundWebhook')) }, responses: { 200: response(InboundWebhookSchema), ...errors } }), async c => {
     const input = c.req.valid('json'), webhookId = c.req.valid('param').id;
     const mailboxIds = input.addressIds;
     const updated = await c.env.db.transaction(async tx => {
       // Serialize partial updates: two independently valid changes must not combine into a scoped message.stored subscription.
-      const { row } = await getWebhook(c, webhookId, tx);
+      const { row } = await getWebhook(c, webhookId, admin(c), tx);
       checkScope(mailboxIds === undefined ? row.mailboxIds : mailboxIds, input.eventTypes ?? row.eventTypes);
       const eventTypes = input.eventTypes && [...new Set(input.eventTypes)];
-      const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url: input.url ? webhookUrl(c.env, input.url) : undefined, eventTypes, updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
+      const [result] = await tx.update(mailboxWebhooks).set({ mailboxIds, description: input.description, paused: input.paused, url: input.url ? webhookUrl(c.env, input.url) : undefined, eventTypes, encryptedHeaders: await encryptWebhookHeaders(c.env, input.headers, webhookSecretBinding(row.workspaceId, webhookId)), updatedAt: new Date().toISOString() }).where(eq(mailboxWebhooks.id, webhookId)).returning();
       return result!;
     });
-    return c.json(webhookView(updated), 200);
+    return c.json(await webhookView(c, updated), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: `${path}/{id}`, operationId: 'deleteInboundWebhook', security, tags, request: { params: IdParam }, responses: { 200: response(Ok), ...errors } }), async c => {
     const { row } = await getWebhook(c, c.req.valid('param').id);
