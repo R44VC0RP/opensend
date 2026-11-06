@@ -18,9 +18,8 @@ const ohio = 'us-east-2', virginia = 'us-east-1', regions = [ohio, virginia];
 const user = 'opensend-mx', principal = `arn:aws:iam::${account}:user/${user}`, arn = name => `arn:aws:iam::${account}:policy/${name}`;
 const origin = 'https://opensend.mx', domain = 'iam-check.testing.mx.vogel.dev', fixtureId = 'dom_97087da408314135a3f6278da0e1aa80';
 const run = randomUUID(), key = process.env.OPENSEND_E2E_API_KEY, stop = new AbortController();
-const tags = {'opensend:owner': 'mx', 'opensend:installation-id': 'opensend-mx:pool', 'opensend:purpose': 'release-canary', 'opensend:run': run};
-let armed = false, createdId, pendingSet;
-const attaching = [];
+const tags = {'opensend:owner': 'mx', 'opensend:installation-id': 'opensend-mx:pool', 'opensend:purpose': 'domain-identity', 'opensend:domain-claim': run};
+let armed = false, activationAttempted = false, iamWritePending = false, createdId, pendingIdentity;
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => stop.abort(new Error(`Interrupted by ${signal}`)));
 function check(ok, msg) { if (!ok) throw new Error(msg); }
 function aws(args, region = ohio, profile = 'anomaly', missing) {
@@ -39,8 +38,7 @@ const attached = () => iam('list-attached-user-policies', '--user-name', user, '
 const canonical = x => Array.isArray(x) ? x.map(canonical) : x && typeof x === 'object' ? Object.fromEntries(Object.keys(x).sort().map(k => [k, canonical(x[k])])) : x;
 const v7Digest = 'bbf2d65755a262da7e263245d355bdf03617f440fd251b7da5961f7af3615de6'; // canonical policy at 7527783, including terminal LF
 const missing = /\(NotFoundException\)/;
-const setInfo = (region, name) => aws(['sesv2', 'get-configuration-set', '--configuration-set-name', name], region, 'anomaly', missing);
-const identity = region => aws(['sesv2', 'get-email-identity', '--email-identity', domain, '--query', 'Tags'], region, 'anomaly', missing);
+const identity = (region, name = domain) => aws(['sesv2', 'get-email-identity', '--email-identity', name, '--query', 'Tags'], region, 'anomaly', missing);
 const runtime = (args, region) => aws(args, region, 'opensend-mx-runtime');
 async function until(label, probe, ms = 60_000) {
   const end = Date.now() + ms;
@@ -86,6 +84,7 @@ function boundaries(workspace) {
   const legacy = 'opensend-042df6f752eaa1f62cb8', denied = ['implicitDeny', 'explicitDeny'];
   decision(virginia, ['ses:CreateReceiptRule', 'ses:UpdateReceiptRule', 'ses:SetActiveReceiptRuleSet', 'ses:DeleteReceiptRule'], ['*'], ['explicitDeny']);
   decision(ohio, ['ses:CreateReceiptRule', 'ses:UpdateReceiptRule'], ['*'], ['allowed']);
+  decision(ohio, ['ses:CreateReceiptRuleSet', 'ses:SetActiveReceiptRuleSet', 'ses:DescribeReceiptRuleSet'], ['*'], denied);
   decision(virginia, ['s3:PutBucketPolicy'], [`arn:aws:s3:::opensend-mx-${account}-mail-${virginia}`], ['explicitDeny']);
   for (const r of regions) {
     const ses = `arn:aws:ses:${r}:${account}:configuration-set/`, sns = `arn:aws:sns:${r}:${account}:`;
@@ -102,20 +101,21 @@ function boundaries(workspace) {
   const ctx = {'aws:ResourceTag/opensend:owner': 'mx', 'aws:ResourceTag/opensend:installation-id': 'opensend-mx:pool', 'aws:ResourceTag/opensend:purpose': 'domain-identity', 'aws:ResourceTag/opensend:domain-claim': run};
   decision(virginia, ['ses:PutEmailIdentityMailFromAttributes', 'ses:DeleteEmailIdentity', 'ses:TagResource', 'ses:CreateTenantResourceAssociation'], adopted, ['explicitDeny'], ctx);
 }
-function ownedSet({region, name}) {
-  const result = setInfo(region, name);
+function ownedIdentity({region, name}) {
+  const result = identity(region, name);
   if (result === null) return false;
-  check(isDeepStrictEqual(Object.fromEntries(result.Tags.map(t => [t.Key, t.Value])), tags), 'Canary set has unexpected tags; never adopt or delete');
+  check(isDeepStrictEqual(Object.fromEntries(result.map(t => [t.Key, t.Value])), tags), 'Canary identity has unexpected tags; never adopt or delete');
   return true;
 }
-function disposable(region) {
-  const name = `opensendmx-${region === ohio ? 'probation' : 'trusted'}-iam-canary`;
-  check(setInfo(region, name) === null, `${region}: canary set already exists`);
-  pendingSet = {region, name}; // Includes ambiguous network failures. Cleanup requires exact run UUID.
-  runtime(['sesv2', 'create-configuration-set', '--configuration-set-name', name, '--tags', JSON.stringify(Object.entries(tags).map(([Key, Value]) => ({Key, Value})))], region);
-  check(ownedSet(pendingSet), 'Created set not observed');
-  runtime(['sesv2', 'delete-configuration-set', '--configuration-set-name', name], region);
-  check(setInfo(region, name) === null, 'Deleted set still present'); pendingSet = undefined;
+async function disposable(region) {
+  const name = `opensendmx-iam-canary-${run}.${region}.testing.mx.vogel.dev`;
+  check(identity(region, name) === null, `${region}: canary identity already exists`);
+  pendingIdentity = {region, name, deleteAttempted: false}; // Includes ambiguous creates. Never retry create or delete by name alone.
+  runtime(['sesv2', 'create-email-identity', '--email-identity', name, '--dkim-signing-attributes', 'NextSigningKeyLength=RSA_2048_BIT', '--tags', JSON.stringify(Object.entries(tags).map(([Key, Value]) => ({Key, Value})))], region);
+  await until(`${region} identity with run-owned claim`, () => ownedIdentity(pendingIdentity));
+  pendingIdentity.deleteAttempted = true;
+  runtime(['sesv2', 'delete-email-identity', '--email-identity', name], region);
+  await until(`${region} identity removal`, () => identity(region, name) === null); pendingIdentity = undefined;
 }
 async function sendProbe(region, workspace) {
   const legacy = region === ohio, host = legacy ? 'e2e.opensend.mx' : 'e2e-trusted.opensend.mx';
@@ -151,6 +151,53 @@ async function domainProbe() {
   }));
   await deleteDomain(); await until('domain removal', () => regions.every(r => identity(r) === null));
 }
+// The release must be serialized. IAM lists/gets can lag writes, including writes whose
+// caller timed out. Issue both detaches before trusting a list. Reconcile late arrivals
+// and require stable reads; an interrupted check must not cancel its own recovery.
+async function rollbackIam() {
+  const start = Date.now(), deadline = start + 90_000;
+  const detach = new Set(companions);
+  let restored = false, stableSince, issues;
+  do {
+    issues = [];
+    const attempt = fn => { try { return fn(); } catch (e) { issues.push(e.message); } };
+    const active = attempt(current);
+    let wrote = false;
+    if (active === candidate || (active === fallback && activationAttempted && !restored)) {
+      wrote = true;
+      attempt(() => { setDefault(fallback); restored = true; });
+    } else if (active && active !== fallback) issues.push(`Concurrent default ${active}; refusing to overwrite it`);
+    const policies = attempt(attached);
+    for (const n of companions) if (detach.has(n) || policies?.includes(arn(n))) {
+      wrote = true;
+      detach.add(n);
+      attempt(() => {
+        aws(['iam', 'detach-user-policy', '--user-name', user, '--policy-arn', arn(n)], ohio, 'anomaly', /\(NoSuchEntity\)/);
+        detach.delete(n);
+      });
+    }
+    if (!wrote && !issues.length && active === fallback && isDeepStrictEqual(policies, [arn(primary)])) {
+      stableSince ??= Date.now();
+      if (Date.now() - stableSince >= 10_000 && (!iamWritePending || Date.now() - start >= 60_000)) return;
+    } else stableSince = undefined;
+    await delay(1500);
+  } while (Date.now() < deadline);
+  throw new Error(`Could not confirm ${fallback} and original attachments within cleanup window${issues.length ? ': ' + issues.join('; ') : ''}`);
+}
+async function cleanupIdentity() {
+  if (!pendingIdentity) return;
+  const {region, name} = pendingIdentity, end = Date.now() + 60_000;
+  do {
+    if (ownedIdentity(pendingIdentity)) {
+      const tenants = aws(['sesv2', 'list-resource-tenants', '--resource-arn', `arn:aws:ses:${region}:${account}:identity/${name}`], region).ResourceTenants;
+      check(Array.isArray(tenants) && !tenants.length, 'Canary identity acquired tenant bindings');
+      pendingIdentity.deleteAttempted = true;
+      aws(['sesv2', 'delete-email-identity', '--email-identity', name], region, 'anomaly', missing);
+    } else if (pendingIdentity.deleteAttempted) return;
+    await delay(1500); // A timed-out create may not be visible yet.
+  } while (Date.now() < end);
+  throw new Error(`Inspect unresolved disposable identity in ${region}: ${name}`);
+}
 try {
   check(aws(['sts', 'get-caller-identity', '--query', 'Account']) === account, 'Wrong operator account');
   check(runtime(['sts', 'get-caller-identity', '--query', 'Arn'], ohio) === principal, 'Wrong worker principal');
@@ -163,6 +210,7 @@ try {
     check(!scope.PolicyGroups.length && !scope.PolicyRoles.length && isDeepStrictEqual(scope.PolicyUsers.map(u => u.UserName), n === primary ? [user] : []), `Unexpected policy attachment: ${n}`);
   }
   checkIreland();
+  check(aws(['ses', 'describe-active-receipt-rule-set', '--query', 'Metadata.Name'], ohio) === 'opensend-mx-inbound', 'Expected the existing Ohio opensend-mx-inbound active set; operator review required');
   check(typeof key === 'string' && /^[\x21-\x7E]+$/.test(key), 'Inject OPENSEND_E2E_API_KEY via Deadbolt');
   const me = await api('/v1/me'), fixture = await api(`/v1/domains/${fixtureId}`);
   check(me.multiTenant && me.simulated === false && me.origin === origin && me.connection?.kind === 'shared' && me.connection.state === 'ready' && /^ws_[a-f0-9]{32}$/.test(me.workspaceId), 'Not a live ready Hosted workspace');
@@ -170,11 +218,14 @@ try {
   stop.signal.throwIfAborted(); check(current() === fallback, 'Default changed before activation');
   armed = true;
   console.log(`Checking ${candidate}, fallback ${fallback}, canary run ${run}`);
-  for (const n of companions) { attaching.push(n); iam('attach-user-policy', '--user-name', user, '--policy-arn', arn(n)); }
+  iamWritePending = true;
+  for (const n of companions) iam('attach-user-policy', '--user-name', user, '--policy-arn', arn(n));
+  activationAttempted = true;
   setDefault(candidate);
+  iamWritePending = false;
   await until('candidate attachments/default visible', () => current() === candidate && isDeepStrictEqual(attached(), names.map(arn).sort()));
   boundaries(me.workspaceId);
-  for (const region of regions) { stop.signal.throwIfAborted(); disposable(region); await sendProbe(region, me.workspaceId); }
+  for (const region of regions) { stop.signal.throwIfAborted(); await disposable(region); await sendProbe(region, me.workspaceId); }
   await domainProbe();
   const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/e2e.ts'], {cwd: new URL('../../api/', import.meta.url), stdio: 'inherit',
     env: {...process.env, OPENSEND_E2E_URL: origin}, signal: stop.signal, timeout: 300_000});
@@ -184,18 +235,12 @@ try {
   stop.signal.throwIfAborted(); console.log(`${candidate}: both regional canaries, protected-resource denials, domain creation/deletion and E2E passed`);
 } catch (e) {
   console.error(`Release check failed: ${e.message}`); process.exitCode = 1;
-  if (armed) try {
-    const active = current();
-    if (active === candidate) setDefault(fallback); else check(active === fallback, `Concurrent default ${active}; refusing to overwrite another release`);
-    check(current() === fallback, 'Cannot verify restored default');
-    for (const n of attaching.reverse()) if (attached().includes(arn(n))) iam('detach-user-policy', '--user-name', user, '--policy-arn', arn(n));
-    check(isDeepStrictEqual(attached(), [arn(primary)]), 'Unexpected attachments after rollback');
-    console.error(`Rollback confirmed: ${fallback}, original attachments`);
-    if (pendingSet && ownedSet(pendingSet)) {
-      const {region, name} = pendingSet;
-      check(!aws(['sesv2', 'get-configuration-set-event-destinations', '--configuration-set-name', name], region).EventDestinations?.length, 'Canary destinations drifted');
-      aws(['sesv2', 'delete-configuration-set', '--configuration-set-name', name], region); check(!ownedSet(pendingSet), 'Canary cleanup not confirmed');
-    }
-    if (createdId) await deleteDomain(true);
-  } catch (err) { console.error(`Manual recovery required: ${err.message}; run ${run}${createdId ? `, domain ${createdId}` : ''}`); }
+  if (armed) {
+    try { await rollbackIam(); console.error(`Rollback confirmed: ${fallback}, original attachments`); }
+    catch (err) { console.error(`Manual IAM recovery required: ${err.message}; run ${run}`); }
+    try { await cleanupIdentity(); }
+    catch (err) { console.error(`Manual identity recovery required: ${err.message}; ${pendingIdentity.region}/${pendingIdentity.name}; run ${run}`); }
+    if (createdId) try { await deleteDomain(true); }
+    catch (err) { console.error(`Manual API cleanup required: ${err.message}; domain ${createdId}; run ${run}`); }
+  }
 }

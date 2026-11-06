@@ -15,7 +15,7 @@
     },
     {
       "Effect": "Allow", "Resource": "*",
-      "Action": ["ses:DescribeActiveReceiptRuleSet", "ses:DescribeReceiptRuleSet", "ses:CreateReceiptRuleSet", "ses:SetActiveReceiptRuleSet", "ses:CreateReceiptRule", "ses:UpdateReceiptRule"],
+      "Action": ["ses:DescribeActiveReceiptRuleSet", "ses:CreateReceiptRule", "ses:UpdateReceiptRule"],
       "Condition": { "StringEquals": { "aws:RequestedRegion": "us-east-2" } }
     },
     {

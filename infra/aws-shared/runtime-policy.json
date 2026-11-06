@@ -53,28 +53,6 @@
         "StringLike": {"aws:ResourceTag/opensend:domain-claim": "????????-????-4???-????-????????????"},
         "StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "domain-identity"}
       }
-    },
-    {
-      "Effect": "Deny", "Action": "ses:TagResource", "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-iam-canary", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-probation-iam-canary"],
-      "Condition": {"Null": {"aws:ResourceTag/opensend:run": "true"}}
-    },
-    {
-      "Effect": "Allow", "Action": ["ses:CreateConfigurationSet", "ses:TagResource"],
-      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-iam-canary", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-probation-iam-canary"],
-      "Condition": {
-        "StringEquals": {"aws:RequestTag/opensend:owner": "mx", "aws:RequestTag/opensend:installation-id": "opensend-mx:pool", "aws:RequestTag/opensend:purpose": "release-canary"},
-        "StringLike": {"aws:RequestTag/opensend:run": "????????-????-4???-????-????????????"},
-        "StringEqualsIfExists": {"aws:ResourceTag/opensend:run": "${aws:RequestTag/opensend:run}", "aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "release-canary"},
-        "ForAllValues:StringEquals": {"aws:TagKeys": ["opensend:owner", "opensend:installation-id", "opensend:purpose", "opensend:run"]}
-      }
-    },
-    {
-      "Effect": "Allow", "Action": "ses:DeleteConfigurationSet",
-      "Resource": ["arn:aws:ses:us-east-1:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-trusted-iam-canary", "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:configuration-set/opensendmx-probation-iam-canary"],
-      "Condition": {
-        "StringEquals": {"aws:ResourceTag/opensend:owner": "mx", "aws:ResourceTag/opensend:installation-id": "opensend-mx:pool", "aws:ResourceTag/opensend:purpose": "release-canary"},
-        "StringLike": {"aws:ResourceTag/opensend:run": "????????-????-4???-????-????????????"}
-      }
     }
   ]
 }
