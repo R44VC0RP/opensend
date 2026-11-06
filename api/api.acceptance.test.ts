@@ -4510,11 +4510,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
       assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'OpenSendMX');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
-      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture',Expiration:new Date(Date.now()+900000)}};
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
     t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
       switch(op){
+        case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
+          const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/opensend-pilot`);
+          return op==='GetEmailTemplateCommand'?{TemplateContent:{Subject:'Fixture'}}:{RenderedTemplate:'Subject: Fixture\r\n\r\nFixture.'};
+        }
+        case 'SendEmailCommand':{
+          const statements=JSON.parse((await this.config.credentials()).sessionToken!).Statement, prefix=`arn:aws:ses:${oh}:${account}:`, resource=params.get('param_ResourcePrefix');
+          assert.deepEqual(statements.map((s:Json)=>s.Action),[['ses:SendEmail'],['ses:ApplyTrackingConfigurationOverrides']]);assert.deepEqual(statements[0].Resource,[prefix+'identity/both.example',prefix+'configuration-set/'+resource+'-transactional',prefix+'configuration-set/'+resource+'-marketing']);
+          assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);return {MessageId:randomUUID()};
+        }
         case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
@@ -4602,6 +4611,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(trace.slice(mark).every(v=>v.region===va));assert.equal((await poll()).importedDomains,2);
     for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,region===va?2:1);}
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
+    await t.test('v5 dispatch signs a rendered template with separate quota, template and selected-identity sessions',async()=>{
+      const {dispatchDue}=await import('./src/dispatcher.js');const scoped={...runtime,config:{...runtime.config,workspaceId:wid,regions:[oh,va]}};
+      const mail=ok(await api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{}}}),202);
+      await dispatchDue(scoped,oh,{accountId:account});assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[mail.id])).rows[0].status,'accepted');
+      assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===oh;}));
+      const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),pc=await workspaceConnection(scoped,oh),other=(await db.query('SELECT domain_id FROM domain_sending_bindings WHERE workspace_id=$1 AND region=$2',[wid,va])).rows[0].domain_id;
+      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'send',domainId:other}}),{code:'BYO_SESSION_SCOPE_REQUIRED'});
+      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'template',name:'opensend-*'}}),{code:'TEMPLATE_SCOPE_REQUIRED'});
+    });
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
       const scoped={...runtime,config:{...runtime.config,workspaceId:wid}}, bucket='retained-v4-mail',topicArn=`arn:aws:sns:${oh}:${account}:opensend-legacy-inbound`;

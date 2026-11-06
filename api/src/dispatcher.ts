@@ -7,7 +7,7 @@ import { sendingConnections, verifiedClaim } from './domain-claims.js';
 import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
-import type { ReadyConnection } from './provider-credentials.js';
+import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
 import { screenSnapshot } from './screen.js';
 
@@ -19,7 +19,7 @@ import { screenSnapshot } from './screen.js';
 
 export type Mail = typeof emails.$inferSelect;
 type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
-type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; tenantName?: string; feedbackTopic?: string };
+type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; sendClient?:(domainId:string)=>SESv2Client; tenantName?: string; feedbackTopic?: string };
 type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
@@ -128,7 +128,7 @@ export async function campaignQuota(runtime: Runtime, a: Actor, region: string, 
   const connection = runtime.config.multiTenant ? (await runtime.db.execute<ReadyConnection>(sql`SELECT * FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region} AND aws_account_id=${account ?? ''} AND paused_at IS NULL`)).rows[0] : undefined;
   if (runtime.config.multiTenant && !connection) return null;
   const gate = initialGate();
-  return await ensureQuota({ runtime, a, ses: providerClient(runtime, region, connection) }, account, region, gate, QUOTA_REFRESH_MS) ? gate.quota : null;
+  return await ensureQuota({ runtime, a, ses: providerClient({...runtime,config:{...runtime.config,workspaceId:a.workspaceId}}, region, forDelivery(connection,{purpose:'quota'})) }, account, region, gate, QUOTA_REFRESH_MS) ? gate.quota : null;
 }
 
 /**
@@ -306,7 +306,9 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const namespace=pc?.legacy_names===false ? pc.kind==='shared' ? pc.pool_tier : 'byo' : undefined;
       const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string,namespace);
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc, runClients), tenantName: pc?.kind === 'shared' ? pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
+      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
+        sendClient:pc?.template_version==='v5'?domainId=>providerClient(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
+        tenantName: pc?.kind === 'shared' ? pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
@@ -520,7 +522,8 @@ async function sendOne(runtime: Runtime, a: Actor, ses: SESv2Client, item: Prepa
     ...(item.owner.tenantName ? { TenantName: item.owner.tenantName } : {}), Content: item.content,
   };
   try {
-    const result = await ses.send(new SendEmailCommand(request));
+    const client=item.owner.sendClient?.((item.stored?.binding??mail.snapshot.binding)?.domain??'')??ses;
+    const result = await client.send(new SendEmailCommand(request));
     if (!result.MessageId) return { mail, type: 'acceptance_unknown', errorCode: 'SES_ACCEPTANCE_UNKNOWN', data: { code: 'SES_MESSAGE_ID_MISSING' } };
     return { mail, type: 'accepted', providerId: result.MessageId, data: {} };
   } catch (error) {

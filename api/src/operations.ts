@@ -18,7 +18,7 @@ import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js'
 import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { verifiedDashboardUser } from './google-auth.js';
-import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
+import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
 import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
@@ -543,7 +543,7 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
   const selectedRegion=connection?.region ?? requested ?? runtime.config.regions[0]!;
   if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[connection.region]}};
-  const a = await sesCall(() => getSes(runtime, selectedRegion,connection).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
+  const a = await sesCall(() => getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'})).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
 export function registerOperations(app: App) {
