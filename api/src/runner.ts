@@ -1,5 +1,6 @@
 import { setTimeout } from 'node:timers/promises';
-import { nodeRuntime } from './adapters/node.js';
+import { Client } from 'pg';
+import { nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain } from './dispatch.js';
 import type { GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
@@ -18,12 +19,25 @@ try {
   // In-process pacing state per account/region. Run one runner per installation (or split
   // the quota explicitly): separate processes do not share this gate.
   const gates = new Map<string, GateState>();
+  // LISTEN requires a session connection, not a checked-out query/transaction connection. Losing
+  // this best-effort nudge only costs latency: ordinary leases still discover every due row.
+  const priorityWake = new EventTarget();
+  let listener: Client | undefined, lastListen = 0;
   for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => { stopped = true; });
   log('info', { code: 'RUNNER_READY', liveSesEnabled: runtime.config.liveEnabled });
   try {
     await queueStartupDiscovery(runtime);
     while (!stopped) {
       try {
+        if (!listener && Date.now() - lastListen >= 15000) {
+          lastListen = Date.now();
+          const client = new Client(postgresConnection(process.env.DATABASE_URL));
+          client.on('notification', msg => { if (msg.payload) priorityWake.dispatchEvent(new Event(msg.payload)); });
+          client.on('error', () => log('warn', { code: 'DISPATCH_LISTENER_FAILED', message: 'Priority wakes disconnected; ordinary leases continue.' }));
+          client.on('end', () => { if (listener === client) listener = undefined; });
+          try { await client.connect(); await client.query('LISTEN opensend_priority'); listener = client; }
+          catch { await client.end(); }
+        }
         // Don't stall mail dispatch while waiting for a platform pool to come online.
         if (runtime.config.multiTenant && !sharedSetup && Date.now() - lastSharedSetup >= 60_000) {
           lastSharedSetup = Date.now();
@@ -39,7 +53,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
-        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover);
+        const count = await drain(runtime, concurrency * 10, concurrency, 5000, gates, recover, priorityWake);
         if (recover) lastRecovery = Date.now();
         if (!count) await setTimeout(1000);
       } catch (error) {
@@ -47,7 +61,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { await sharedSetup; await close(); }
+  } finally { await sharedSetup; await listener?.end(); await close(); }
 } catch (error) {
   log('error', { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED', message: error instanceof ApiError ? error.message : 'Runner startup failed.' });
   process.exitCode = 1;

@@ -5085,6 +5085,45 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a transactional admission takes the next paced slot during an already leased campaign', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { runDispatcher, dispatchWakeKey } = await import('./src/dispatcher.js');
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('priority') }), 201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT gen_random_uuid()::text,$1,'priority-'||n||'@example.net','subscribed' FROM generate_series(1,24)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('priority'), from: 'sender@example.com', subject: 'Campaign', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      await run('campaign.run');
+      runtime.config.simulatedSes.maxSendRate = 14;
+      const priorityWake = new EventTarget();
+      let admitted = 0;
+      runtime.dispatch = async (region, account, _count, _kind, priority) => {
+        if (priority) { admitted = Date.now(); priorityWake.dispatchEvent(new Event(dispatchWakeKey(region, account))); }
+      };
+      const calls: { id: string; at: number }[] = [];
+      let started!: () => void;
+      const first = new Promise<void>(resolve => { started = resolve; });
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype, 'send', function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof SendEmailCommand) { calls.push({ id: cmd.input.EmailTags!.find(t => t.Name === 'opensend_email_id')!.Value!, at: Date.now() }); started(); }
+        return Reflect.apply(send, this, [cmd]);
+      });
+      const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1 });
+      await first;
+      let receipt: Json;
+      try {
+        assert.ok((await db.query("SELECT 1 FROM sending_emails WHERE campaign_id=$1 AND lease_until IS NOT NULL", [campaign.id])).rowCount);
+        receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      } finally { await draining; }
+      const next = calls.find(c => c.at >= admitted)!;
+      assert.ok(admitted > 0); assert.equal(next.id, receipt.id, 'Already-leased marketing must not own future slots.');
+      assert.ok(next.at - admitted < 100, `14/s slot + wake latency: ${next.at - admitted} ms`);
+      assert.equal(calls.length, 25);
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),

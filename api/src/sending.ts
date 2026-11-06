@@ -584,12 +584,13 @@ async function queueEmail(runtime: Runtime, db: DbExecutor, a: Actor, snapshot: 
   await linkAttachments(db, a, snapshot.attachments, 'email', emailId, lockedAttachments);
   // The row itself is the dispatch queue entry; the request's response path nudges that region's dispatcher.
   void requestId;
-  noteDispatch(a, snapshot.region);
+  noteDispatch(a, snapshot);
   return { id: emailId, status: 'queued' as const, simulated: isSimulatedSes(runtime) };
 }
-function noteDispatch(a: Actor, region: string) {
+function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
   const targets = a.dispatchTargets ??= new Map();
-  targets.set(region, (targets.get(region) ?? 0) + 1);
+  const target = targets.get(region) ?? { count: 0, priority: false };
+  target.count++; target.priority ||= kind === 'transactional'; targets.set(region, target);
 }
 async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: SendRequest[] }) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
@@ -656,7 +657,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         SELECT id, ${a.workspaceId}, ${a.keyId}, snapshot->>'region', snapshot->>'from', snapshot->'to', snapshot->'cc', snapshot->'bcc',
           snapshot->>'subject', snapshot, ${isSimulatedSes(runtime)} FROM submitted`);
     if (state.connection) a.dispatchAccount = { aws_account_id: state.connection.aws_account_id, kind: state.connection.kind };
-    for (const row of rows) noteDispatch(a, row.snapshot.region);
+    for (const row of rows) noteDispatch(a, row.snapshot);
     return receipt;
   }, receipt);
 }

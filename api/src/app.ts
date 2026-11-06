@@ -50,8 +50,8 @@ export function createApp() {
     if (!wake && !dispatch) return;
     const nudge = async (runtime: Runtime) => {
       if (wake) try { await runtime.wake?.(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
-      if (dispatch && targets) for (const [region, count] of targets) {
-        try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+      if (dispatch && targets) for (const [region, { count, priority }] of targets) {
+        try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);

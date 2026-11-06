@@ -42,6 +42,8 @@ export interface DispatcherOptions {
   /** This shard's share of the regional quota: 1/count. */
   shard?: { index: number; count: number };
   gate?: GateState;
+  /** Best-effort admission hints. Leases remain the durable source of truth. */
+  priorityWake?: EventTarget;
   onGate?: (state: GateState) => void | Promise<void>;
   /** Stop claiming new batches after this epoch millisecond; in-flight batches always finish. */
   until?: number;
@@ -55,14 +57,6 @@ const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) 
 let rankJsonCache: string | undefined;
 const rankJson = () => rankJsonCache ??= JSON.stringify(rank);
 
-function semaphore(limit: number) {
-  let active = 0; const waiting: (() => void)[] = [];
-  return async <T>(work: () => Promise<T>): Promise<T> => {
-    if (active >= limit) await new Promise<void>(resolve => waiting.push(resolve));
-    active++;
-    try { return await work(); } finally { active--; waiting.shift()?.(); }
-  };
-}
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 export function providerClient(runtime: Runtime, region: string, connection?: ReadyConnection): SESv2Client {
@@ -146,8 +140,9 @@ export function shardRate(gate: GateState, shard?: { index: number; count: numbe
 export function reserve(gate: GateState, recipients: number, shard?: { index: number; count: number }, pacing?: Pacing): number {
   const rate = shardRate(gate, shard, pacing);
   if (rate <= 0) return 1000;
-  const start = Math.max(Date.now(), gate.nextAllowedAt);
-  gate.nextAllowedAt = start + Math.ceil(1000 * recipients / rate);
+  const now = Date.now(), start = Math.max(now, gate.nextAllowedAt), spacing = 1000 * recipients / rate;
+  // Keep fractional slots and absorb timer rounding without banking idle capacity for a burst.
+  gate.nextAllowedAt = Math.max(gate.nextAllowedAt || now, now - Math.min(2, spacing / 2)) + spacing;
   gate.sentSinceRefresh += recipients;
   return Math.max(0, start - Date.now());
 }
@@ -164,12 +159,13 @@ function dailyRemaining(gate: GateState) {
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind'] };
-async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string, priorityOnly = false): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
+    ${priorityOnly ? sql`AND ${transactional} = true` : sql``}
     ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
       WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
@@ -536,8 +532,35 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; limitSends: <T>(work: () => Promise<T>) => Promise<T>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared) => Promise<Outcome>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
+
+// There is only one slot timer and one in-flight limit for every stream and lane. Choose who owns
+// the slot when it opens, not when an earlier batch was claimed. In-flight calls are never canceled.
+function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing, counters: DispatcherReport) {
+  const queues: Record<EmailSnapshot['kind'], (() => void)[]> = { transactional: [], marketing: [] };
+  let active = 0, timer: ReturnType<typeof setTimeout> | undefined;
+  function pump() {
+    if (timer || active >= (options.sendConcurrency ?? 6) || !(queues.transactional.length || queues.marketing.length)) return;
+    const wait = gate.nextAllowedAt - Date.now();
+    if (wait > 0) { timer = setTimeout(() => { timer = undefined; pump(); }, Math.ceil(wait)); return; }
+    (queues.transactional.shift() ?? queues.marketing.shift())!();
+    pump();
+  }
+  return (item: Prepared) => new Promise<Outcome>((resolve, reject) => {
+    const queuedAt = Date.now(), s = item.snapshot;
+    queues[s.kind].push(() => {
+      active++;
+      counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - queuedAt;
+      reserve(gate, s.to.length + s.cc.length + s.bcc.length, options.shard, pacing);
+      sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
+        if (outcome.type === 'provider_throttled') brake(gate);
+        resolve(outcome);
+      }, reject).finally(() => { active--; pump(); });
+    });
+    pump();
+  });
+}
 
 // Quota exhausted for the day: give the leases back untouched and stop this run.
 async function releaseLeases(runtime: Runtime, mails: Mail[]) {
@@ -597,13 +620,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     if (!attempting.length) continue;
     // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
     // rate rather than one burst per group; a throttled response brakes every lane on this shard.
-    const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.limitSends(async () => {
-      const wait = reserve(gate, item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length, options.shard, lane.pacing);
-      if (wait > 0) { const paced = Date.now(); await sleep(wait); counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - paced; }
-      const outcome = await sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item);
-      if (outcome.type === 'provider_throttled') brake(gate);
-      return outcome;
-    }))));
+    const outcomes = await phase('send', () => Promise.all(attempting.map(lane.send)));
     pendingRecords.push(phase('record', () => recordOutcomes(base, outcomes)).then(async () => {
       for (const outcome of outcomes) {
         if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
@@ -634,13 +651,10 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
     try { return await work(); } finally { counters.timings[name] = (counters.timings[name] ?? 0) + Date.now() - startedAt; if (name !== 'send' && name !== 'pace' && name !== 'prepare') counters.statements++; }
   };
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
-  const lane: Lane = { deferred: [], gate, pacing, finishing: new Map(), limitSends: semaphore(options.sendConcurrency ?? 6), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
-  const lease = () => phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId));
-  const first = await lease();
-  const lanes = first.length === lane.options.batchSize ? Math.max(1, options.lanes ?? 2) : 1;
+  const lane: Lane = { deferred: [], gate, pacing, finishing: new Map(), send: pacedSender(gate, options, pacing, counters), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? 60000 } };
+  const lease = (priorityOnly = false) => phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId, priorityOnly));
   let blocked = false;
-  const results = await Promise.allSettled(Array.from({ length: lanes }, async (_, i) => {
-    let batch = i === 0 ? first : await lease();
+  const drainLane = async (batch: Leased[]) => {
     for (;;) {
       const { processed, blocked: exhausted } = await dispatchBatch(runtime, lane, batch);
       counters.batches++;
@@ -651,7 +665,35 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       if (options.until !== undefined && Date.now() >= options.until) { counters.idle = false; await flushFinishing(runtime, lane); return; }
       batch = await lease();
     }
-  }));
+  };
+  // The host wakes this run after a transactional admission commits. Coalesce hints arriving
+  // during a probe; no database polling, spare send capacity or campaign-sized reservation.
+  const key = dispatchWakeKey(options.region, options.accountId);
+  let done = false, dirty = false, resume: (() => void) | undefined;
+  const wake = () => { dirty = true; resume?.(); };
+  options.priorityWake?.addEventListener(key, wake);
+  const priority = async () => {
+    if (!options.priorityWake) return;
+    while (!done && !blocked && Date.now() < (options.until ?? Infinity)) {
+      if (!dirty) await new Promise<void>(resolve => { resume = resolve; });
+      if (done || blocked) return;
+      resume = undefined; dirty = false;
+      const batch = await lease(true);
+      const result = await dispatchBatch(runtime, lane, batch);
+      if (result.blocked) blocked = true;
+      if (result.processed) { counters.batches++; await options.onGate?.(gate); }
+      if (batch.length === lane.options.batchSize) dirty = true;
+    }
+  };
+  const normal = async () => {
+    try {
+      const first = await lease();
+      const lanes = first.length === lane.options.batchSize ? Math.max(1, options.lanes ?? 2) : 1;
+      const results = await Promise.allSettled(Array.from({ length: lanes }, async (_, i) => drainLane(i === 0 ? first : await lease())));
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
+    } finally { done = true; options.priorityWake?.removeEventListener(key, wake); resume?.(); }
+  };
+  const results = await Promise.allSettled([normal(), priority()]);
   for (const result of results) if (result.status === 'rejected') throw result.reason;
   await flushFinishing(runtime, lane);
   if (blocked) counters.idle = true;
@@ -660,6 +702,8 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });
   return counters;
 }
+
+export const dispatchWakeKey = (region: string, account?: string) => `${account ?? ''}:${region}`;
 
 /** Test/runner helper: drain everything due for one account/region with no time limit. */
 export async function dispatchDue(runtime: Runtime, region: string, overrides: Partial<DispatcherOptions> = {}) {

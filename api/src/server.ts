@@ -3,10 +3,15 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { fileURLToPath } from 'node:url';
 import { app } from './app.js';
 import { nodeRuntime } from './adapters/node.js';
+import { sql } from 'drizzle-orm';
+import { dispatchWakeKey } from './dispatcher.js';
 import { admissionDenied, ApiError, digest, log, publicFailureAllowed, publicFailureBucket, publicFailureDenied } from './core.js';
 
 try {
   const { runtime, close } = nodeRuntime(process.env);
+  runtime.dispatch = async (region, account, _count, _kind, priority) => {
+    if (priority) await runtime.db.execute(sql`SELECT pg_notify('opensend_priority', ${dispatchWakeKey(region, account)})`);
+  };
   const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
   const assets = serveStatic({ root: publicRoot });
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });

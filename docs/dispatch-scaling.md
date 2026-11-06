@@ -75,7 +75,11 @@ Commits `be8076e` → `7f82248` on `main`.
 ### 3.3 Pacing (`GateState`, `reserve`, `brake`)
 - Target per shard = `MaxSendRate × DISPATCH_RATE_FACTOR ÷ shards` (or an absolute live
   `DISPATCH_TARGET_RATE`). Production uses factor `1.1` → 22/s at a 20/s quota. Slots are spaced
-  evenly per message, not per group.
+  evenly per recipient. The shared gate assigns each slot only when it opens: ready transactional
+  mail goes before waiting marketing, without reserving rate for either stream. A transactional API
+  admission nudges the active shard (Node: `LISTEN/NOTIFY`; Cloudflare: the existing DO wake) to
+  lease fresh transactional work without polling between sends. Existing provider calls finish;
+  missed wakes and scheduled rows are still picked up by the ordinary fair per-owner batch lease.
 - Any `429` sets `brakeUntil = now + 10 s` (target falls to the raw quota) and yields the slots the
   shard ran ahead by. Throttled rows requeue with 2 s, 4 s, 8 s, 16 s, 32 s backoff (five attempts).
 - `sending_region_limits` is the shared one-minute quota cache; only a shard that finds it stale calls
