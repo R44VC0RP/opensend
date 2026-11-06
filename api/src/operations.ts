@@ -20,6 +20,7 @@ import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './
 import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
+import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
 import { awsError, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
@@ -326,13 +327,13 @@ async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
 }
 const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
-async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string,installation?:string) {
+async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string,installation?:string,regionalByo=false) {
   try {
-    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'opensend:installation-id',Value:installation}]:[])]})));
+    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'opensend:installation-id',Value:installation}]:[]),...(regionalByo?[{Key:'opensend:purpose',Value:'domain-identity'}]:[])]})));
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
-    if (!ownsIdentity(existing,token)) throw unavailableDomain();
+    if (!ownsIdentity(existing,token) || regionalByo && ![mxOwnerTag,{Key:'opensend:installation-id',Value:installation},{Key:'opensend:purpose',Value:'domain-identity'}].every(tag=>existing.Tags?.some(t=>t.Key===tag.Key && t.Value===tag.Value))) throw unavailableDomain();
     return existing;
   }
 }
@@ -341,13 +342,21 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
 function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
-    if (current && current.token===token && !current.expired) return ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined);
+    if (current && current.token===token && !current.expired) {
+      const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
+      const identity=await ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo);
+      if (regionalByo) {
+        const entry=JSON.stringify([{kind:'identity',resource:`arn:aws:ses:${current.region}:${current.connection.aws_account_id}:identity/${current.name}`,claim:token}]);
+        await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=ownership_journal||${entry}::jsonb WHERE connection_id=${current.connection.id} AND region=${current.region} AND NOT ownership_journal @> ${entry}::jsonb`);
+      }
+      return identity;
+    }
   });
 }
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
 // domain deletion and by disconnecting a shared connection, so a later reconnect never meets its own ghost.
 async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDomain,'name'|'region'|'token'|'connection'>) {
-  const client=getSes({...runtime,config:{...runtime.config,regions:[row.region]}},row.region,row.connection);
+  const client=getSes({...runtime,config:{...runtime.config,regions:[row.region]}},row.region,{...row.connection,identitySession:{name:row.name,purpose:'delete'}});
   const ignoreMissing=async <T>(fn:()=>Promise<T>)=>{ try {return await sesCall(fn);} catch(e){if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND') throw e;} };
   const identity=await ignoreMissing(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
   if (!identity || !ownsIdentity(identity,row.token)) return;
@@ -446,7 +455,8 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) {
       defer(1000+Math.random()*1000);
     }
-    const client=getSes(scoped,row.region,row.connection);
+    if (row.connection.kind==='byo' && row.connection.legacy===false && !runtime.config.byoV2) defer(300_000);
+    const client=getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
     let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
     catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_NOT_FOUND' || row.identity) throw e; }
@@ -578,9 +588,11 @@ export function registerOperations(app: App) {
     }
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Defaults to the workspace connection’s region on MX, or the installation’s default region when self-hosted.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name);
     if (c.env.config.multiTenant) {
+      const pending=await newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
+      if (pending) {a.wakeJobs=1;return c.json(pending,202);}
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region), row={name:input.name,region:claim.connection.region,id:claim.id};
       if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
       a.wakeJobs=1;
@@ -627,7 +639,7 @@ export function registerOperations(app: App) {
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
-        const client=getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,current.connection);
+        const client=getSes({...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}},row.region,{...current.connection,identitySession:{name:row.name,purpose:'mailFrom'}});
         if (current.identity?.imported) throw new ApiError(409,'IMPORTED_IDENTITY_READ_ONLY','Manage this imported identity’s MAIL FROM settings in AWS.');
         const identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name})));
         if (!ownsIdentity(identity,current.token)) throw unavailableDomain();
