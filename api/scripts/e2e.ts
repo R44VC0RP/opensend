@@ -389,12 +389,17 @@ async function campaign(audience: Audience, templateId?: string) {
 async function webhook() {
   // Synthetic tests bypass pause, actual workspace subscriptions do not. No customer events
   // or signing secrets leave MX. httpbin's fixed 204 endpoint is not a public request inbox.
-  const item = await api('createWebhook', { body: { url: webhookUrl, description: prefix, eventTypes: ['email.delivered'], paused: true } });
+  // A throwaway bearer value: proves custom headers are stored, masked on read and kept on edit.
+  const bearer = `Bearer ${randomUUID()}`;
+  const item = await api('createWebhook', { body: { url: webhookUrl, description: prefix, eventTypes: ['email.delivered'], paused: true, headers: [{ name: 'Authorization', value: bearer }] } });
   const path = { id: item.id };
   defer(`delete webhook ${item.id}`, async () => check((await api('deleteWebhook', { path })).deleted, 'webhook not deleted'));
-  check(item.paused && (await api('getWebhook', { path })).paused, 'test endpoint must remain paused');
+  const created = await api('getWebhook', { path });
+  check(item.paused && created.paused, 'test endpoint must remain paused');
+  check(created.headers?.length === 1 && created.headers[0].name === 'Authorization' && created.headers[0].hint?.endsWith(bearer.slice(-4)) && !JSON.stringify(created).includes(bearer), 'custom header missing, unmasked or leaked on read');
   await api('updateWebhook', { path, body: { description: subject, paused: true } });
-  check((await api('getWebhook', { path })).description === subject, 'webhook edit not persisted');
+  const edited = await api('getWebhook', { path });
+  check(edited.description === subject && edited.headers?.[0]?.name === 'Authorization', 'webhook edit not persisted or dropped its custom header');
   check(hasId(await api('listWebhooks', { query: { limit: 100 } }), item.id), 'webhook not listed');
   const before = await api('revealWebhookSecret', { path });
   const after = await api('rotateWebhookSecret', { path });
