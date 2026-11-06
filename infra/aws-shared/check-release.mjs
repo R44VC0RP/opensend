@@ -55,7 +55,7 @@ async function api(path, method = 'GET', body, status = [200], cleanup = false) 
 async function findDomains(region) {
   const rows = [], cursors = new Set(); let cursor;
   do {
-    const q = new URLSearchParams({region, refresh: 'false', limit: '10', ...(cursor && {cursor})});
+    const q = new URLSearchParams({...(region && {region}), refresh: 'false', limit: '10', ...(cursor && {cursor})});
     const page = await api(`/v1/domains?${q}`); rows.push(...page.data); cursor = page.nextCursor;
     check(!cursor || !cursors.has(cursor), 'Repeated domain cursor'); cursors.add(cursor);
   } while (cursor);
@@ -225,7 +225,17 @@ try {
   iamWritePending = false;
   await until('candidate attachments/default visible', () => current() === candidate && isDeepStrictEqual(attached(), names.map(arn).sort()));
   boundaries(me.workspaceId);
-  for (const region of regions) { stop.signal.throwIfAborted(); await disposable(region); await sendProbe(region, me.workspaceId); }
+  for (const region of regions) {
+    stop.signal.throwIfAborted(); await disposable(region);
+    // On first install, v7 cannot create these resources. An operator may request a
+    // bounded bootstrap window AFTER the Ohio canary, with the existing rollback armed.
+    // No enrollment, DNS or extra grants here; never substitute waiting for sendProbe.
+    if (region === virginia && process.env.OPENSEND_E2E_TRUSTED_BOOTSTRAP === '1') {
+      console.log('Ohio canary passed. Prepare the pinned Virginia E2E fixture now (15 minutes; no customer enrollment).');
+      await until('verified Virginia release fixture', async () => (await findDomains()).some(d => d.name === 'e2e-trusted.opensend.mx' && d.region === virginia && d.ready), 900_000);
+    }
+    await sendProbe(region, me.workspaceId);
+  }
   await domainProbe();
   const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/e2e.ts'], {cwd: new URL('../../api/', import.meta.url), stdio: 'inherit',
     env: {...process.env, OPENSEND_E2E_URL: origin}, signal: stop.signal, timeout: 300_000});

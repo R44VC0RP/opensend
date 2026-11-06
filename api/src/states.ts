@@ -28,6 +28,8 @@ export type IdentityFacts = {
   proven: boolean; mx: MxReport | null; note: string | null;
   /** Verified by the exclusive BYO account, not an identity managed by the claim's ownership tag. */
   imported?: true;
+  /** Immutable operator-attested SES fingerprint. Only the operator can restore a revoked adoption. */
+  adopted?: {arn:string;fingerprint:string};
 };
 export type ClaimState = { sending_state: SendingState; receiving_state: ReceivingState; receiving_host: string | null; lost_since: string | null; receiving_lost_since: string | null };
 export type ClaimEvidence = {

@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { ApiError, assertSesConfigured, isSimulatedSes, errors, id, json, log, notFound, response, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
-import { awsError, discoverSes, feedbackUrl, POOL_INSTALLATION, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
+import { awsError, discoverSes, feedbackUrl, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery } from './ses-setup.js';
 import { importByoClaims } from './domain-claims.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
@@ -231,9 +231,9 @@ export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, pa
 });
 // The one tenant path. CreateTenant is idempotent, so concurrent callers need no lease: both converge on `ready`.
 // Called by createConnection, its retry job, the hourly reconcile and domain verification; never by sending.
-type TenantTarget = Pick<Row, 'id' | 'region' | 'tenant_state'> & { pool_account: string | null;managed_tenant:boolean;namespace?:'trusted'|'probation' };
+type TenantTarget = Pick<Row, 'id' | 'region' | 'tenant_state'> & { pool_account: string | null;pool_tenant_name:string|null;managed_tenant:boolean;namespace?:'trusted'|'probation' };
 async function tenantTarget(runtime: Runtime, wid: string, connectionId: string) {
-  return (await runtime.db.execute<TenantTarget>(sql`SELECT c.id,c.region,c.tenant_state,c.managed_tenant,CASE WHEN NOT p.legacy_names THEN p.pool_tier END AS namespace,p.aws_account_id AS pool_account FROM provider_connections c
+  return (await runtime.db.execute<TenantTarget>(sql`SELECT c.id,c.region,c.tenant_state,c.managed_tenant,c.pool_tenant_name,CASE WHEN NOT p.legacy_names THEN p.pool_tier END AS namespace,p.aws_account_id AS pool_account FROM provider_connections c
     LEFT JOIN provider_pool_regions p ON p.region=c.region AND ${poolSends()} AND (c.aws_account_id IS NULL OR c.aws_account_id=p.aws_account_id)
     WHERE c.id=${connectionId} AND c.workspace_id=${wid} AND c.kind='shared'`)).rows[0];
 }
@@ -242,7 +242,7 @@ export async function ensureTenant(runtime: Runtime, wid: string, connectionId: 
   if (!row || row.tenant_state === 'ready') return;
   if (!row.pool_account) throw new ApiError(503, 'POOL_NOT_READY', 'The shared sending pool for this region is not ready yet.', undefined, true);
   await platformIdentity(runtime, row.pool_account);
-  await provisionTenant(runtime, row.region, row.pool_account, wid,row.managed_tenant,row.namespace);
+  await provisionTenant(runtime, row.region, row.pool_account, wid,row.managed_tenant,row.namespace,row.pool_tenant_name);
   await runtime.db.execute(setTenantState(row.id, 'ready', row.pool_account));
 }
 export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
@@ -294,9 +294,9 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
     // Hosted is instant: `ready` on creation with zero AWS calls. The tenant job owns CreateTenant and flips
     // tenant_state; until then domains and sends answer TENANT_NOT_READY. Simulation has no tenant, so it is ready.
     const row = (await runtime.db.execute<Row & { queued: boolean }>(sql`WITH pool AS (SELECT aws_account_id FROM provider_pool_regions p WHERE region=${region} AND ${poolSends()}), connection AS (
-      INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,managed_tenant) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool),${!!runtime.config.regionalSending})
+      INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,managed_tenant,pool_tenant_name) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool),${!!runtime.config.regionalSending},${runtime.config.trustedPool?poolTenantName(wid,'probation'):null})
       ON CONFLICT(workspace_id) DO UPDATE SET aws_account_id=coalesce(provider_connections.aws_account_id,excluded.aws_account_id) WHERE provider_connections.kind='shared' AND provider_connections.region=excluded.region RETURNING *),
-      settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=jsonb_build_array(c.region) FROM connection c WHERE c.workspace_id=s.workspace_id),
+      settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=CASE WHEN EXISTS(SELECT FROM provider_connection_regions r WHERE r.connection_id=c.id AND NOT r.legacy AND r.sending_state='ready') THEN s.enabled_regions ELSE jsonb_build_array(c.region) END FROM connection c WHERE c.workspace_id=s.workspace_id),
       stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL,report=NULL FROM connection c WHERE c.workspace_id=d.workspace_id AND d.report IS NOT NULL),
       queued AS (${queueTenantJob(sql`SELECT c.id,c.workspace_id FROM connection c JOIN pool USING (aws_account_id) WHERE c.tenant_state<>'ready'`)} RETURNING 1)
       SELECT c.*, EXISTS (SELECT 1 FROM queued) AS queued FROM connection c`)).rows[0];
@@ -374,7 +374,7 @@ export function registerProviderConnections(app: App) {
         }
         // Disconnect/reconnect must not serve as a workspace-controlled unpause.
         if (row.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.pause_reason);
-        if (row.template_version==='v5' || (await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${row.id} AND NOT legacy LIMIT 1`)).rowCount) throw new ApiError(409,'REGIONAL_DISCONNECT_REQUIRED','A regional connection requires reviewed cleanup before disconnecting.');
+        if (row.template_version==='v5' || (await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${row.id} AND NOT legacy AND NOT (${row.kind}='shared' AND region='us-east-1' AND pool_tenant_name IS NOT NULL AND receiving_state='off' AND sending_state='ready') LIMIT 1`)).rowCount) throw new ApiError(409,'REGIONAL_DISCONNECT_REQUIRED','A regional connection requires reviewed cleanup before disconnecting.');
         await releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
         await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
       });

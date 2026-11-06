@@ -39,6 +39,7 @@ export interface Config {
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
   regionalSending?: boolean;
+  trustedPool?: boolean;
   requireDmarcForBulk?: boolean;
   placementShadow?: boolean;
   placementDblZone?: string;

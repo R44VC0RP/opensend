@@ -73,6 +73,10 @@ export function mxResourceName(suffix:string) {
   if (!/^[a-zA-Z0-9_-]+$/.test(suffix)) throw new Error('Invalid MX resource suffix');
   return `opensendmx-${suffix}`;
 }
+export function poolTenantName(wid:string,tier:'trusted'|'probation') {
+  if (!/^ws_[0-9a-f]{32}$/.test(wid)) throw new ApiError(409,'INVALID_TENANT_NAME','Expected an exact Hosted workspace ID.');
+  return mxResourceName(`${tier}-${wid}`);
+}
 export function setupResources(installationId: string, namespace?:MxNamespace): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
   const hash=createHash('sha256').update(installationId).digest('hex').slice(0,20);
@@ -143,6 +147,10 @@ function sesSend<T>(context: SetupContext, send: () => Promise<T>): Promise<T> {
   return run;
 }
 
+export function paceSetupSes(client:SESv2Client,context=setupContext(300_000)) {
+  const paced = <Input extends object, Output>(next: (args: { input: Input }) => Promise<Output>) => (args: { input: Input }) => sesSend(context, () => next(args));
+  client.middlewareStack.add(paced, { step: 'initialize', priority: 'high', name: 'opensendSesPacing' });
+}
 function clients(runtime: Runtime, region: string, context: SetupContext) {
   const deadlineSignal = context.signal;
   assertSesConfigured(runtime);
@@ -153,8 +161,7 @@ function clients(runtime: Runtime, region: string, context: SetupContext) {
     if (deadlineSignal.aborted) throw new ApiError(503, 'AWS_SETUP_TIMEOUT', 'The AWS setup time budget was exceeded. Retry later.', undefined, true);
     return next(args);
   };
-  const paced = <Input extends object, Output>(next: (args: { input: Input }) => Promise<Output>) => (args: { input: Input }) => sesSend(context, () => next(args));
-  result.ses.middlewareStack.add(paced, { step: 'initialize', priority: 'high', name: 'opensendSesPacing' });
+  paceSetupSes(result.ses,context);
   result.ses.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
   result.sns.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
   result.sts.middlewareStack.add(deadline, { step: 'initialize', name: 'opensendSetupDeadline' });
@@ -275,6 +282,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         try { existing = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: set.name }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!missing(error)) throw error; set.exists = false; set.owned = false; set.eventDestinationExists = false; set.eventWired = false; return; }
         set.exists = true; set.owned = owned(existing.Tags, options); set.sendingEnabled = existing.SendingOptions?.SendingEnabled ?? null; set.autoValidation = autoValidationMode(existing.SuppressionOptions);
+        if (options.namespace==='trusted' && existing.SuppressionOptions && (existing.SuppressionOptions.SuppressionScope!=='TENANT' || canonical(existing.SuppressionOptions.SuppressedReasons)!==canonical(['BOUNCE','COMPLAINT']))) add(report,'SUPPRESSION_DRIFT','The trusted configuration set no longer uses tenant bounce and complaint suppression.');
         if (!set.owned) { add(report, 'RESOURCE_OWNERSHIP_CONFLICT', 'An expected SES configuration-set name belongs to another installation or has no ownership tags.'); return; }
         if (set.sendingEnabled === null) add(report, 'AWS_STATE_UNKNOWN', 'SES did not return the configuration set sending state.');
         if (set.sendingEnabled === false) add(report, 'SES_CONFIGURATION_SET_DISABLED', 'An installation configuration set has sending disabled; setup will not override that control.');
@@ -541,24 +549,25 @@ export async function removeByoFeedbackResource(runtime:Runtime,region:string,in
 // Unlike self-hosted setup, this is create-only. Never adopt even a tagged resource
 // without its journal, repair a drifted destination, or rewrite an existing topic policy.
 // If a create's acknowledgement was lost, stop for review rather than assume ownership.
-export async function provisionByoRegion(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],
-  fence:()=>Promise<void>, record:(entry:JournalEntry)=>Promise<void>,register:(arn:string)=>Promise<void>) {
-  const options:SesSetupOptions={region,installationId,namespace:'byo',connectionSetup:true};
-  const account=runtime.config.awsAccountId!, names=setupResources(installationId,'byo'), a=arns(account,region,names);
+export async function provisionJournaledFeedback(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],
+  fence:()=>Promise<void>, record:(entry:JournalEntry)=>Promise<void>,register:(arn:string)=>Promise<void>,signedPool?:()=>Promise<boolean>) {
+  const namespace=signedPool?'trusted':'byo';
+  const options:SesSetupOptions={region,installationId,namespace,connectionSetup:true};
+  const account=runtime.config.awsAccountId!, names=setupResources(installationId,namespace), a=arns(account,region,names);
   const ctx=setupContext(), {report,subscriptions}=await inspect(runtime,options,ctx);
-  const drift=()=>new ApiError(409,'BYO_RESOURCE_DRIFT','Regional feedback resources differ from the ownership journal. Nothing will be repaired automatically.');
+  const drift=()=>new ApiError(409,signedPool?'POOL_RESOURCE_DRIFT':'BYO_RESOURCE_DRIFT','Regional feedback resources differ from the ownership journal. Nothing will be repaired automatically.');
   const check=(kind:JournalEntry['kind'],resource:string,exists:boolean,target?:string)=>{
     const entry=journal.find(e=>e.kind===kind && e.resource===resource && e.target===target);
     // The journal must retain ambiguous creates for manual review. Retry a proven
     // absence; do not adopt an existing AWS resource after an ambiguous result.
     if (entry?.state==='creating' ? exists : !!entry!==exists) throw drift();
   };
-  const blocker=report.blockers.find(b=>!['SES_SANDBOX','SNS_CONFIRMATION_PENDING'].includes(b.code));
+  const blocker=report.blockers.find(b=>b.code!=='SNS_CONFIRMATION_PENDING' && (b.code!=='SES_SANDBOX' || namespace==='trusted'));
   if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code));
   if (report.account?.id!==account || report.feedbackUrl!==byoFeedback) throw drift();
   const topic=report.resources.topic;
   check('topic',a.topic,topic.exists===true);
-  if (topic.exists && (!topic.owned || !topic.policyReady)) throw drift();
+  if (topic.exists && (!topic.owned || !topic.policyReady && !signedPool)) throw drift();
   const subscription=journal.find(e=>e.kind==='subscription');
   if (subscription ? subscription.resource!==a.topic || subscription.target!==byoFeedback || (!subscriptions.length && subscription.state!=='creating') : subscriptions.length>0) throw drift();
   if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==byoFeedback || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
@@ -570,6 +579,10 @@ export async function provisionByoRegion(runtime:Runtime,region:string,installat
   }
   const c=clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
   try {
+    const finalPolicy=topicPolicy(account,region,names),initialPolicy={...finalPolicy,Statement:finalPolicy.Statement.slice(0,1)};
+    const publish=!signedPool || (topic.subscription==='confirmed' && await signedPool());
+    if (signedPool && topic.exists && !topic.policyReady && !policyReady((await c.sns.send(new GetTopicAttributesCommand({TopicArn:a.topic}),opts)).Attributes?.Policy,initialPolicy)) throw drift();
+    if (!publish && (topic.policyReady || streams.some(s=>report.resources[s].eventDestinationExists))) throw drift();
     for (const [i,stream] of streams.entries()) {
       if (!report.resources[stream].exists) {
         await record({kind:'set',resource:a.sets[i]!,state:'creating'});
@@ -579,13 +592,12 @@ export async function provisionByoRegion(runtime:Runtime,region:string,installat
       if (!report.resources[stream].exists || report.resources[stream].autoValidation==='inherit') {
         const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts);
         if (!owned(s.Tags,options)) throw drift();
-        await fence();await c.ses.send(validationInput(names[stream],DEFAULT_AUTO_VALIDATION[stream]),opts);
+        await fence();await c.ses.send(validationInput(names[stream],DEFAULT_AUTO_VALIDATION[stream],namespace==='trusted'),opts);
       } else if (report.resources[stream].autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) throw drift();
     }
     if (!topic.exists) {
       // Bootstrap private: only add SES publish after positive checks of account,
       // tags, the initial owner-only policy and an empty subscriber inventory.
-      const finalPolicy=topicPolicy(account,region,names),initialPolicy={...finalPolicy,Statement:finalPolicy.Statement.slice(0,1)};
       await record({kind:'topic',resource:a.topic,state:'creating'});
       await fence();const result=await c.sns.send(new CreateTopicCommand({Name:names.topicName,Tags:tags(options),Attributes:{Policy:JSON.stringify(initialPolicy)}}),opts);
       if (result.TopicArn!==a.topic) throw drift();
@@ -593,10 +605,11 @@ export async function provisionByoRegion(runtime:Runtime,region:string,installat
       if (attr?.Owner!==account || attr.TopicArn!==a.topic || !policyReady(attr.Policy,initialPolicy) || !owned((await c.sns.send(new ListTagsForResourceCommand({ResourceArn:a.topic}),opts)).Tags,options)) throw drift();
       const empty=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:a.topic}),opts);
       if (empty.NextToken || empty.Subscriptions?.length!==0) throw drift();
-      await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);
+      if (publish) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
       await record({kind:'topic',resource:a.topic,state:'created'});
     }
-    for (const [i,stream] of streams.entries()) if (!report.resources[stream].eventWired) {
+    if (signedPool && publish && !topic.policyReady) {await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);}
+    for (const [i,stream] of streams.entries()) if (publish && !report.resources[stream].eventWired) {
       const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
       if (!owned(set.Tags,options) || dest.EventDestinations?.length!==0) throw drift();
       await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'creating'});
@@ -708,25 +721,35 @@ export async function setAutoValidation(runtime: Runtime, options: SesSetupOptio
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
-export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation') {
+export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation',persistedName?:string|null,
+  journal?:{arn:string|null;created:(arn:string)=>Promise<void>;fence:()=>Promise<void>}) {
   const context = setupContext(20_000), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
-  const TenantName=managed?mxResourceName(workspaceId):`opensend-${workspaceId}`;
-  const Tags=managed?[mxOwnerTag,{Key:OWNER_TAG,Value:workspaceId},{Key:PURPOSE_TAG,Value:'tenant'}]:undefined;
+  const TenantName=persistedName??(managed?mxResourceName(workspaceId):`opensend-${workspaceId}`);
+  if (persistedName && persistedName!==poolTenantName(workspaceId,region==='us-east-1'?'trusted':'probation')) throw new ApiError(409,'TENANT_MISMATCH','Incorrect regional tenant name.');
+  const Tags=persistedName?[mxOwnerTag,{Key:OWNER_TAG,Value:POOL_INSTALLATION},{Key:PURPOSE_TAG,Value:'workspace-tenant'}]:managed?[mxOwnerTag,{Key:OWNER_TAG,Value:workspaceId},{Key:PURPOSE_TAG,Value:'tenant'}]:undefined;
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(TenantName)) throw new ApiError(409, 'INVALID_TENANT_NAME', 'This workspace ID is not a valid SES tenant name.');
   const suppression = { SuppressionScope: 'TENANT' as const, SuppressedReasons: ['BOUNCE', 'COMPLAINT'] as ('BOUNCE' | 'COMPLAINT')[] };
   try {
     let tenant:Tenant|undefined,repair=false;
-    try { tenant = await c.ses.send(new CreateTenantCommand({ TenantName, SuppressionAttributes: suppression, Tags }), opts); }
+    try {
+      if (journal?.arn || runtime.config.trustedPool && !managed) tenant=(await c.ses.send(new GetTenantCommand({TenantName}),opts)).Tenant;
+      else { await journal?.fence();tenant = await c.ses.send(new CreateTenantCommand({ TenantName, SuppressionAttributes: suppression, Tags }), opts); }
+      repair=!!journal?.arn || !!runtime.config.trustedPool && !managed;
+    }
     catch (error) {
       if (!collision(error)) throw error;
+      if (journal) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','Unjournaled tenant exists; review the original create before retrying.');
       tenant = (await c.ses.send(new GetTenantCommand({ TenantName }), opts)).Tenant;
-      if (Tags && !Tags.every(t=>tenant?.Tags?.some(v=>v.Key===t.Key && v.Value===t.Value))) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The existing SES tenant does not have this workspace’s ownership tags.');
       repair=true;
     }
     if (tenant?.TenantName !== TenantName || !tenant.TenantArn?.startsWith(`arn:aws:ses:${region}:${account}:tenant/${TenantName}/`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
-    if (repair) await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);
+    if (repair && Tags && !Tags.every(t=>tenant?.Tags?.some(v=>v.Key===t.Key && v.Value===t.Value)) || journal?.arn && journal.arn!==tenant.TenantArn) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The existing SES tenant differs from its recorded owner.');
+    if (journal && !journal.arn) await journal.created(tenant.TenantArn);
+    if (repair) {await journal?.fence();await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);}
+    await journal?.fence();
     await c.ses.send(new UpdateReputationEntityPolicyCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: tenant.TenantArn, ReputationEntityPolicy: `arn:aws:ses:${region}:aws:reputation-policy/strict` }), opts);
     for (const ResourceArn of arns(account, region, setupResources(POOL_INSTALLATION,namespace)).sets) {
+      await journal?.fence();
       try { await c.ses.send(new CreateTenantResourceAssociationCommand({ TenantName, ResourceArn }), opts); }
       catch (error) { if (!collision(error)) throw error; }
     }
