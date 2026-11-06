@@ -4551,12 +4551,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { Body: { transformToByteArray: async () => bytes } };
       });
       const parseSpy = t.mock.method(PostalMime, 'parse');
-      async function ingest(bytes: Uint8Array, subject: string, messageId: string) {
+      async function ingest(bytes: Uint8Array, subject: string, messageId: string, commonFrom = ['Sender <sender@example.net>']) {
         const receiptId = unique('cap'), objectKey = `raw/${receiptId}`;
         raw.set(objectKey, bytes);
         const message = {
           notificationType: 'Received',
-          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: ['Sender <sender@example.net>'], subject, messageId: `<${messageId}>` } },
+          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: commonFrom, subject, messageId: `<${messageId}>` } },
           receipt: { timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
         };
         assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
@@ -4721,6 +4721,43 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(autoNo.status, 'unparsed');
       assert.equal(autoNo.automated, false, 'Auto-Submitted: no and body text after the blank line must not flag a message as automated.');
       ok(await local('POST', `/v1/inbound/threads/${autoNo.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoNo.id, text: 'normal reply allowed' }, 'live'), 202);
+
+      // Structured header tokens, RFC 2047 encoded words, quoted display names, and incomplete header scan handling.
+      const autoNoParam = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: (human) no; owner=me\r\n\r\n${unparsedTail}`), 'Auto no param', 'auto-no-param@example.net');
+      assert.equal(autoNoParam.automated, false);
+
+      const autoEncoded = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: =?UTF-8?B?YXV0by1yZXBsaWVk?=; owner=me\r\n\r\n${unparsedTail}`), 'Encoded auto-replied', 'auto-enc@example.net');
+      assert.equal(autoEncoded.automated, true);
+
+      const precEncodedB = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: =?UTF-8?B?YnVsaw==?=\r\n\r\n${unparsedTail}`), 'Encoded bulk', 'prec-b64@example.net');
+      assert.equal(precEncodedB.automated, true);
+      const precEncodedQ = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: =?UTF-8?Q?auto=5Freply?=\r\n\r\n${unparsedTail}`), 'Encoded auto_reply', 'prec-qp@example.net');
+      assert.equal(precEncodedQ.automated, true);
+
+      const filenameReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: application/octet-stream; name="multipart/report.eml"\r\n\r\n${unparsedTail}`), 'Filename report', 'fn-report@example.net');
+      assert.equal(filenameReport.automated, false, 'A parameter value containing multipart/report must not match Content-Type media type.');
+      const nonDsnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; boundary="r"\r\n\r\n${unparsedTail}`), 'Report without report-type', 'no-rtype@example.net');
+      assert.equal(nonDsnReport.automated, false);
+      const mdnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type="disposition-notification"; boundary="r"\r\n\r\n${unparsedTail}`), 'MDN unparsed', 'mdn-unparsed@example.net');
+      assert.equal(mdnReport.automated, true);
+
+      const quotedPostmaster = '"<postmaster@example.net>" <human@example.net>';
+      const displayPostmaster = await ingest(Buffer.from(`From: ${quotedPostmaster}\r\nTo: caps@example.com\r\n\r\n${unparsedTail}`), 'Quoted display name', 'quoted-pm@example.net', [quotedPostmaster]);
+      assert.equal(displayPostmaster.from_address, 'human@example.net');
+      assert.equal(displayPostmaster.automated, false, 'Quoted display name containing <postmaster@...> must not mark the message automated.');
+      const realPostmaster = await ingest(Buffer.from(`From: "System" <postmaster@example.net>\r\nTo: caps@example.com\r\n\r\n${unparsedTail}`), 'Real postmaster', 'real-pm@example.net', []);
+      assert.equal(realPostmaster.automated, true);
+
+      const capWarnSpy = t.mock.method(console, 'warn');
+      const unterminatedHeaders = Buffer.concat([Buffer.from('From: Sender <sender@example.net>\r\nAuto-Submitted: auto-replied\r\nX-Pad: '), Buffer.alloc(2 * 1024 * 1024 + 1024, 0x61)]);
+      const cappedScan1 = await ingest(unterminatedHeaders, 'Capped header block', 'cap-hdr-1@example.net');
+      assert.equal(cappedScan1.status, 'unparsed');
+      assert.equal(cappedScan1.automated, false, 'Incomplete header scan must treat automated status as unknown and default to false.');
+      const cappedField = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nAuto-Submitted: ${'('.concat('a'.repeat(17_000), ') auto-replied')}\r\n\r\n${unparsedTail}`), 'Capped header field', 'cap-hdr-2@example.net');
+      assert.equal(cappedField.automated, false);
+      const capLogs = capWarnSpy.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(entry => entry.code === 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE');
+      assert.deepEqual(capLogs.map(entry => entry.count), [1, 2]);
+      capWarnSpy.mock.restore();
     });
   });
 

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
-import PostalMime, { type Address, type Email } from 'postal-mime';
+import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Runtime } from './core.js';
@@ -80,32 +80,83 @@ function headersOf(email: Email | null): MailHeader[] {
 }
 const AUTOMATED_HEADERS = new Set(['auto-submitted', 'precedence', 'x-autoreply', 'x-autorespond', 'content-type', 'from']);
 const RAW_HEADER_SCAN_LIMIT = 2 * 1024 * 1024;
+const RAW_HEADER_FIELD_LIMIT = 16 * 1024;
 const rawHeaderDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+let incompleteAutomatedHeaderScans = 0;
 const trimWsp = (s: string) => {
   let a = 0, b = s.length;
   while (a < b && (s.charCodeAt(a) === 32 || s.charCodeAt(a) === 9)) a++;
   while (b > a && (s.charCodeAt(b - 1) === 32 || s.charCodeAt(b - 1) === 9)) b--;
   return s.slice(a, b);
 };
-function rawAutomatedHeaders(raw: Uint8Array) {
+function stripHeaderComments(input: string): string {
+  let out = '', depth = 0, quote = false, esc = false, inParam = false, wsp = true;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]!;
+    if (esc) { if (depth === 0) { out += ch; wsp = false; } esc = false; continue; }
+    if (ch === '\\' && (quote || depth > 0)) { esc = true; if (depth === 0) out += ch; continue; }
+    if (depth === 0 && ch === '"') { quote = !quote; out += ch; wsp = false; continue; }
+    if (!quote) {
+      if (ch === '(' && (depth > 0 || !inParam || wsp)) { depth++; continue; }
+      if (ch === ')' && depth > 0) { depth--; if (depth === 0) wsp = true; continue; }
+      if (depth === 0) {
+        if (ch === '=') { inParam = true; out += ch; wsp = true; continue; }
+        if (ch === ';') inParam = false;
+      }
+    }
+    if (depth === 0) { out += ch; wsp = ch === ' ' || ch === '\t'; }
+  }
+  return depth === 0 ? out : input;
+}
+function unquoteMimeToken(s: string): string {
+  const t = trimWsp(s);
+  return t.length >= 2 && t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1).replace(/\\([\s\S])/g, '$1') : t;
+}
+function parseStructuredField(raw: string): { value: string; params: Map<string, string> } {
+  const cleaned = stripHeaderComments(raw);
+  const parts: string[] = [];
+  let cur = '', quote = false, esc = false;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]!;
+    if (esc) { cur += ch; esc = false; continue; }
+    if (quote && ch === '\\') { cur += ch; esc = true; continue; }
+    if (ch === '"') { quote = !quote; cur += ch; continue; }
+    if (!quote && ch === ';') { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  const decodedHead = trimWsp(decodeWords(unquoteMimeToken(parts[0] ?? '')));
+  const semi = decodedHead.indexOf(';');
+  const value = (semi < 0 ? decodedHead : trimWsp(decodedHead.slice(0, semi))).toLowerCase();
+  const params = new Map<string, string>();
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i]!, eq = p.indexOf('=');
+    if (eq < 0) continue;
+    const k = trimWsp(p.slice(0, eq)).toLowerCase();
+    if (k && !params.has(k)) params.set(k, trimWsp(decodeWords(unquoteMimeToken(p.slice(eq + 1)))).toLowerCase());
+  }
+  return { value, params };
+}
+function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
   const out = new Map<string, string>();
   const head = raw.subarray(0, Math.min(raw.byteLength, RAW_HEADER_SCAN_LIMIT));
-  let pos = 0;
-  while (pos < head.byteLength && out.size < AUTOMATED_HEADERS.size) {
+  let pos = 0, ended = false, capped = false;
+  while (pos < head.byteLength) {
     const start = pos;
     let nl = head.indexOf(10, pos);
     const lineEnd = nl < 0 ? head.byteLength : nl;
     let firstEnd = lineEnd;
     while (firstEnd > pos && head[firstEnd - 1] === 13) firstEnd--;
-    if (firstEnd === pos || (nl < 0 && raw.byteLength > head.byteLength)) break;
+    if (firstEnd === pos) { ended = nl >= 0; break; }
+    if (nl < 0 && raw.byteLength > head.byteLength) break;
     pos = nl < 0 ? head.byteLength : nl + 1;
-    let truncated = false;
+    let foldTruncated = false;
     while (pos < head.byteLength && (head[pos] === 32 || head[pos] === 9)) {
       nl = head.indexOf(10, pos);
-      if (nl < 0 && raw.byteLength > head.byteLength) { truncated = true; break; }
+      if (nl < 0 && raw.byteLength > head.byteLength) { foldTruncated = true; break; }
       pos = nl < 0 ? head.byteLength : nl + 1;
     }
-    if (truncated) break;
+    if (foldTruncated) break;
     let k = start;
     while (k < firstEnd && (head[k] === 32 || head[k] === 9)) k++;
     let key = '';
@@ -137,19 +188,32 @@ function rawAutomatedHeaders(raw: Uint8Array) {
       }
       v++;
     }
-    const decoded = rawHeaderDecoder.decode(head.subarray(v, Math.min(pos, v + 4096))).replace(/\r*\n/g, '').replace(/\r+$/, '').replace(/\r+/g, ' ');
-    out.set(key, trimWsp(decoded).toLowerCase());
+    if (pos - v > RAW_HEADER_FIELD_LIMIT) { capped = true; break; }
+    const decoded = rawHeaderDecoder.decode(head.subarray(v, pos)).replace(/\r*\n/g, '').replace(/\r+$/, '').replace(/\r+/g, ' ');
+    out.set(key, trimWsp(decoded));
   }
-  return out;
+  return ended && !capped ? out : null;
 }
 function automated(email: Email | null, raw: Uint8Array, from: string) {
-  const fallback = email ? null : rawAutomatedHeaders(raw);
-  const header = (name: string) => email ? (email.headers.find(item => item.key === name)?.value.toLowerCase() ?? '') : (fallback!.get(name) ?? '');
+  let fallback: Map<string, string> | null = null;
+  if (!email) {
+    fallback = rawAutomatedHeaders(raw);
+    if (!fallback) {
+      log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
+      return false;
+    }
+  }
+  const header = (name: string) => email ? (email.headers.find(item => item.key === name)?.value ?? '') : (fallback!.get(name) ?? '');
+  const auto = parseStructuredField(header('auto-submitted')).value;
+  const precedence = parseStructuredField(header('precedence')).value;
+  const contentType = parseStructuredField(header('content-type'));
+  const report = contentType.value === 'multipart/report' && /^(?:(?:global-)?delivery-status|(?:global-)?disposition-notification)$/.test(contentType.params.get('report-type') ?? '');
+  const xAutoreply = trimWsp(decodeWords(stripHeaderComments(header('x-autoreply'))));
+  const xAutorespond = trimWsp(decodeWords(stripHeaderComments(header('x-autorespond'))));
   const rawFrom = fallback?.get('from') ?? '';
-  const rawSender = rawFrom ? (rawFrom.match(/<([^>]+)>/)?.[1] ?? rawFrom).trim() : '';
-  const auto = header('auto-submitted');
-  return (auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(header('precedence')) || !!header('x-autoreply') || !!header('x-autorespond')
-    || /^(?:mailer-daemon|postmaster)@/.test(from) || /^(?:mailer-daemon|postmaster)@/.test(rawSender) || /multipart\/report/.test(header('content-type'));
+  const rawSenders = rawFrom ? flatten(addressParser(rawFrom)).map(item => item.address) : [];
+  const daemonSender = /^(?:mailer-daemon|postmaster)@/.test(from) || rawSenders.some(addr => /^(?:mailer-daemon|postmaster)@/.test(addr));
+  return (auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report;
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 function withinLineLimit(raw: Uint8Array) {
@@ -330,7 +394,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
-  const from = flatten(email?.from)[0] ?? { name: null, address: (common.from?.[0]?.match(/<([^>]+)>/)?.[1] ?? common.from?.[0] ?? notification.mail?.source ?? '').trim().toLowerCase() };
+  const commonFrom = common.from?.[0] ? flatten(addressParser(common.from[0]))[0] : undefined;
+  const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
