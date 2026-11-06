@@ -20,7 +20,8 @@ import { screenSnapshot } from './screen.js';
 export type Mail = typeof emails.$inferSelect;
 type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; tenantName?: string; feedbackTopic?: string };
-type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number };
+type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number; refresh_due: boolean };
+type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
 const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
@@ -172,7 +173,7 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string, priorityOnly = false): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string, priorityOnly = false, readQuota = false): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
@@ -235,6 +236,10 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       LEFT JOIN ses_installation_settings s USING (workspace_id)
       ${mx ? sql`JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=p.workspace_id AND pc.region=${region} AND pc.aws_account_id=${accountId}` : !isSimulatedSes(runtime) ? sql`LEFT JOIN ses_region_discovery d ON d.workspace_id = p.workspace_id AND d.region = ${region}` : sql``}
     ) SELECT ${sql.join(mailColumns, sql`, `)}, s.installation_id, s.default_region, s.enabled_regions, s.ready, s.connection,
+      ${readQuota ? sql`(SELECT jsonb_build_object('rate',max_send_rate,'max',max_24_hour_send,'sent',sent_last_24_hours,'checked',checked_at::text,
+        'age_ms',extract(epoch FROM clock_timestamp()-checked_at)*1000,'refresh_due',coalesce(${sql.identifier(accountId ? 'refresh_after' : 'next_allowed_at')} <= clock_timestamp(),true))
+        FROM ${accountId ? sql`provider_account_limits WHERE aws_account_id=${accountId}` : sql`sending_region_limits WHERE workspace_id=leased.workspace_id`}
+        AND region=${region} AND max_send_rate>0 AND isfinite(checked_at))` : sql`NULL`} AS quota_sample,
       CASE WHEN leased.dispatch_version > 0 THEN (SELECT count(*)::int FROM sending_email_events v
         WHERE v.workspace_id=leased.workspace_id AND v.email_id=leased.id AND v.type='provider_throttled' AND v.data->>'code'='SES_THROTTLED') ELSE 0 END AS rate_retries,
       r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
@@ -250,7 +255,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     reviews.set(reviewKey(row), { draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
   }
   return result.rows.map(row => {
-    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, ...fields } = row;
+    const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, quota_sample, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
     const pc0 = connection as (ReadyConnection & { tenant_state?: TenantState; paused_at?: string | null }) | null;
     const ready = regionReady && !pc0?.paused_at && !(mx && !isSimulatedSes(runtime) && pc0?.kind === 'shared' && pc0.tenant_state !== 'ready');
@@ -271,7 +276,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
-    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), quota: quota_sample as LeaseQuota | undefined, review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
 
@@ -669,11 +674,33 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   const first = ready[0]!.owner;
   // An absolute rate override is an operator setting for their account, not a BYO customer's quota.
   if (options.accountId && !first.tenantName) lane.pacing.targetRate = undefined;
-  // Quota is loaded lazily so idle regions never touch the provider control plane.
-  if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
+  const refresh = async () => {
     lane.refresh ??= phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs)).finally(() => { lane.refresh = undefined; });
-    if (!await lane.refresh) { await releaseLeases(base, ready.map(item => item.mail)); return { processed: 0, blocked: true }; }
+    if (!await lane.refresh) return false;
     await options.onGate?.(gate);
+    return true;
+  };
+  // Only the first lease reads the shared sample. Its age is measured on Postgres, not by
+  // subtracting unrelated clocks. Never give a shard fresh capacity for the same sample.
+  let refreshAfterSend = false;
+  if (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) {
+    const q = ready[0]!.quota, period = options.accountId ? Math.max(1000, options.quotaRefreshMs) : options.quotaRefreshMs;
+    if (q) {
+      const sample = { maxSendRate:q.rate, max24HourSend:options.accountId ? q.max : q.max || -1, sentLast24Hours:q.sent, checkedAt:Date.parse(q.checked) };
+      if (q.age_ms < period) observeQuota(gate, sample, period, q.age_ms);
+      else if (q.refresh_due && !gate.dailyBlockedUntil && ready.every(item => item.mail.snapshot.kind === 'transactional')) {
+        // One idle transactional batch may use the last known rate while comfortably outside
+        // the daily reserve. A missing sample, failed refresh fence or daily hold fails closed.
+        const spent = gate.quota && gate.quota.checkedAt >= sample.checkedAt ? gate.sentSinceRefresh : 0;
+        const recipients = ready.reduce((n, {mail:{snapshot:s}}) => n + s.to.length + s.cc.length + s.bcc.length, 0);
+        if ((!gate.quota || sample.checkedAt >= gate.quota.checkedAt) && (sample.max24HourSend < 0 || marketingCredits(sample, base.config.dispatch.dailyHeadroomPercent) > spent + recipients + 50)) {
+          observeQuota(gate, sample, period, q.age_ms); gate.refreshAt = 0; refreshAfterSend = true;
+        }
+      }
+    }
+    if (!refreshAfterSend && (!gate.quota || Date.now() >= (gate.refreshAt ?? 0)) && !await refresh()) {
+      await releaseLeases(base, ready.map(item => item.mail)); return { processed: 0, blocked: true };
+    }
   }
   if (dailyRemaining(gate) <= 0) {
     counters.quotaRetryAt = quotaRetry(gate, options.quotaRefreshMs);
@@ -709,6 +736,9 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
     await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
   }
+  // The DO already hosts the run inside waitUntil/an alarm. Finish the fenced refresh here,
+  // after provider IDs are visible, rather than letting unowned I/O escape the invocation.
+  if (refreshAfterSend && Date.now() >= (gate.refreshAt ?? 0)) await refresh();
   return { processed: leased.length, blocked: false };
 }
 async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
@@ -801,7 +831,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const pacing: Pacing = { rateFactor: runtime.config.dispatch.rateFactor, targetRate: runtime.config.dispatch.targetRate, live: !isSimulatedSes(runtime) };
   const held = { recipients: 0 };
   const lane: Lane = { deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
-  const lease = async (priorityOnly = false) => {
+  const lease = async (priorityOnly = false, first = false) => {
     const now = Date.now();
     if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
     for (let i = lane.deferred.length - 1; i >= 0; i--) if ((lane.deferred[i]!.until ?? Infinity) <= now) lane.deferred.splice(i, 1);
@@ -810,7 +840,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       if (dailyRemaining(gate) <= 0) return [];
       priorityOnly = true; // Seek past the entire marketing queue, including owners this run hasn't seen.
     }
-    return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId, priorityOnly));
+    return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0))));
   };
   let blocked = false;
   const drainLane = async (batch: Leased[]) => {
@@ -846,7 +876,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   };
   const normal = async () => {
     try {
-      const first = await lease();
+      const first = await lease(false, true);
       const lanes = first.length === lane.options.batchSize ? Math.max(1, options.lanes ?? 2) : 1;
       const results = await Promise.allSettled(Array.from({ length: lanes }, async (_, i) => drainLane(i === 0 ? first : await lease())));
       for (const result of results) if (result.status === 'rejected') throw result.reason;

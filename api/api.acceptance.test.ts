@@ -5425,6 +5425,26 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a stale quota refresh follows transactional acceptance except near the daily reserve', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string;
+      t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof GetAccountCommand) visible.push(!!(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[pending])).rows[0].provider_id);
+        return Reflect.apply(send,this,[cmd]);
+      });
+      for (const used of [0,899]) {
+        pending = ok(await local('POST','/v1/emails/send',mail()),202).id;
+        await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+          VALUES($1,$2,100,1000,$3,clock_timestamp()-interval '2 minutes') ON CONFLICT(workspace_id,region) DO UPDATE SET
+          max_24_hour_send=1000,sent_last_24_hours=excluded.sent_last_24_hours,checked_at=excluded.checked_at,next_allowed_at=NULL`,[runtime.config.workspaceId,REGION,used]);
+        assert.equal((await dispatchDue(runtime,REGION)).sent,1);
+      }
+      assert.deepEqual(visible,[true,false]);
+    });
+  });
+
   test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
