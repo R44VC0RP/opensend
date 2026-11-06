@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
 import PostalMime, { type Address, type Email } from 'postal-mime';
@@ -189,13 +190,21 @@ function countHeaderEscaped(msg: Email, count: number) {
 }
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const origRenderTextContent = (PostalMime.prototype as unknown as { renderTextContent?: (this: InternalParser) => void }).renderTextContent;
-if (typeof origRenderTextContent !== 'function') throw new Error('Incompatible postal-mime: missing renderTextContent');
-let escapeBudget: { count: number } | null = null;
-(PostalMime.prototype as unknown as { renderTextContent: (this: InternalParser) => void }).renderTextContent = function () {
+const escapeBudgetStore = new AsyncLocalStorage<{ count: number }>();
+const postalProto = PostalMime.prototype as unknown as {
+  parse?: (this: unknown, buf: unknown) => Promise<Email>;
+  renderTextContent?: (this: InternalParser) => void;
+};
+const origParse = postalProto.parse;
+const origRenderTextContent = postalProto.renderTextContent;
+if (typeof origRenderTextContent !== 'function' || typeof origParse !== 'function') throw new Error('Incompatible postal-mime: missing renderTextContent');
+postalProto.parse = function (buf: unknown) {
+  return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse.call(this, buf));
+};
+postalProto.renderTextContent = function () {
   if (!(this.textTypes instanceof Set) || !(this.textMap instanceof Map)) throw new Error('Incompatible postal-mime internal state');
   if (this.textTypes.has('html')) {
-    const budget = escapeBudget ?? { count: 0 };
+    const budget = escapeBudgetStore.getStore() ?? { count: 0 };
     let count = budget.count;
     for (const entry of this.textMap.values()) {
       const own = entry.html;
@@ -208,6 +217,11 @@ let escapeBudget: { count: number } | null = null;
   }
   return origRenderTextContent.call(this);
 };
+export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
+  if (raw.byteLength > PARSE_LIMIT || !withinLineLimit(raw)) return null;
+  try { return await escapeBudgetStore.run({ count: 0 }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
+  catch { return null; }
+}
 
 const ingestJob: JobHandler = async (runtime, payload, job) => {
   const scope: Scope = { workspaceId: job.workspaceId };
@@ -232,12 +246,8 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     }
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
-  let email: Email | null = null, status = 'received';
-  if (raw.byteLength <= PARSE_LIMIT && withinLineLimit(raw)) {
-    escapeBudget = { count: 0 };
-    try { email = await PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' }); } catch { status = 'unparsed'; }
-    finally { escapeBudget = null; }
-  } else status = 'unparsed';
+  const email = await parseInboundMime(raw);
+  const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
   const from = flatten(email?.from)[0] ?? { name: null, address: (common.from?.[0]?.match(/<([^>]+)>/)?.[1] ?? common.from?.[0] ?? notification.mail?.source ?? '').trim().toLowerCase() };

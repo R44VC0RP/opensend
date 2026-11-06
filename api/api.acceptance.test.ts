@@ -4526,7 +4526,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
       const PostalMime = (await import('postal-mime')).default;
       const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
-      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { acceptInboundNotification, mailboxIngestJobs, parseInboundMime } = await import('./src/mailbox-ingest.js');
       const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-caps`;
       const domainId = unique('domain');
       runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
@@ -4650,6 +4650,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\n${altPlain}\r\n--alt\r\nContent-Type: text/html\r\n\r\n${altBody}\r\n--alt--\r\n`
       ), 'Alternative HTML', 'alt-html-ok@example.net');
       assert.equal(parsedAlt.status, 'received');
+
+      // Concurrent root parses isolate their escape counters via AsyncLocalStorage while nested message/rfc822 parts share their root's counter.
+      const mixed70kA = mixedMime('8bit', '<'.repeat(70_000));
+      const mixed70kB = mixedMime('8bit', '&'.repeat(70_000));
+      const nested140k = Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="outer"\r\n\r\n--outer\r\nContent-Type: message/rfc822\r\n\r\n${mixed70kA.toString('utf8')}\r\n--outer\r\nContent-Type: text/html\r\n\r\n<p>outer</p>\r\n--outer--\r\n`
+      );
+      const [concA, concNested, concB] = await Promise.all([parseInboundMime(mixed70kA), parseInboundMime(nested140k), parseInboundMime(mixed70kB)]);
+      assert.ok(concA?.html && concB?.html, 'Two concurrent 70,000-escape root parses must both succeed without summing across roots.');
+      assert.equal(concNested, null, 'Nested message/rfc822 escape counts must accumulate onto their own root parse.');
 
       // Unparsed messages preserve header-based auto-reply detection from the raw header block so reply loop guards still hold.
       const unparsedTail = 'x\r\n'.repeat(30_005);
