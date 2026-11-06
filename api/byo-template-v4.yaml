@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: OpenSend MX customer connection v4. Connects regional SES sending and signed feedback; receiving is optional.
+Parameters:
+  PlatformPrincipalArn:
+    Type: String
+    AllowedPattern: 'arn:aws:iam::[0-9]{12}:user/[A-Za-z0-9+=,.@_/-]+'
+  ExternalId:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '[0-9a-f-]{36}'
+  ConnectionId:
+    Type: String
+    AllowedPattern: 'conn_[0-9a-f]{32}'
+  ResourcePrefix:
+    Description: OpenSend resources dedicated to this connection.
+    Type: String
+    AllowedPattern: 'opensend-[0-9a-f]{20}'
+  FeedbackUrl:
+    Type: String
+    AllowedPattern: 'https://[^/?#]+/v1/events/ses'
+  ReceiveMail:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+Conditions:
+  Receiving: !Equals [!Ref ReceiveMail, 'true']
+Resources:
+  FeedbackTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}-feedback'
+      Tags:
+        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'opensend:purpose', Value: ses-feedback }
+  FeedbackPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref FeedbackTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: OpenSendOwner
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action: ['sns:GetTopicAttributes', 'sns:SetTopicAttributes', 'sns:AddPermission', 'sns:RemovePermission', 'sns:DeleteTopic', 'sns:Subscribe', 'sns:ListSubscriptionsByTopic', 'sns:Publish']
+            Resource: !Ref FeedbackTopic
+          - Sid: OpenSendSesPublish
+            Effect: Allow
+            Principal: { Service: ses.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref FeedbackTopic
+            Condition:
+              StringEquals:
+                'AWS:SourceAccount': !Ref AWS::AccountId
+                'AWS:SourceArn':
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${TransactionalSet}'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${MarketingSet}'
+  TransactionalSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Sub '${ResourcePrefix}-transactional'
+      SendingOptions: { SendingEnabled: true }
+      SuppressionOptions:
+        SuppressedReasons: [BOUNCE, COMPLAINT]
+        ValidationOptions: { ConditionThreshold: { ConditionThresholdEnabled: DISABLED } }
+      Tags:
+        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'opensend:purpose', Value: ses-feedback }
+  MarketingSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Sub '${ResourcePrefix}-marketing'
+      SendingOptions: { SendingEnabled: true }
+      SuppressionOptions:
+        SuppressedReasons: [BOUNCE, COMPLAINT]
+        ValidationOptions: { ConditionThreshold: { ConditionThresholdEnabled: ENABLED, OverallConfidenceThreshold: { ConfidenceVerdictThreshold: MANAGED } } }
+      Tags:
+        - { Key: 'opensend:installation-id', Value: !Ref ConnectionId }
+        - { Key: 'opensend:purpose', Value: ses-feedback }
+  TransactionalEvents:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    DependsOn: FeedbackPolicy
+    Properties:
+      ConfigurationSetName: !Ref TransactionalSet
+      EventDestination:
+        Name: !Sub '${ResourcePrefix}-events'
+        Enabled: true
+        MatchingEventTypes: [DELIVERY, BOUNCE, COMPLAINT, REJECT, RENDERING_FAILURE, DELIVERY_DELAY, OPEN, CLICK]
+        SnsDestination: { TopicARN: !Ref FeedbackTopic }
+  MarketingEvents:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    DependsOn: FeedbackPolicy
+    Properties:
+      ConfigurationSetName: !Ref MarketingSet
+      EventDestination:
+        Name: !Sub '${ResourcePrefix}-events'
+        Enabled: true
+        MatchingEventTypes: [DELIVERY, BOUNCE, COMPLAINT, REJECT, RENDERING_FAILURE, DELIVERY_DELAY, OPEN, CLICK]
+        SnsDestination: { TopicARN: !Ref FeedbackTopic }
+  FeedbackSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: [OpenSendRole, TransactionalEvents, MarketingEvents]
+    Properties:
+      TopicArn: !Ref FeedbackTopic
+      Protocol: https
+      Endpoint: !Ref FeedbackUrl
+      RawMessageDelivery: false
+  OpenSendRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref AWS::StackName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref PlatformPrincipalArn }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'sts:ExternalId': !Ref ExternalId }
+      Policies:
+        - PolicyName: Sending
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['ses:GetAccount', 'ses:ListEmailIdentities', 'cloudwatch:GetMetricData', 'ses:ApplyTrackingConfigurationOverrides']
+                Resource: '*'
+                Condition: { StringEquals: { 'aws:RequestedRegion': !Ref 'AWS::Region' } }
+              - Effect: Allow
+                Action: ses:GetEmailIdentity
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+              - Effect: Allow
+                Action: ses:CreateEmailIdentity
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                Condition:
+                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['opensend:domain-claim'] }
+                  'Null': { 'aws:RequestTag/opensend:domain-claim': 'false' }
+              - Effect: Allow
+                Action: ses:TagResource
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                # Restrict the value as well: a key allowlist alone would let us tag a customer's
+                # existing identity and then satisfy the DeleteEmailIdentity / MAIL FROM guard.
+                Condition:
+                  'ForAllValues:StringEquals': { 'aws:TagKeys': ['opensend:domain-claim'] }
+                  StringEquals: { 'aws:RequestTag/opensend:domain-claim': '${aws:ResourceTag/opensend:domain-claim}' }
+                  'Null': { 'aws:ResourceTag/opensend:domain-claim': 'false' }
+              - Effect: Allow
+                Action: ['ses:DeleteEmailIdentity', 'ses:PutEmailIdentityMailFromAttributes']
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                Condition: { 'Null': { 'aws:ResourceTag/opensend:domain-claim': 'false' } }
+              - Effect: Allow
+                Action: ['ses:GetConfigurationSet', 'ses:GetConfigurationSetEventDestinations']
+                Resource:
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
+              - Effect: Allow
+                Action: ['ses:SendEmail', 'ses:SendRawEmail']
+                Resource:
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
+              - Effect: Allow
+                Action: ['ses:GetEmailTemplate', 'ses:TestRenderEmailTemplate']
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:template/opensend-*'
+              - Effect: Allow
+                Action: ['sns:ListTagsForResource', 'sns:ListSubscriptionsByTopic', 'sns:GetTopicAttributes', 'sns:GetSubscriptionAttributes']
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-feedback'
+        - !If
+          - Receiving
+          - PolicyName: Receiving
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: ['ses:DescribeActiveReceiptRuleSet', 'ses:DescribeReceiptRuleSet', 'ses:CreateReceiptRuleSet', 'ses:SetActiveReceiptRuleSet', 'ses:CreateReceiptRule', 'ses:UpdateReceiptRule', 'ses:DeleteReceiptRule']
+                  Resource: '*'
+                  Condition: { StringEquals: { 'aws:RequestedRegion': !Ref 'AWS::Region' } }
+                - Effect: Allow
+                  Action: ['sns:CreateTopic', 'sns:TagResource', 'sns:ListTagsForResource', 'sns:SetTopicAttributes', 'sns:ListSubscriptionsByTopic']
+                  Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-inbound'
+                - Effect: Allow
+                  Action: sns:Subscribe
+                  Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-inbound'
+                  Condition: { StringEquals: { 'sns:Protocol': https, 'sns:Endpoint': !Ref FeedbackUrl } }
+                - Effect: Allow
+                  Action: ['s3:ListBucket', 's3:CreateBucket', 's3:PutBucketOwnershipControls', 's3:PutBucketTagging', 's3:PutBucketPublicAccessBlock', 's3:PutBucketPolicy', 's3:PutLifecycleConfiguration']
+                  Resource: !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}'
+                  Condition: { StringEqualsIfExists: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
+                - Effect: Allow
+                  Action: s3:GetObject
+                  Condition: { StringEquals: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/staging/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
+                - Effect: Allow
+                  Action: ['s3:PutObject','s3:PutObjectTagging']
+                  Condition: { StringEquals: { 's3:ResourceAccount': !Ref 'AWS::AccountId' } }
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/raw/*'
+                    - !Sub 'arn:aws:s3:::${ResourcePrefix}-mail-${AWS::Region}/workspaces/*/att/*'
+          - !Ref AWS::NoValue
+Outputs:
+  AccountId:
+    Description: OpenSend detects this account automatically. Use this ID only for manual verification.
+    Value: !Ref AWS::AccountId
+  RoleArn:
+    Value: !GetAtt OpenSendRole.Arn
