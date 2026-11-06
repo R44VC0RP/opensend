@@ -13,6 +13,7 @@ type Op = keyof typeof sdk;
 const dashboard = 'Requires a signed-in dashboard session, not an API key.';
 const shared = 'Would change shared domain, routing, provider or workspace configuration.';
 const subdomain = 'Hosted receiving follows exact verified DNS; no wildcard/subdomain fixture.';
+const byoV2 = 'Bring-your-own AWS v2 is behind MX_BYO_V2 and needs a non-platform AWS account, not this Hosted workspace.';
 // Deliberately enumerate IDs (not paths, tags or prefixes): a new endpoint must never auto-skip.
 const SKIP: Partial<Record<Op, string>> = {
   listMcpConnections: dashboard, revokeMcpConnection: dashboard,
@@ -35,6 +36,7 @@ const SKIP: Partial<Record<Op, string>> = {
   disableInboundDomain: 'Hosted receiving cannot be disabled via API; removing the shared MX would break delivery.',
   createInboundSubdomain: subdomain, updateInboundSubdomain: subdomain, removeInboundSubdomain: subdomain,
   getInboundSubdomain: subdomain,
+  refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2,
 };
 
 const started = Date.now();
