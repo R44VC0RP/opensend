@@ -19,6 +19,7 @@ export type EmailSnapshot = {
   unsubscribeUrl?: string;
 };
 export type CampaignDraft = {
+  regionPinned?: boolean;
   /** Only stored in the internal, immutable launch review. */
   binding?: SendingBinding;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;

@@ -622,6 +622,10 @@ export type CampaignDraft = {
     previewText?: string;
     replyTo?: Array<string>;
     region: string;
+    /**
+     * Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.
+     */
+    regionPinned?: boolean;
     subject?: string | '';
     attachments?: Array<string>;
     tracking?: boolean;
@@ -718,9 +722,13 @@ export type CreateCampaignInput = {
     previewText?: string;
     replyTo?: Array<string>;
     /**
-     * Defaults to the installation’s persisted default region when omitted.
+     * Defaults to the installation region. With regional MX delivery, omitting region follows the From domain.
      */
     region?: string;
+    /**
+     * Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.
+     */
+    regionPinned?: boolean;
     subject?: string | '';
     attachments?: Array<string>;
     tracking?: boolean;
@@ -977,9 +985,13 @@ export type CampaignUpdateInput = {
         previewText?: string;
         replyTo?: Array<string>;
         /**
-         * Keeps the campaign’s current region when omitted.
+         * Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.
          */
         region?: string;
+        /**
+         * Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.
+         */
+        regionPinned?: boolean;
         subject?: string | '';
         attachments?: Array<string>;
         tracking?: boolean;

@@ -2689,6 +2689,10 @@
             "minLength": 1,
             "maxLength": 40
           },
+          "regionPinned": {
+            "type": "boolean",
+            "description": "Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region."
+          },
           "subject": {
             "anyOf": [
               {
@@ -3005,7 +3009,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 40,
-            "description": "Defaults to the installation’s persisted default region when omitted."
+            "description": "Defaults to the installation region. With regional MX delivery, omitting region follows the From domain."
+          },
+          "regionPinned": {
+            "type": "boolean",
+            "description": "Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region."
           },
           "subject": {
             "anyOf": [
@@ -3855,7 +3863,11 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 40,
-                "description": "Keeps the campaign’s current region when omitted."
+                "description": "Omit to keep the current region selection. An unpinned regional MX draft follows its From domain."
+              },
+              "regionPinned": {
+                "type": "boolean",
+                "description": "Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region."
               },
               "subject": {
                 "anyOf": [
@@ -19719,7 +19731,7 @@
     "/v1/campaigns": {
       "post": {
         "operationId": "createCampaign",
-        "description": "Create a campaign; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace as an independent draft. Omitted region uses the installation default. Returns a dashboard URL so an agent and user can continue editing together.",
+        "description": "Create a campaign draft; only a name is required. templateId copies an active published global template, including its content and assets, into this workspace. With regional MX delivery, drafts can be edited before sender setup is complete; the sender and region are checked when sending a test or launching. Returns a dashboard URL so an agent and user can continue editing together.",
         "tags": [
           "Campaigns"
         ],

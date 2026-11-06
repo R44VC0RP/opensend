@@ -44,7 +44,10 @@ const orderedRegions = (settings: typeof sesSettings.$inferSelect) => [settings.
 // API routes validating a region don't need either set of SNS topic bindings.
 export async function withRegionSettings(runtime: Runtime, workspaceId: string): Promise<Runtime> {
   if (runtime.config.multiTenant && runtime.config.regionalSending) {
-    const row=(await runtime.db.execute<{regions:string[]}>(sql`SELECT array_prepend(s.default_region,ARRAY(SELECT region FROM regional_simulated_connections c WHERE c.workspace_id=s.workspace_id AND c.region<>s.default_region ORDER BY region)) AS regions
+    // These regions address settings, drafts and historical logs, not permission to send.
+    const row=(await runtime.db.execute<{regions:string[]}>(sql`SELECT array_prepend(s.default_region,ARRAY(SELECT region FROM (
+        SELECT jsonb_array_elements_text(s.enabled_regions) AS region UNION SELECT r.region FROM provider_connections c JOIN provider_connection_regions r ON r.connection_id=c.id
+          WHERE c.workspace_id=s.workspace_id AND r.sending_state IN ('ready','disabled')) known WHERE region<>s.default_region ORDER BY region)) AS regions
       FROM ses_installation_settings s WHERE s.workspace_id=${workspaceId}`)).rows[0];
     if (!row) throw new ApiError(503,'REGION_SETTINGS_NOT_INITIALIZED','Run database migrations to initialize SES region settings.');
     return {...runtime,config:{...runtime.config,workspaceId,regions:row.regions}};

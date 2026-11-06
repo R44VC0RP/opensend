@@ -167,10 +167,12 @@ export const toggleRegionSending = (ref:RegionRef,enable:boolean,generation:numb
   WHERE ${managedRegion(ref)} AND sending_state=${enable?'disabled':'ready'} AND generation=${generation} RETURNING generation`;
 // After the provisioner has verified the tenant and its resource associations. The pool,
 // not each tenant, owns the shared topic. Never copy a pool ARN into a BYO registration.
-export const finishHostedRegion = (ref:RegionRef,generation:number) => sql`UPDATE provider_connection_regions r SET sending_state='ready',tenant_state='ready',lease_until=NULL
+export const finishHostedRegion = (ref:RegionRef,generation:number) => sql`WITH finished AS (UPDATE provider_connection_regions r SET sending_state='ready',tenant_state='ready',lease_until=NULL
   FROM provider_connections c JOIN provider_pool_regions p ON p.aws_account_id=c.aws_account_id WHERE c.kind='shared' AND c.state='ready' AND p.sending_state='ready'
     AND p.feedback_topic_arn LIKE 'arn:aws:sns:'||p.region||':'||p.aws_account_id||':%' AND p.region=r.region AND c.id=r.connection_id
-    AND r.connection_id=${ref.connectionId} AND r.region=${ref.region} AND NOT r.legacy AND r.sending_state='provisioning' AND r.generation=${generation} AND r.lease_until>clock_timestamp() RETURNING r.region`;
+    AND r.connection_id=${ref.connectionId} AND r.region=${ref.region} AND NOT r.legacy AND r.sending_state='provisioning' AND r.generation=${generation} AND r.lease_until>clock_timestamp() RETURNING c.workspace_id,r.region),
+  settings AS (UPDATE ses_installation_settings s SET enabled_regions=s.enabled_regions||jsonb_build_array(f.region) FROM finished f
+    WHERE s.workspace_id=f.workspace_id AND NOT s.enabled_regions ? f.region) SELECT region FROM finished`;
 const receiveNext = {off:'review',review:'provisioning',provisioning:'active',active:'disabling',disabling:'off'} as const;
 export const transitionRegionReceiving = (ref:RegionRef,from:keyof typeof receiveNext,generation:number) => sql`UPDATE provider_connection_regions SET receiving_state=${receiveNext[from]},receiving_generation=receiving_generation+1
   WHERE ${managedRegion(ref)} AND receiving_state=${from} AND receiving_generation=${generation} AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND c.kind='byo') RETURNING receiving_generation`;
@@ -243,9 +245,9 @@ export function moveCampaign(ref: CampaignRef, from: readonly CampaignState[], t
 }
 /** Cursor or setting changes that keep the state; fenced on it so a paused or canceled campaign is never advanced. */
 export const progressCampaign = (ref: CampaignRef, state: CampaignState, set: SQL) => sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE ${campaignRow(ref)} AND state=${state} RETURNING id`;
-export type CampaignLaunch = { reviewId: string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null };
+export type CampaignLaunch = { reviewId: string; resolvedRegion?:string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null };
 /** draft, or failed with nothing released -> preparing with a fresh snapshot: every cursor and setting starts over; the error of a failed launch is cleared. */
-export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampaign(ref, ['draft', 'failed'], 'preparing', sql`,review_id=${l.reviewId},actor_key_id=${l.actorKeyId},simulated=${l.simulated},total=${l.total},prepared=0,expanded=0,canceled=0,error=NULL,request_id=${l.requestId},
+export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampaign(ref, ['draft', 'failed'], 'preparing', sql`,review_id=${l.reviewId}${l.resolvedRegion ? sql`,draft=jsonb_set(draft,'{region}',to_jsonb(${l.resolvedRegion}::text))` : sql``},actor_key_id=${l.actorKeyId},simulated=${l.simulated},total=${l.total},prepared=0,expanded=0,canceled=0,error=NULL,request_id=${l.requestId},
   scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL`, editableRow);
 /** A new revision: draft, or failed with nothing released -> draft with no snapshot; a failed launch's counters and error go with it. */
 export const reviseCampaign = (ref: CampaignRef, set: SQL) => sql`UPDATE sending_campaigns SET state='draft',updated_at=now(),review_id=NULL,error=NULL,total=0,prepared=0,expanded=0,canceled=0,scheduled_at=NULL${set} WHERE ${campaignRow(ref)} AND ${editableRow} RETURNING *`;
