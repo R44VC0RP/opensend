@@ -53,6 +53,8 @@
 .domain-sections > :not(:first-child) { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
 .ui-section-header > .domain-group-title { gap: var(--space-8); }
 .domain-group-title p { font-size: var(--text-sm); line-height: var(--leading-sm); max-width: 60ch; text-wrap: pretty; }
+/* Keep both identifier slots the same size across checks, even when a narrow page wraps them. */
+.dmarc-alignment span { display: inline-block; width: 27ch; max-width: 100%; }
 .domain-group-title h3 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .domain-group + .domain-group { margin-top: var(--space-16); }
 .settings-facts.domain-facts { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-40); }

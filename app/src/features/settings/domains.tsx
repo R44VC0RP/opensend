@@ -74,7 +74,8 @@ export function DomainDetailPage() {
   const { regionId, setRegionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
-  const domain = useDomain(id)
+  const [recheckUntil, setRecheckUntil] = useState(0)
+  const domain = useDomain(id, recheckUntil)
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true)
   const client = useQueryClient()
   // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
@@ -102,8 +103,7 @@ export function DomainDetailPage() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   return <div className="stack">
     <PageHeader title={current.name} backTo="/domains" actions={<>
-      {/* Kept in place once verified, so the header doesn't reflow as the live status flips. */}
-      <span className="dns-reserve" data-hidden={current.status === 'verified' || undefined} inert={current.status === 'verified'}><Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id) } catch { /* Shown inline. */ } }}>Check now</Button></span>
+      <Button loading={verify.isPending} onClick={async () => { try { await verify.mutateAsync(id); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ } }}>Check now</Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
@@ -118,7 +118,7 @@ export function DomainDetailPage() {
       <details className="domain-advanced">
         <summary>Advanced</summary>
         <div className="domain-advanced-body">
-          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">Routes bounces through a subdomain you own and aligns SPF.</p></div>
+          <div className="ui-section-header"><div className="domain-group-title"><h3>Custom MAIL FROM{mailFromName && <span className="muted"> · {mailFromName}</span>}</h3><p className="muted">Routes bounces through a subdomain you own for relaxed SPF alignment.</p></div>
             <div className="cluster">{mailFromName && <StatusBadge status={label(current.mailFromStatus)} />}<Button aria-label={mailFromName ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} onClick={openMailFrom}>{mailFromName ? 'Change' : 'Add'}</Button></div>
           </div>
           {mailFromRecords.length > 0 && <DnsRecordTable domain={current.name} records={mailFromRecords} />}
@@ -180,4 +180,3 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     <ConfirmDialog open={disableOpen} onOpenChange={setDisableOpen} title={`Stop receiving on ${domainName}?`} description="SES stops accepting mail for this domain. Addresses and stored messages are kept." confirmLabel="Turn off" danger onConfirm={() => disable.mutateAsync()} />
   </section>
 }
-
