@@ -1,122 +1,104 @@
-import { useState, type FormEvent } from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
-import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, SectionHeader, Select } from '../../components/ui'
-import { useApiMutation, useApiDef, useApi } from '../../data/context'
+import { useState } from 'react'
+import { Button, Checkbox, ConfirmDialog, DataTable, EmptyState, ErrorState, PageHeader, Pagination, SectionHeader } from '../../components/ui'
+import { useApiMutation, useApiDef } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { AgentTokenSummary, ApiKey, ApiKeyInput, McpConnection, PageRequest } from '../../data/types'
-import { date } from '../../lib/format'
+import type { AgentTokenSummary, ApiKey, MailboxKey, McpConnection } from '../../data/types'
+import { date, shortDateTime } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
-import { fieldError, MutationError, SecretDialog } from './shared'
-import { MailboxKeysSection } from './mailbox-keys'
+import { SecretDialog } from './shared'
+import { CreateKeyDialog, accessLabel, domainScope, permissionList } from './create-key'
 import { settingsColumns } from './skeletons'
 import './api-keys.css'
 
+type KeyRow = { kind: 'api'; key: ApiKey } | { kind: 'inbound'; key: MailboxKey }
+type ConnectedRow = { kind: 'token'; item: AgentTokenSummary } | { kind: 'mcp'; item: McpConnection }
+const lastUsed = (value: string | null) => value ? date(value) : 'Never'
+const tokenInactive = (token: AgentTokenSummary) => token.revokedAt !== null || Date.parse(token.expiresAt) <= Date.now()
+
 export function ApiKeysPage() {
-  const api = useApi()
   const [showRevoked, setShowRevoked] = useState(false)
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
   const keys = useApiDef(queries.keys(cursor, showRevoked), { keepPrevious: true })
+  const inboundKeys = useApiDef(queries.mailboxKeys(showRevoked), { keepPrevious: true })
+  const addresses = useApiDef(queries.inboundAddressOptions())
   const agentTokens = useApiDef(queries.agentTokens(showRevoked), { keepPrevious: true })
   const mcpConnections = useApiDef(queries.mcpConnections())
-  const create = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
   const revoke = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
+  const revokeInbound = useApiMutation((api, id: string) => api.mailboxes.revokeKey(id), 'Inbound key revoked')
   const revokeAgentToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
   const revokeMcpConnection = useApiMutation((api, id: string) => api.credentials.revokeMcpConnection(id), 'MCP connection revoked')
   const [open, setOpen] = useState(false)
-  const [name, setName] = useState('')
-  const [permission, setPermission] = useState<ApiKeyInput['permission']>('send')
-  const [allDomains, setAllDomains] = useState(true)
-  const [selectedDomains, setSelectedDomains] = useState<string[]>([])
-  const [domainError, setDomainError] = useState('')
-  const domainOptions = useInfiniteQuery({
-    queryKey: ['opensend', api.mode, 'domains', 'key-options'],
-    enabled: open,
-    initialPageParam: {page: 1} as Pick<PageRequest, 'page' | 'cursor'>,
-    queryFn: ({pageParam, signal}) => api.domains.list({...pageParam, pageSize: 10}, signal),
-    getNextPageParam: last => last.nextCursor ? {cursor: last.nextCursor} : api.mode === 'demo' && last.total !== undefined && last.page * last.pageSize < last.total ? {page: last.page + 1} : undefined,
-    staleTime: 60_000,
-    retry: false,
-  })
-  const domains = [...new Set(domainOptions.data?.pages.flatMap(page => page.items.map(domain => domain.name.toLowerCase())) ?? [])].sort()
-  function toggleDomain(name: string, checked: boolean) {
-    setDomainError('')
-    setAllDomains(false)
-    setSelectedDomains(current => checked ? [...new Set([...current, name])] : current.filter(domain => domain !== name))
-  }
-  const [nameError, setNameError] = useState('')
-  const [secret, setSecret] = useState<string | null>(null)
-  const [revokeKey, setRevokeKey] = useState<ApiKey | null>(null)
+  const [secret, setSecret] = useState<{ value: string; title: string } | null>(null)
+  const [revokeKey, setRevokeKey] = useState<KeyRow | null>(null)
   const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
   const [revokeConnection, setRevokeConnection] = useState<McpConnection | null>(null)
-  function openCreate() { create.reset(); setName(''); setNameError(''); setPermission('send'); setAllDomains(true); setSelectedDomains([]); setDomainError(''); setOpen(true) }
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!name.trim()) { setNameError('Enter a name for this key.'); return }
-    setNameError('')
-    if (!allDomains && selectedDomains.length === 0) { setDomainError('Select at least one domain, or choose All domains.'); return }
-    if (!allDomains && selectedDomains.length > 50) { setDomainError('Select up to 50 domains.'); return }
-    setDomainError('')
-    try {
-      const result = await create.mutateAsync({ name: name.trim(), permission, domains: allDomains ? [] : selectedDomains })
-      setOpen(false)
-      setSecret(result.secret)
-      create.reset()
-    } catch { /* The mutation error is shown in the form. */ }
-  }
+  const address = (id: string) => addresses.data?.find(item => item.id === id)?.address ?? id
+
+  // Inbound keys aren't paginated, so they join the first page of API keys, newest first.
+  const firstPage = !cursor
+  const listLoading = keys.isPending || firstPage && (inboundKeys.isPending || addresses.isPending)
+  // Each source fails on its own: a failed API key page still lists inbound keys, and the other way round.
+  const apiFailed = Boolean(keys.error)
+  const inboundFailed = firstPage && Boolean(inboundKeys.error)
+  const listFailed = apiFailed && (!firstPage || inboundFailed)
+  const emptyTitle = cursor ? 'No keys on this page' : `No ${showRevoked ? '' : 'active '}${apiFailed ? 'inbound keys' : inboundFailed ? 'API keys' : 'keys'}`
+  const rows: KeyRow[] = [...(keys.data ?? []).map(key => ({ kind: 'api' as const, key })), ...(firstPage ? inboundKeys.data ?? [] : []).map(key => ({ kind: 'inbound' as const, key }))]
+    .sort((a, b) => b.key.createdAt.localeCompare(a.key.createdAt))
+  const connected: ConnectedRow[] = [...(mcpConnections.data ?? []).map(item => ({ kind: 'mcp' as const, item })), ...(agentTokens.data ?? []).map(item => ({ kind: 'token' as const, item }))]
+  const connectedError = agentTokens.error ?? mcpConnections.error
+  const showConnected = !listLoading && !agentTokens.isPending && !mcpConnections.isPending && (connected.length > 0 || connectedError)
+  const connectionName = (grantId: string) => mcpConnections.data?.find(connection => connection.id === grantId)?.name
+
   return <div className="stack">
-    <PageHeader title="Credentials" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => {setShowRevoked(checked); pagination.reset()}} /><Button variant="primary" onClick={openCreate}>Create API key</Button></>} />
+    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
     <div className="keys-sections">
-    <section className="section stack"><SectionHeader title="API keys" />
-    {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable loading={keys.isPending} skeletonRows={2} minRows={2} rows={keys.data ?? []} rowKey={row => row.id} empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No API keys' : 'No active API keys'} action={<Button onClick={openCreate}>Create key</Button>} />} columns={[
-      { ...settingsColumns.keys[0], render: row => row.name },
-      { ...settingsColumns.keys[1], render: row => <code>{row.prefix}</code> },
-      { ...settingsColumns.keys[2], render: row => <>{row.permission} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</> },
-      { ...settingsColumns.keys[3], render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never' },
-      { ...settingsColumns.keys[4], render: row => row.revokedAt ? 'Revoked' : <Button variant="danger" onClick={() => setRevokeKey(row)}>Revoke</Button> },
-    ]} />}
-    {!keys.isPending && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
-    </section>
-    <MailboxKeysSection showRevoked={showRevoked} />
-    <section className="section stack"><SectionHeader title="Agent tokens" />
-      {agentTokens.error ? <ErrorState error={agentTokens.error} onRetry={() => void agentTokens.refetch()} /> : <DataTable loading={agentTokens.isPending} skeletonRows={1} minRows={1} rows={agentTokens.data ?? []} rowKey={row => row.id} empty={<EmptyState title={showRevoked ? 'No agent tokens' : 'No active agent tokens'} />} columns={[
-        {key: 'purpose', label: 'Purpose', width: '28%', render: row => row.purpose},
-        {key: 'permissions', label: 'Permissions', width: '25%', render: row => <>{row.permissions.join(', ')} · {row.domains.length ? row.domains.join(', ') : 'All domains'}</>},
-        {key: 'expires', label: 'Expires', width: '17%', render: row => row.revokedAt ? 'Revoked' : Date.parse(row.expiresAt) <= Date.now() ? 'Expired' : date(row.expiresAt)},
-        {key: 'used', label: 'Last used', width: '15%', render: row => row.lastUsedAt ? date(row.lastUsedAt) : 'Never'},
-        {key: 'actions', label: '', align: 'right', width: 100, render: row => row.revokedAt || Date.parse(row.expiresAt) <= Date.now() ? null : <Button variant="danger" onClick={() => setRevokeToken(row)}>Revoke</Button>},
-      ]} />}
-    </section>
-    <section className="section stack"><SectionHeader title="MCP connections" />
-      {mcpConnections.error ? <ErrorState error={mcpConnections.error} onRetry={() => void mcpConnections.refetch()} /> : <DataTable className="keys-table--two-line" loading={mcpConnections.isPending} skeletonRows={1} minRows={1} rows={mcpConnections.data ?? []} rowKey={row => row.id} empty={<EmptyState title="No MCP connections" />} columns={[
-        {key: 'client', label: 'Client', width: '32%', render: row => <>{row.name || 'MCP client'}<div className="muted">{row.userEmail}</div></>},
-        {key: 'access', label: 'Access', width: '38%', render: row => row.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')},
-        {key: 'connected', label: 'Connected', render: row => date(row.createdAt)},
-        {key: 'actions', label: '', align: 'right', width: 100, render: row => <Button variant="danger" onClick={() => setRevokeConnection(row)}>Revoke</Button>},
-      ]} />}
-    </section>
+      <section className="section stack" aria-label="Keys">
+        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
+          empty={<EmptyState title={emptyTitle} description={cursor || showRevoked || apiFailed || inboundFailed ? undefined : 'Create a key to send from your app or let an agent work on an inbound address.'} />}
+          columns={[
+            { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} /> },
+            { ...settingsColumns.keys[1], render: row => row.kind === 'api'
+              ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
+              : <TwoLines first={`Inbound: ${row.key.addressIds ? row.key.addressIds.map(address).join(', ') : 'every address'}`} second={permissionList(row.key.permissions)} /> },
+            { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
+            { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt) },
+            { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button> },
+          ]} />}
+        {apiFailed && <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />}
+        {inboundFailed && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
+        {!listLoading && (!apiFailed || pagination.page > 1) && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
+      </section>
+      {showConnected && <section className="section stack">
+        <div className="keys-head">
+          <SectionHeader title="Connected apps & agents" />
+          <p className="muted">Signed in through MCP. Agent tokens are short-lived keys they create.</p>
+        </div>
+        {connectedError ? <ErrorState error={connectedError} onRetry={() => { void agentTokens.refetch(); void mcpConnections.refetch() }} /> : <DataTable className="keys-table keys-table--two-line" rows={connected} rowKey={row => row.item.id} columns={[
+          { key: 'name', label: 'Name', width: '30%', render: row => row.kind === 'mcp'
+            ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
+            : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} /> },
+          { key: 'access', label: 'Access', width: '30%', render: row => row.kind === 'mcp'
+            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('opensend:', '')), true)} second={row.item.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')} />
+            : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} /> },
+          { key: 'when', label: 'Connected / expires', width: '18%', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
+          { key: 'used', label: 'Last used', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
+          { key: 'actions', label: '', align: 'right', width: 100, render: row => row.kind === 'mcp'
+            ? <Button variant="danger" aria-label={`Revoke ${row.item.name || 'MCP connection'}`} onClick={() => setRevokeConnection(row.item)}>Revoke</Button>
+            : tokenInactive(row.item) ? null : <Button variant="danger" aria-label={`Revoke ${row.item.purpose}`} onClick={() => setRevokeToken(row.item)}>Revoke</Button> },
+        ]} />}
+      </section>}
     </div>
-    <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Create API key" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-api-key">Create key</Button></>}>
-      <form id="create-api-key" className="stack" onSubmit={submit} noValidate>
-        <MutationError error={create.error} />
-        <Field label="Name" htmlFor="key-name" error={nameError || fieldError(create.error, 'name')}><Input id="key-name" value={name} onChange={event => setName(event.target.value)} autoFocus required disabled={create.isPending} placeholder="Order notifications" /></Field>
-        <Field label="Permission" htmlFor="key-permission" hint={permission === 'manage' ? 'Includes reading, sending, and management.' : undefined}><Select id="key-permission" value={permission} onValueChange={value => setPermission(value as ApiKeyInput['permission'])} disabled={create.isPending} options={[{ value: 'send', label: 'Sending access' }, { value: 'read', label: 'Read only' }, { value: 'manage', label: 'Management access' }]} /></Field>
-        <fieldset className="settings-key-domains" disabled={create.isPending} aria-describedby={domainError || fieldError(create.error, 'domains') ? 'key-domain-error' : undefined}>
-          <legend className="ui-field__label">Domains</legend>
-          <Checkbox label={<span className="settings-key-all-domains">All domains <span className="ui-field__hint">Includes future domains.</span></span>} checked={allDomains} onCheckedChange={checked => {setAllDomains(checked); setSelectedDomains([]); setDomainError('')}} disabled={create.isPending} />
-          <div className="settings-key-domain-options">
-            {domainOptions.isPending ? <p className="muted" role="status">Loading domains…</p> : domains.length === 0 && !domainOptions.isError ? <p className="muted">No domains available.</p> : domains.map(name => <Checkbox key={name} label={name} checked={!allDomains && selectedDomains.includes(name)} onCheckedChange={checked => toggleDomain(name, checked)} disabled={create.isPending || !selectedDomains.includes(name) && selectedDomains.length >= 50} />)}
-          </div>
-          {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => {void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch())}}>Retry loading domains</Button></div>}
-          {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
-          {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
-          {(domainError || fieldError(create.error, 'domains')) && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError || fieldError(create.error, 'domains')}</p>}
-        </fieldset>
-      </form>
-    </Dialog>
-    <SecretDialog secret={secret} title="API key created" onClose={() => { setSecret(null); create.reset() }} />
-    <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.name ?? 'key'}?`} description="Requests using this key will stop working. Revoking a key cannot be undone." confirmLabel="Revoke key" danger pending={revoke.isPending} onConfirm={async () => { if (revokeKey) await revoke.mutateAsync(revokeKey.id) }} />
+    {open && <CreateKeyDialog open onOpenChange={setOpen} onCreated={(value, title) => setSecret({ value, title })} />}
+    <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)} />
+    <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.key.name ?? 'key'}?`}
+      description={revokeKey?.kind === 'inbound' ? 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.' : 'Requests using this key will stop working. Revoking a key cannot be undone.'}
+      confirmLabel="Revoke key" danger pending={revoke.isPending || revokeInbound.isPending} onConfirm={async () => { if (revokeKey?.kind === 'api') await revoke.mutateAsync(revokeKey.key.id); else if (revokeKey) await revokeInbound.mutateAsync(revokeKey.key.id) }} />
     <ConfirmDialog open={revokeToken !== null} onOpenChange={next => { if (!next) setRevokeToken(null) }} title={`Revoke ${revokeToken?.purpose ?? 'agent token'}?`} description="This temporary token will stop working immediately. Revoking it cannot be undone." confirmLabel="Revoke token" danger pending={revokeAgentToken.isPending} onConfirm={async () => { if (revokeToken) await revokeAgentToken.mutateAsync(revokeToken.id) }} />
     <ConfirmDialog open={revokeConnection !== null} onOpenChange={next => { if (!next) setRevokeConnection(null) }} title={`Revoke ${revokeConnection?.name || 'MCP connection'}?`} description="This connection and every agent token created from it will stop working immediately." confirmLabel="Revoke connection" danger pending={revokeMcpConnection.isPending} onConfirm={async () => { if (revokeConnection) await revokeMcpConnection.mutateAsync(revokeConnection.id) }} />
   </div>
+}
+
+function TwoLines({ first, second }: { first: string; second: string }) {
+  return <div className="settings-cell-stack keys-cell"><span title={first}>{first}</span><span className="muted" title={second}>{second}</span></div>
 }
