@@ -20,7 +20,7 @@ export async function cachedDashboardRead<T>(origin: string, scope: string, comp
   if (cache) {
     const hit = await cache.match(request).catch(() => undefined);
     const expires = Number(hit?.headers.get('x-opensend-expires'));
-    if (hit && expires > Date.now()) { const value = await hit.json(); remember(value,expires); return { value, hit: true }; }
+    if (hit && expires > Date.now()) { const value = await hit.json() as T; remember(value,expires); return { value, hit: true }; }
   }
   const work = compute();
   inflight.set(key, work);
