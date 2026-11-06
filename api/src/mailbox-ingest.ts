@@ -106,23 +106,19 @@ function unfoldHeaderValue(s: string): string {
   return trimWsp(parts.join(''));
 }
 function stripHeaderComments(input: string): string {
-  let out = '', depth = 0, quote = false, esc = false, inParam = false, wsp = true;
+  let out = '', depth = 0, commentStart = 0, quote = false, esc = false;
   for (let i = 0; i < input.length; i++) {
     const ch = input[i]!;
-    if (esc) { if (depth === 0) { out += ch; wsp = false; } esc = false; continue; }
+    if (esc) { if (depth === 0) out += ch; esc = false; continue; }
     if (ch === '\\' && (quote || depth > 0)) { esc = true; if (depth === 0) out += ch; continue; }
-    if (depth === 0 && ch === '"') { quote = !quote; out += ch; wsp = false; continue; }
+    if (depth === 0 && ch === '"') { quote = !quote; out += ch; continue; }
     if (!quote) {
-      if (ch === '(' && (depth > 0 || !inParam || wsp)) { depth++; continue; }
-      if (ch === ')' && depth > 0) { depth--; if (depth === 0) wsp = true; continue; }
-      if (depth === 0) {
-        if (ch === '=') { inParam = true; out += ch; wsp = true; continue; }
-        if (ch === ';') inParam = false;
-      }
+      if (ch === '(') { if (depth === 0) commentStart = i; depth++; continue; }
+      if (ch === ')' && depth > 0) { depth--; continue; }
     }
-    if (depth === 0) { out += ch; wsp = ch === ' ' || ch === '\t'; }
+    if (depth === 0) out += ch;
   }
-  return depth === 0 ? out : input;
+  return depth === 0 || input.indexOf(';', commentStart) < 0 ? out : input;
 }
 function unquoteMimeToken(s: string): string {
   const t = trimWsp(s);
@@ -235,7 +231,7 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   const rawFrom = fallback?.get('from') ?? '';
   const rawSenders = rawFrom ? flatten(addressParser(rawFrom)).map(item => item.address) : [];
   const daemonSender = /^(?:mailer-daemon|postmaster)@/.test(from) || rawSenders.some(addr => /^(?:mailer-daemon|postmaster)@/.test(addr));
-  if ((auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report) return true;
+  if ((auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto[-_]reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report) return true;
   if (parsedCapped) log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
   return false;
 }

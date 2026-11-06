@@ -4737,13 +4737,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(precEncodedB.automated, true);
       const precEncodedQ = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: =?UTF-8?Q?auto=5Freply?=\r\n\r\n${unparsedTail}`), 'Encoded auto_reply', 'prec-qp@example.net');
       assert.equal(precEncodedQ.automated, true);
+      const precHyphen = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: auto-reply\r\n\r\n${unparsedTail}`), 'Hyphenated auto-reply', 'prec-hyphen@example.net');
+      assert.equal(precHyphen.automated, true);
+      const precHyphenParsed = await ingest(Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: auto-reply\r\n\r\nhi\r\n'), 'Parsed auto-reply', 'prec-hyphen-parsed@example.net');
+      assert.equal(precHyphenParsed.status, 'received');
+      assert.equal(precHyphenParsed.automated, true);
 
       const filenameReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: application/octet-stream; name="multipart/report.eml"\r\n\r\n${unparsedTail}`), 'Filename report', 'fn-report@example.net');
       assert.equal(filenameReport.automated, false, 'A parameter value containing multipart/report must not match Content-Type media type.');
       const nonDsnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; boundary="r"\r\n\r\n${unparsedTail}`), 'Report without report-type', 'no-rtype@example.net');
       assert.equal(nonDsnReport.automated, false);
-      const mdnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type="disposition-notification"; boundary="r"\r\n\r\n${unparsedTail}`), 'MDN unparsed', 'mdn-unparsed@example.net');
+      const mdnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type="disposition-notification"(comment); boundary="r"\r\n\r\n${unparsedTail}`), 'MDN trailing comment', 'mdn-unparsed@example.net');
       assert.equal(mdnReport.automated, true);
+      const dsnTokenComment = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type=delivery-status(dsn); boundary="r"\r\n\r\n${unparsedTail}`), 'DSN token comment', 'dsn-comment@example.net');
+      assert.equal(dsnTokenComment.automated, true);
 
       const quotedPostmaster = '"<postmaster@example.net>" <human@example.net>';
       const displayPostmaster = await ingest(Buffer.from(`From: ${quotedPostmaster}\r\nTo: caps@example.com\r\n\r\n${unparsedTail}`), 'Quoted display name', 'quoted-pm@example.net', [quotedPostmaster]);
