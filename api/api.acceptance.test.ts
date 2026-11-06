@@ -4136,6 +4136,69 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'limits.example', from = `sender@${domain}`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending]);
+      await assert.rejects(limits('100', 'default'), /No Hosted connection/);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-interval '6 days 23 hours')`, [wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain,wid]);
+      const changes: Json[] = [];
+      t.mock.method(console, 'info', (line: string) => { const entry = JSON.parse(line); if (entry.code === 'HOSTED_LIMITS_CHANGED') changes.push(entry); });
+      const key = ok(await local('POST','/v1/api-keys',{name:'Limits fixture',permissions:['read','send','manage']}),201).secret;
+      // Ten thousand outstanding direct messages with eleven thousand non-simulator recipients.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||md5($1||n),$1,'fixture',$2,$3,'["one@example.net"]',CASE WHEN n<=1000 THEN '["two@example.net"]'::jsonb ELSE '[]' END,'[]','Fixture','{}',false FROM generate_series(1,10000)n`, [wid,REGION,from]);
+      const send = (to = 'real@example.net') => request('POST','/v1/emails/send',key,mail({from,to}));
+      const simulator = 'success@simulator.amazonses.com';
+      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      await limits('11001','10001');
+      error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
+      error(await request('POST','/v1/connection',key,{kind:'shared'}),403,'PERMISSION_DENIED');
+      ok(await send(),202);
+      const capped = error(await send(),429,'SEND_LIMIT_REACHED');
+      assert.match(capped.message, /11001 recipients/);
+      assert.ok(Date.parse(capped.resetAt) > Date.now()+23*3600000, 'Crossing into week two in an hour cannot reset a fixed override.');
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10001/);
+      await limits('default','default');
+      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      assert.deepEqual(changes.map(({workspaceId,old,new:next}) => [workspaceId,old,next]), [
+        [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
+      ]);
+
+      // A full direct queue does not consume campaign reservations. Exercise the last 401 frozen
+      // recipients of a two-million-recipient run without rendering two million messages in CI.
+      await limits('100000','10001');
+      const list = ok(await local('POST','/v1/lists',{name:unique('newsletter')}),201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT 'con_'||md5($1||n),$1,'subscriber-'||n||'@example.net','subscribed' FROM generate_series(1,401)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [wid,list.id]);
+      const c = ok(await local('POST','/v1/campaigns',{name:'Large newsletter',from,subject:'Fixture',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+      const path = `/v1/campaigns/${c.id}`, view = async () => ok(await local('GET',path));
+      ok(await local('POST',`${path}/schedule`,{revision:c.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202);
+      await run('campaign.run');
+      assert.equal((await view()).delivery.prepared,401);
+      await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes,content_hash,subject,snapshot_bytes)
+        SELECT review_id,ordinal+1999599,recipient,recipient_bytes,content_hash,subject,snapshot_bytes FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`, [c.id]);
+      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=2000000,expanded=1999599,scheduled_at=now() WHERE id=$1`, [c.id]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES ($1,$2,20,20000,17000,clock_timestamp(),now()+interval '1 minute')`, [pool,REGION]);
+      await run('campaign.run');
+      const full = await view(); assert.equal(full.delivery.expanded,1999999); assert.equal(full.counts.byStatus.queued,400);
+      await db.query(`UPDATE sending_emails SET status='delivered' WHERE campaign_id=$1`, [c.id]);
+      await db.query(`UPDATE provider_account_limits SET sent_last_24_hours=18000 WHERE aws_account_id=$1`, [pool]);
+      await run('campaign.run');
+      const held = await view(); assert.equal(held.state,'sending'); assert.equal(held.delivery.waiting.reason,'ses_daily_quota'); assert.equal(held.delivery.expanded,1999999);
+      await db.query(`UPDATE provider_account_limits SET sent_last_24_hours=17999 WHERE aws_account_id=$1`, [pool]);
+      await run('campaign.run');
+      assert.equal((await view()).delivery.expanded,2000000, 'A quota refresh releases the last recipient without a manual resume.');
+    });
+  });
+
   test('MX: Hosted admission, campaign release and dispatch share the rolling recipient cap and reputation hold', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { checkHostedHealth } = await import('./src/maintenance.js');
@@ -4187,6 +4250,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
+      await (await import('./scripts/set-hosted-limits.js')).setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','25000']);
+      // An operator override does not exempt this workspace from bounce or complaint holds.
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
@@ -4281,6 +4346,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         INSERT INTO workspaces VALUES('mature',now()-interval '45 days');
         INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('mature','mature','shared','ready','ready');`);
       await db.query(await readFile(new URL('./migrations/060_hosted_sending_guardrails.sql',import.meta.url),'utf8'));
+      await db.query(await readFile(new URL('./migrations/062_hosted_limit_overrides.sql',import.meta.url),'utf8'));
       runtime.config.multiTenant=true;
       const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
       assert.equal(await getCap('mature'),10000);

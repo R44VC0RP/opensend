@@ -12,17 +12,17 @@ export const realDestinations = sql`(SELECT count(*)::int FROM jsonb_array_eleme
 // SNS topic; queued mail has no topic yet and cannot survive a connection switch.
 export const hostedMail = sql`(e.feedback_topic_arn IS NULL OR e.feedback_topic_arn IN (SELECT feedback_topic_arn FROM provider_pool_regions WHERE feedback_topic_arn IS NOT NULL))`;
 
-export type HostedAllowance = { cap: number; used: number; resetAt: string | null; pauseReason: string | null };
+export type HostedAllowance = { cap: number; used: number; resetAt: string | null; pauseReason: string | null; pendingCapOverride: number | null };
 // Embedded in the existing post-lock capacity read, never its own round trip. Scope the
 // scan to a shared connection and the existing (workspace_id, created_at) index. A queued
 // acceptance reserves its destinations immediately; suppression/definitive failure frees them.
 export function hostedAllowance(config: Config, wid: string, incoming: number) {
   if (!config.multiTenant) return sql<HostedAllowance | null>`NULL`;
   const { firstWeek, secondWeek, mature } = config.hostedSendCaps;
-  return sql<HostedAllowance | null>`(SELECT jsonb_build_object('cap',c.cap,'used',usage.used,'resetAt',least(usage.next_expiry,c.next_tier),'pauseReason',c.pause_reason)
-    FROM (SELECT workspace_id,pause_reason,CASE WHEN created_at > now()-interval '7 days' THEN ${firstWeek}::int
-      WHEN created_at > now()-interval '14 days' THEN ${secondWeek}::int ELSE ${mature}::int END AS cap,
-      CASE WHEN created_at > now()-interval '7 days' THEN created_at+interval '7 days' WHEN created_at > now()-interval '14 days' THEN created_at+interval '14 days' END AS next_tier
+  return sql<HostedAllowance | null>`(SELECT jsonb_build_object('cap',c.cap,'used',usage.used,'resetAt',least(usage.next_expiry,c.next_tier),'pauseReason',c.pause_reason,'pendingCapOverride',c.pending_cap_override)
+    FROM (SELECT workspace_id,pause_reason,pending_cap_override,coalesce(send_cap_override,CASE WHEN created_at > now()-interval '7 days' THEN ${firstWeek}::int
+      WHEN created_at > now()-interval '14 days' THEN ${secondWeek}::int ELSE ${mature}::int END) AS cap,
+      CASE WHEN send_cap_override IS NOT NULL THEN NULL WHEN created_at > now()-interval '7 days' THEN created_at+interval '7 days' WHEN created_at > now()-interval '14 days' THEN created_at+interval '14 days' END AS next_tier
       FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' FOR SHARE) c
     CROSS JOIN LATERAL (SELECT coalesce(max(running),0) AS used,
       max(created_at) FILTER (WHERE running+least(${incoming}::int,c.cap)>c.cap)+interval '24 hours' AS next_expiry FROM (

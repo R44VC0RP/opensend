@@ -29,10 +29,10 @@ const MAX_BODY = 512 * 1024;
 // Outstanding (queued or attempting) mail per workspace is capped by the account's SES 24-hour quota, which
 // the dispatcher keeps synced in the limits tables: a day of backlog is plenty, the floor keeps sandbox and
 // brand-new accounts usable, and the ceiling bounds queue bloat. Shared-pool workspaces never inherit the
-// pool's quota and stay at the floor; BYO and self-hosted use their own account's. There is no per-key cap.
+// pool's quota: they use the floor unless an operator sets a cap. BYO and self-hosted use their own account's.
 const SENDING_LIMITS = { pendingFloor: 10000, pendingCeiling: 200000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
 const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
-const pendingCap = (quota: number | string | null) => Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
+const pendingCap = (quota: number | string | null, hosted: HostedAllowance | null) => hosted?.pendingCapOverride ?? Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
 const CAMPAIGN_PREPARE_ROWS = 20000;
@@ -74,9 +74,9 @@ const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number)
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
   FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
-function assertPending(incoming: number, counts: { total: number; quota: number | string | null }) {
-  const cap = pendingCap(counts.quota);
-  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace, sized from its SES daily quota. Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
+function assertPending(incoming: number, counts: { total: number; quota: number | string | null; hosted: HostedAllowance | null }) {
+  const cap = pendingCap(counts.quota, counts.hosted);
+  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
   await lockAdmission(db, a);
