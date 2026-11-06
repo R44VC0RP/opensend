@@ -873,12 +873,14 @@ export function registerSending(app: App) {
     description:'One log detail: metadata, visible HTML/text, attachment IDs, the first 100 events and active contact for a single To address. Uses the same content and event redaction as their individual endpoints; no raw MIME. Continue events with listEmailEvents.',
     request:{params:IdParams},responses:{200:response(z.object({email:Email,content:EmailContent.pick({html:true,text:true,attachments:true}),events:page(Event),contact:z.object({id:z.string(),suppressed:z.boolean()}).nullable()}).openapi('EmailDetail')),...errors} }),async c=>{
     const a=actor(c), emailId=c.req.valid('param').id;
+    // Single-table select fields render columns unqualified, which would bind to the subquery's own
+    // table (events matching their own id; contacts matching any workspace). Name the outer row.
     const [detail]=await c.env.db.select({mail:emails,
       contact:sql<{id:string;suppressed:boolean}|null>`(SELECT jsonb_build_object('id',c.id,'suppressed',c.suppressed) FROM audience_contacts c
-        WHERE c.workspace_id=${emails.workspaceId} AND c.deleted_at IS NULL AND jsonb_array_length(${emails.to})=1 AND c.email=lower(${emails.to}->>0))`,
+        WHERE c.workspace_id=sending_emails.workspace_id AND c.deleted_at IS NULL AND jsonb_array_length(sending_emails.to_addresses)=1 AND c.email=lower(sending_emails.to_addresses->>0))`,
       timeline:sql<z.input<typeof Event>[]>`(SELECT coalesce(jsonb_agg(t ORDER BY t.id),'[]') FROM (
         SELECT id,email_id AS "emailId",type,provider_id AS "providerId",simulated,created_at::text AS "createdAt",data FROM sending_email_events
-        WHERE workspace_id=${emails.workspaceId} AND email_id=${emails.id} ORDER BY id LIMIT 101) t)`
+        WHERE workspace_id=sending_emails.workspace_id AND email_id=sending_emails.id ORDER BY id LIMIT 101) t)`
     }).from(emails).where(mailWhere(a,emailId)).limit(1);
     if(!detail) return notFound('Email');
     const {mail,contact,timeline}=detail, {html,text,attachments}=await visibleEmailContent(c.env,a,mail);

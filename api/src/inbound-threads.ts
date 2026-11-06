@@ -156,7 +156,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
     return c.json(result, 200);
   });
-  const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND ${links.messageId}=${messages.id} ORDER BY ${links.mailboxId})`;
+  const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = (v: MailboxAccess, f: Filter) => and(eq(messages.workspaceId,v.workspaceId),
     v.admin && !f.addressId ? undefined : sql`EXISTS (SELECT 1 FROM ${links} WHERE ${visibleLinks(v,f)} AND ${links.messageId}=${messages.id})`);
   // Received Logs can inspect the entire workspace, including SMTP envelopes and unassigned mail.
@@ -187,7 +187,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     request: { params: z.object({ messageId: Id }), query: AddressFilter.extend({includeDelivery,includeHtml:z.enum(['true','false']).default('false')}) }, responses: { 200: response(Message.extend({...DeliveryDetail.shape,html:z.string().nullable(),attachments:z.array(Attachment)}).openapi('InboundMessageDetail')), ...errors } }), async c => {
     const q=c.req.valid('query'),v=messageScope(c,q.includeDelivery),id=c.req.valid('param').messageId;
     if (q.includeDelivery==='true') {
-      const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND ${links.messageId}=${messages.id}),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+      const [result]=await c.env.db.select({row:messages,addresses:deliveryAddresses(v,q),addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
       if (!result) throw new ApiError(404,'NOT_FOUND','Message was not found.');
       const {row,addresses,addressIds,isRead}=result;
       const files=await c.env.db.select().from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
@@ -195,7 +195,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       return c.json({...messageView(row,addressIds,isRead),addresses,envelopeTo:row.envelopeTo,region:row.region,spam:row.spam,headers:row.headers,verdicts:row.verdicts,sentAt:row.sentAt?timestamp(row.sentAt):null,sizeBytes:row.sizeBytes,rawUrl,html:q.includeHtml==='true'?row.html:null,
         attachments:files.map((f,i)=>({id:f.id,filename:f.filename,contentType:f.contentType,size:f.sizeBytes,disposition:f.disposition,contentId:f.contentId,url:urls[i]!}))},200);
     }
-    const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND ${links.messageId}=${messages.id}),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
+    const [row] = await c.env.db.select({...messageFields,addressIds:addressLinks(v,q),isRead:sql<boolean>`coalesce((SELECT bool_and(${links.read}) FROM ${links} WHERE ${visibleLinks(v,q)} AND mailbox_messages.message_id=mail_messages.id),false)`}).from(messages).where(and(eq(messages.id,id),accessible(v,q)));
     if (!row) throw new ApiError(404, 'NOT_FOUND', 'Message was not found.');
     const attachments=await c.env.db.select({id:mailAttachments.id,filename:mailAttachments.filename,contentType:mailAttachments.contentType,size:mailAttachments.sizeBytes,disposition:mailAttachments.disposition,contentId:mailAttachments.contentId}).from(mailAttachments).where(eq(mailAttachments.messageId,id)).orderBy(asc(mailAttachments.id));
     return c.json({...messageView(row,row.addressIds,row.isRead),html:q.includeHtml==='true'?row.html:null,attachments},200);

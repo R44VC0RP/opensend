@@ -3599,6 +3599,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.deepEqual(detail.contact,{id:contact.id,suppressed:false});
     assert.deepEqual(detail.content,{html:redacted.html,text:redacted.text,attachments:redacted.attachments});
     assert.equal(detail.email.id,source.id); assert.ok(!JSON.stringify(detail).includes(token));
+    const listedEvents=page(await http('GET',`/v1/emails/${source.id}/events`,reader.secret)) as {id:string}[];
+    assert.deepEqual((detail.events.data as {id:string}[]).map(e=>e.id),listedEvents.map(e=>e.id),'Detail must return the same events as listEmailEvents.');
     assert.equal(redacted.raw, null, 'Read-only access must not expose an unredacted MIME alternative.');
     assert.ok(!JSON.stringify(redacted).includes(token), 'Read-only content must not disclose the valid unsubscribe token anywhere in its response.');
     assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');
@@ -3684,6 +3686,10 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
     ok(await consent(manager.secret, contact.id, 'subscribed'));
     const queued = ok(await http('POST', '/v1/emails/send', manager.secret, mail({ to: contact.email, kind: 'marketing' })), 202);
     await poll(`/v1/emails/${queued.id}`, manager.secret, body => body.status === 'delivered');
+    const deliveredEvents = page(await http('GET', `/v1/emails/${queued.id}/events`, manager.secret)) as { id: string }[];
+    const deliveredDetail = ok(await http('GET', `/v1/emails/${queued.id}/detail`, manager.secret));
+    assert.ok(deliveredEvents.length > 0);
+    assert.deepEqual((deliveredDetail.events.data as { id: string }[]).map(e => e.id), deliveredEvents.map(e => e.id), 'Detail must return the delivered email’s own events.');
     const content = ok(await http('GET', `/v1/emails/${queued.id}/content`, manager.secret));
     const match = /Unsubscribe:\s*(https?:\/\/[^\s]+)/.exec(content.text ?? '');
     assert.ok(match, 'A real test-marketing snapshot must supply this fixture’s owned unsubscribe capability.');

@@ -166,6 +166,8 @@ async function direct() {
   await outcome(a.id, singleSuccess, 'delivered');
   const content = await api('getEmailContent', { path: { id: a.id } });
   check(content.text === text && content.subject === subject && !content.simulated, 'stored email content differs');
+  const detail = await api('getEmailDetail', { path: { id: a.id } });
+  check(detail.email.id === a.id && detail.content.text === text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
   const logs = await api('listEmails', { query: { search: singleSuccess, region } });
   check(logs.nextCursor === null && logs.data.length === 1 && hasId(logs, a.id), 'email missing or duplicated in log');
 }
