@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
-import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand } from '@aws-sdk/client-sesv2';
+import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand, type Tenant } from '@aws-sdk/client-sesv2';
 import { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
@@ -37,7 +37,8 @@ export const SesDiscoverySchema = z.object({
   }).nullable().default(null).describe('Account-level SES reputation from CloudWatch AWS/SES Reputation.BounceRate and Reputation.ComplaintRate, as fractions (0.05 = 5%). Latest hourly value plus 14 days of 6-hour averages. Null in reports cached before this field existed. Requires cloudwatch:GetMetricData; unavailable does not block readiness.'),
 }).openapi('SesDiscovery');
 export type SesDiscovery = z.infer<typeof SesDiscoverySchema>;
-export type SesSetupOptions = { region: string; installationId: string; connectionSetup?: boolean; verifiedPoolPrincipal?:{account:string;arn:string} };
+export type MxNamespace = 'trusted'|'probation'|'byo';
+export type SesSetupOptions = { region: string; installationId: string; namespace?:MxNamespace; connectionSetup?: boolean; verifiedPoolPrincipal?:{account:string;arn:string} };
 export type SesProvisionOptions = SesSetupOptions & { registerTopic: (accountId: string, topicArn: string) => Promise<void> };
 
 // OPEN/CLICK destinations support tracking-enabled sends; per-message tracking overrides
@@ -64,9 +65,15 @@ function validationInput(name: string, mode: Exclude<AutoValidationMode, 'inheri
 }
 
 export const POOL_INSTALLATION = 'opensend-mx:pool';
-export function setupResources(installationId: string): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
+export const mxOwnerTag = {Key:'opensend:owner',Value:'mx'} as const;
+export function mxResourceName(suffix:string) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(suffix)) throw new Error('Invalid MX resource suffix');
+  return `opensendmx-${suffix}`;
+}
+export function setupResources(installationId: string, namespace?:MxNamespace): { transactional: string; marketing: string; topicName: string; eventDestinationName: string } {
   if (!installationId) throw new ApiError(503, 'INSTALLATION_ID_REQUIRED', 'The persisted installation ID is missing.');
-  const prefix = installationId === POOL_INSTALLATION ? 'opensend-mx' : `opensend-${createHash('sha256').update(installationId).digest('hex').slice(0, 20)}`;
+  const hash=createHash('sha256').update(installationId).digest('hex').slice(0,20);
+  const prefix = namespace ? mxResourceName(namespace==='byo'?hash:namespace) : installationId === POOL_INSTALLATION ? 'opensend-mx' : `opensend-${hash}`;
   return { transactional: `${prefix}-transactional`, marketing: `${prefix}-marketing`, topicName: `${prefix}-feedback`, eventDestinationName: `${prefix}-events` };
 }
 
@@ -152,8 +159,8 @@ function clients(runtime: Runtime, region: string, context: SetupContext) {
   return result;
 }
 type Clients = ReturnType<typeof clients>;
-function tags(installationId: string) { return [{ Key: OWNER_TAG, Value: installationId }, { Key: PURPOSE_TAG, Value: PURPOSE }]; }
-function owned(values: { Key?: string; Value?: string }[] | undefined, installationId: string) { return tags(installationId).every(t => values?.some(v => v.Key === t.Key && v.Value === t.Value)); }
+function tags(options: SesSetupOptions) { return [{ Key: OWNER_TAG, Value: options.installationId }, { Key: PURPOSE_TAG, Value: PURPOSE },...(options.namespace?[mxOwnerTag]:[])]; }
+function owned(values: { Key?: string; Value?: string }[] | undefined, options: SesSetupOptions) { return tags(options).every(t => values?.some(v => v.Key === t.Key && v.Value === t.Value)); }
 function arns(account: string, region: string, names: ReturnType<typeof setupResources>) {
   return { topic: `arn:aws:sns:${region}:${account}:${names.topicName}`, sets: [names.transactional, names.marketing].map(name => `arn:aws:ses:${region}:${account}:configuration-set/${name}`) };
 }
@@ -209,7 +216,7 @@ function subscriptionArn(subscription: Subscription, topicArn: string): string |
 
 async function inspect(runtime: Runtime, options: SesSetupOptions, context: SetupContext = setupContext()): Promise<{ report: SesDiscovery; subscriptions: Subscription[] }> {
   const deadlineSignal = context.signal;
-  const names = setupResources(options.installationId);
+  const names = setupResources(options.installationId,options.namespace);
   const blankSet = (name: string) => ({ name, exists: null, owned: null, sendingEnabled: null, eventDestinationExists: null, eventWired: null, autoValidation: null });
   const report: SesDiscovery = {
     region: options.region, checkedAt: new Date().toISOString(), account: null, domains: [], identitiesTruncated: false,
@@ -264,7 +271,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         let existing;
         try { existing = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: set.name }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!missing(error)) throw error; set.exists = false; set.owned = false; set.eventDestinationExists = false; set.eventWired = false; return; }
-        set.exists = true; set.owned = owned(existing.Tags, options.installationId); set.sendingEnabled = existing.SendingOptions?.SendingEnabled ?? null; set.autoValidation = autoValidationMode(existing.SuppressionOptions);
+        set.exists = true; set.owned = owned(existing.Tags, options); set.sendingEnabled = existing.SendingOptions?.SendingEnabled ?? null; set.autoValidation = autoValidationMode(existing.SuppressionOptions);
         if (!set.owned) { add(report, 'RESOURCE_OWNERSHIP_CONFLICT', 'An expected SES configuration-set name belongs to another installation or has no ownership tags.'); return; }
         if (set.sendingEnabled === null) add(report, 'AWS_STATE_UNKNOWN', 'SES did not return the configuration set sending state.');
         if (set.sendingEnabled === false) add(report, 'SES_CONFIGURATION_SET_DISABLED', 'An installation configuration set has sending disabled; setup will not override that control.');
@@ -280,7 +287,7 @@ async function inspect(runtime: Runtime, options: SesSetupOptions, context: Setu
         catch (error) { if (!missing(error)) throw error; topic.exists = false; topic.owned = false; topic.policyReady = false; topic.subscription = 'missing'; return; }
         topic.exists = true;
         if (attributes?.TopicArn !== topic.arn || attributes.Owner !== accountId) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'SNS returned a topic outside the expected account or ARN.');
-        topic.owned = owned((await c.sns.send(new ListTagsForResourceCommand({ ResourceArn: topic.arn! }), { abortSignal: deadlineSignal })).Tags, options.installationId);
+        topic.owned = owned((await c.sns.send(new ListTagsForResourceCommand({ ResourceArn: topic.arn! }), { abortSignal: deadlineSignal })).Tags, options);
         if (!topic.owned) { add(report, 'RESOURCE_OWNERSHIP_CONFLICT', 'The expected SNS topic name belongs to another installation or has no ownership tags.'); return; }
         if (attributes.FifoTopic === 'true' || attributes.KmsMasterKeyId) { add(report, 'SNS_TOPIC_UNSUPPORTED', 'The feedback topic must be Standard and unencrypted by a customer-configured KMS key; setup will not modify these settings.'); return; }
         topic.policyReady = policyReady(attributes.Policy, topicPolicy(accountId, options.region, names));
@@ -390,24 +397,24 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
   if (unsafe) throw new ApiError(unsafe.code === 'AWS_ACCESS_DENIED' ? 403 : unsafe.code.startsWith('AWS_') ? 503 : 409, unsafe.code, unsafe.message, undefined, ['AWS_THROTTLED', 'AWS_SETUP_TIMEOUT', 'AWS_SETUP_FAILED'].includes(unsafe.code));
   if (!report.account) throw new ApiError(503, 'AWS_ACCOUNT_UNKNOWN', 'AWS account identity must be verified before provisioning.');
   if (runtime.config.awsAccountId && runtime.config.awsAccountId !== report.account.id) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'This installation is already provisioned for another AWS account. Use matching credentials or a separate installation.');
-  const names = setupResources(options.installationId);
+  const names = setupResources(options.installationId,options.namespace);
   const accountId = report.account.id;
   const expected = arns(accountId, options.region, names);
   const c = clients(runtime, options.region, context);
   const assertSetOwned = async (name: string) => {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: deadlineSignal });
-    if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
+    if (!owned(set.Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
     return set;
   };
   const assertTopicOwned = async () => {
     const attrs = (await c.sns.send(new GetTopicAttributesCommand({ TopicArn: expected.topic }), { abortSignal: deadlineSignal })).Attributes;
-    if (attrs?.TopicArn !== expected.topic || attrs.Owner !== accountId || !owned((await c.sns.send(new ListTagsForResourceCommand({ ResourceArn: expected.topic }), { abortSignal: deadlineSignal })).Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SNS topic without the expected ARN, account and installation ownership tags.');
+    if (attrs?.TopicArn !== expected.topic || attrs.Owner !== accountId || !owned((await c.sns.send(new ListTagsForResourceCommand({ ResourceArn: expected.topic }), { abortSignal: deadlineSignal })).Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SNS topic without the expected ARN, account and installation ownership tags.');
     if (attrs.FifoTopic === 'true' || attrs.KmsMasterKeyId) throw new ApiError(409, 'SNS_TOPIC_UNSUPPORTED', 'The owned SNS topic has unsupported FIFO or KMS settings.');
   };
   try {
     for (const kind of ['transactional', 'marketing'] as const) {
       if (report.resources[kind].exists === false) {
-        try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options.installationId), SendingOptions: { SendingEnabled: true }, ...(options.installationId === POOL_INSTALLATION ? { SuppressionOptions: { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'] } } : {}) }), { abortSignal: deadlineSignal }); }
+        try { await c.ses.send(new CreateConfigurationSetCommand({ ConfigurationSetName: names[kind], Tags: tags(options), SendingOptions: { SendingEnabled: true }, ...(options.installationId === POOL_INSTALLATION ? { SuppressionOptions: { SuppressionScope: 'TENANT', SuppressedReasons: ['BOUNCE', 'COMPLAINT'] } } : {}) }), { abortSignal: deadlineSignal }); }
         catch (error) { if (!collision(error)) throw error; }
       }
       const set = await assertSetOwned(names[kind]); // Recheck after create/AlreadyExists races; never adopt by name.
@@ -416,7 +423,7 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
     }
     if (report.resources.topic.exists === false) {
       // SNS CreateTopic is idempotent, so its success alone is not ownership evidence.
-      const created = await c.sns.send(new CreateTopicCommand({ Name: names.topicName, Tags: tags(options.installationId) }), { abortSignal: deadlineSignal });
+      const created = await c.sns.send(new CreateTopicCommand({ Name: names.topicName, Tags: tags(options) }), { abortSignal: deadlineSignal });
       if (created.TopicArn !== expected.topic) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'SNS did not return the expected regional topic ARN.');
     }
     await assertTopicOwned();
@@ -457,31 +464,34 @@ export async function provisionSes(runtime: Runtime, options: SesProvisionOption
 export async function setAutoValidation(runtime: Runtime, options: SesSetupOptions, stream: 'transactional' | 'marketing', mode: 'off' | 'managed' | 'medium' | 'high'): Promise<void> {
   const context = setupContext();
   const c = clients(runtime, options.region, context);
-  const name = setupResources(options.installationId)[stream];
+  const name = setupResources(options.installationId,options.namespace)[stream];
   try {
     const set = await c.ses.send(new GetConfigurationSetCommand({ ConfigurationSetName: name }), { abortSignal: context.signal });
-    if (!owned(set.Tags, options.installationId)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
+    if (!owned(set.Tags, options)) throw new ApiError(409, 'RESOURCE_OWNERSHIP_CONFLICT', 'Refusing to update an SES configuration set without this installation’s ownership tags.');
     await c.ses.send(validationInput(name, mode, options.installationId === POOL_INSTALLATION), { abortSignal: context.signal });
   } catch (error) { throw awsError(error); }
   finally { c.ses.destroy(); c.sns.destroy(); c.sts.destroy(); c.cw.destroy(); }
 }
 
-export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string) {
+export async function provisionTenant(runtime: Runtime, region: string, account: string, workspaceId: string, managed=false,namespace?:'trusted'|'probation') {
   const context = setupContext(20_000), c = clients(runtime, region, context), opts = { abortSignal: context.signal };
-  const TenantName = `opensend-${workspaceId}`;
+  const TenantName=managed?mxResourceName(workspaceId):`opensend-${workspaceId}`;
+  const Tags=managed?[mxOwnerTag,{Key:OWNER_TAG,Value:workspaceId},{Key:PURPOSE_TAG,Value:'tenant'}]:undefined;
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(TenantName)) throw new ApiError(409, 'INVALID_TENANT_NAME', 'This workspace ID is not a valid SES tenant name.');
   const suppression = { SuppressionScope: 'TENANT' as const, SuppressedReasons: ['BOUNCE', 'COMPLAINT'] as ('BOUNCE' | 'COMPLAINT')[] };
   try {
-    let tenant;
-    try { tenant = await c.ses.send(new CreateTenantCommand({ TenantName, SuppressionAttributes: suppression }), opts); }
+    let tenant:Tenant|undefined,repair=false;
+    try { tenant = await c.ses.send(new CreateTenantCommand({ TenantName, SuppressionAttributes: suppression, Tags }), opts); }
     catch (error) {
       if (!collision(error)) throw error;
       tenant = (await c.ses.send(new GetTenantCommand({ TenantName }), opts)).Tenant;
-      await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);
+      if (Tags && !Tags.every(t=>tenant?.Tags?.some(v=>v.Key===t.Key && v.Value===t.Value))) throw new ApiError(409,'RESOURCE_OWNERSHIP_CONFLICT','The existing SES tenant does not have this workspace’s ownership tags.');
+      repair=true;
     }
     if (tenant?.TenantName !== TenantName || !tenant.TenantArn?.startsWith(`arn:aws:ses:${region}:${account}:tenant/${TenantName}/`)) throw new ApiError(409, 'TENANT_MISMATCH', 'SES did not return the expected tenant.');
+    if (repair) await c.ses.send(new PutTenantSuppressionAttributesCommand({ TenantName, ...suppression }), opts);
     await c.ses.send(new UpdateReputationEntityPolicyCommand({ ReputationEntityType: 'RESOURCE', ReputationEntityReference: tenant.TenantArn, ReputationEntityPolicy: `arn:aws:ses:${region}:aws:reputation-policy/strict` }), opts);
-    for (const ResourceArn of arns(account, region, setupResources(POOL_INSTALLATION)).sets) {
+    for (const ResourceArn of arns(account, region, setupResources(POOL_INSTALLATION,namespace)).sets) {
       try { await c.ses.send(new CreateTenantResourceAssociationCommand({ TenantName, ResourceArn }), opts); }
       catch (error) { if (!collision(error)) throw error; }
     }

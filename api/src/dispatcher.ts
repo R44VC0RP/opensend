@@ -6,7 +6,7 @@ import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inline
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
 import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
-import { POOL_INSTALLATION, setupResources } from './ses-setup.js';
+import { mxResourceName, POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import { simulatedSes } from './adapters/simulated-ses.js';
 import { screenSnapshot } from './screen.js';
@@ -212,12 +212,12 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
   // MX lane only, run the SAME durable claim on the locked fair selection. Both UPDATEs below
   // are disjoint: Postgres must never update the same email twice in one WITH statement.
   const simple = inline && sql`SELECT e.id,e.workspace_id,e.dispatch_version,e.campaign_id,e.actor_key_id,lower(e.snapshot->>'from') AS sender,
-      false AS mcp_allowed,s.connection->>'feedback_topic_arn' AS feedback_topic,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,
+      false AS mcp_allowed,s.connection->>'feedback_topic_arn' AS feedback_topic,e.snapshot->'binding' AS binding,jsonb_build_array(lower(e.snapshot#>>'{to,0}')) AS destinations,false AS marketing,
       NULL::jsonb AS snapshot,NULL::text AS token_hash,NULL::text AS token_email,${id('event')}::text AS event_id,
       'attempt-start:'||e.id||':'||e.dispatch_version AS external_id,e.dispatch_version+1 AS attempt
     FROM selected e JOIN settings s ON s.workspace_id=e.workspace_id AND s.stream=e.snapshot->>'kind'
     WHERE (SELECT count(*) FROM due)=1 AND s.ready AND s.installation_id IS NOT NULL AND s.connection->>'paused_at' IS NULL
-      AND (s.default_region=${region} OR s.enabled_regions ? ${region})
+      AND (e.snapshot ? 'binding' OR s.default_region=${region} OR s.enabled_regions ? ${region})
       AND (${isSimulatedSes(runtime)} OR NOT e.simulated) AND (${isSimulatedSes(runtime)} OR s.connection->>'kind'<>'shared' OR s.connection->>'tenant_state'='ready')
       AND e.campaign_id IS NULL AND e.review_id IS NULL AND s.stream='transactional' AND NOT starts_with(e.actor_key_id,'mcp_')
       AND NOT (e.snapshot ?| array['raw','deferredCampaign']) AND NOT coalesce((e.snapshot->>'screen')::boolean,false)
@@ -303,9 +303,10 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       }
     } else if (!owner) {
       const pc = connection as (ReadyConnection & { feedback_topic_arn: string }) | undefined;
-      const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string);
-      const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region)], configurationSets: { transactional, marketing } } };
-      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc, runClients), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
+      const namespace=pc?.legacy_names===false ? pc.kind==='shared' ? pc.pool_tier : 'byo' : undefined;
+      const { transactional, marketing } = setupResources(pc?.kind === 'shared' ? POOL_INSTALLATION : pc?.id ?? installation_id as string,namespace);
+      const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
+      owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc, runClients), tenantName: pc?.kind === 'shared' ? pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));
@@ -426,13 +427,13 @@ async function claimGroup(runtime: Runtime, prepared: Prepared[], origins: Map<s
   const input = prepared.map(item => ({
     id: item.mail.id, workspace_id: item.mail.workspaceId, dispatch_version: item.mail.dispatchVersion, campaign_id: item.mail.campaignId,
     actor_key_id: item.mail.actorKeyId, sender: item.snapshot.from.toLowerCase(), mcp_allowed: item.mail.actorKeyId.startsWith('mcp_') && origins.get(mcpOrigin(item)) === true,
-    feedback_topic: item.owner.feedbackTopic, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
+    feedback_topic: item.owner.feedbackTopic, binding:item.stored?.binding ?? item.mail.snapshot.binding, destinations: [...item.snapshot.to, ...item.snapshot.cc, ...item.snapshot.bcc].map(email => email.toLowerCase()),
     marketing: item.snapshot.kind === 'marketing', snapshot: item.unsubscribe ? item.stored ?? null : null,
     token_hash: item.unsubscribe?.tokenHash ?? null, token_email: item.unsubscribe?.email ?? null,
     event_id: id('event'), external_id: `attempt-start:${item.mail.id}:${item.mail.dispatchVersion}`, attempt: item.mail.dispatchVersion + 1,
   }));
   const rows = sql`SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
-        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
+        AS x(id text, workspace_id text, dispatch_version int, campaign_id text, actor_key_id text, sender text, mcp_allowed boolean, feedback_topic text, binding jsonb, destinations jsonb, marketing boolean, snapshot jsonb, token_hash text, token_email text, event_id text, external_id text, attempt int)`;
   const claimed = await db.execute<{ id: string; status: EmailStatus }>(sql`WITH ${claimCtes(runtime, prepared[0]!.mail.region, rows)} SELECT id, status FROM claimed`);
   return new Map(claimed.rows.map(row => [row.id, row.status]));
 }
@@ -461,16 +462,20 @@ function claimCtes(runtime: Runtime, region: string, input: SQL) {
             AND (k.permissions ? 'manage' OR k.permissions ? 'send') AND (k.domains = '[]'::jsonb OR EXISTS (
               SELECT 1 FROM jsonb_array_elements_text(k.domains) d WHERE split_part(x.sender, '@', 2) = lower(d.value)
                 OR right(split_part(x.sender, '@', 2), length(d.value) + 1) = '.' || lower(d.value)))) END
-          ${runtime.config.multiTenant ? sql`AND ${verifiedClaim(sql`x.workspace_id`, sql`${region}`, sql`split_part(x.sender, '@', 2)`)}` : sql``} AS origin_ok,
+          AS origin_ok,
+        ${runtime.config.multiTenant ? sql`CASE WHEN x.binding IS NULL THEN ${verifiedClaim(sql`x.workspace_id`, sql`${region}`, sql`split_part(x.sender, '@', 2)`)} ELSE EXISTS (
+          SELECT 1 FROM regional_sender(x.workspace_id,split_part(x.sender,'@',2),${isSimulatedSes(runtime)}) r WHERE r.region=${region} AND r.verified AND r.binding=x.binding
+            AND r.connection IS NOT NULL AND r.connection->>'paused_at' IS NULL AND (r.connection->>'kind'='byo' OR ${isSimulatedSes(runtime)} OR r.connection->>'tenant_state'='ready')
+            AND r.connection->>'feedback_topic_arn' IS NOT DISTINCT FROM x.feedback_topic) END` : sql`true`} AS binding_ok,
         (x.campaign_id IS NULL OR EXISTS (SELECT 1 FROM campaign_state c WHERE c.workspace_id = x.workspace_id AND c.id = x.campaign_id AND c.state <> 'canceled')) AS campaign_allowed,
         NOT EXISTS (SELECT 1 FROM dest d LEFT JOIN consent c USING (workspace_id, email)
           WHERE d.email_id = x.id AND (c.suppressed IS TRUE OR (x.marketing AND (c.email IS NULL OR c.deleted_at IS NOT NULL OR c.marketing_consent <> 'subscribed')))) AS recipient_allowed
       FROM input x
     ), claimed AS (
       UPDATE sending_emails e SET simulated = ${isSimulatedSes(runtime)},
-        status = CASE WHEN NOT el.origin_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
-        attempt_started_at = CASE WHEN el.origin_ok AND el.campaign_allowed AND el.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
-        error_code = CASE WHEN NOT el.origin_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
+        status = CASE WHEN NOT el.origin_ok OR NOT el.binding_ok OR NOT el.campaign_allowed THEN 'canceled' WHEN el.recipient_allowed THEN 'attempting' ELSE 'suppressed' END,
+        attempt_started_at = CASE WHEN el.origin_ok AND el.binding_ok AND el.campaign_allowed AND el.recipient_allowed THEN clock_timestamp() ELSE e.attempt_started_at END,
+        error_code = CASE WHEN NOT el.binding_ok AND x.binding IS NOT NULL THEN 'SENDER_BINDING_CHANGED' WHEN NOT el.origin_ok OR NOT el.binding_ok THEN 'ORIGIN_KEY_REVOKED' WHEN NOT el.campaign_allowed THEN 'CAMPAIGN_CANCELED' WHEN el.recipient_allowed THEN e.error_code ELSE 'RECIPIENT_INELIGIBLE' END,
         ${runtime.config.multiTenant && !isSimulatedSes(runtime) ? sql`feedback_topic_arn=x.feedback_topic,` : sql``} snapshot = coalesce(x.snapshot, e.snapshot), lease_until = NULL, updated_at = clock_timestamp()
       FROM input x JOIN eligibility el ON el.id = x.id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.status = 'queued' AND e.dispatch_version = x.dispatch_version

@@ -34,7 +34,7 @@ function template(runtime: Runtime) {
   return runtime.config.byoTemplateUrl;
 }
 const platformRegion = 'us-east-2';
-const sharedRegions = (runtime: Runtime) => runtime.config.sharedRegions ?? [platformRegion];
+const sharedRegions = (runtime: Runtime) => runtime.config.regionalSending ? [platformRegion] : runtime.config.sharedRegions ?? [platformRegion];
 const principals = new Map<string, { account: string; arn: string }>();
 async function platformIdentity(runtime: Runtime, expectedAccount?: string) {
   const key = platformCredentials(runtime), cached = principals.get(key.accessKeyId);
@@ -55,7 +55,7 @@ const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-sout
 const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
-  if (row.kind === 'byo' && (row.state === 'awaiting_role' || row.state === 'failed')) {
+  if (row.kind === 'byo' && row.template_version!=='v5' && (row.state === 'awaiting_role' || row.state === 'failed')) {
     const params = new URLSearchParams({ templateURL: template(runtime), stackName: stackName(row), param_ExternalId: row.external_id!, param_PlatformPrincipalArn: row.platform_principal_arn!, param_ReceiveMail: 'true',
       param_ConnectionId: row.id, param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
     quickCreateUrl = `https://${row.region}.console.aws.amazon.com/cloudformation/home?region=${row.region}#/stacks/create/review?${params}`;
@@ -80,9 +80,9 @@ function checkProvisioned(report: SesDiscovery, pooled: boolean) {
 
 // The pool's sending and receiving states are explicit; the lease only fences one setup run per region
 // so a crashed isolate's attempt can be retried without a DB transaction spanning AWS calls.
-type Pool = { sending: boolean; receiving: boolean; aws_account_id: string };
+type Pool = { sending: boolean; receiving: boolean; aws_account_id: string;legacy_names:boolean };
 async function getPool(runtime: Runtime, region: string) {
-  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, ${poolReceives()} AS receiving, aws_account_id FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
+  return (await runtime.db.execute<Pool>(sql`SELECT ${poolSends()} AS sending, ${poolReceives()} AS receiving, aws_account_id,legacy_names FROM provider_pool_regions p WHERE region=${region}`)).rows[0];
 }
 async function ensurePool(runtime: Runtime, principal:Awaited<ReturnType<typeof platformIdentity>>, region: string) {
   const account=principal.account;
@@ -133,6 +133,7 @@ export async function byoStackTopic(runtime: Runtime, arn: string) {
   return (confirmation: Confirmation) => provision(runtime, row, account!, confirmation);
 }
 async function provision(runtime: Runtime, row: Row, account: string, confirmation?: Confirmation) {
+  if (row.template_version==='v5') throw new ApiError(409,'REGIONAL_SETUP_REQUIRED','This connection requires regional setup, not stack import.');
   const roleArn = `arn:aws:iam::${account}:role/${stackName(row)}`;
   if (row.platform_principal_arn!.split(':')[4] === account) throw new ApiError(409, 'AWS_ACCOUNT_IN_USE', 'The shared sending account cannot be used as a customer account.');
   if (row.aws_account_id && row.aws_account_id !== account) throw new ApiError(409, 'AWS_ACCOUNT_MISMATCH', 'Disconnect before choosing a different AWS account.');
@@ -193,7 +194,7 @@ async function provision(runtime: Runtime, row: Row, account: string, confirmati
 export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
   if (!runtime.config.multiTenant || typeof payload.connectionId !== 'string') return;
   const row = (await runtime.db.execute<Row>(sql`SELECT * FROM provider_connections WHERE workspace_id=${job.workspaceId} AND id=${payload.connectionId}`)).rows[0];
-  if (!row || row.id !== payload.connectionId || row.kind !== 'byo' || row.state !== 'provisioning') return;
+  if (!row || row.id !== payload.connectionId || row.kind !== 'byo' || row.state !== 'provisioning' || row.template_version==='v5') return;
   const owned = sql`id=${row.id} AND EXISTS (SELECT 1 FROM jobs WHERE id=${job.id} AND status='running' AND attempts=${job.attempts})`;
   try {
     const cursor = typeof payload.cursor === 'string' ? payload.cursor : undefined;
@@ -227,9 +228,9 @@ export const byoVerifyJob: JobHandler = retryDatabaseFailures(async (runtime, pa
 });
 // The one tenant path. CreateTenant is idempotent, so concurrent callers need no lease: both converge on `ready`.
 // Called by createConnection, its retry job, the hourly reconcile and domain verification; never by sending.
-type TenantTarget = Pick<Row, 'id' | 'region' | 'tenant_state'> & { pool_account: string | null };
+type TenantTarget = Pick<Row, 'id' | 'region' | 'tenant_state'> & { pool_account: string | null;managed_tenant:boolean;namespace?:'trusted'|'probation' };
 async function tenantTarget(runtime: Runtime, wid: string, connectionId: string) {
-  return (await runtime.db.execute<TenantTarget>(sql`SELECT c.id,c.region,c.tenant_state,p.aws_account_id AS pool_account FROM provider_connections c
+  return (await runtime.db.execute<TenantTarget>(sql`SELECT c.id,c.region,c.tenant_state,c.managed_tenant,CASE WHEN NOT p.legacy_names THEN p.pool_tier END AS namespace,p.aws_account_id AS pool_account FROM provider_connections c
     LEFT JOIN provider_pool_regions p ON p.region=c.region AND ${poolSends()} AND (c.aws_account_id IS NULL OR c.aws_account_id=p.aws_account_id)
     WHERE c.id=${connectionId} AND c.workspace_id=${wid} AND c.kind='shared'`)).rows[0];
 }
@@ -238,7 +239,7 @@ export async function ensureTenant(runtime: Runtime, wid: string, connectionId: 
   if (!row || row.tenant_state === 'ready') return;
   if (!row.pool_account) throw new ApiError(503, 'POOL_NOT_READY', 'The shared sending pool for this region is not ready yet.', undefined, true);
   await platformIdentity(runtime, row.pool_account);
-  await provisionTenant(runtime, row.region, row.pool_account, wid);
+  await provisionTenant(runtime, row.region, row.pool_account, wid,row.managed_tenant,row.namespace);
   await runtime.db.execute(setTenantState(row.id, 'ready', row.pool_account));
 }
 export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
@@ -255,8 +256,11 @@ export const tenantJob: JobHandler = retryDatabaseFailures(async (runtime, paylo
 export async function reconcileSharedConnections(runtime: Runtime) {
   if (!runtime.config.multiTenant || isSimulatedSes(runtime)) return;
   for (const region of sharedRegions(runtime)) {
+    // Virginia is outbound-only. Its provisioning and enrollment have a separate release gate.
+    if (region==='us-east-1') continue;
     try {
       const pool = await getPool(runtime, region);
+      if (pool?.legacy_names===false || (runtime.config.regionalSending && !pool)) continue; // The legacy reconciler never owns a newly enrolled pool.
       if (!pool?.sending || !pool.receiving) {
         const principal=await platformIdentity(runtime,pool?.aws_account_id);
         try { await ensurePool(runtime,principal,region); }
@@ -287,7 +291,7 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
     // Hosted is instant: `ready` on creation with zero AWS calls. The tenant job owns CreateTenant and flips
     // tenant_state; until then domains and sends answer TENANT_NOT_READY. Simulation has no tenant, so it is ready.
     const row = (await runtime.db.execute<Row & { queued: boolean }>(sql`WITH pool AS (SELECT aws_account_id FROM provider_pool_regions p WHERE region=${region} AND ${poolSends()}), connection AS (
-      INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool))
+      INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,managed_tenant) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool),${!!runtime.config.regionalSending})
       ON CONFLICT(workspace_id) DO UPDATE SET aws_account_id=coalesce(provider_connections.aws_account_id,excluded.aws_account_id) WHERE provider_connections.kind='shared' AND provider_connections.region=excluded.region RETURNING *),
       settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=jsonb_build_array(c.region) FROM connection c WHERE c.workspace_id=s.workspace_id),
       stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL,report=NULL FROM connection c WHERE c.workspace_id=d.workspace_id AND d.report IS NOT NULL),
@@ -343,6 +347,7 @@ export function registerProviderConnections(app: App) {
         }
         // Disconnect/reconnect must not serve as a workspace-controlled unpause.
         if (row.pause_reason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', row.pause_reason);
+        if (row.template_version==='v5' || (await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${row.id} AND NOT legacy LIMIT 1`)).rowCount) throw new ApiError(409,'REGIONAL_DISCONNECT_REQUIRED','A regional connection requires reviewed cleanup before disconnecting.');
         await releaseConnectionDomains(c.env, db, wid, { id: row.id, kind: row.kind, region: row.region, aws_account_id: row.aws_account_id!, role_arn: row.role_arn!, external_id: row.external_id!, tenant_state: row.tenant_state });
         await db.execute(sql`DELETE FROM provider_connections WHERE id=${row.id}`);
       });

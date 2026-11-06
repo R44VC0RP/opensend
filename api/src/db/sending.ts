@@ -1,10 +1,12 @@
 import { sql } from 'drizzle-orm';
 import type { CampaignState } from '../states.js';
+import type { SendingBinding } from '../domain-claims.js';
 import { boolean, doublePrecision, index, integer, jsonb, pgTable, primaryKey, smallint, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated';
 export type CampaignEditor = { format: 'react-email'; version: 1; document: Record<string, unknown> };
 export type EmailSnapshot = {
+  binding?: SendingBinding;
   from: string; fromName?: string; previewText?: string; to: string[]; cc: string[]; bcc: string[]; replyTo: string[]; region: string;
   kind: 'transactional' | 'marketing'; subject: string; html?: string; text?: string;
   attachments: string[]; tracking: boolean; raw?: string;
@@ -17,6 +19,8 @@ export type EmailSnapshot = {
   unsubscribeUrl?: string;
 };
 export type CampaignDraft = {
+  /** Only stored in the internal, immutable launch review. */
+  binding?: SendingBinding;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };

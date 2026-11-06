@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
-import { connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
+import { assertTenantReady, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
 // Registry suffixes have independently owned children. Platform-controlled DNS trees do not.
@@ -32,9 +32,11 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
   const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null }) | null; fresh: boolean; recovering: boolean; error_code: string | null}>(
     sql`SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
-      FROM reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')}) r
+      FROM ${regionalSending(runtime) ? sql`reserve_regional_claim(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`} r
       LEFT JOIN domain_claims dc ON dc.token=r.token`)).rows[0]!;
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
+  if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
+  if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,'Hosted sending placement is managed by OpenSend.','region');
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw new ApiError(409,row.error_code,'A workspace can have at most 10 unproven domains and 100 domains in total. Verify or remove a domain first.');
   if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
   if (!row.token || !row.id) throw new ApiError(409,'DOMAIN_CLAIMED','This domain overlaps an existing claim.');
@@ -62,7 +64,21 @@ export const releaseConnectionClaims = (wid: string, target: SQL) => sql`target 
   dropped AS (DELETE FROM operation_domains d USING released r WHERE d.workspace_id=${wid} AND d.name=r.name), ${releasedClaimCleanup(wid)}`;
 // Used in the existing admission/dispatch statements. The connection join also fences
 // disconnects and verifies the region. Hosted sender proof is required even when SES is simulated.
-export const sendingConnections = (runtime: Runtime) => sql.identifier(isSimulatedSes(runtime) ? 'provider_simulated_connections' : 'provider_sending_connections');
+export const regionalSending = (runtime: Pick<Runtime,'config'>) => runtime.config.multiTenant && runtime.config.regionalSending === true;
+// Dispatch/recovery readers always understand a persisted binding, including on flag rollback.
+export const sendingConnections = (runtime: Runtime) => sql.identifier(`regional_${isSimulatedSes(runtime) ? 'simulated' : 'sending'}_connections`);
+export type SendingBinding = { domain: string; connection: string; generation: number; account:string; topic:string|null };
+export type SenderRoute = { region: string; verified: boolean; binding: SendingBinding; connection: (ReadyConnection & { region:string; tenant_state:TenantState; pause_reason:string|null }) | null };
+export const senderRoutes = (runtime:Runtime,wid:string,hosts:string[]) => sql`(SELECT coalesce(jsonb_object_agg(h.host,to_jsonb(r)),'{}'::jsonb)
+  FROM jsonb_array_elements_text(${JSON.stringify([...new Set(hosts)])}::jsonb) h(host) CROSS JOIN LATERAL regional_sender(${wid},h.host,${isSimulatedSes(runtime)}) r)`;
+export function checkRoute(runtime: Runtime, route: SenderRoute | undefined, requested?: string) {
+  if (!route?.verified) throw unverifiedSender();
+  if (requested !== undefined && requested !== route.region) throw new ApiError(422,'SENDER_REGION_MISMATCH','The requested region does not match this sender domain.', 'region');
+  if (!route.connection) throw new ApiError(409,'CONNECTION_REQUIRED','The sending connection is not ready in the bound region.');
+  if (route.connection.pause_reason) throw new ApiError(409,'HOSTED_SENDING_PAUSED',route.connection.pause_reason);
+  assertTenantReady(route.connection,isSimulatedSes(runtime));
+  return route;
+}
 export const verifiedClaim = (workspace: SQL, region: SQL, host: SQL) =>
   sql`EXISTS (SELECT FROM verified_sending_domains v WHERE v.workspace_id=${workspace} AND v.region=${region} AND ${within(host,sql`v.name`)})`;
 export const unverifiedSender = () => new ApiError(403, 'SENDER_DOMAIN_NOT_VERIFIED', 'Verify this sender domain or a parent domain in this workspace and region.', 'from');

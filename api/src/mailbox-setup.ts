@@ -200,6 +200,7 @@ function ruleMatches(rule: ReceiptRule, expected: ReceiptRule) {
 
 /** Platform maintenance only: customer identities share one regional catch-all rule. */
 export async function preparePoolReceiving(runtime:Runtime,region:string,account:string,register:(account:string,bucket:string,arn:string)=>Promise<void>) {
+  if (region==='us-east-1' || (runtime.config.regionalSending && region!=='us-east-2')) throw new ApiError(409,'HOSTED_RECEIVING_REGION','Hosted receiving is only available in Ohio.');
   assertSesConfigured(runtime);
   const config=awsConfig(region,platformCredentials(runtime)),signal=AbortSignal.timeout(90000);
   const ses=new SESClient(config),clients={ses:pacedSes(ses,signal),s3:new S3Client(config),sns:new SNSClient(config),sts:new STSClient(config)};
@@ -227,6 +228,7 @@ export async function reconcileRegion(runtime: Runtime, region: string, workspac
   const scoped={...runtime,config:{...runtime.config,workspaceId}};
   const connection=runtime.config.multiTenant ? await workspaceConnection(scoped,region) : undefined;
   if (connection?.kind==='shared') return; // Pool preparation is never a per-domain operation.
+  if (connection?.legacy===false) return; // Sending enrollment never authorizes the v4 receipt-rule reconciler.
   const config = awsConfig(region,connection ? await workspaceCredentials(scoped,region,connection) : platformCredentials(runtime));
   await runtime.db.insert(mailboxRegions).values({ workspaceId, region }).onConflictDoNothing();
   // The lease must expire before the job's own lease (3 minutes), so a retry of a run that died can take over

@@ -71,7 +71,7 @@ export function registerSesRegions(app: App) {
     const [cached] = await c.env.db.select().from(sesRegions).where(regionWhere(value.workspaceId, region)).limit(1);
     const fingerprint = await credentialFingerprint(runtime.config);
     if (c.req.valid('query').refresh !== 'true' && cached?.report && cached.credentialsFingerprint === fingerprint && cached.publicUrl === discoveryTarget(runtime.config) && cached.lastDiscoveredAt && Date.now() - Date.parse(cached.lastDiscoveredAt) < DISCOVERY_TTL) return c.json(SesDiscoverySchema.parse(cached.report), 200);
-    const report = await discoverSes(runtime, { region, installationId: connection?.id ?? settings.installationId });
+    const report = await discoverSes(runtime, { region, installationId: connection?.id ?? settings.installationId,namespace:connection?.legacy===false?'byo':undefined });
     await saveDiscovery(runtime, report, undefined, value.workspaceId, connection); return c.json(report, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/regions/{region}/provision', operationId: 'provisionRegion', tags: ['Regions'], security,

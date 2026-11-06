@@ -4,7 +4,7 @@ import { GetEmailIdentityCommand } from '@aws-sdk/client-sesv2';
 import { ApiError, digest, errors, getSes, id, json, log, randomSecret, response, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { authenticate, chargeCredential } from './auth.js';
 import { domains } from './db/operations.js';
-import { claimReceivable, claimSends, connectionReady } from './states.js';
+import { claimReceivable, claimReceives, claimSends, connectionReady } from './states.js';
 import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxMessages, mailboxThreads, mailboxWebhookDeliveries, mailboxWebhooks, mailMessages, mailUnrouted, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents, webhookSecretBinding } from './mailbox-events.js';
@@ -106,12 +106,14 @@ async function domainViews(c: Ctx, rows: (typeof domains.$inferSelect)[]) {
   const inbound = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, access(c).workspaceId), isNull(mailboxDomains.parentId), inArray(mailboxDomains.domainId, rows.map(row => row.id))));
   const counts = inbound.length ? await c.env.db.select({ domainId: mailboxes.domainId, count: sql<number>`count(*)::int` }).from(mailboxes).where(inArray(mailboxes.domainId, inbound.map(row => row.id))).groupBy(mailboxes.domainId) : [];
   const children = inbound.length ? await c.env.db.select({ parentId: mailboxDomains.parentId, count: sql<number>`count(*)::int` }).from(mailboxDomains).where(and(inArray(mailboxDomains.parentId, inbound.map(row => row.id)), eq(mailboxDomains.status, 'active'))).groupBy(mailboxDomains.parentId) : [];
+  const shared=c.env.config.regionalSending && rows.some(row=>row.region!=='us-east-2') && (await c.env.db.execute(sql`SELECT FROM provider_connections WHERE workspace_id=${access(c).workspaceId} AND kind='shared'`)).rowCount;
   return rows.map(row => {
     const state = inbound.find(item => item.domainId === row.id);
     const host=state?.receivingHost ?? row.name;
-    return { id: row.id, name: host, region: row.region, status: state?.status ?? 'off' as const, dns: [expectedMx(host, row.region)], mx: state?.mx ?? null, lastError: state?.lastError ?? null,
+    const region=state?.region ?? (shared?'us-east-2':row.region);
+    return { id: row.id, name: host, region, status: state?.status ?? 'off' as const, dns: [expectedMx(host, region)], mx: state?.mx ?? null, lastError: state?.lastError ?? null,
       enabledAt: iso(state?.enabledAt), checkedAt: iso(state?.checkedAt), catchAll: state?.catchAll ?? 'create_address' as const, addressCount: counts.find(item => item.domainId === state?.id)?.count ?? 0,
-      subdomains: { enabled: state?.acceptSubdomains ?? false, count: children.find(item => item.parentId === state?.id)?.count ?? 0, dns: [expectedMx(`*.${row.name}`, row.region)] } };
+      subdomains: { enabled: state?.acceptSubdomains ?? false, count: children.find(item => item.parentId === state?.id)?.count ?? 0, dns: [expectedMx(`*.${row.name}`, region)] } };
   });
 }
 async function operationDomain(c: Ctx, domainId: string) {
@@ -224,7 +226,7 @@ function registerReceivingDomains(app: App) {
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: 'checkInboundDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(InboundDomainSchema), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    if (c.env.config.multiTenant) { const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,row.region)},200); }
+    if (c.env.config.multiTenant) { const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200); }
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(c.env.db,row.workspaceId,row.id,mx);
     const [view] = await domainViews(c, [row]);
@@ -362,7 +364,7 @@ function registerAddresses(app: App) {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     const host = input.address.split('@')[1]!;
     // On MX, proven ownership of the claim is enough: routing follows the MX observation later.
-    const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND ${connectionReady()} JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.region=pc.region WHERE d.id=${mailboxDomains.domainId} AND dc.workspace_id=${value.workspaceId} AND (${claimSends()} OR ${claimReceivable()}))` : undefined));
+    const [domain] = await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND ${connectionReady()} JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE d.id=${mailboxDomains.domainId} AND dc.workspace_id=${value.workspaceId} AND (${claimSends()} OR ${claimReceivable()}) AND (d.region=pc.region OR (pc.kind='shared' AND ${mailboxDomains.region}='us-east-2' AND ${mailboxDomains.status}='active' AND ${claimReceives()})))` : undefined));
     if (!domain || (!c.env.config.multiTenant && ['disabled', 'disabling'].includes(domain.status))) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
     const publicAddress = input.publicAddress;
     if (publicAddress) {

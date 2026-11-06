@@ -47,11 +47,11 @@ export async function assume(runtime: Runtime, region: string, roleArn: string, 
     return value;
   } finally { client.destroy(); }
 }
-export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string };
+export type ReadyConnection = { id: string; kind: 'shared' | 'byo'; aws_account_id: string; role_arn: string; external_id: string; managed_tenant?:boolean; legacy?:boolean; legacy_names?:boolean; pool_tier?:'trusted'|'probation' };
 export async function workspaceConnection(runtime: Runtime, region?: string) {
   const result = await runtime.db.execute<ReadyConnection & { region: string }>(sql`
-    SELECT id, kind, region, aws_account_id, role_arn, external_id FROM provider_connections pc
-    WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region}` : sql``} AND ${connectionReady()}`);
+    SELECT id, kind, region, aws_account_id, role_arn, external_id ${region!==undefined ? sql`,legacy` : sql``} FROM ${region!==undefined ? sql`regional_connections` : sql`provider_connections`} pc
+    WHERE workspace_id = ${runtime.config.workspaceId} ${region !== undefined ? sql`AND region = ${region} AND (legacy OR sending_state='ready')` : sql``} AND ${connectionReady()}`);
   const row = result.rows[0];
   if (!row) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.');
   return row;

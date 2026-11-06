@@ -20,7 +20,7 @@ import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './
 import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
-import { awsError } from './ses-setup.js';
+import { awsError, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -171,7 +171,7 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 const claimTag = 'opensend:domain-claim';
 type Readiness = z.infer<typeof domainSchema>;
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
-type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
+type HostedDomain = DomainRef & ClaimState & { connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean };
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => identity.Tags?.some(t => t.Key===claimTag && t.Value===token);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
@@ -179,7 +179,8 @@ function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
     dc.created_at,dc.ever_proven,domain_claim_expired(dc) AS expired,dc.created_at <= now()-interval '1 hour' AS check_txt,
     EXISTS(SELECT 1 FROM provider_pool_regions p WHERE p.region=pc.region AND p.aws_account_id=pc.aws_account_id AND ${poolReceives()}) AS pool_receiving
     FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
-    JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=d.region AND ${connectionReady()}
+    JOIN domain_sending_bindings b ON b.domain_id=d.id AND b.connection_id=dc.connection_id AND b.region=d.region
+    JOIN regional_connections pc ON pc.id=b.connection_id AND pc.workspace_id=dc.workspace_id AND pc.region=b.region AND ${connectionReady()}
     WHERE d.workspace_id=${wid} AND d.id=${domainId} ${lock}`;
 }
 async function hostedDomain(db: DbExecutor, wid: string, domainId: string, lock=false, recheck?: { domains:readonly string[]; mode:'manual'|'dashboard' }) {
@@ -202,7 +203,7 @@ async function txtProof(name: string, token: string) {
   } catch { throw dnsUnavailable(); }
 }
 const state = (verified:boolean) => verified ? 'verified' as const : 'pending' as const;
-function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; proven:boolean; imported?:boolean; txtOwned?:boolean }, mx?:MxReport|null, note?:string|null): Readiness {
+function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>, hosted?: { token:string; shared:boolean; regional?:boolean; proven:boolean; imported?:boolean; txtOwned?:boolean }, mx?:MxReport|null, note?:string|null): Readiness {
   const dkim = value.DkimAttributes, suffix = dkim?.SigningHostedZone;
   const signed = dkim?.Status === 'SUCCESS' && dkim.SigningEnabled === true;
   const dns: z.infer<typeof domainSchema>['dns'] = [];
@@ -226,7 +227,7 @@ function readiness(row: DomainRef, value: Partial<GetEmailIdentityCommandOutput>
     if (!verified && verificationStatus === 'SUCCESS') verificationStatus = 'PENDING';
   }
   const ready = verified && signed;
-  dns.push({...(mx?.expected ?? expectedMx(row.name,row.region)),purpose:'receiving',status:state(mx?.state==='active'),...(note ? {note} : {})});
+  dns.push({...(mx?.expected ?? expectedMx(row.name,hosted?.shared && hosted.regional ? 'us-east-2' : row.region)),purpose:'receiving',status:state(mx?.state==='active'),...(note ? {note} : {})});
   return { id: row.id, name: row.name, region: row.region, verificationStatus, verified, dkimStatus: dkim?.Status ?? 'NOT_STARTED', ready, sending:state(ready),receiving:state(mx?.state==='active' && value.VerificationStatus==='SUCCESS' && (hosted?.proven ?? true)), mailFromDomain: mailFrom?.MailFromDomain ?? null, mailFromStatus: mailFrom?.MailFromDomainStatus ?? null, dnsStatus: dnsUnavailableReason ? 'unavailable' as const : 'available' as const, dnsUnavailableReason, dns };
 }
 async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetEmailIdentityCommandOutput) {
@@ -235,8 +236,8 @@ async function domainReadiness(runtime: Runtime, row: DomainRef, identity?: GetE
   if (stored?.status!=='active') report.receiving='pending';
   return report;
 }
-const claimProof = (row: {connection:Pick<ReadyConnection,'kind'>;token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
-type ClaimRow = DomainRef & ClaimState & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> };
+const claimProof = (row: {connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean};token:string;identity?:IdentityFacts|null;claim_scope?:string}, proven=false) => ({ token:row.token,shared:row.connection.kind==='shared',regional:row.connection.legacy===false,proven,imported:row.connection.kind==='byo' && row.identity?.imported===true,txtOwned:row.claim_scope==='txt' });
+type ClaimRow = DomainRef & ClaimState & { token:string; identity:IdentityFacts|null; connection:Pick<ReadyConnection,'kind'> & {legacy?:boolean} };
 const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='verified' || row.sending_state==='lost';
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
 function derivedReadiness(row: ClaimRow): Readiness {
@@ -249,7 +250,7 @@ function derivedReadiness(row: ClaimRow): Readiness {
   report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,status:state(row.receiving_host!==null)} : r);
   return report;
 }
-const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
+const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.managed_tenant?mxResourceName(wid):`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
 type ReceivingObservation={mx:MxReport;note?:string};
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
@@ -265,6 +266,12 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
   }
   const next=transitionClaim(row,{...evidence,regionReceives:row.claim_scope!=='account' && (byo || row.pool_receiving),observedHost:observed,byo});
   const mx=next.receiving_state==='lost' ? row.identity?.mx ?? null : observation?.mx ?? row.identity?.mx ?? null;
+  // Managed sending identities confer no receiving rights (including Virginia). Only a
+  // separately reviewed receiving binding may change that projection in phase 2.
+  if (row.connection.legacy===false) {
+    await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported},null);
+    return next;
+  }
   await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,proven:evidence.proven,mx,note,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
   if (byo && (next.receiving_host!==row.receiving_host || (next.receiving_state==='pending' && next.receiving_host))) await queueReconcile(db,wid,row.region);
   return next;
@@ -285,9 +292,9 @@ async function receivingMx(row:HostedDomain):Promise<ReceivingObservation> {
 }
 const sesFacts = (identity: Partial<GetEmailIdentityCommandOutput>): IdentityFacts['ses'] => ({ VerificationStatus: identity.VerificationStatus, VerifiedForSendingStatus: identity.VerifiedForSendingStatus, DkimAttributes: identity.DkimAttributes, MailFromAttributes: identity.MailFromAttributes });
 // Creates this claim's tagged identity, or adopts the one an earlier lost response left behind. Never adopts by name.
-async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string) {
+async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, token: string,installation?:string) {
   try {
-    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token}]})));
+    return await sesCall(()=>client.send(new CreateEmailIdentityCommand({EmailIdentity:name,DkimSigningAttributes:{NextSigningKeyLength:'RSA_2048_BIT'},Tags:[{Key:claimTag,Value:token},...(installation?[mxOwnerTag,{Key:'opensend:installation-id',Value:installation}]:[])]})));
   } catch(e) {
     if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e;
     const existing=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:name})));
@@ -300,7 +307,7 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
 function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
-    if (current && current.token===token && !current.expired) return ensureIdentity(client,current.name,token);
+    if (current && current.token===token && !current.expired) return ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined);
   });
 }
 // Removes only this claim's tagged identity (and, in the shared pool, its tenant association). Used by
@@ -327,8 +334,8 @@ async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDom
 /** Disconnect: shared identities are deleted, BYO identities stay in AWS, and only exclusive claims are retained. */
 export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid:string,connection:HostedDomain['connection'] & {region:string}) {
   if (connection.kind==='shared') {
-    const claims=(await db.execute<{name:string;token:string}>(sql`SELECT name,token FROM domain_claims WHERE workspace_id=${wid} AND connection_id=${connection.id} FOR UPDATE`)).rows;
-    for (const claim of claims) await deleteClaimIdentity(runtime,wid,{...claim,region:connection.region,connection});
+    const claims=(await db.execute<{name:string;token:string;region:string;managed_tenant:boolean}>(sql`SELECT dc.name,dc.token,b.region,r.managed_tenant FROM domain_claims dc JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) JOIN provider_connection_regions r USING(connection_id,region) WHERE dc.workspace_id=${wid} AND dc.connection_id=${connection.id} FOR UPDATE OF dc`)).rows;
+    for (const claim of claims) await deleteClaimIdentity(runtime,wid,{...claim,connection:{...connection,managed_tenant:claim.managed_tenant}});
   }
   await db.execute(sql`WITH ${releaseConnectionClaims(wid,sql`SELECT ${connection.id}::text AS id`)} SELECT 1`);
 }
@@ -347,7 +354,8 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
       const found=await runtime.db.transaction(async db=>{
         const row=(await db.execute<{workspace_id:string;name:string;token:string;created:string;connection:(HostedDomain['connection'] & {region:string})|null}>(sql`
           SELECT dc.workspace_id,dc.name,dc.token,dc.created_at::text AS created,to_jsonb(pc) AS connection FROM domain_claims dc
-          LEFT JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
+          LEFT JOIN domain_sending_bindings b ON b.workspace_id=dc.workspace_id AND b.name=dc.name AND b.connection_id=dc.connection_id
+          LEFT JOIN regional_connections pc ON pc.id=b.connection_id AND pc.region=b.region
           WHERE domain_claim_expired(dc) ${after} ORDER BY dc.created_at,dc.token LIMIT 1 FOR UPDATE OF dc SKIP LOCKED`)).rows[0];
         if (!row) return false;
         cursor=row; selected=true;
@@ -423,7 +431,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
     const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
     const [positive,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,
-      scopedImport ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
+      scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
     if (shared && report.ready && row.connection.tenant_state!=='ready') {
@@ -473,7 +481,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
 const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
-  if (!row?.identity || row.token!==payload.token) return;
+  if (!row?.identity || row.token!==payload.token || row.connection.legacy===false) return;
   const observation=await receivingMx(row);
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
@@ -512,11 +520,11 @@ export function registerOperations(app: App) {
     const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
     const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
     if (c.env.config.multiTenant) {
-      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,kind:sql<'shared'|'byo'>`pc.kind`}).from(domains)
+      const rows=await c.env.db.select({row:domains,token:domainClaims.token,claim_scope:domainClaims.claimScope,sending_state:domainClaims.sendingState,receiving_state:domainClaims.receivingState,receiving_host:domainClaims.receivingHost,lost_since:domainClaims.lostSince,receiving_lost_since:domainClaims.receivingLostSince,identity:domainClaims.identity,kind:sql<'shared'|'byo'>`pc.kind`,legacy:sql<boolean>`pc.legacy`}).from(domains)
         .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
-        .innerJoin(sql`provider_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
+        .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
         .where(where).orderBy(desc(domains.id)).limit(q.limit+1);
-      return c.json({data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
+      return c.json({data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null},200);
     }
     const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
     if (q.refresh === 'false') {
@@ -547,7 +555,7 @@ export function registerOperations(app: App) {
       let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
       try {
         const client=getSes(runtime,row.region,claim.connection);
-        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token));
+        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token,c.env.config.regionalSending && (claim.connection.kind==='shared' || claim.connection.legacy_names===false)?claim.connection.id:undefined));
       }
       catch(e) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
@@ -777,16 +785,18 @@ function verifySesAccount(runtime: Runtime, message: unknown, topicArn: string) 
   if ((runtime.config.multiTenant && !/^\d{12}$/.test(expected ?? '')) || (expected && accountId !== expected)) throw new ApiError(403, 'SES_ACCOUNT_MISMATCH', 'The SES sending account is missing or does not match this topic.');
 }
 function registerPublicEvents(app: App) {
-  type TopicBinding = { region: string; aws_account_id: string; kind: 'byo' | 'shared'; ready: boolean; inbound:boolean };
+  type TopicBinding = { region: string; aws_account_id: string; kind: 'byo' | 'shared'; ready: boolean; inbound:boolean; managed_id:string|null;generation:number|null };
   const sendingTopics = new Map<string, { binding: TopicBinding; expires: number }>();
   async function sendingTopic(runtime: Runtime, arn: string, confirming: boolean) {
     const cached = sendingTopics.get(arn);
     if (!confirming && cached && cached.expires > Date.now()) return cached.binding;
     const binding = (await runtime.db.execute<TopicBinding>(sql`
-      SELECT region, aws_account_id, kind, ${connectionReady()} AS ready,false AS inbound FROM provider_connections pc WHERE kind='byo' AND feedback_topic_arn=${arn}
-      UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
-      UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
-      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}`)).rows[0];
+      SELECT r.region,c.aws_account_id,c.kind,r.sending_state='ready' AS ready,false AS inbound,CASE WHEN NOT r.legacy THEN c.id END AS managed_id,r.generation
+        FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state IN ('ready','provisioning'))
+      UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,NULL,NULL FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
+      UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
+      UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' WHERE r.topic_arn=${arn}
+      ${!confirming ? sql`UNION ALL SELECT region,aws_account_id,kind,true,false,NULL,NULL FROM provider_feedback_history WHERE topic_arn=${arn}` : sql``} ORDER BY ready DESC LIMIT 1`)).rows[0];
     if (!binding || !arn.startsWith(`arn:aws:sns:${binding.region}:${binding.aws_account_id}:`)) return;
     // A pending topic may confirm its subscription but must never prime trust for notifications.
     if (!binding.ready) return confirming ? binding : undefined;
@@ -810,9 +820,10 @@ function registerPublicEvents(app: App) {
     const envelope = parsed.data;
     // Region settings may come from a 30 s cache: a topic or account provisioned since then is re-checked fresh.
     let stack: Awaited<ReturnType<typeof byoStackTopic>>;
+    let binding:TopicBinding|undefined;
     if (c.env.config.multiTenant) {
       if (envelope.Type==='SubscriptionConfirmation') stack=await byoStackTopic(c.env,envelope.TopicArn);
-      const binding=stack ? undefined : await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
+      binding=stack ? undefined : await sendingTopic(c.env,envelope.TopicArn,envelope.Type==='SubscriptionConfirmation');
       if (!stack && !binding) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','This SNS topic is not registered for the account and region.');
       c.env={...c.env,config:{...c.env.config,snsTopicArns:[envelope.TopicArn],inboundTopicArns:binding?.inbound?[envelope.TopicArn]:[]}};
     } else if (!c.env.config.snsTopicArns.includes(envelope.TopicArn)) c.env = await resolveRegionRuntime(c.env);
@@ -832,7 +843,11 @@ function registerPublicEvents(app: App) {
             if (error.retryable || error.code==='AWS_ACCESS_DENIED') throw new ApiError(503,error.code,error.message,undefined,true);
             throw error;
           }
-        } else await confirm();
+        } else {
+          await confirm();
+          if (binding?.managed_id) await c.env.db.execute(sql`UPDATE provider_connection_regions SET confirmed_topic_arn=${envelope.TopicArn},confirmed_generation=generation
+            WHERE connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`);
+        }
       }
       // An authenticated UnsubscribeConfirmation is acknowledged, never automatically resubscribed.
       return c.json({ accepted: true }, 202);
@@ -1097,9 +1112,9 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const { kind, providerId } = sesFeedbackIdentity(data);
   const tagged = taggedEmailId(data);
   const [input] = await runtime.db.select({ receipt: snsReceipts, hostedFeedback: runtime.config.multiTenant && (kind==='Bounce' || kind==='Complaint')
-    ? sql<boolean>`EXISTS (SELECT 1 FROM provider_pool_regions WHERE feedback_topic_arn=${String(payload.topicArn)})` : sql<boolean>`false`, email: {
+    ? sql<boolean>`EXISTS (SELECT 1 FROM provider_feedback_history WHERE topic_arn=${String(payload.topicArn)} AND kind='shared')` : sql<boolean>`false`, email: {
     id: emails.id, region: emails.region, to: emails.to, cc: emails.cc, bcc: emails.bcc, simulated: emails.simulated,
-  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)), tagged
+  } }).from(snsReceipts).leftJoin(emails, and(scoped(emails, job), eq(emails.region, String(payload.region)),runtime.config.multiTenant && !String(payload.topicArn).startsWith('urn:opensend:simulated-ses:') ? sql`"sending_emails".feedback_topic_arn=${String(payload.topicArn)}` : undefined, tagged
     // Fallback for a lost provider response: see ingestRoutineSesEvents.
     ? and(eq(emails.id, tagged), or(eq(emails.providerId, providerId), and(isNull(emails.providerId), eq(emails.status, 'acceptance_unknown'))))
     : eq(emails.providerId, providerId))).where(receiptWhere);

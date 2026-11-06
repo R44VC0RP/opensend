@@ -105,7 +105,12 @@ type ClaimRef = { name: string; token: string; connectionId: string; workspaceId
  * so a stale verifier never overwrites a reclaimed or disconnected row. `suggestedHost` is where the MX should be
  * published (the receiving record shown to the user); addresses can be created on it before it routes.
  */
-export async function applyClaim(db: DbExecutor, claim: ClaimRef, next: ClaimState, facts: IdentityFacts, suggestedHost: string) {
+export async function applyClaim(db: DbExecutor, claim: ClaimRef, next: ClaimState, facts: IdentityFacts, suggestedHost: string|null) {
+  if (suggestedHost===null) {
+    await db.execute(sql`UPDATE domain_claims SET sending_state=${next.sending_state},lost_since=${next.lost_since}::timestamptz,identity=${JSON.stringify(facts)}::jsonb
+      WHERE workspace_id=${claim.workspaceId} AND name=${claim.name} AND token=${claim.token} AND connection_id=${claim.connectionId}`);
+    return;
+  }
   const mx = facts.mx;
   const status = projectedMailboxStatus(next);
   await db.execute(sql`WITH claim AS (UPDATE domain_claims SET sending_state=${next.sending_state},receiving_state=${next.receiving_state},receiving_host=${next.receiving_host},
@@ -139,6 +144,36 @@ export const noteReconcileFailure = (workspaceId: string, region: string, messag
 // Provider connections: `state` is the connection state; the tenant has its own.
 // provisioning -> provisioning is a retry taking over an expired lease; startProvisioning enforces the lease.
 export const connectionTransitions: Record<ConnectionState, ConnectionState[]> = { awaiting_role: ['provisioning'], provisioning: ['provisioning', 'ready', 'failed', 'awaiting_role'], failed: ['provisioning'], ready: [] };
+// Managed regions only. Legacy singleton rows remain a projection; a scan never changes
+// sending readiness. Replacing an expired lease or disabling a binding invalidates its generation.
+type RegionRef = { connectionId:string; region:string };
+const managedRegion = (ref:RegionRef) => sql`connection_id=${ref.connectionId} AND region=${ref.region} AND NOT legacy`;
+export const startRegionScan = (ref:RegionRef) => sql`UPDATE provider_connection_regions SET scan_state='scanning',scan_revision=scan_revision+1
+  WHERE ${managedRegion(ref)} RETURNING scan_revision`;
+export const finishRegionScan = (ref:RegionRef, revision:number, completed:boolean) => sql`UPDATE provider_connection_regions SET scan_state=${completed?'ready_to_import':'failed'}
+  WHERE ${managedRegion(ref)} AND scan_revision=${revision} AND scan_state='scanning' RETURNING region`;
+export const acquireRegionProvisioning = (ref:RegionRef) => sql`UPDATE provider_connection_regions SET sending_state='provisioning',generation=generation+1,lease_until=clock_timestamp()+interval '4 minutes',
+  confirmed_generation=CASE WHEN confirmed_generation=generation AND confirmed_topic_arn=feedback_topic_arn THEN generation+1 END
+  WHERE ${managedRegion(ref)} AND (scan_state='ready_to_import' OR EXISTS (SELECT FROM provider_connections c WHERE c.id=connection_id AND c.kind='shared'))
+    AND (sending_state IN ('unprovisioned','failed') OR (sending_state='provisioning' AND lease_until<=clock_timestamp())) RETURNING generation`;
+export const finishRegionProvisioning = (ref:RegionRef,generation:number,confirmedTopic:string|null) => sql`WITH finished AS (
+  UPDATE provider_connection_regions SET sending_state=${confirmedTopic?'ready':'failed'},lease_until=NULL
+  WHERE ${managedRegion(ref)} AND sending_state='provisioning' AND generation=${generation} AND lease_until>clock_timestamp()
+    AND (${confirmedTopic}::text IS NULL OR (feedback_topic_arn=${confirmedTopic} AND confirmed_generation=generation AND confirmed_topic_arn=feedback_topic_arn)) RETURNING connection_id,region,sending_state),
+  parent AS (UPDATE provider_connections c SET state='ready' FROM finished r WHERE c.id=r.connection_id AND c.state<>'ready' AND r.sending_state='ready'),
+  settings AS (UPDATE ses_installation_settings s SET enabled_regions=s.enabled_regions||jsonb_build_array(r.region) FROM finished r JOIN provider_connections c ON c.id=r.connection_id
+    WHERE s.workspace_id=c.workspace_id AND r.sending_state='ready' AND NOT s.enabled_regions ? r.region) SELECT * FROM finished`;
+export const toggleRegionSending = (ref:RegionRef,enable:boolean,generation:number) => sql`UPDATE provider_connection_regions SET sending_state=${enable?'ready':'disabled'},generation=generation+1
+  WHERE ${managedRegion(ref)} AND sending_state=${enable?'disabled':'ready'} AND generation=${generation} RETURNING generation`;
+// After the provisioner has verified the tenant and its resource associations. The pool,
+// not each tenant, owns the shared topic. Never copy a pool ARN into a BYO registration.
+export const finishHostedRegion = (ref:RegionRef,generation:number) => sql`UPDATE provider_connection_regions r SET sending_state='ready',tenant_state='ready',lease_until=NULL
+  FROM provider_connections c JOIN provider_pool_regions p ON p.aws_account_id=c.aws_account_id WHERE c.kind='shared' AND c.state='ready' AND p.sending_state='ready'
+    AND p.feedback_topic_arn LIKE 'arn:aws:sns:'||p.region||':'||p.aws_account_id||':%' AND p.region=r.region AND c.id=r.connection_id
+    AND r.connection_id=${ref.connectionId} AND r.region=${ref.region} AND NOT r.legacy AND r.sending_state='provisioning' AND r.generation=${generation} AND r.lease_until>clock_timestamp() RETURNING r.region`;
+const receiveNext = {off:'review',review:'provisioning',provisioning:'active',active:'disabling',disabling:'off'} as const;
+export const transitionRegionReceiving = (ref:RegionRef,from:keyof typeof receiveNext,generation:number) => sql`UPDATE provider_connection_regions SET receiving_state=${receiveNext[from]},receiving_generation=receiving_generation+1
+  WHERE ${managedRegion(ref)} AND receiving_state=${from} AND receiving_generation=${generation} AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND c.kind='byo') RETURNING receiving_generation`;
 export function assertConnectionTransition(from: ConnectionState, to: ConnectionState) {
   if (!connectionTransitions[from].includes(to)) throw new Error(`Invalid connection transition ${from} -> ${to}`);
 }
