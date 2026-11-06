@@ -3222,7 +3222,7 @@ export const acceptWorkspaceInvitation = <ThrowOnError extends boolean = false>(
 });
 
 /**
- * Disconnect only when no mail or campaign is in flight. Account-scoped BYO imports are forgotten; exclusive domain claims stay reserved but stop sending and receiving. AWS resources are retained. Delete the customer stack in AWS to revoke the role.
+ * Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.
  */
 export const deleteConnection = <ThrowOnError extends boolean = false>(options?: Options<DeleteConnectionData, ThrowOnError>): RequestResult<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError> => (options?.client ?? client).delete<DeleteConnectionResponses, DeleteConnectionErrors, ThrowOnError>({
     security: [{

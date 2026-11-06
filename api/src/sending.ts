@@ -65,7 +65,7 @@ const drainDelayMs = (backlog: number, rate: number, floor = 1000) => rate > 0 ?
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes admission without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
-function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
+export function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
   // ON CONFLICT locks the existing tuple even when its UPDATE predicate is false. No dead tuple per send.
   const lock = sql`INSERT INTO job_schedule (workspace_id) SELECT ${a.workspaceId}::text ${claim ? sql`FROM claim` : sql``}
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;

@@ -37,7 +37,7 @@ export type ConnectionSummary = {
     /**
      * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
-    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed';
+    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed' | 'disconnecting';
     /**
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
@@ -2166,7 +2166,7 @@ export type ProviderConnection = {
     /**
      * awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again.
      */
-    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed';
+    state: 'awaiting_role' | 'scanning' | 'ready_to_import' | 'provisioning' | 'ready' | 'failed' | 'disconnecting';
     /**
      * Hosted only: the SES tenant that isolates this workspace. Sends are rejected with TENANT_NOT_READY until it is ready. BYO connections are always ready.
      */
@@ -2250,6 +2250,23 @@ export type ProviderConnection = {
         mailFromDomain: string | null;
         overlap: boolean;
     }>;
+    cleanup?: {
+        operationId: string;
+        lastError: {
+            region: string | null;
+            code: string;
+        } | null;
+        remaining: Array<{
+            region: string;
+            resources: Array<{
+                kind: string;
+                resource: string;
+                target?: string;
+                state?: 'creating' | 'created';
+            }>;
+        }>;
+        retain: Array<string>;
+    };
 };
 
 export type ConnectionRegions = {
@@ -12596,6 +12613,12 @@ export type DeleteConnectionResponses = {
      */
     200: {
         deleted: true;
+    };
+    /**
+     * Success
+     */
+    202: {
+        operationId: string;
     };
 };
 

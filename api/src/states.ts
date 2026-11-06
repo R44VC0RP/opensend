@@ -9,7 +9,7 @@ import type { MxReport } from './db/mailbox.js';
 
 export const SENDING_STATES = ['pending', 'verified', 'lost', 'failed'] as const;
 export const RECEIVING_STATES = ['off', 'pending', 'active', 'lost'] as const;
-export const CONNECTION_STATES = ['awaiting_role', 'scanning', 'ready_to_import', 'provisioning', 'ready', 'failed'] as const;
+export const CONNECTION_STATES = ['awaiting_role', 'scanning', 'ready_to_import', 'provisioning', 'ready', 'failed','disconnecting'] as const;
 export const TENANT_STATES = ['pending', 'ready', 'failed'] as const;
 export const POOL_STATES = ['pending', 'ready'] as const;
 export type SendingState = typeof SENDING_STATES[number];
@@ -143,7 +143,7 @@ export const noteReconcileFailure = (workspaceId: string, region: string, messag
 
 // Provider connections: `state` is the connection state; the tenant has its own.
 // provisioning -> provisioning is a retry taking over an expired lease; startProvisioning enforces the lease.
-export const connectionTransitions: Record<ConnectionState, ConnectionState[]> = { awaiting_role: ['provisioning','scanning'], scanning:['ready_to_import','ready','failed'],ready_to_import:['scanning','ready'], provisioning: ['provisioning', 'ready', 'failed', 'awaiting_role'], failed: ['provisioning','scanning'], ready: [] };
+export const connectionTransitions: Record<ConnectionState, ConnectionState[]> = { awaiting_role: ['provisioning','scanning','disconnecting'], scanning:['ready_to_import','ready','failed','disconnecting'],ready_to_import:['scanning','ready','disconnecting'], provisioning: ['provisioning', 'ready', 'failed', 'awaiting_role','disconnecting'], failed: ['provisioning','scanning','disconnecting'], ready: ['disconnecting'],disconnecting:[] };
 // Managed regions only. Legacy singleton rows remain a projection; a scan never changes
 // sending readiness. Replacing an expired lease or disabling a binding invalidates its generation.
 type RegionRef = { connectionId:string; region:string };
