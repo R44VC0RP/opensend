@@ -29,10 +29,10 @@ const MAX_BODY = 512 * 1024;
 // Outstanding (queued or attempting) mail per workspace is capped by the account's SES 24-hour quota, which
 // the dispatcher keeps synced in the limits tables: a day of backlog is plenty, the floor keeps sandbox and
 // brand-new accounts usable, and the ceiling bounds queue bloat. Shared-pool workspaces never inherit the
-// pool's quota and stay at the floor; BYO and self-hosted use their own account's. There is no per-key cap.
+// pool's quota: they use the floor unless an operator sets a cap. BYO and self-hosted use their own account's.
 const SENDING_LIMITS = { pendingFloor: 10000, pendingCeiling: 200000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
 const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'provider_workspace_limits' : 'sending_region_limits');
-const pendingCap = (quota: number | string | null) => Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
+const pendingCap = (quota: number | string | null, hosted: HostedAllowance | null) => hosted?.pendingCapOverride ?? Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
 const CAMPAIGN_PREPARE_ROWS = 20000;
@@ -70,13 +70,13 @@ function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number) => sql`SELECT count(*)::int AS total, ${hostedAllowance(runtime.config, a.workspaceId, cost)} AS hosted,
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0) => sql`SELECT count(*)::int AS total, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
   FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
-function assertPending(incoming: number, counts: { total: number; quota: number | string | null }) {
-  const cap = pendingCap(counts.quota);
-  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace, sized from its SES daily quota. Wait for dispatch or cancel queued campaigns before retrying.`, undefined, true);
+function assertPending(incoming: number, counts: { total: number; quota: number | string | null; hosted: HostedAllowance | null }) {
+  const cap = pendingCap(counts.quota, counts.hosted);
+  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
   await lockAdmission(db, a);
@@ -137,7 +137,7 @@ const Failure = z.object({ code: z.string(), message: z.string() });
 const Delivery = z.object({ total: z.number().int().describe('Fixed recipient count frozen at send or schedule.'), prepared: z.number().int().describe('Recipients whose message was validated.'), expanded: z.number().int().describe('Recipients materialized as immutable email records.'), canceled: z.number().int().describe('Recipients canceled before materialization. Materialized cancellations remain in counts.byStatus.canceled.'), error: Failure.nullable().describe('Why the campaign failed or was canceled by the system.'),
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: typeof campaigns.$inferSelect) {
   if (!row.reviewId) return null;
   const next = row.pacePerDay !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
@@ -602,7 +602,10 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     // A new READ COMMITTED statement after the workspace lock sees the previous sender's committed rows.
     // Lock settings against disablement; read only readiness (not discovery reports) and lock each asset once.
     const mx = c.env.config.multiTenant;
-    const cost = mx && !isSimulatedSes(c.env) ? mails.reduce((n, m) => n + hostedCost(m.to, m.cc, m.bcc), 0) : 0;
+    let cost = 0, marketing = 0;
+    if (mx && !isSimulatedSes(c.env)) for (const mail of mails) {
+      const n = hostedCost(mail.to, mail.cc, mail.bcc); cost += n; if (mail.kind === 'marketing') marketing += n;
+    }
     const ready = !mx && !isSimulatedSes(c.env) ? sql`ARRAY(SELECT wanted.region || ':' || wanted.kind FROM (
       SELECT DISTINCT coalesce(m.region, settings.default_region) AS region, m.kind FROM settings,
         jsonb_to_recordset(${JSON.stringify(mails.filter(m => m.region === undefined || regionPattern.test(m.region)).map(({ region, kind }) => ({ region, kind })))}::jsonb) m(region text, kind text)
@@ -622,8 +625,8 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const state = (await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(c.env, a, cost)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
-    assertHostedAllowance(state.hosted, cost);
+      FROM (${pendingCounts(c.env, a, cost, marketing)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    assertHostedAllowance(state.hosted, cost, marketing);
     assertPending(mails.length, state);
     if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
@@ -1565,14 +1568,17 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     let recipients = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
     if (!recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     const allowance = buffer!.hosted;
-    let capPause: {code: string; message: string} | undefined;
+    let hostedUntil: string | null = null;
     if (allowance && !campaign.simulated) {
-      let left = allowance.cap - allowance.used;
+      let left = allowance.marketingCap - allowance.used;
       const blocked = recipients.findIndex(r => hostedCost(r.recipient.email) > 0 && --left < 0);
       if (blocked >= 0) {
-        capPause = {code:'SEND_LIMIT_REACHED', message:`The workspace reached its Hosted limit of ${allowance.cap} recipients per rolling 24 hours. Resume after capacity returns.`};
-        if (blocked === 0) { await db.execute(pauseCampaign(ref, capPause)); return null; }
-        recipients = recipients.slice(0, blocked); // Commit the last affordable prefix and its paused cursor together.
+        hostedUntil = allowance.nextChangeAt;
+        if (blocked === 0) {
+          await db.execute(holdCampaign(ref, 'hosted_daily_quota', hostedUntil));
+          return {count:0, completed:false, hostedUntil};
+        }
+        recipients = recipients.slice(0, blocked); // Commit the affordable prefix and its wait together.
       }
     }
     const prepared = recipients.map(recipient => ({ id: id('email'), ordinal: recipient.ordinal, snapshot: {
@@ -1583,14 +1589,16 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const links = prepared.flatMap(({ id: emailId, snapshot }) => snapshot.attachments.map(attachmentId => ({ workspaceId: a.workspaceId, attachmentId, ownerType: 'email' as const, ownerId: emailId })));
     if (links.length) await db.insert(attachmentLinks).values(links);
     const expanded = recipients[recipients.length - 1]!.ordinal;
-    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length, capPause));
+    await db.execute(recordExpanded(ref, expanded, windowStart, windowUsed + prepared.length, hostedUntil));
     log('info', { code: 'CAMPAIGN_RELEASED', campaignId: campaign.id, released: prepared.length, expanded, total: campaign.total, capacity, buffered: buffer!.campaign, workspaceBuffered: buffer!.total, rate: buffer!.rate });
-    return { count: prepared.length, completed: !!capPause || expanded === campaign.total };
+    return { count: prepared.length, completed: expanded === campaign.total, hostedUntil };
   });
   if (!released) return 'done';
   if (released === 'quota') return hold('ses_daily_quota', quotaUntil);
   // Released rows are claimed directly by the region dispatcher.
-  try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+  if (released.count) try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+  // Usually the oldest bucket expires first. Also notice an earlier refund or operator raise.
+  if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
   if (released.completed) return 'done';
   if (sesCapacity <= buffered!.total + released.count) return hold('ses_daily_quota', quotaUntil);
   // A rate-shared continuation runs once this release has been paid for at the campaign's share.

@@ -224,11 +224,10 @@ export const failCampaign = (ref: CampaignRef, error: { code: string; message: s
 /** Preparation advanced to `prepared`; when the whole list is validated the campaign moves to its schedule or straight to sending. */
 export const recordPrepared = (ref: CampaignRef, prepared: number, next: RunningState) => next === 'preparing' ? progressCampaign(ref, 'preparing', sql`,prepared=${prepared}`) : moveCampaign(ref, ['preparing'], next, sql`,prepared=${prepared}`);
 export const startSending = (ref: CampaignRef) => moveCampaign(ref, ['scheduled'], 'sending');
-export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, pause?: PauseReason) {
-  const cursor = sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=NULL,waiting_until=NULL`;
-  return pause ? moveCampaign(ref, ['sending'], 'paused', sql`${cursor}${pausedFields(pause)}`) : progressCampaign(ref, 'sending', cursor);
+export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null) {
+  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? 'hosted_daily_quota' : null},waiting_until=${hostedUntil}::timestamptz`);
 }
-export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
 export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
 /**

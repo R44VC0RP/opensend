@@ -20,7 +20,7 @@ type Progress = Pick<Campaign, 'status' | 'delivery'>
 const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
-const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota' } as const
+const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 
 // Poll only while a send can still change; a future schedule waits until it is due.

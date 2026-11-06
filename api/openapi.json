@@ -2849,7 +2849,8 @@
                 "type": "string",
                 "enum": [
                   "pacing_window",
-                  "ses_daily_quota"
+                  "ses_daily_quota",
+                  "hosted_daily_quota"
                 ]
               },
               "until": {

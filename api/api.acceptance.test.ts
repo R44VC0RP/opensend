@@ -4136,6 +4136,69 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
+      const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
+      const wid = runtime.config.workspaceId, pool = '111122223333', domain = 'limits.example', from = `sender@${domain}`;
+      Object.assign(runtime.config, { multiTenant:true, liveEnabled:true, aws:{ accessKeyId:'fixture-platform', secretAccessKey:'fixture-only' } });
+      const limits = (send: string, pending: string) => setHostedLimits(db, [wid, '--send-cap', send, '--pending-cap', pending]);
+      await assert.rejects(limits('100', 'default'), /No Hosted connection/);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`, [REGION,pool,`arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,created_at) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now()-interval '6 days 23 hours')`, [wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain,wid]);
+      const changes: Json[] = [];
+      t.mock.method(console, 'info', (line: string) => { const entry = JSON.parse(line); if (entry.code === 'HOSTED_LIMITS_CHANGED') changes.push(entry); });
+      const key = ok(await local('POST','/v1/api-keys',{name:'Limits fixture',permissions:['read','send','manage']}),201).secret;
+      // Ten thousand outstanding direct messages with eleven thousand non-simulator recipients.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'email_'||md5($1||n),$1,'fixture',$2,$3,'["one@example.net"]',CASE WHEN n<=1000 THEN '["two@example.net"]'::jsonb ELSE '[]' END,'[]','Fixture','{}',false FROM generate_series(1,10000)n`, [wid,REGION,from]);
+      const send = (to = 'real@example.net') => request('POST','/v1/emails/send',key,mail({from,to}));
+      const simulator = 'success@simulator.amazonses.com';
+      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      await limits('11001','10001');
+      error(await request('POST','/v1/connection',key,{kind:'shared',sendCapOverride:99999,pendingCapOverride:99999}),422,'VALIDATION_FAILED');
+      error(await request('POST','/v1/connection',key,{kind:'shared'}),403,'PERMISSION_DENIED');
+      ok(await send(),202);
+      const capped = error(await send(),429,'SEND_LIMIT_REACHED');
+      assert.match(capped.message, /11001 recipients/);
+      assert.ok(Date.parse(capped.resetAt) > Date.now()+23*3600000, 'Crossing into week two in an hour cannot reset a fixed override.');
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10001/);
+      await limits('default','default');
+      assert.match(error(await send(),429,'SEND_LIMIT_REACHED').message, /100 recipients/);
+      assert.match(error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED').message, /10000/);
+      assert.deepEqual(changes.map(({workspaceId,old,new:next}) => [workspaceId,old,next]), [
+        [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
+      ]);
+
+      // The scale run freezes the physical two-million-contact audience. Normal CI uses a sparse
+      // tail fixture; neither run needs to render the previous days' 1,999,599 messages.
+      await limits('100000','10001');
+      const list = ok(await local('POST','/v1/lists',{name:unique('newsletter')}),201);
+      const total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 401;
+      if (total>401) await db.query("SET LOCAL statement_timeout='180s'");
+      for (let start=1;start<=total;start+=50000) await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT 'con_'||md5($1||n),$1,'subscriber-'||n||'@example.net','subscribed' FROM generate_series($3::int,$4::int)n RETURNING workspace_id,id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [wid,list.id,start,Math.min(start+49999,total)]);
+      const c = ok(await local('POST','/v1/campaigns',{name:'Large newsletter',from,subject:'Fixture',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+      const path = `/v1/campaigns/${c.id}`, view = async () => ok(await local('GET',path));
+      assert.equal(ok(await local('POST',`${path}/schedule`,{revision:c.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202).queued,total);
+      if (total===401) await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
+        SELECT review_id,ordinal+1999599,recipient,recipient_bytes FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`, [c.id]);
+      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=1999599,expanded=1999599,scheduled_at=now() WHERE id=$1`, [c.id]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES ($1,$2,20,20000,17000,clock_timestamp(),now()+interval '1 minute')`, [pool,REGION]);
+      await run('campaign.run');
+      const full = await view(); assert.equal(full.delivery.expanded,1999999); assert.equal(full.counts.byStatus.queued,400);
+      await db.query(`UPDATE sending_emails SET status='delivered' WHERE campaign_id=$1`, [c.id]);
+      await db.query(`UPDATE provider_account_limits SET sent_last_24_hours=18000 WHERE aws_account_id=$1`, [pool]);
+      await run('campaign.run');
+      const held = await view(); assert.equal(held.state,'sending'); assert.equal(held.delivery.waiting.reason,'ses_daily_quota'); assert.equal(held.delivery.expanded,1999999);
+      await db.query(`UPDATE provider_account_limits SET sent_last_24_hours=17999 WHERE aws_account_id=$1`, [pool]);
+      await run('campaign.run');
+      assert.equal((await view()).delivery.expanded,2000000, 'A quota refresh releases the last recipient without a manual resume.');
+    });
+  });
+
   test('MX: Hosted admission, campaign release and dispatch share the rolling recipient cap and reputation hold', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { checkHostedHealth } = await import('./src/maintenance.js');
@@ -4172,10 +4235,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'guard-'||n||'@example.net','subscribed' FROM generate_series(1,3)n`,[wid]);
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM audience_contacts WHERE workspace_id=$1`,[wid,list.id]);
       const c = ok(await local('POST','/v1/campaigns',{name:unique('guard'),from,subject:'Cap',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+      // 99 real recipients already admitted. 112 minus the 12-recipient reserve leaves one marketing slot.
+      const {setHostedLimits}=await import('./scripts/set-hosted-limits.js');
+      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default']);
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),202);
       await run('campaign.run');
       const campaign = ok(await local('GET',`/v1/campaigns/${c.id}`));
-      assert.equal(campaign.state,'paused'); assert.equal(campaign.delivery.pauseReason.code,'SEND_LIMIT_REACHED'); assert.equal(campaign.delivery.expanded,1);
+      assert.equal(campaign.state,'sending'); assert.equal(campaign.delivery.waiting.reason,'hosted_daily_quota'); assert.equal(campaign.delivery.expanded,1);
+      assert.equal(campaign.delivery.pauseReason,null); assert.ok(Date.parse(campaign.delivery.waiting.until)>Date.now());
+      assert.match(error(await send({kind:'marketing'}),429,'SEND_LIMIT_REACHED').message,/Marketing stops at 100/);
+      error(await local('POST','/v1/emails/batch',{emails:[mail,{...mail,kind:'marketing'}]}),429,'SEND_LIMIT_REACHED');
+      ok(await batch(12),202); // Only transactional traffic can consume the remaining workspace capacity.
       error(await send(),429,'SEND_LIMIT_REACHED');
       // Even a fully drained queue cannot refill the rolling budget. Only an expired admission opens a new slot.
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND status='queued'`,[wid]);
@@ -4183,10 +4253,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE sending_emails SET created_at=now()-interval '24 hours' WHERE id=$1`,[recipients[0].id]);
       const queued = ok(await send(),202).id;
       error(await send(),429,'SEND_LIMIT_REACHED');
+      await db.query(`UPDATE sending_emails SET created_at=now()-interval '24 hours' WHERE id=ANY($1::text[])`,[recipients.slice(1,15).map((r:Json)=>r.id)]);
+      await run('campaign.run');
+      const resumed=ok(await local('GET',`/v1/campaigns/${c.id}`));
+      assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
+      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
+      await (await import('./scripts/set-hosted-limits.js')).setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','25000']);
+      // An operator override does not exempt this workspace from bounce or complaint holds.
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
@@ -4276,16 +4353,63 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
         CREATE TABLE provider_connections AS SELECT id,workspace_id,kind,region,aws_account_id,role_arn,external_id,feedback_topic_arn,tenant_state,state FROM public.provider_connections WITH NO DATA;
         CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
-        CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated FROM public.sending_email_events WITH NO DATA;
-        CREATE TABLE sending_emails (LIKE public.sending_emails);
+        CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated,data FROM public.sending_email_events WITH NO DATA;
+        CREATE TABLE sending_emails (LIKE public.sending_emails INCLUDING DEFAULTS);
+        CREATE TABLE sending_campaigns (LIKE public.sending_campaigns INCLUDING CONSTRAINTS);
         INSERT INTO workspaces VALUES('mature',now()-interval '45 days');
         INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('mature','mature','shared','ready','ready');`);
       await db.query(await readFile(new URL('./migrations/060_hosted_sending_guardrails.sql',import.meta.url),'utf8'));
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id)
+        VALUES('backfill','mature','us-east-1','key','a@example.org','["b@example.org"]','["c@example.org"]','["success@simulator.amazonses.com"]','fixture','{}',false,'accepted','ses-id');
+        INSERT INTO sending_email_events(created_at,workspace_id,email_id,type,simulated,data) SELECT now(),'mature','backfill',v,false,'{}' FROM unnest(array['accepted','send','complaint']) v`);
+      await db.query(await readFile(new URL('./migrations/062_hosted_limit_overrides.sql',import.meta.url),'utf8'));
+      assert.deepEqual((await db.query('SELECT recipients::int FROM hosted_usage_hourly')).rows,[{recipients:2}]);
+      assert.deepEqual((await db.query('SELECT accepted::int, complaints::int FROM hosted_health_hourly')).rows,[{accepted:2,complaints:1}]);
       runtime.config.multiTenant=true;
       const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
       assert.equal(await getCap('mature'),10000);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
+      await db.query(`INSERT INTO workspaces(id,created_at) VALUES('new',now()); INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
       assert.equal(await getCap('new'),100);
+    });
+  });
+  test('MX: disconnect and reconnect cannot reset operator policy', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const {setHostedLimits}=await import('./scripts/set-hosted-limits.js'), {hostedAllowance}=await import('./src/hosted-sending.js'), {sql}=await import('drizzle-orm');
+      const wid=runtime.config.workspaceId; runtime.config.multiTenant=true; runtime.config.sharedRegions=[REGION];
+      runtime.config.liveEnabled=true; runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
+      const connect=()=>local('POST','/v1/connection',{kind:'shared',region:REGION});
+      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3']);
+      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']),/No Hosted connection/);
+      ok(await connect(),201);
+      const allowance=(await runtime.db.execute<{a:{cap:number;pendingCapOverride:number}}>(sql`SELECT ${hostedAllowance(runtime.config,wid,1)} a`)).rows[0].a;
+      assert.deepEqual([allowance.cap,allowance.pendingCapOverride],[2,3]);
+    });
+  });
+  test('MX: admission reads only hourly totals even with a full day of Hosted mail', async t => {
+    await simulatedSesFixture(t, async ({runtime,db}) => {
+      const {sql}=await import('drizzle-orm'), {hostedAllowance}=await import('./src/hosted-sending.js');
+      const wid=runtime.config.workspaceId, total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 2400;
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state) VALUES ($1,$1,'shared',$2,'ready','ready')`,[wid,REGION]);
+      for(let start=1;start<=total;start+=20000) await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        SELECT $1||n,$1,$2,'key','a@example.org','["b@example.org"]','[]','[]','fixture','{}',false,'delivered',now()-(n%24)*interval '1 hour' FROM generate_series($3::int,$4::int)n`,[wid,REGION,start,Math.min(start+19999,total)]);
+      const allowance=hostedAllowance(runtime.config,wid,1);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total);
+      const plan=(await runtime.db.execute(sql`EXPLAIN (ANALYZE, FORMAT JSON) SELECT ${allowance}`)).rows[0]['QUERY PLAN'] as Json[];
+      const nodes=(p:Json):Json[]=>[p,...(p.Plans??[]).flatMap(nodes)]; const all=nodes(plan[0].Plan);
+      assert.ok(!all.some(n=>['sending_emails','sending_email_events'].includes(n['Relation Name'])));
+      assert.equal(all.find(n=>n['Relation Name']==='hosted_usage_hourly')?.['Actual Rows'],24);
+      assert.ok(plan[0]['Execution Time']<100,`Allowance took ${plan[0]['Execution Time']}ms for ${total} messages.`);
+      t.diagnostic(`Allowance on ${total} envelopes: 24 hourly rows, ${plan[0]['Execution Time']} ms.`);
+      await db.query(`UPDATE sending_emails SET status='rejected' WHERE id=$1`,[wid+'1']);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
+      await db.query(`UPDATE sending_emails SET status='rejected',provider_id='accepted-before-rejection' WHERE id=$1`,[wid+'2']);
+      assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES ('accepted',$1,$2,'accepted',false)`,[wid,wid+'2']);
+      const accepted=async()=>Number((await db.query('SELECT sum(accepted) n FROM hosted_health_hourly WHERE workspace_id=$1',[wid])).rows[0].n);
+      assert.equal(await accepted(),1);
+      await db.query(`UPDATE sending_emails SET status='suppressed' WHERE id=$1`,[wid+'2']);
+      assert.equal(await accepted(),0,'A later validation suppression removes the acceptance from reputation volume.');
     });
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {
