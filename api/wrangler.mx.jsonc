@@ -22,7 +22,7 @@
     "HOSTED_SEND_CAP_FIRST_WEEK": "100",
     "HOSTED_SEND_CAP_SECOND_WEEK": "1000",
     "HOSTED_SEND_CAP_MATURE": "10000",
-    // Bring-your-own AWS CloudFormation template, published from api/byo-template.yaml (public, versioned).
+    // Bring-your-own AWS CloudFormation template, v4 published from api/byo-template-v4.yaml (public, versioned); v5 (api/byo-template.yaml) is unpublished.
     "BYO_TEMPLATE_URL": "https://opensend-mx-templates.s3.us-east-2.amazonaws.com/byo/v4.yaml",
     "DEFAULT_SES_REGION": "us-east-2",
     // Live SES uses the shared-account key (infra/aws-shared). Sends stay denied by its IAM policy
