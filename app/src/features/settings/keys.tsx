@@ -67,7 +67,7 @@ export function ApiKeysPage() {
           ]} />}
         {apiFailed && <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />}
         {inboundFailed && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
-        {!listLoading && !apiFailed && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
+        {!listLoading && (!apiFailed || pagination.page > 1) && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
       {showConnected && <section className="section stack">
         <div className="keys-head">
