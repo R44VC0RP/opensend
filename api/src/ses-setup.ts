@@ -4,6 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
 import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand, type Tenant } from '@aws-sdk/client-sesv2';
 import { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
+import { ListConfigurationSetsCommand } from '@aws-sdk/client-sesv2';
+import { SESClient, DescribeActiveReceiptRuleSetCommand } from '@aws-sdk/client-ses';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
@@ -361,6 +363,83 @@ export async function readReputation(cw: CloudWatchClient, signal: AbortSignal):
 /** AWS reads only. A resource is missing only after AWS explicitly reports NotFound. */
 export async function discoverSes(runtime: Runtime, options: SesSetupOptions): Promise<SesDiscovery> { return (await inspect(runtime, options)).report; }
 
+// A scan turn is bounded even when an account has thousands of identities/sets. The
+// job checkpoints its page before continuing; nothing here registers a topic or a claim.
+export type ScanStage = 'account'|'receipt'|'sets'|'domains';
+export type CandidateIdentity = IdentityFacts['ses'] & { ConfigurationSetName?:string };
+export type Inventory = { production?:boolean; sendingEnabled?:boolean; max24HourSend?:number; maxSendRate?:number; sentLast24Hours?:number;
+  configurationSets?:Record<string,{installation:boolean|null}>; receiving?:{supported:boolean;set:string|null;rules:{name:string;enabled:boolean;recipients:string[];actions:string[]}[]} };
+export type ScanPage = { facts:Inventory; domains:{name:string;identity:CandidateIdentity}[]; next?:{stage:ScanStage;token?:string} };
+const receivingRegions = new Set('us-east-1 us-east-2 us-west-1 us-west-2 af-south-1 ap-southeast-3 ap-south-1 ap-northeast-3 ap-northeast-2 ap-southeast-1 ap-southeast-2 ap-northeast-1 ca-central-1 eu-central-1 eu-west-1 eu-west-2 eu-south-1 eu-west-3 eu-north-1 il-central-1 me-south-1 sa-east-1'.split(' '));
+const unknownInventory = () => new ApiError(503,'AWS_STATE_UNKNOWN','AWS returned an incomplete regional inventory. Refresh the scan.');
+function identityDefaults(v:CandidateIdentity):CandidateIdentity {
+  const {VerificationStatus,VerifiedForSendingStatus,DkimAttributes,MailFromAttributes,ConfigurationSetName}=v;
+  if (!VerificationStatus || VerifiedForSendingStatus===undefined) throw unknownInventory();
+  return {VerificationStatus,VerifiedForSendingStatus,DkimAttributes,MailFromAttributes,ConfigurationSetName};
+}
+export async function scanRegionPage(runtime:Runtime,region:string,installation:string,stage:ScanStage,token?:string):Promise<ScanPage> {
+  const ctx=setupContext(), c=clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  const page:ScanPage={facts:{},domains:[]};
+  try {
+    if (stage==='account') {
+      const a=await c.ses.send(new GetAccountCommand({}),opts), q=a.SendQuota;
+      if (a.ProductionAccessEnabled===undefined || a.SendingEnabled===undefined || q?.Max24HourSend===undefined || q.MaxSendRate===undefined || q.SentLast24Hours===undefined) throw unknownInventory();
+      page.facts={production:a.ProductionAccessEnabled,sendingEnabled:a.SendingEnabled,max24HourSend:q.Max24HourSend,maxSendRate:q.MaxSendRate,sentLast24Hours:q.SentLast24Hours};
+      page.next={stage:'receipt'};
+    } else if (stage==='receipt') {
+      const supported=receivingRegions.has(region);
+      const receiving:NonNullable<Inventory['receiving']>={supported,set:null,rules:[]};
+      if (supported) {
+        const classic=new SESClient({region,credentials:runtime.config.aws,ignoreConfiguredEndpointUrls:true,maxAttempts:1,requestHandler:new FetchHttpHandler({requestTimeout:10000})});
+        try {
+          const r=await classic.send(new DescribeActiveReceiptRuleSetCommand({}),opts);
+          if (r.Metadata && (!r.Metadata.Name || !Array.isArray(r.Rules))) throw unknownInventory();
+          receiving.set=r.Metadata?.Name??null;
+          receiving.rules=(r.Rules??[]).map(rule=>({name:rule.Name!,enabled:rule.Enabled===true,recipients:rule.Recipients??[],actions:(rule.Actions??[]).flatMap(a=>Object.keys(a))}));
+        } catch(e) { if (errorName(e)!=='RuleSetDoesNotExist') throw e; } finally { classic.destroy(); }
+      }
+      page.facts.receiving=receiving; page.next={stage:'sets'};
+    } else if (stage==='sets') {
+      const p=await c.ses.send(new ListConfigurationSetsCommand({NextToken:token,PageSize:10}),opts), names=setupResources(installation,'byo');
+      if (!Array.isArray(p.ConfigurationSets)) throw unknownInventory();
+      const sets:NonNullable<Inventory['configurationSets']>=Object.create(null);
+      for (const name of p.ConfigurationSets) {
+        let tagged:boolean|null=null;
+        if (name.startsWith('opensend-') || name===names.transactional || name===names.marketing) {
+          const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:name}),opts);
+          tagged=!!s.Tags?.some(t=>t.Key===OWNER_TAG && t.Value);
+        }
+        sets[name]={installation:tagged};
+      }
+      page.facts.configurationSets=sets;page.next=p.NextToken?{stage,token:p.NextToken}:{stage:'domains'};
+    } else {
+      const p=await c.ses.send(new ListEmailIdentitiesCommand({NextToken:token,PageSize:10}),opts);
+      if (!Array.isArray(p.EmailIdentities)) throw unknownInventory();
+      for (const v of p.EmailIdentities) {
+        const n=domainName.safeParse(v.IdentityName);
+        if (v.IdentityType!=='DOMAIN' || !n.success || !claimNameAllowed(n.data,runtime.config.publicUrl)) continue;
+        try { page.domains.push({name:n.data,identity:identityDefaults(await c.ses.send(new GetEmailIdentityCommand({EmailIdentity:n.data}),opts))}); }
+        catch(e) { if (!missing(e)) throw e; }
+      }
+      if (p.NextToken) page.next={stage,token:p.NextToken};
+    }
+    return page;
+  } finally { c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy(); }
+}
+
+export async function readSelectedDomains(runtime:Runtime,region:string,names:string[]) {
+  const ctx=setupContext(155_000), c=clients(runtime,region,ctx), values=new Map<string,CandidateIdentity>();
+  try {
+    for (const name of names) {
+      let value:CandidateIdentity|undefined;
+      try { value=identityDefaults(await c.ses.send(new GetEmailIdentityCommand({EmailIdentity:name}),{abortSignal:ctx.signal})); } catch(e) { if (!missing(e)) throw e; }
+      if (!value?.VerifiedForSendingStatus || value.VerificationStatus!=='SUCCESS') throw new ApiError(409,'CANDIDATE_NO_LONGER_VERIFIED','A selected SES identity is no longer verified. Refresh the domain list.');
+      values.set(name,value);
+    }
+    return values;
+  } finally { c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy(); }
+}
+
 /** One durable page at a time, using the assumed role and the normal regional control-plane pace.
  * No discovery limit: an account with many identities continues at the next token in a fresh job turn. */
 export async function verifiedByoDomains(runtime: Runtime, region: string, cursor?: string) {
@@ -384,6 +463,85 @@ export async function verifiedByoDomains(runtime: Runtime, region: string, curso
 export function assertProvisionable(runtime: Runtime): void {
   feedbackUrl(runtime.config);
   assertSesConfigured(runtime);
+}
+
+export type JournalEntry={kind:'set'|'topic'|'destination'|'subscription'|'identity';resource:string;target?:string;state?:'creating'|'created'};
+export const byoFeedback='https://opensend.mx/v1/events/ses';
+// Unlike self-hosted setup, this is create-only. Never adopt even a tagged resource
+// without its journal, repair a drifted destination, or rewrite an existing topic policy.
+// If a create's acknowledgement was lost, stop for review rather than assume ownership.
+export async function provisionByoRegion(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],
+  fence:()=>Promise<void>, record:(entry:JournalEntry)=>Promise<void>,register:(arn:string)=>Promise<void>) {
+  const options:SesSetupOptions={region,installationId,namespace:'byo',connectionSetup:true};
+  const account=runtime.config.awsAccountId!, names=setupResources(installationId,'byo'), a=arns(account,region,names);
+  const ctx=setupContext(), {report,subscriptions}=await inspect(runtime,options,ctx);
+  const drift=()=>new ApiError(409,'BYO_RESOURCE_DRIFT','Regional feedback resources differ from the ownership journal. Nothing will be repaired automatically.');
+  const check=(kind:JournalEntry['kind'],resource:string,exists:boolean,target?:string)=>{
+    const entry=journal.find(e=>e.kind===kind && e.resource===resource && e.target===target);
+    // The journal must retain ambiguous creates for manual review. Retry a proven
+    // absence; do not adopt an existing AWS resource after an ambiguous result.
+    if (entry?.state==='creating' ? exists : !!entry!==exists) throw drift();
+  };
+  const blocker=report.blockers.find(b=>!['SES_SANDBOX','SNS_CONFIRMATION_PENDING'].includes(b.code));
+  if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,blocker.code.startsWith('AWS_'));
+  if (report.account?.id!==account || report.feedbackUrl!==byoFeedback) throw drift();
+  const topic=report.resources.topic;
+  check('topic',a.topic,topic.exists===true);
+  if (topic.exists && (!topic.owned || !topic.policyReady)) throw drift();
+  check('subscription',a.topic,subscriptions.length>0,byoFeedback);
+  if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==byoFeedback || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
+  const streams=['transactional','marketing'] as const;
+  for (const [i,stream] of streams.entries()) {
+    const s=report.resources[stream];
+    check('set',a.sets[i]!,s.exists===true);check('destination',a.sets[i]!+'/'+names.eventDestinationName,s.eventDestinationExists===true,a.topic);
+    if (s.exists && (!s.owned || s.autoValidation!=='inherit' && s.autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) || s.eventDestinationExists && !s.eventWired || report.warnings.some(w=>w.code==='OTHER_EVENT_DESTINATIONS')) throw drift();
+  }
+  const c=clients(runtime,region,ctx), opts={abortSignal:ctx.signal};
+  try {
+    for (const [i,stream] of streams.entries()) {
+      if (!report.resources[stream].exists) {
+        await record({kind:'set',resource:a.sets[i]!,state:'creating'});
+        await fence();await c.ses.send(new CreateConfigurationSetCommand({ConfigurationSetName:names[stream],Tags:tags(options),SendingOptions:{SendingEnabled:true}}),opts);
+        await record({kind:'set',resource:a.sets[i]!,state:'created'});
+      }
+      if (!report.resources[stream].exists || report.resources[stream].autoValidation==='inherit') {
+        const s=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts);
+        if (!owned(s.Tags,options)) throw drift();
+        await fence();await c.ses.send(validationInput(names[stream],DEFAULT_AUTO_VALIDATION[stream]),opts);
+      } else if (report.resources[stream].autoValidation!==DEFAULT_AUTO_VALIDATION[stream]) throw drift();
+    }
+    if (!topic.exists) {
+      // Bootstrap private: only add SES publish after positive checks of account,
+      // tags, the initial owner-only policy and an empty subscriber inventory.
+      const finalPolicy=topicPolicy(account,region,names),initialPolicy={...finalPolicy,Statement:finalPolicy.Statement.slice(0,1)};
+      await record({kind:'topic',resource:a.topic,state:'creating'});
+      await fence();const result=await c.sns.send(new CreateTopicCommand({Name:names.topicName,Tags:tags(options),Attributes:{Policy:JSON.stringify(initialPolicy)}}),opts);
+      if (result.TopicArn!==a.topic) throw drift();
+      const attr=(await c.sns.send(new GetTopicAttributesCommand({TopicArn:a.topic}),opts)).Attributes;
+      if (attr?.Owner!==account || attr.TopicArn!==a.topic || !policyReady(attr.Policy,initialPolicy) || !owned((await c.sns.send(new ListTagsForResourceCommand({ResourceArn:a.topic}),opts)).Tags,options)) throw drift();
+      const empty=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:a.topic}),opts);
+      if (empty.NextToken || empty.Subscriptions?.length!==0) throw drift();
+      await fence();await c.sns.send(new SetTopicAttributesCommand({TopicArn:a.topic,AttributeName:'Policy',AttributeValue:JSON.stringify(finalPolicy)}),opts);
+      await record({kind:'topic',resource:a.topic,state:'created'});
+    }
+    for (const [i,stream] of streams.entries()) if (!report.resources[stream].eventWired) {
+      const set=await c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:names[stream]}),opts), dest=await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:names[stream]}),opts);
+      if (!owned(set.Tags,options) || dest.EventDestinations?.length!==0) throw drift();
+      await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'creating'});
+      await fence();await c.ses.send(new CreateConfigurationSetEventDestinationCommand({ConfigurationSetName:names[stream],EventDestinationName:names.eventDestinationName,EventDestination:{Enabled:true,MatchingEventTypes:[...EVENTS],SnsDestination:{TopicArn:a.topic}}}),opts);
+      await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'created'});
+    }
+    await register(a.topic);
+    if (!subscriptions.length) {
+      const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:a.topic}),opts);
+      if (page.NextToken || page.Subscriptions?.length!==0) throw drift();
+      // The signed callback may beat the Subscribe response. Register its topic and
+      // record the intended endpoint first. An ambiguous timeout must not resubscribe.
+      await record({kind:'subscription',resource:a.topic,target:byoFeedback});
+      await fence();await c.sns.send(new SubscribeCommand({TopicArn:a.topic,Protocol:'https',Endpoint:byoFeedback,ReturnSubscriptionArn:true,Attributes:{RawMessageDelivery:'false'}}),opts);
+    }
+    return {topic:a.topic,verified:report.provisioned};
+  } finally { c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy(); }
 }
 
 /** Explicit provisioning; caller persists the job and the topic trust before SNS Subscribe. */
