@@ -1,5 +1,7 @@
 -- Apply with mail writers drained. The snapshot and trigger installation must be atomic.
 LOCK TABLE sending_emails, sending_email_events IN SHARE ROW EXCLUSIVE MODE;
+ALTER TABLE sending_campaigns DROP CONSTRAINT sending_campaigns_waiting_reason_check,
+  ADD CHECK (waiting_reason IN ('pacing_window','ses_daily_quota','hosted_daily_quota'));
 -- A workspace may disconnect or switch to BYO. Operator policy survives, but is
 -- only consulted while the workspace has a Hosted connection.
 ALTER TABLE workspaces

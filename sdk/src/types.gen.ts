@@ -686,7 +686,7 @@ export type CampaignDelivery = {
      * Why releasing recipients is currently held, and the best estimate of until when.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota';
         until: string;
     } | null;
 } | null;

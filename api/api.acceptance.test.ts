@@ -4235,10 +4235,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'guard-'||n||'@example.net','subscribed' FROM generate_series(1,3)n`,[wid]);
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM audience_contacts WHERE workspace_id=$1`,[wid,list.id]);
       const c = ok(await local('POST','/v1/campaigns',{name:unique('guard'),from,subject:'Cap',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+      // 99 real recipients already admitted. 112 minus the 12-recipient reserve leaves one marketing slot.
+      const {setHostedLimits}=await import('./scripts/set-hosted-limits.js');
+      await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default']);
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),202);
       await run('campaign.run');
       const campaign = ok(await local('GET',`/v1/campaigns/${c.id}`));
-      assert.equal(campaign.state,'paused'); assert.equal(campaign.delivery.pauseReason.code,'SEND_LIMIT_REACHED'); assert.equal(campaign.delivery.expanded,1);
+      assert.equal(campaign.state,'sending'); assert.equal(campaign.delivery.waiting.reason,'hosted_daily_quota'); assert.equal(campaign.delivery.expanded,1);
+      assert.equal(campaign.delivery.pauseReason,null); assert.ok(Date.parse(campaign.delivery.waiting.until)>Date.now());
+      assert.match(error(await send({kind:'marketing'}),429,'SEND_LIMIT_REACHED').message,/Marketing stops at 100/);
+      error(await local('POST','/v1/emails/batch',{emails:[mail,{...mail,kind:'marketing'}]}),429,'SEND_LIMIT_REACHED');
+      ok(await batch(12),202); // Only transactional traffic can consume the remaining workspace capacity.
       error(await send(),429,'SEND_LIMIT_REACHED');
       // Even a fully drained queue cannot refill the rolling budget. Only an expired admission opens a new slot.
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND status='queued'`,[wid]);
@@ -4246,6 +4253,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`UPDATE sending_emails SET created_at=now()-interval '24 hours' WHERE id=$1`,[recipients[0].id]);
       const queued = ok(await send(),202).id;
       error(await send(),429,'SEND_LIMIT_REACHED');
+      await db.query(`UPDATE sending_emails SET created_at=now()-interval '24 hours' WHERE id=ANY($1::text[])`,[recipients.slice(1,15).map((r:Json)=>r.id)]);
+      await run('campaign.run');
+      const resumed=ok(await local('GET',`/v1/campaigns/${c.id}`));
+      assert.equal(resumed.delivery.expanded,3); assert.equal(resumed.delivery.waiting,null,'Hour expiry releases the tail without a resume request.');
+      await setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']);
       await db.query(`UPDATE provider_connections SET created_at=now()-interval '7 days' WHERE workspace_id=$1`,[wid]);
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
@@ -4343,6 +4355,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
         CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated,data FROM public.sending_email_events WITH NO DATA;
         CREATE TABLE sending_emails (LIKE public.sending_emails INCLUDING DEFAULTS);
+        CREATE TABLE sending_campaigns (LIKE public.sending_campaigns INCLUDING CONSTRAINTS);
         INSERT INTO workspaces VALUES('mature',now()-interval '45 days');
         INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('mature','mature','shared','ready','ready');`);
       await db.query(await readFile(new URL('./migrations/060_hosted_sending_guardrails.sql',import.meta.url),'utf8'));
