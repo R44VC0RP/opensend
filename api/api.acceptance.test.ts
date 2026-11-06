@@ -510,7 +510,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       db: drizzle(authDb!),
       storage: { async put() { throw new Error('Unexpected storage access'); }, async get() { throw new Error('Unexpected storage access'); }, async delete() { throw new Error('Unexpected storage access'); } },
       config: { multiTenant: false, hostedSendCaps: {firstWeek:100,secondWeek:1000,mature:10000}, workspaceId: unique('mock-oauth-workspace'), authSecret: unique('mock-oauth-root-secret'), googleClientId: 'acceptance-client.apps.googleusercontent.com', googleClientSecret: 'synthetic-client-secret',
-        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
+        allowedEmails: [emailAllowed], allowedDomains: ['example.com', 'second.example.com'], defaultWorkspaceOwners: '*', publicUrl: origin, regions: [REGION], liveEnabled: false, apiRateLimitPerMinute: 1200, simulatedSes: { latencyMs: 100, maxSendRate: 1000, deliveryDelayMs: 250 }, dispatch: { rateFactor: 1, dailyHeadroomPercent: 10 }, encryptionKey: '0'.repeat(64), snsTopicArns: [], configurationSets: { transactional: '', marketing: '' } },
     };
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const kid = unique('mock-google-signing-key');
@@ -5124,6 +5124,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('rolling daily headroom holds a sending campaign, admits transactional recipients and drains after quota refresh', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const gate = initialGate(), opts = { gate, lanes: 2, batchSize: 6, quotaRefreshMs: 650 };
+      const list = ok(await local('POST', '/v1/lists', { name: unique('rolling-quota') }), 201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT gen_random_uuid()::text,$1,'rolling-'||n||'@example.net','subscribed' FROM generate_series(1,15)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
+      const c = ok(await local('POST', '/v1/campaigns', { name: unique('rolling-quota'), from: 'sender@example.com', subject: 'Quota fixture', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+      await run('campaign.run');
+      let used = 87, reads = 0, calls = 0, deny = false;
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype, 'send', function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof GetAccountCommand) { reads++; return { SendingEnabled: true, SendQuota: { Max24HourSend: 100, SentLast24Hours: used, MaxSendRate: 1000 } }; }
+        calls++;
+        if (deny) throw Object.assign(new Error('Daily message quota exceeded.'), { name: 'TooManyRequestsException', $metadata: { httpStatusCode: 429 } });
+        return Reflect.apply(send, this, [cmd]);
+      });
+      const drain = () => dispatchDue(runtime, REGION, opts), view = async () => ok(await local('GET', `/v1/campaigns/${c.id}`));
+      const hold = await drain();
+      assert.equal(hold.sent, 3, 'Concurrent lanes together leave the last ten recipients unused by marketing.');
+      assert.ok(hold.quotaRetryAt! > Date.now()); assert.equal((await view()).state, 'sending');
+      const tx = ok(await local('POST', '/v1/emails/send', mail({ to: [address(), address()] })), 202);
+      assert.equal((await drain()).sent, 1);
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [tx.id])).rows[0].status, 'accepted');
+      assert.equal(gate.sentSinceRefresh, 5); assert.equal((await view()).counts.byStatus.queued, 12);
+      assert.deepEqual([reads,calls],[1,4], 'Only the cached refresh and the affordable sends reach SES.');
+      // SES may report exhaustion before the cache reflects other senders. It is a retryable
+      // daily hold, not the five-attempt rate error or a campaign failure.
+      deny = true;
+      const later = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await drain(); await drain();
+      assert.deepEqual([reads,calls],[1,5]);
+      const row = (await db.query('SELECT status,error_code,scheduled_at FROM sending_emails WHERE id=$1',[later.id])).rows[0];
+      assert.equal(row.status,'queued'); assert.equal(row.error_code,'SES_DAILY_QUOTA_EXHAUSTED');
+      used = 100; deny = false;
+      await new Promise(r => setTimeout(r, Math.max(0, new Date(row.scheduled_at).getTime() - Date.now()) + 5));
+      const exhausted = await drain(); assert.equal(exhausted.sent,0); assert.deepEqual([reads,calls],[2,5]);
+      await drain(); assert.deepEqual([reads,calls],[2,5], 'No GetAccount or SendEmail loop during a daily hold.');
+      assert.equal((await view()).state,'sending');
+      used = 20;
+      await new Promise(r => setTimeout(r, Math.max(0, exhausted.quotaRetryAt! - Date.now()) + 5));
+      assert.equal((await drain()).sent,13);
+      const final = await view(); assert.equal(final.state,'done'); assert.equal(final.counts.byStatus.accepted,15); assert.equal(final.counts.total,15);
+      assert.deepEqual((await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1',[later.id])).rows,[{status:'accepted',error_code:null}]);
+      assert.equal(reads,3,'Capacity returns through the normal quota refresh; no resume or provider retry storm.');
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
@@ -5901,19 +5952,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST', `/v1/campaigns/${campaign.id}/resume`, {}));
 
       // The SES 24-hour quota holds expansion while remaining capacity is within the transactional reserve.
-      // 2,000/day with 900 sent and a 1,000 reserve leaves exactly 100 for campaigns.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      // 2,000/day with 1,700 sent and a 10% reserve leaves exactly 100 for campaigns.
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 2000, sent_last_24_hours = 1700, checked_at=clock_timestamp() WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.delivery.expanded, 1200, 'Only the SES allowance above the transactional reserve is released.');
       await db.query(`UPDATE sending_emails SET status = 'delivered', provider_id = 'sim_' || id WHERE campaign_id = $1 AND status = 'queued'`, [campaign.id]);
-      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1100 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      await db.query(`UPDATE sending_region_limits SET sent_last_24_hours = 1900 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       await run('campaign.run');
       view = ok(await local('GET', `/v1/campaigns/${campaign.id}`));
       assert.equal(view.delivery.expanded, 1200, 'Nothing is released into the reserved SES quota.');
       assert.equal(view.delivery.waiting.reason, 'ses_daily_quota');
-      // With quota available, the rest of the new 200/day window (100 already released) goes out, and the run then waits for the next window.
-      await db.query(`UPDATE sending_region_limits SET max_24_hour_send = 100000, sent_last_24_hours = 0 WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
+      // Even with no outstanding rows to refresh the expired quota, expansion must not wait on
+      // yesterday's snapshot forever. It releases a bounded buffer for the dispatcher to check.
+      assert.ok(Date.parse(view.delivery.waiting.until) <= Date.now() + 60_000);
+      await db.query(`UPDATE sending_region_limits SET checked_at = clock_timestamp() - interval '2 minutes' WHERE workspace_id = $1 AND region = $2`, [ws, REGION]);
       pending = (await jobs('campaign.run')).filter(job => job.status === 'pending');
       await db.query(`UPDATE jobs SET available_at = clock_timestamp() WHERE id = $1`, [pending[0]!.id]);
       await run('campaign.run');
@@ -5977,14 +6030,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('dispatch retries definitive throttling once but never replays rejection or uncertain provider acceptance', async t => {
+  test('dispatch retries definitive rate throttles independently of daily holds but never replays rejection or uncertain acceptance', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
         import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),
       ]);
       const faultClient = new SESv2Client({ region: REGION, endpoint: 'https://ses-simulator.invalid', maxAttempts: 1,
         credentials: { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' },
-        requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 1000, outcomes: ['throttle', 'accept', 'reject', 'timeout'] }),
+        requestHandler: createSimulatedSesHandler({ latencyMs: 0, maxSendRate: 1000, outcomes: ['throttle', 'throttle', 'accept', 'reject', 'timeout'] }),
       });
       cleanup(t, async () => { faultClient.destroy(); });
       // Preserve the real SDK serializer, signer and error decoder. Only select
@@ -6024,12 +6077,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await run('email.dispatch');
       assert.equal(providerCalls.length, 1, 'A dispatch pass before the retry is due must not call the provider.');
       assert.equal((await stored(first.id)).dispatch_version, 1);
+      // Model an intervening day hold. A version bump fences stale results, but only actual
+      // per-second throttles consume the five retries and advance their exponential backoff.
+      await db.query(`UPDATE sending_emails SET dispatch_version=2,error_code='SES_DAILY_QUOTA_EXHAUSTED',scheduled_at=clock_timestamp() WHERE id=$1`,[first.id]);
+      const secondStart = Date.now();
+      await run('email.dispatch');
+      const second = await stored(first.id), secondWait = new Date(second.scheduled_at).getTime();
+      assert.equal(second.status,'queued'); assert.ok(secondWait >= secondStart + 4000 && secondWait <= Date.now() + 4000);
       await db.query('UPDATE sending_emails SET scheduled_at = clock_timestamp() WHERE id = $1', [first.id]);
       await run('email.dispatch');
       const accepted = ok(await local('GET', `/v1/emails/${first.id}`));
       assert.equal(accepted.status, 'accepted');
       assert.match(accepted.providerId, /^sim_/);
-      assert.equal((await events(first.id)).filter(event => event.type === 'dispatch_attempt').length, 2);
+      assert.equal((await events(first.id)).filter(event => event.type === 'dispatch_attempt').length, 3);
       assert.equal((await events(first.id)).filter(event => event.type === 'accepted').length, 1);
 
       const terminal: Array<{ id: string; to: string }> = [];
@@ -6053,14 +6113,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.deepEqual(await events(email.id), recorded);
       }
       assert.deepEqual(providerCalls, [
-        { emailId: first.id, to: [retryAddress] }, { emailId: first.id, to: [retryAddress] },
+        ...Array.from({ length: 3 }, () => ({ emailId: first.id, to: [retryAddress] })),
         ...terminal.map(email => ({ emailId: email.id, to: [email.to] })),
       ]);
       const callbacks = await jobs('operation.simulatedFeedback');
       assert.equal(callbacks.length, 2, 'Only the accepted retry may create Send/Delivery feedback vehicles.');
       assert.ok(callbacks.every(job => job.payload.message.mail.messageId === accepted.providerId));
       const versions = (await db.query('SELECT dispatch_version FROM sending_emails WHERE workspace_id = $1 ORDER BY dispatch_version DESC', [runtime.config.workspaceId])).rows;
-      assert.deepEqual(versions, [{ dispatch_version: 1 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
+      assert.deepEqual(versions, [{ dispatch_version: 3 }, { dispatch_version: 0 }, { dispatch_version: 0 }]);
     });
   });
 

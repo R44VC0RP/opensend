@@ -73,7 +73,8 @@ export class DispatcherShard extends DurableObject<Env> {
       this.priorityWake.dispatchEvent(new Event(dispatchWakeKey(identity.region, identity.accountId)));
     }
     // An alarm during a run is harmless: it re-checks for work after the current run returns.
-    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now());
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || (url.searchParams.get('priority') === '1' && alarm > Date.now())) await this.ctx.storage.setAlarm(Date.now());
     return Response.json({ ok: true, running: this.running });
   }
 
@@ -100,6 +101,7 @@ export class DispatcherShard extends DurableObject<Env> {
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
       // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
       if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
+      else if (report.quotaRetryAt && (await this.ctx.storage.getAlarm() ?? Infinity) > report.quotaRetryAt) await this.ctx.storage.setAlarm(report.quotaRetryAt);
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error('DISPATCHER_DEPS_FAILED', error);

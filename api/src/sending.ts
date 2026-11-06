@@ -50,7 +50,8 @@ const DAY_MS = 24 * 3600_000;
 const AUTO_PAUSE = { bounceRate: 0.02, bounceMinimum: 1000, complaintRate: 0.0008, complaintMinimum: 5000, intervalMs: 30 * 60_000 };
 // Campaigns stop releasing recipients while SES's remaining 24-hour quota is within this reserve, which
 // stays available for transactional mail. The quota itself is read from SES, never configured.
-const sesDailyReserve = (max24: number) => Math.max(1000, Math.ceil(max24 * 0.1));
+export const sesDailyReserve = (max24: number, percent: number) => Math.ceil(max24 * percent / 100);
+export const QUOTA_REFRESH_MS = 60_000;
 // A rate-shared campaign aims to release about every five to ten seconds. Each release covers the time actually
 // elapsed since the previous one, because a real cycle (queue wake, claim, job) takes 13-20 s in production;
 // it never banks more than 20 seconds while waiting, so a pause, hold or stall cannot be caught up at full rate.
@@ -1417,7 +1418,7 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string): Pro
 }
 // The campaign row with its frozen snapshot and the cached regional limits: one read per step of the run job.
 type RunAccount = NonNullable<Actor['dispatchAccount']> & { pauseReason: string | null };
-type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; account: RunAccount | null };
+type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | null; reviewRendered: { html?: string; text?: string } | null; rate: number; max24: number; sent24: number; quotaCheckedAt: string | null; account: RunAccount | null };
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
@@ -1425,6 +1426,7 @@ async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     sent24: sql<number>`coalesce((SELECT sent_last_24_hours FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
+    quotaCheckedAt: sql<string | null>`(SELECT checked_at::text FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region})`,
   }).from(campaigns).leftJoin(campaignReviews, eq(campaignReviews.id, campaigns.reviewId)).where(campaignWhere(a, campaignId));
   return row;
 }
@@ -1511,9 +1513,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   if (row.pacePerDay !== null && row.windowStartedAt && !rolling && row.windowExpanded >= row.pacePerDay) await hold('pacing_window', new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString());
   // SES 24-hour quota (cached from GetAccount about every minute): keep a reserve for transactional mail.
   let sesAllowance = Number.POSITIVE_INFINITY, rateAllowance = Number.POSITIVE_INFINITY, shareRate = 0;
-  if (Number(row.max24) > 0) {
-    sesAllowance = Number(row.max24) - Number(row.sent24) - buffered!.total - sesDailyReserve(Number(row.max24));
-    if (sesAllowance <= 0) await hold('ses_daily_quota', new Date(nowMs + 10 * 60_000).toISOString());
+  // Do not hold on an expired snapshot: if the queue is empty, releasing a bounded buffer
+  // gives the dispatcher work on which to perform its ordinary cached quota refresh.
+  const refreshAt = Date.parse(row.quotaCheckedAt ?? '') + QUOTA_REFRESH_MS;
+  if (Number(row.max24) > 0 && refreshAt > nowMs) {
+    sesAllowance = Number(row.max24) - Number(row.sent24) - buffered!.total - sesDailyReserve(Number(row.max24), runtime.config.dispatch.dailyHeadroomPercent);
+    if (sesAllowance <= 0) await hold('ses_daily_quota', new Date(refreshAt).toISOString());
   }
   // Rate share: release at most rateShare of the regional send rate, measured from the previous release.
   if (row.rateShare !== null && row.rateShare < 1 && Number(row.rate) > 0) {

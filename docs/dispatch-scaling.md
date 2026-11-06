@@ -80,6 +80,9 @@ Commits `be8076e` → `7f82248` on `main`.
   admission nudges the active shard (Node: `LISTEN/NOTIFY`; Cloudflare: the existing DO wake) to
   lease fresh transactional work without polling between sends. Existing provider calls finish;
   missed wakes and scheduled rows are still picked up by the ordinary fair per-owner batch lease.
+- Marketing leaves `DISPATCH_DAILY_HEADROOM_PERCENT` of the rolling 24-hour quota unused (default
+  10%); transactional mail may use it. Quota holds leave the campaign `sending` and its rows queued.
+  The dispatcher rechecks at the next quota-cache refresh, not on every send or via a manual resume.
 - Any `429` sets `brakeUntil = now + 10 s` (target falls to the raw quota) and yields the slots the
   shard ran ahead by. Throttled rows requeue with 2 s, 4 s, 8 s, 16 s, 32 s backoff (five attempts).
 - `sending_region_limits` is the shared one-minute quota cache; only a shard that finds it stale calls
