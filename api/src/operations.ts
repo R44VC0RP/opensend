@@ -339,6 +339,7 @@ async function ensureIdentity(client: ReturnType<typeof getSes>, name: string, t
 }
 // A retried/reconnected creation or a verifier can recover an old claim right at its deadline.
 // Recheck and hold the row across Create so recovery cannot recreate the identity after expiry cleanup.
+const identityJournalEntry=(row:Pick<HostedDomain,'connection'|'region'|'name'|'token'>)=>({kind:'identity',resource:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`,claim:row.token});
 function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
@@ -346,7 +347,7 @@ function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
       const identity=await ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo);
       if (regionalByo) {
-        const entry=JSON.stringify([{kind:'identity',resource:`arn:aws:ses:${current.region}:${current.connection.aws_account_id}:identity/${current.name}`,claim:token}]);
+        const entry=JSON.stringify([identityJournalEntry(current)]);
         await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=ownership_journal||${entry}::jsonb WHERE connection_id=${current.connection.id} AND region=${current.region} AND NOT ownership_journal @> ${entry}::jsonb`);
       }
       return identity;
@@ -713,7 +714,12 @@ export function registerOperations(app: App) {
         allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached); return;
       }
       allowedDomain(a,row.name);
-      if (!row.identity?.imported) await deleteClaimIdentity(c.env,a.workspaceId,row);
+      if (!row.identity?.imported) {
+        await deleteClaimIdentity(c.env,a.workspaceId,row);
+        if (row.connection.kind==='byo' && row.connection.legacy===false) await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=(
+          SELECT coalesce(jsonb_agg(e ORDER BY n),'[]') FROM jsonb_array_elements(ownership_journal) WITH ORDINALITY entries(e,n) WHERE NOT e @> ${JSON.stringify(identityJournalEntry(row))}::jsonb)
+          WHERE connection_id=${row.connection.id} AND region=${row.region} AND NOT legacy`);
+      }
       await releaseClaim(db,a.workspaceId,row);
       if (row.connection.kind==='byo' && row.receiving_host) await queueReconcile(db,a.workspaceId,row.region);
     }); return c.json({deleted:true as const},200);

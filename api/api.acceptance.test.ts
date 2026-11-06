@@ -4502,7 +4502,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
-    let external='',failOnce=true,revoked=false,loseSubscribe=true,throttlePoll=false;
+    let external='',failOnce=true,revoked=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
@@ -4517,8 +4517,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
         case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
-        case 'GetEmailIdentityCommand':assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example')throw missing();return {VerificationStatus:revoked?'FAILED':'SUCCESS',VerifiedForSendingStatus:!revoked,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);return {DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};
+        case 'GetEmailIdentityCommand':assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}return {VerificationStatus:revoked?'FAILED':'SUCCESS',VerifiedForSendingStatus:!revoked,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
         case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
         case 'PutConfigurationSetSuppressionOptionsCommand':sets.get(key)!.SuppressionOptions=i;return {};
         case 'GetConfigurationSetEventDestinationsCommand':return {EventDestinations:sets.get(key)!.dest};
@@ -4618,6 +4619,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       finally {await db.query("DELETE FROM byo_domain_intents WHERE connection_id=$1 AND id LIKE 'cap-%'",[v5.id]);}
       ok(await select(va+':reselect.example'),202);await run('byo.bind',va);
       assert.equal((await db.query("SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name='reselect.example'",[wid])).rows[0].region,va);
+    });
+    await t.test('deleting a managed identity prunes only the matching journal and only on success',async()=>{
+      const journal=async():Promise<Json[]> => (await db.query('SELECT ownership_journal FROM provider_connection_regions WHERE connection_id=$1 AND region=$2',[v5.id,oh])).rows[0].ownership_journal;
+      const owned=(await journal()).find(e=>e.kind==='identity' && e.resource.endsWith('/new.example'))!;assert.equal(owned.claim,verify.payload.token);
+      await db.query('UPDATE provider_connection_regions SET ownership_journal=ownership_journal||$1::jsonb WHERE connection_id=$2 AND region=$3',[JSON.stringify([{...owned,claim:randomUUID()}]),v5.id,oh]);
+      const before=await journal(),path='/v1/domains/'+verify.payload.domainId;
+      error(await api('DELETE',path),403,'SES_ACCESS_DENIED');assert.deepEqual(await journal(),before);assert.ok(createdIdentity);
+      ok(await api('DELETE',path));assert.equal(createdIdentity,undefined);assert.deepEqual(await journal(),before.filter(e=>e.claim!==owned.claim));
+      assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE domain_id=$1',[verify.payload.domainId])).rowCount,0);
     });
     const selection={revision:rev,candidateIds:[ohId],confirm:true}, receipt=ok(await api('POST',path+'/imports',selection,'retry-selected'),202);
     ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,3);
