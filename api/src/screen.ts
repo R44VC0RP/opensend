@@ -10,7 +10,7 @@ const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const MAX_BODY = 8000;
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
-const DEADLINE_MS = 45000;
+const DEADLINE_MS = 500;
 const QUESTIONS = {
   spam: {
     type: 'noul',
@@ -34,33 +34,25 @@ function body(snapshot: EmailSnapshot) {
   const source = snapshot.text ?? (snapshot.html ? textOf(snapshot.html) : snapshot.raw ? textOf(snapshot.raw) : '');
   return source.replace(/\s+/g, ' ').trim().slice(0, MAX_BODY);
 }
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-
 async function evaluate(apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
-  // One deadline covers every attempt so a slow classifier cannot outlast the dispatcher's lease.
-  const deadline = Date.now() + DEADLINE_MS;
-  for (let attempt = 0; ; attempt++) {
-    let response: Response;
-    try {
-      response = await fetch(ENDPOINT, {
-        method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model, state, questions: QUESTIONS }), signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
-      });
-    } catch {
-      throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
-    }
-    if (response.ok) {
-      const parsed = await response.json().catch(() => null) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
-      const spam = parsed?.answers?.spam?.noul;
-      if (typeof spam !== 'number' || !Number.isFinite(spam)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no spam score.', undefined, true);
-      return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
-    }
-    // The body may quote the message, so it is discarded, never logged.
+  // The deadline includes reading the response body. Never retry inside a send lease.
+  let response: Response;
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, state, questions: QUESTIONS }), signal: AbortSignal.timeout(DEADLINE_MS),
+    });
+  } catch {
+    throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
+  }
+  if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    const wait = 1000 * 2 ** attempt + Math.random() * 500;
-    if ((response.status === 429 || response.status >= 500) && attempt < 4 && Date.now() + wait < deadline) { await sleep(wait); continue; }
     throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', `The content classifier failed with HTTP ${response.status}.`, undefined, true);
   }
+  const parsed = await response.json().catch(() => null) as { model?: unknown; answers?: { spam?: { noul?: unknown } } } | null;
+  const spam = parsed?.answers?.spam?.noul;
+  if (typeof spam !== 'number' || !Number.isFinite(spam)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no spam score.', undefined, true);
+  return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
 }
 
 /** Spam probability for one snapshot, or null when the installation has no classifier configured. */

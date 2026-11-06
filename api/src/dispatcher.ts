@@ -678,11 +678,36 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
-  const prepared = (await phase('prepare', () => Promise.all(ready.map(async item => {
+  const prepare = async (item: typeof ready[number]) => {
     try { return await prepareMail(item, loadAttachments); }
     catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.owner.a, item.mail, error); }
-  })))).filter((item): item is Prepared => item !== undefined);
-  if (!prepared.length) return { processed: leased.length, blocked: false };
+  };
+  if (ready.some(({mail, owner}) => mail.snapshot.screen && owner.runtime.config.screen && !isSimulatedSes(owner.runtime))) {
+    // Start every preflight together, but don't gate unrelated sends on the slowest classifier.
+    // Drain completions in groups; those arriving during a claim/send form the next group.
+    const available: Prepared[] = [];
+    let notify: (() => void) | undefined, finished = false;
+    const preparing = Promise.allSettled(ready.map(async item => {
+      const p = await prepare(item);
+      if (p) { available.push(p); notify?.(); }
+    })).then(results => { finished = true; notify?.(); return results; });
+    try {
+      while (!finished || available.length) {
+        if (available.length) await dispatchPrepared(base, lane, available.splice(0));
+        else await new Promise<void>(resolve => { notify = resolve; });
+      }
+    } finally {
+      for (const result of await preparing) if (result.status === 'rejected') throw result.reason;
+    }
+  } else {
+    const prepared = await phase('prepare', () => Promise.all(ready.map(prepare)));
+    await dispatchPrepared(base, lane, prepared.filter((item): item is Prepared => item !== undefined));
+  }
+  return { processed: leased.length, blocked: false };
+}
+async function dispatchPrepared(base: Runtime, lane: Lane, prepared: Prepared[]) {
+  if (!prepared.length) return;
+  const {gate, options, counters, phase} = lane;
   const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
   const delayed: Mail[] = [], unpaced: Mail[] = [];
@@ -747,7 +772,6 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   if (marketing.length || unpaced.length) await releaseLeases(base, [...marketing, ...unpaced]);
   if (direct.length) await releaseLeases(base, direct, counters.quotaRetryAt);
   await Promise.all(pendingRecords);
-  return { processed: leased.length, blocked: false };
 }
 async function flushFinishing(runtime: Runtime, lane: Lane) {
   if (!lane.finishing.size) return;

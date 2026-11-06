@@ -6402,6 +6402,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       });
       const marker = unique('CASINO-BONUS');
       let classifierDown = false;
+      let sibling = '', siblingSentAtAbort = false, timeoutMs = 0;
       const classified: string[] = [];
       const passthrough = globalThis.fetch;
       t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
@@ -6414,7 +6415,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(request.questions.spam.type, 'noul');
         assert.equal(request.state.signals.recipients, 1);
         classified.push(request.state.email.subject);
-        if (classifierDown) throw new Error('Synthetic classifier outage');
+        if (request.state.email.subject === 'Unresponsive classifier') {
+          const at = Date.now();
+          return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => {
+            timeoutMs = Date.now() - at; siblingSentAtAbort = sent.includes(sibling); reject(new Error('Timed out'));
+          }, { once: true }));
+        }
+        if (classifierDown) return new Response(null, { status: 429 });
         return Response.json({ model: 'jev-test', answers: { spam: { noul: request.state.email.subject.includes(marker) ? 0.97 : 0.02 } } });
       });
       const send = async (extra: Json) => ok(await local('POST', '/v1/emails/send', mail(extra), 'live'), 202).id as string;
@@ -6447,6 +6454,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await get(outage)).status, 'accepted', 'A classifier outage fails open.');
       assert.ok(sent.includes(outage));
       assert.equal(classified.length, 3);
+      const slow = await send({ subject: 'Unresponsive classifier', screen: true });
+      sibling = await send({ subject: 'Unrelated receipt' });
+      await dispatchDue(runtime, REGION);
+      assert.ok(siblingSentAtAbort, 'The sibling was sent while the slow screen was still pending.');
+      assert.ok(timeoutMs < 1000, `Classifier aborted after ${timeoutMs} ms`);
+      assert.ok(sent.includes(slow));
+      t.diagnostic(`Unresponsive classifier failed open in ${timeoutMs} ms; sibling already sent.`);
     });
   });
 });
