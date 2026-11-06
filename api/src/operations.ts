@@ -481,7 +481,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
     // is established, keep checking it even if DKIM regresses: receive-only routing has its own grace.
     const dkimSuccess=identity.DkimAttributes?.Status==='SUCCESS';
     const checkHostedTxt=row.check_txt || dkimSuccess || row.identity?.proven || sends(row) || row.receiving_host!==null;
-    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain),
+    const [positive,dmarc,observation,upgrade]=await Promise.all([shared ? (checkHostedTxt ? txtProof(`_opensend.${row.name}`,row.token) : false) : identityVerified,observeDmarc(row.name,identity.MailFromAttributes?.MailFromDomain).catch(()=>null),
       scopedImport || row.connection.legacy===false ? undefined : receivingMx(row),scopedImport ? txtProof(`_opensend.${row.name}`,row.token).catch(()=>false) : false]); // Optional ownership lookup never blocks applying SES's sending evidence.
     const report=readiness(row,identity,claimProof(row,positive));
     // The identity binds to the workspace tenant, which the tenant job owns; a verified domain waits for it here.
@@ -534,7 +534,10 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row?.identity || row.token!==payload.token) return;
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
-  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain)]);
+  // undefined preserves the locked row's last observation and its original expiry.
+  // A definitive missing/invalid/ambiguous answer must still replace it.
+  const [observation,dmarc]=await Promise.all([checkReceiving ? receivingMx(row) : undefined,observeDmarc(row.name,row.identity.ses.MailFromAttributes?.MailFromDomain).catch(()=>undefined)]);
+  if(!observation && dmarc===undefined) throw dnsUnavailable();
   await runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,job.workspaceId,row.id,true);
     if (!current?.identity || current.token!==row.token || current.receiving_host!==row.receiving_host) return;
@@ -542,6 +545,7 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
     if(!observation) { await db.execute(sql`UPDATE domain_claims SET identity=jsonb_set(identity,'{dmarc}',${JSON.stringify(dmarc)}::jsonb) WHERE workspace_id=${job.workspaceId} AND name=${current.name} AND token=${current.token}`); return; }
     await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:current.identity.proven},dmarc);
   });
+  if(dmarc===undefined) throw dnsUnavailable(); // Retry after committing any independent MX change.
 };
 
 async function account(runtime: Runtime, wid: string, requested?: string) {

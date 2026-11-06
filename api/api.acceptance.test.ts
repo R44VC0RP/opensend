@@ -1180,6 +1180,13 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               error(await marketing(`sub.${domain}`),409,'BULK_DMARC_REQUIRED'); // A parent check cannot establish the exact From policy.
               policies.set(domain,['v=DMARC1; p=none']);d=await observe();assert.equal(d.dmarc.source,domain);assert.equal(d.dmarc.status,'none');assert.deepEqual(d.dmarc.alignment,{dkim:true,spf:true});await accepted(await marketing());
               policies.set(domain,['v=DMARC1; p=reject']);d=await observe();assert.equal(d.dmarc.status,'reject');assert.deepEqual(recommended(d),[]);
+              const upkeep=()=>operationJobs['domain.mx']!(runtime,job.payload,{id:unique('mx'),attempts:1,workspaceId:b.org.id});
+              const cached=async()=>(await pool.query("SELECT identity->'dmarc' AS policy FROM domain_claims WHERE workspace_id=$1 AND name=$2",[b.org.id,domain])).rows[0].policy;
+              const lastGood=await cached();
+              for(fault of ['TXT-timeout','TXT-503','TXT-servfail']) {
+                await assert.rejects(upkeep(),{code:'DOMAIN_DNS_UNAVAILABLE',retryable:true});assert.deepEqual(await cached(),lastGood);await accepted(await marketing());
+              }
+              fault='';policies.clear();await upkeep();assert.equal((await inspect()).dmarc.status,'missing');error(await marketing(),409,'BULK_DMARC_REQUIRED');
               for(const records of [['v=DMARC1; p=bogus'],['v=DMARC1; p=none; p=reject'],['v=DMARC1; p=reject','v=DMARC1; p=none'],['v=DMARC1; p=reject; adkim=x']]) {
                 policies.set(domain,records);d=await observe();assert.equal(d.dmarc.status,'invalid');assert.deepEqual(recommended(d),[]);error(await marketing(),409,'BULK_DMARC_REQUIRED');
               }
@@ -1188,7 +1195,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
               identity.MailFromAttributes={MailFromDomain:`email.${domain}`,MailFromDomainStatus:'FAILED'};d=await observe();assert.deepEqual(d.dmarc.alignment,{dkim:false,spf:false});error(await marketing(),409,'BULK_DMARC_REQUIRED');
               dmarcFailure=true; d=await observe();assert.equal(d.dmarc,null);assert.deepEqual(recommended(d),[]);error(await marketing(),409,'BULK_DMARC_REQUIRED');
               const staleCount=dmarcQueries;assert.equal((await inspect()).dmarc,null); assert.equal(dmarcQueries,staleCount);
-            } finally {runtime.config.requireDmarcForBulk=originalFlag;policies.clear();dmarcFailure=false;identity.MailFromAttributes=originalMailFrom;identity.DkimAttributes=dkim;await observe();}
+            } finally {runtime.config.requireDmarcForBulk=originalFlag;policies.clear();dmarcFailure=false;fault='';identity.MailFromAttributes=originalMailFrom;identity.DkimAttributes=dkim;await observe();}
           });
           await dt.test('MX inbound routes only MX-verified customer hosts, independently of DKIM, and splits private Bcc',async it=>{
             const {acceptInboundNotification,mailboxIngestJobs}=await import('./src/mailbox-ingest.js');

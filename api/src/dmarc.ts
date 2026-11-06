@@ -30,30 +30,27 @@ function policyAt(values:string[],source:string,inherited:boolean):PolicyRecord|
 // The verifier persists this alongside its SES and MX facts. No resolver calls in MX reads or admissions.
 export async function observeDmarc(name:string,mailFrom?:string):Promise<DmarcObservation|null> {
   const signal=AbortSignal.timeout(5000);
-  try {
-    const {root}=await placementRoot(name), query=(host:string)=>dns('_dmarc.'+host,'TXT',signal);
-    const exact=await query(name);
-    let policy=policyAt(exact.values,name,false), empty=!exact.values.length && exact.aliases.length===1;
-    if(!policy && root && root!==name) {
-      const org=await query(root);
-      policy=policyAt(org.values,root,true);
-      empty &&= !org.values.length && org.aliases.length===1;
-    }
-    // Our alignment boundary is the shared PSL. Before recommending a new TXT,
-    // also rule out an inherited policy visible to RFC 9989 tree-walk receivers
-    // (an intermediate ancestor or the public suffix itself). If the two discovery
-    // methods disagree, or any answer is inconclusive, don't prescribe a policy.
-    if(!policy && empty) {
-      const labels=name.split('.').slice(1).slice(-7);
-      const other=labels.map((_,i)=>labels.slice(i).join('.')).filter(host=>host!==root);
-      const answers=await Promise.all(other.map(query));
-      if(answers.some((rr,i)=>policyAt(rr.values,other[i]!,true))) return null;
-    }
-    policy??={status:'missing',record:null,source:null,adkim:'r',aspf:'r'};
-    const bounce=mailFrom && fqdn(mailFrom);
-    const aligns=bounce && (name===bounce || (policy.aspf==='r' && root && (await placementRoot(bounce)).root===root));
-    return {...policy,checkedAt:Date.now(),recommend:policy.status==='missing' && empty,alignedMailFrom:aligns?bounce:null};
-  } catch { return null; } // Timeout, truncation and SERVFAIL are not evidence of absence.
+  const {root}=await placementRoot(name), query=(host:string)=>dns('_dmarc.'+host,'TXT',signal);
+  const exact=await query(name);
+  let policy=policyAt(exact.values,name,false), empty=!exact.values.length && exact.aliases.length===1;
+  if(!policy && root && root!==name) {
+    const org=await query(root);
+    policy=policyAt(org.values,root,true);
+    empty &&= !org.values.length && org.aliases.length===1;
+  }
+  // Our alignment boundary is the shared PSL. Before recommending a new TXT,
+  // also rule out an inherited policy visible to RFC 9989 tree-walk receivers.
+  // An authoritative disagreement returns null; transport failures reject.
+  if(!policy && empty) {
+    const labels=name.split('.').slice(1).slice(-7);
+    const other=labels.map((_,i)=>labels.slice(i).join('.')).filter(host=>host!==root);
+    const answers=await Promise.all(other.map(query));
+    if(answers.some((rr,i)=>policyAt(rr.values,other[i]!,true))) return null;
+  }
+  policy??={status:'missing',record:null,source:null,adkim:'r',aspf:'r'};
+  const bounce=mailFrom && fqdn(mailFrom);
+  const aligns=bounce && (name===bounce || (policy.aspf==='r' && root && (await placementRoot(bounce)).root===root));
+  return {...policy,checkedAt:Date.now(),recommend:policy.status==='missing' && empty,alignedMailFrom:aligns?bounce:null};
 }
 
 export function dmarcView(obs:DmarcObservation|null|undefined,ses:IdentityFacts['ses']) {
@@ -71,7 +68,7 @@ const local=new Map<string,{value:DmarcObservation|null;until:number}>();
 export async function localDmarc(name:string,mailFrom?:string,refresh=false) {
   const key=name+':'+(mailFrom ?? ''), hit=local.get(key);
   if(!refresh && hit && hit.until>Date.now()) return hit.value;
-  const value=await observeDmarc(name,mailFrom);
+  const value=await observeDmarc(name,mailFrom).catch(()=>null);
   if(local.size>=256) local.delete(local.keys().next().value!);
   local.set(key,{value,until:Date.now()+(value?300_000:30_000)}); return value;
 }
