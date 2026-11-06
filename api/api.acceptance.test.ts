@@ -5071,6 +5071,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal(shardRate(gate, undefined, pacing), 22, 'The brake releases after its window.');
   });
 
+  test('transactional mail wins the next lease ahead of older non-campaign marketing', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'fixture', policyVersion: 'v1', evidence: 'Synthetic fixture.', occurredAt: new Date().toISOString() }));
+      const marketing = ok(await local('POST', '/v1/emails/send', mail({ to: contact.email, kind: 'marketing' })), 202);
+      await db.query("UPDATE sending_emails SET created_at = now() - interval '1 hour' WHERE id = $1", [marketing.id]);
+      const transactional = ok(await local('POST', '/v1/emails/send', mail()), 202);
+      await dispatchDue(runtime, REGION, { batchSize: 1, until: Date.now() });
+      const { rows } = await db.query('SELECT id, status FROM sending_emails WHERE id = ANY($1)', [[transactional.id, marketing.id]]);
+      assert.deepEqual(Object.fromEntries(rows.map(r => [r.id, r.status])), { [transactional.id]: 'accepted', [marketing.id]: 'queued' });
+    });
+  });
+
   test('SDK responses preserve acceptance, rejection, throttling and timeout semantics without network', async t => {
     const [{ SESv2Client, SendEmailCommand, GetAccountCommand }, { createSimulatedSesHandler }] = await Promise.all([
       import('@aws-sdk/client-sesv2'), import('./src/adapters/simulated-ses.js'),

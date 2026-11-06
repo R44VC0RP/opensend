@@ -167,7 +167,8 @@ type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind'] };
 async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], accountId?: string): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(scheduled_at IS NULL OR scheduled_at <= clock_timestamp()) AND (lease_until IS NULL OR lease_until < clock_timestamp())`;
-  const priority = sql`ORDER BY (campaign_id IS NULL) DESC, created_at, id`;
+  const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
+  const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
     ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
       WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
@@ -180,8 +181,8 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
         SELECT workspace_id FROM sending_emails WHERE ${queued} AND workspace_id > o.workspace_id ORDER BY workspace_id LIMIT 1
       ) n`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE owners(workspace_id) AS (${ownersSql}), candidates AS (
-      SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.direct DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
-        SELECT id, (campaign_id IS NULL) AS direct, created_at, row_number() OVER (${priority}) AS turn
+      SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
+        SELECT id, ${transactional} AS transactional, created_at, row_number() OVER (${priority}) AS turn
         ${dueForOwner} ${priority} LIMIT ${limit}
       ) q
     ), shares AS MATERIALIZED (
@@ -218,7 +219,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
     LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
-    ORDER BY (leased.campaign_id IS NULL) DESC, leased.created_at, leased.id`);
+    ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
   return result.rows.map(row => {
     const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, ...fields } = row;
@@ -572,12 +573,11 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     log('warn', { code: 'SES_DAILY_QUOTA_EXHAUSTED', region: options.region });
     return { processed: 0, blocked: true };
   }
-  const prepared: Prepared[] = [];
   const loadAttachments = batchAttachments(base, ready);
-  await phase('prepare', () => Promise.all(ready.map(async item => {
-    try { prepared.push(await prepareMail(item, loadAttachments)); }
+  const prepared = (await phase('prepare', () => Promise.all(ready.map(async item => {
+    try { return await prepareMail(item, loadAttachments); }
     catch (error) { counters.skipped++; await rejectPreflight(item.owner.runtime, item.owner.a, item.mail, error); }
-  })));
+  })))).filter((item): item is Prepared => item !== undefined);
   if (!prepared.length) return { processed: leased.length, blocked: false };
   const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
