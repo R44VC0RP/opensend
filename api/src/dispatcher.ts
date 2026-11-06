@@ -159,6 +159,10 @@ export function brake(gate: GateState) {
   gate.nextAllowedAt = Math.max(gate.nextAllowedAt, Date.now() + 1000);
 }
 const marketingCredits = (q: QuotaSnapshot, percent: number) => Math.max(0, q.max24HourSend - q.sentLast24Hours - sesDailyReserve(q.max24HourSend, percent));
+// Trust at most two extra refresh periods past expiry, never a sample stale for hours.
+// Each shard must fit its spend plus one maximum-size envelope into its share of headroom.
+const maxProvisionalAge = (period: number) => 3 * Math.min(period, QUOTA_REFRESH_MS);
+const provisionalMargin = (spent: number, recipients: number, shard: DispatcherOptions['shard']) => (spent + recipients + 50) * (shard?.count ?? 1);
 function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: DispatcherOptions['shard']) {
   if (gate.dailyBlockedUntil) return 0; // A fresh account snapshot, not a slot timer, releases a provider daily denial.
   const quota = gate.quota;
@@ -177,7 +181,7 @@ function dailyRemaining(gate: GateState, headroomPercent?: number, shard?: Dispa
 
 // One statement leases the oldest due mail for this region and returns it with its frozen review inputs.
 type DeferredStream = { workspace_id: string; stream: EmailSnapshot['kind']; until?: number };
-async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number }): Promise<Leased[]> {
+async function leaseDue(runtime: Runtime, region: string, limit: number, deferred: DeferredStream[], runClients: Map<string, SESv2Client>, accountId?: string, priorityOnly = false, readQuota = false, inline?: { gate: GateState; period: number; margin: number }): Promise<Leased[]> {
   const queued = sql`region = ${region} AND status = 'queued'`;
   const available = sql`(lease_until IS NULL OR lease_until < statement_timestamp())`;
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
@@ -219,10 +223,11 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       AND NOT (e.snapshot ?| array['raw','deferredCampaign']) AND NOT coalesce((e.snapshot->>'screen')::boolean,false)
       AND e.snapshot->'attachments'='[]'::jsonb AND e.snapshot->'cc'='[]'::jsonb AND e.snapshot->'bcc'='[]'::jsonb
       AND jsonb_array_length(e.snapshot->'to')=1 AND octet_length(e.snapshot::text)<65536
-      AND ((s.quota_sample->>'age_ms')::float8 < ${inline.period} OR floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) IS DISTINCT FROM ${inline.gate.staleSampleUsed ?? null}::numeric)
+      AND ((s.quota_sample->>'age_ms')::float8 < ${inline.period} OR ((s.quota_sample->>'age_ms')::float8 < ${maxProvisionalAge(inline.period)}
+        AND floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) IS DISTINCT FROM ${inline.gate.staleSampleUsed ?? null}::numeric))
       AND floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) >= ${inline.gate.quota?.checkedAt ?? 0}
       AND ((s.quota_sample->>'max')::float8 < 0 OR (s.quota_sample->>'max')::float8 - (s.quota_sample->>'sent')::float8
-        - ceil((s.quota_sample->>'max')::float8 * ${runtime.config.dispatch.dailyHeadroomPercent} / 100) > ${inline.gate.sentSinceRefresh + 51})`;
+        - ceil((s.quota_sample->>'max')::float8 * ${runtime.config.dispatch.dailyHeadroomPercent} / 100) > ${inline.margin})`;
   const result = await runtime.db.execute<Record<string, unknown>>(sql`WITH RECURSIVE owners(workspace_id) AS (${ownersSql}), candidates AS (
       SELECT o.workspace_id, row_number() OVER (ORDER BY q.turn, q.transactional DESC, q.created_at, q.id) AS place FROM owners o CROSS JOIN LATERAL (
         SELECT p.*,row_number() OVER (ORDER BY transactional DESC,created_at,id) AS turn FROM (${page(sql`${limit}`)}) p
@@ -718,13 +723,13 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     if (q) {
       const sample = { maxSendRate:q.rate, max24HourSend:options.accountId ? q.max : q.max || -1, sentLast24Hours:q.sent, checkedAt:Date.parse(q.checked) };
       if (q.age_ms < period) observeQuota(gate, sample, period, q.age_ms);
-      else if (gate.staleSampleUsed !== sample.checkedAt && !gate.dailyBlockedUntil && ready.some(item => item.mail.snapshot.kind === 'transactional')) {
+      else if (q.age_ms < maxProvisionalAge(period) && gate.staleSampleUsed !== sample.checkedAt && !gate.dailyBlockedUntil && ready.some(item => item.mail.snapshot.kind === 'transactional')) {
         // One idle transactional batch may use the last known rate while comfortably outside
         // the daily reserve, even while another shard refreshes. A failed refresher cannot
         // authorize another batch against the same sample on this shard.
         const spent = gate.quota && gate.quota.checkedAt >= sample.checkedAt ? gate.sentSinceRefresh : 0;
         const recipients = ready.reduce((n, {mail:{snapshot:s}}) => n + s.to.length + s.cc.length + s.bcc.length, 0);
-        if ((!gate.quota || sample.checkedAt >= gate.quota.checkedAt) && (sample.max24HourSend < 0 || marketingCredits(sample, base.config.dispatch.dailyHeadroomPercent) > spent + recipients + 50)) {
+        if ((!gate.quota || sample.checkedAt >= gate.quota.checkedAt) && (sample.max24HourSend < 0 || marketingCredits(sample, base.config.dispatch.dailyHeadroomPercent) > provisionalMargin(spent, recipients, options.shard))) {
           observeQuota(gate, sample, period, q.age_ms); gate.refreshAt = 0; gate.staleSampleUsed = sample.checkedAt; refreshAfterSend = true;
         }
       }
@@ -941,7 +946,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
       priorityOnly = true; // Seek past the entire marketing queue, including owners this run hasn't seen.
     }
     const inline = first && runtime.config.multiTenant && !gate.dailyBlockedUntil && gate.nextAllowedAt <= now && (gate.brakeUntil ?? 0) <= now
-      ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs) } : undefined;
+      ? { gate, period: Math.max(1000,lane.options.quotaRefreshMs), margin: provisionalMargin(gate.sentSinceRefresh, 1, options.shard) } : undefined;
     return phase('lease', () => leaseDue(runtime, options.region, lane.options.batchSize, lane.deferred, runClients, options.accountId, priorityOnly, first && (!gate.quota || now >= (gate.refreshAt ?? 0)), inline));
   };
   let blocked = false;

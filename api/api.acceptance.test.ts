@@ -5523,6 +5523,36 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX shard leases wait for fresh quota before claiming against old or thin daily headroom', async t => {
+    await simulatedSesFixture(t, async ({runtime, local, db}) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const ws=runtime.config.workspaceId, accountId='111122223333';
+      const ids=[ok(await local('POST','/v1/emails/send',mail()),202).id,ok(await local('POST','/v1/emails/send',mail()),202).id];
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,accountId,`arn:aws:sns:${REGION}:${accountId}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[ws,REGION,accountId]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('example.com',$1,$1,'verified')`,[ws]);
+      let reads=0,sends=0;
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any) => {
+        if (!(cmd instanceof GetAccountCommand)) { sends++; return {MessageId:unique('unexpected')}; }
+        reads++; return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:1000,SentLast24Hours:1000}};
+      });
+      for (const [ageSeconds,used] of [[90,800],[3600,0]]) for (const batchSize of [1,2]) {
+        // 100 credits above reserve would pass the old per-shard 51-credit threshold. The
+        // other case has abundant credits but is an hour old. Neither can authorize an attempt.
+        await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after)
+          VALUES($1,$2,1000,1000,$3,clock_timestamp()-$4::int*interval '1 second','-infinity') ON CONFLICT(aws_account_id,region) DO UPDATE SET
+          sent_last_24_hours=excluded.sent_last_24_hours,checked_at=excluded.checked_at,refresh_after=excluded.refresh_after`,[accountId,REGION,used,ageSeconds]);
+        const before=reads;
+        await Promise.all([0,1].map(index=>dispatchDue(runtime,REGION,{accountId,batchSize,lanes:1,shard:{index,count:4}})));
+        assert.equal(reads-before,1); assert.equal(sends,0);
+        assert.equal((await db.query("SELECT id FROM sending_emails WHERE id=ANY($1) AND status='queued' AND attempt_started_at IS NULL AND lease_until IS NULL",[ids])).rowCount,2);
+        assert.equal((await db.query("SELECT id FROM sending_email_events WHERE email_id=ANY($1) AND type='dispatch_attempt'",[ids])).rowCount,0);
+      }
+    });
+  });
+
   test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
