@@ -1,4 +1,4 @@
-/* Credentials page: plain sections split by hairlines, no boxes (same rhythm as onboarding). */
+/* API keys page: plain sections split by hairlines, no boxes (same rhythm as onboarding). */
 .keys-sections { display: flex; flex-direction: column; min-width: 0; }
 .keys-sections > .section { margin-block: 0; }
 .keys-sections > .section:not(:first-child) { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
@@ -7,6 +7,20 @@
 .keys-head > p { max-width: 60ch; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
 /* Two-line rows (name + caption, access + scope) render 53px; the skeleton must match. */
 .ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
-.keys-head > .ui-section-header { align-items: center; flex-wrap: wrap; }
 /* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
-.keys-sections .ui-table { min-width: 880px; }
+.keys-table .ui-table { min-width: 880px; }
+.keys-cell { min-width: 0; }
+.keys-cell > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Create key dialog: plain choices up front, exact scope under Advanced. */
+.keys-purpose { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; margin: 0; padding: 0; border: 0; }
+.keys-purpose > legend { padding: 0; margin-bottom: var(--space-8); }
+.keys-choice { display: flex; align-items: flex-start; gap: var(--space-8); cursor: pointer; }
+.keys-choice input { appearance: none; flex-shrink: 0; width: var(--space-16); height: var(--space-16); margin: 2px 0 0; border-radius: 50%; background: var(--color-surface); box-shadow: var(--shadow-button); cursor: inherit; transition: box-shadow var(--motion-duration), background var(--motion-duration); }
+.keys-choice input:checked { background: var(--color-on-accent); box-shadow: inset 0 0 0 5px var(--color-accent); }
+.keys-purpose:disabled .keys-choice { color: var(--color-muted); cursor: not-allowed; }
+.keys-advanced > summary { width: fit-content; max-width: 100%; cursor: pointer; font-weight: var(--font-weight-bold); overflow-wrap: anywhere; }
+.keys-advanced > summary .muted { font-weight: var(--font-weight-regular); }
+.keys-advanced-body { display: flex; flex-direction: column; gap: var(--space-16); padding-top: var(--space-16); min-width: 0; }
+.keys-advanced-body .settings-key-domains > legend { margin-bottom: var(--space-8); }
+.keys-advanced-body .settings-key-domains > .ui-field__hint { margin: 0; }

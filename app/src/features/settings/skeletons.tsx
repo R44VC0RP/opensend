@@ -2,13 +2,14 @@ import { ControlSkeleton, FieldSkeleton, LoadingRegion, PageHeader, SectionHeade
 import { useRegion, useWorkspaceAccess } from '../../data/context'
 import './settings.css'
 import './domain-records.css'
+import './api-keys.css'
 
 const twoLines = <div><SkeletonText width="74%" /><SkeletonText width="88%" /></div>
 export const settingsColumns = {
   keys: [
-    { key: 'name', label: 'Name', width: '23%' },
-    { key: 'prefix', label: 'Key prefix', width: '20%' },
-    { key: 'permission', label: 'Permissions', width: '30%' },
+    { key: 'name', label: 'Name', width: '26%', skeleton: twoLines },
+    { key: 'access', label: 'Access', width: '32%', skeleton: twoLines },
+    { key: 'prefix', label: 'Key prefix', width: '18%' },
     { key: 'last', label: 'Last used' },
     { key: 'actions', label: '', align: 'right', width: 100, skeleton: <ControlSkeleton width={76} /> },
   ],
@@ -105,5 +106,6 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  return <LoadingRegion className="stack" label={kind === 'keys' ? 'Loading API keys' : 'Loading domains'}><PageHeader title={kind === 'keys' ? 'Credentials' : 'Domains'} actions={kind === 'keys' ? <><ControlSkeleton width={104} /><ControlSkeleton width={116} /></> : <ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton columns={settingsColumns[kind]} rows={3} pagination={kind === 'domains'} /></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={89} /></>} /><div className="keys-sections"><section className="section stack"><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton columns={settingsColumns[kind]} rows={3} pagination /></LoadingRegion>
 }
