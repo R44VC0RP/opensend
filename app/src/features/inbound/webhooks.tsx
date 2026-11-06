@@ -6,6 +6,7 @@ import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
 import { date, time } from '../../lib/format'
 import { fieldError, MutationError, SecretDialog } from '../settings/shared'
+import { headerDraftErrors, HeaderNames, headerPayload, headersChanged, WebhookHeadersField, type HeaderDraft } from '../settings/webhook-headers'
 import '../settings/settings.css'
 import './inbound.css'
 
@@ -25,7 +26,7 @@ function validate(input: InboundWebhookInput) {
 }
 const scopeText = (webhook: InboundWebhook, addresses?: InboundAddress[]) => webhook.addressIds ? webhook.addressIds.map(id => addresses?.find(item => item.id === id)?.address ?? id).join(', ') : 'All addresses'
 
-function WebhookFields({ input, onChange, addresses, errors, apiError, disabled }: { input: InboundWebhookInput; onChange: (input: InboundWebhookInput) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean }) {
+function WebhookFields({ input, onChange, addresses, errors, apiError, disabled, headers }: { input: InboundWebhookInput; onChange: (input: InboundWebhookInput) => void; addresses?: InboundAddress[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: InboundWebhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
   return <div className="stack">
     <div className="form-grid">
       <Field label="Description" htmlFor="mailbox-webhook-description"><Input id="mailbox-webhook-description" value={input.description} onChange={event => onChange({ ...input, description: event.target.value })} disabled={disabled} placeholder="Support agent runtime" /></Field>
@@ -40,6 +41,7 @@ function WebhookFields({ input, onChange, addresses, errors, apiError, disabled 
       {inboundEventTypes.map(type => <Checkbox key={type} disabled={type === 'message.stored' && input.addressIds !== null} label={<span className="settings-cell-stack"><code>{type}</code>{eventInfo[type] && <span className="ui-field__hint">{eventInfo[type]}</span>}</span>} checked={input.eventTypes.includes(type)} onCheckedChange={checked => onChange({ ...input, eventTypes: checked ? [...input.eventTypes, type] : input.eventTypes.filter(value => value !== type) })} />)}
       {(errors.eventTypes || fieldError(apiError, 'eventTypes')) && <p className="ui-field__error" role="alert">{errors.eventTypes || fieldError(apiError, 'eventTypes')}</p>}
     </fieldset>
+    <WebhookHeadersField current={headers.current} draft={headers.draft} onChange={headers.onChange} errors={errors} apiError={apiError} disabled={disabled} />
   </div>
 }
 
@@ -50,14 +52,15 @@ export function InboundWebhooksPage() {
   const create = useApiMutation((api, input: InboundWebhookInput) => api.inbound.createWebhook(input), 'Webhook created')
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState<InboundWebhookInput>(blank)
+  const [headers, setHeaders] = useState<HeaderDraft>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [secret, setSecret] = useState<{ value: string; id: string } | null>(null)
-  function openCreate() { create.reset(); setInput(blank); setErrors({}); setOpen(true) }
+  function openCreate() { create.reset(); setInput(blank); setHeaders([]); setErrors({}); setOpen(true) }
   async function submit(event: FormEvent) {
     event.preventDefault()
-    const next = validate(input); setErrors(next)
+    const next = { ...validate(input), ...headerDraftErrors(headers) }; setErrors(next)
     if (Object.keys(next).length) return
-    try { const result = await create.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim() }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
+    try { const result = await create.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim(), headers: headerPayload(headers) }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
     <PageHeader title="Inbound webhooks" backTo="/inbound" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
@@ -65,15 +68,16 @@ export function InboundWebhooksPage() {
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/inbound/webhooks/${row.id}`)}
       empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
-        { key: 'endpoint', label: 'Endpoint', width: '38%', render: row => <div className="settings-cell-stack"><Link to={`/inbound/webhooks/${row.id}`}>{row.description || new URL(row.url).host}</Link><span className="muted settings-break">{row.url}</span></div> },
-        { key: 'addresses', label: 'Addresses', width: '24%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
-        { key: 'events', label: 'Events', width: '16%', render: row => <span title={row.eventTypes.join(', ')}>{row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span> },
+        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/inbound/webhooks/${row.id}`}>{row.description || new URL(row.url).host}</Link><span className="muted settings-break">{row.url}</span></div> },
+        { key: 'addresses', label: 'Addresses', width: '20%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
+        { key: 'events', label: 'Events', width: '14%', render: row => <span title={row.eventTypes.join(', ')}>{row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span> },
+        { key: 'headers', label: 'Headers', width: '16%', render: row => <HeaderNames headers={row.headers} /> },
         { key: 'status', label: 'Status', render: row => <StatusBadge status={row.paused ? 'Paused' : 'Active'} tone={row.paused ? 'neutral' : 'success'} /> },
       ]} />}
     <Dialog open={open} onOpenChange={next => { if (!create.isPending) setOpen(next) }} title="Add inbound webhook" footer={<><Button disabled={create.isPending} onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="create-mailbox-webhook">Add webhook</Button></>}>
       <form id="create-mailbox-webhook" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
-        <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={create.error} disabled={create.isPending} />
+        <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={create.error} disabled={create.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
       </form>
     </Dialog>
     <SecretDialog secret={secret?.value ?? null} title="Signing secret" onClose={() => { const target = secret?.id; setSecret(null); if (target) navigate(`/inbound/webhooks/${target}`) }} />
@@ -90,18 +94,21 @@ export function InboundWebhookDetailPage() {
   const rotate = useApiMutation((api, _: void) => api.inbound.rotateWebhookSecret(id))
   const remove = useApiMutation((api, _: void) => api.inbound.deleteWebhook(id), 'Webhook deleted')
   const [input, setInput] = useState<InboundWebhookInput | null>(null)
+  const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput({ url: webhook.data.url, description: webhook.data.description, eventTypes: webhook.data.eventTypes, addressIds: webhook.data.addressIds }) }, [webhook.data, input])
   if (webhook.error) return <><PageHeader title="Inbound webhook" backTo="/inbound/webhooks" /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   const current = webhook.data
-  const dirty = !!current && !!input && JSON.stringify({ url: current.url, description: current.description, eventTypes: [...current.eventTypes].sort(), addressIds: current.addressIds }) !== JSON.stringify({ ...input, eventTypes: [...input.eventTypes].sort() })
+  // The saved response is newer than the cached endpoint until the refetch lands.
+  const currentHeaders = save.data?.headers ?? current?.headers ?? []
+  const dirty = !!current && !!input && (headersChanged(headers, currentHeaders) || JSON.stringify({ url: current.url, description: current.description, eventTypes: [...current.eventTypes].sort(), addressIds: current.addressIds }) !== JSON.stringify({ ...input, eventTypes: [...input.eventTypes].sort() }))
   async function submit(event: FormEvent) {
     event.preventDefault(); if (!input) return
-    const next = validate(input); setErrors(next)
+    const next = { ...validate(input), ...headerDraftErrors(headers) }; setErrors(next)
     if (Object.keys(next).length) return
-    try { await save.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim() }) } catch { /* Shown in the form. */ }
+    try { await save.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim(), headers: headerPayload(headers, currentHeaders) }); setHeaders(null) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
     <PageHeader title={current ? current.description || new URL(current.url).host : <SkeletonText width={220} lineHeight={28} />} backTo="/inbound/webhooks" actions={current && <>
@@ -130,8 +137,8 @@ export function InboundWebhookDetailPage() {
         <SectionHeader title="Settings" />
         {!input ? <SkeletonText width="60%" /> : <form className="stack" onSubmit={submit} noValidate>
           <MutationError error={save.error} />
-          <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} />
-          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setErrors({}) }}>Discard</Button>}</div>
+          <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: currentHeaders, draft: headers, onChange: setHeaders }} />
+          <div className="cluster"><Button variant="primary" type="submit" loading={save.isPending && dirty} disabled={!dirty}>Save changes</Button>{dirty && <Button onClick={() => { setInput(null); setHeaders(null); setErrors({}) }}>Discard</Button>}</div>
         </form>}
       </section>
     </>}

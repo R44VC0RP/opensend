@@ -124,8 +124,12 @@ export interface InboundRecipients { to: string[]; cc: string[]; bcc: string[] }
 export interface InboundThreadDetail extends InboundThread { messages: InboundMessage[]; nextCursor: string | null; addressStates?: InboundAddressState[] }
 export interface InboundReplyInput { text: string; addressId?: string; replyToMessageId?: string; replyAll?: boolean; allowAutomated?: boolean; expectedRecipients?: InboundRecipients; idempotencyKey: string }
 export interface InboundThreadInput { addressId: string; to: string[]; subject: string; text: string; idempotencyKey: string }
-export interface InboundWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; createdAt: ISODate; updatedAt: ISODate }
-export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null }
+/** Header values are write-only: reads return names, and a masked hint for managers. */
+export interface WebhookHeaderView { name: string; hint?: string; updatedAt?: ISODate }
+/** Omitted on update to keep the current headers; any list replaces them all, and [] removes them. */
+export interface WebhookHeaderInput { name: string; value: string }
+export interface InboundWebhook { id: string; url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; paused: boolean; headers: WebhookHeaderView[]; createdAt: ISODate; updatedAt: ISODate }
+export interface InboundWebhookInput { url: string; description: string; eventTypes: MailboxEventType[]; addressIds: string[] | null; headers?: WebhookHeaderInput[] }
 export interface ReceivedEmail {
   id: string; threadId: string; status: string; from: MailAddress; to: MailAddress[]; subject: string; snippet: string
   receivedAt: ISODate; attachmentCount: number; spam: boolean; region: RegionId | null
@@ -139,8 +143,8 @@ export interface ReceivedEmailDetail extends ReceivedEmail {
   sizeBytes: number | null; rawUrl: string | null
 }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
-export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; deliveries: WebhookDelivery[]; nextCursor?: string | null }
-export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'regionIds' | 'events'> & { id?: string }
+export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
+export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'regionIds' | 'events'> & { id?: string; headers?: WebhookHeaderInput[] }
 export interface ImportRow { email: string; name?: string; country?: string; subscribed?: boolean }
 export interface ImportResult { created: number; matched: number; skipped: number; issues: { row: number; message: string }[] }
 export class ApiError extends Error {

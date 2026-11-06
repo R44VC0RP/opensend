@@ -1,6 +1,7 @@
 import { ApiError } from './types'
-import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
+import type { AudienceList, AudiencePreview, Campaign, CampaignInput, CampaignTemplate, CampaignTemplateDraft, Contact, ContactInput, Domain, Email, InboundMessage, InboundThread, InboundWebhook, WebhookHeaderInput, WebhookHeaderView, Mailbox, MailboxDomain, MailboxMessage, MailboxThreadDetail, OpenSendApi, PageRequest, PageResult, RegionCatalog, RegionCatalogEntry, SesDiscovery, Segment, SegmentInput, SegmentRule, Webhook, WebhookDelivery, WebhookEvent } from './types'
 import { ownAddressesOf, replyRecipients, senderOf } from '../lib/reply-recipients'
+import { webhookHeaderErrors, webhookHeaderHint } from '../lib/webhook-headers'
 import { createSeed, demoInboundLinks, demoMailboxAccess, demoMailboxes, demoMailboxThreads, demoReceived } from './seed'
 import type { DemoAttachment, DemoState } from './seed'
 
@@ -132,7 +133,15 @@ function inboundThread(state: DemoState, row: MailboxThreadDetail, addressId?: s
   if (!last) return null
   return { id: row.id, subject: last.subject || row.subject, snippet: last.snippet, lastMessageAt: last.receivedAt, addressIds: addressId ? [addressId] : [...new Set(row.messages.flatMap(message => inboundLinks(state, message)))].sort(), messageCount: visible.length }
 }
-const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => webhook
+const inboundWebhook = ({ deliveries: _d, ...webhook }: InboundWebhook & { deliveries?: unknown }): InboundWebhook => ({ ...webhook, headers: webhook.headers ?? [] })
+// Like the API, the demo keeps only names and masked hints; header values are never stored or returned.
+function headerViews(headers: WebhookHeaderInput[]): WebhookHeaderView[] {
+  if (!Array.isArray(headers)) invalid('headers', 'Headers must be a list.')
+  const [field, message] = Object.entries(webhookHeaderErrors(headers))[0] ?? []
+  if (field && message) invalid(field, message)
+  const updatedAt = now()
+  return headers.map(({ name, value }) => ({ name, hint: webhookHeaderHint(value), updatedAt }))
+}
 // Demo idempotency mirrors the API: the same key and body returns the first result; a different body is rejected.
 function inboundOnce<T>(state: DemoState, key: string, body: unknown, create: () => T): T {
   const seen = (state.inboundIdempotency ??= {})[key]
@@ -985,20 +994,20 @@ export function createMockApi(): OpenSendApi {
       })),
       webhooks: signal => run(signal, false, s => (s.mailboxWebhooks ??= demoMailboxAccess().webhooks).map(inboundWebhook)),
       webhook: (webhookId, signal) => run(signal, false, s => inboundWebhook(find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'))),
-      createWebhook: ({ addressIds, ...input }, signal) => run(signal, true, s => {
+      createWebhook: ({ addressIds, headers, ...input }, signal) => run(signal, true, s => {
         try { if (new URL(input.url).protocol !== 'https:') throw new Error() } catch { invalid('url', 'Enter an HTTPS endpoint URL.') }
-        const webhook = { id: id('mwh'), ...input, addressIds, paused: false, createdAt: now(), updatedAt: now(), deliveries: [] }
+        const webhook = { id: id('mwh'), ...input, addressIds, paused: false, headers: headerViews(headers ?? []), createdAt: now(), updatedAt: now(), deliveries: [] }
         ;(s.mailboxWebhooks ??= demoMailboxAccess().webhooks).unshift(webhook)
         return { webhook: inboundWebhook(webhook), secret: `whsec_demo${id('s').slice(-16)}` }
       }),
-      updateWebhook: (webhookId, patch, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, { updatedAt: now() }); return inboundWebhook(row) }),
+      updateWebhook: (webhookId, { headers, ...patch }, signal) => run(signal, true, s => { const row = find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); Object.assign(row, patch, headers === undefined ? {} : { headers: headerViews(headers) }, { updatedAt: now() }); return inboundWebhook(row) }),
       deleteWebhook: (webhookId, signal) => run(signal, true, s => { const rows = s.mailboxWebhooks ??= demoMailboxAccess().webhooks; rows.splice(rows.indexOf(find(rows, webhookId, 'Webhook')), 1) }),
       rotateWebhookSecret: (webhookId, signal) => run(signal, true, s => { find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook'); return { secret: `whsec_demo${id('s').slice(-16)}` } }),
       webhookDeliveries: (webhookId, _cursor, signal) => run(signal, false, s => Object.assign([...find(s.mailboxWebhooks ??= demoMailboxAccess().webhooks, webhookId, 'Webhook').deliveries], { nextCursor: null })),
     },
     webhooks: {
-      list: signal => run(signal, false, s => s.webhooks),
-      get: (webhookId, signal) => run(signal, false, s => find(s.webhooks, webhookId, 'Webhook')),
+      list: signal => run(signal, false, s => s.webhooks.map(webhook => ({ ...webhook, headers: webhook.headers ?? [] }))),
+      get: (webhookId, signal) => run(signal, false, s => { const webhook = find(s.webhooks, webhookId, 'Webhook'); return { ...webhook, headers: webhook.headers ?? [] } }),
       save: (input, signal) => run(signal, true, s => {
         const existing = input.id ? find(s.webhooks, input.id, 'Webhook') : undefined
         const name = text(input.name, 'name')
@@ -1006,13 +1015,14 @@ export function createMockApi(): OpenSendApi {
         try { const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.includes('.') || parsed.username || parsed.password || parsed.hash) invalid('url', 'Enter an HTTPS endpoint without credentials or a fragment.') } catch { invalid('url', 'Enter a valid HTTPS webhook URL.') }
         if (!Array.isArray(input.events) || input.events.length === 0 || input.events.length > EVENTS.length || !input.events.every(event => EVENTS.includes(event))) invalid('events', 'Select between one and six supported webhook events.')
         const events = [...new Set(input.events)]
+        const headers = input.headers === undefined ? existing?.headers ?? [] : headerViews(input.headers)
         let regionIds: string[] | 'all' = 'all'
         if (input.regionIds !== 'all') {
           if (!Array.isArray(input.regionIds) || input.regionIds.length === 0) invalid('regionIds', 'Select at least one region or all regions.')
           regionIds = [...new Set(input.regionIds)]
           regionIds.forEach(regionId => checkRegion(s, regionId))
         }
-        const webhook: Webhook = { id: existing?.id ?? id('wh'), name, url, events, regionIds, status: existing?.status ?? 'active', secretHint: existing?.secretHint ?? `demo_wh_…${crypto.randomUUID().slice(0, 8)}`, deliveries: existing?.deliveries ?? [] }
+        const webhook: Webhook = { id: existing?.id ?? id('wh'), name, url, events, regionIds, status: existing?.status ?? 'active', secretHint: existing?.secretHint ?? `demo_wh_…${crypto.randomUUID().slice(0, 8)}`, headers, deliveries: existing?.deliveries ?? [] }
         if (existing) Object.assign(existing, webhook)
         else s.webhooks.push(webhook)
         return webhook

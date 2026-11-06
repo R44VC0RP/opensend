@@ -392,15 +392,15 @@ function curate(combined: Map<string, McpOperation>, raw: Map<string, McpOperati
   direct('deleteAttachment', 'Delete an attachment that is not referenced by retained mail or campaigns.', 'deleteAttachment');
 
   const webhooks = need('getWebhooks');
-  add(custom('findWebhooks', 'List webhook endpoints, or supply id alone to retrieve one endpoint with recent deliveries.', webhooks.tool.inputSchema, false, args => {
+  add(custom('findWebhooks', 'List webhook endpoints, or supply id alone to retrieve one endpoint with recent deliveries. Custom header values are never returned; readers see names only.', webhooks.tool.inputSchema, false, args => {
     if (typeof args.id !== 'string') return { steps: [{ operation: webhooks, args }] };
     return { steps: [{ operation: need('getWebhook', raw), args: { id: args.id } }, { operation: need('listWebhookDeliveries', raw), args: { id: args.id, limit: 100 } }], parallel: true,
       combine: ([detail, deliveries]) => ({ ...detail, response: { data: [{ ...detail.response, deliveries: deliveries.response.data, deliveriesNextCursor: deliveries.response.nextCursor }], nextCursor: null } }) };
   }, pageOutput()));
-  add(actionTool('saveWebhook', 'Create or update a webhook endpoint and its event filters.', { create: need('createWebhook', raw), update: need('updateWebhook', raw) }));
+  add(actionTool('saveWebhook', 'Create or update a webhook endpoint, event filters and write-only custom HTTP headers. Use body.headers: [{name, value}] for endpoint authentication such as Authorization. Omit to keep existing headers, supply all to replace, or [] to remove all.', { create: need('createWebhook', raw), update: need('updateWebhook', raw) }));
   direct('deleteWebhook', 'Delete a webhook endpoint.', 'deleteWebhook');
-  direct('testWebhook', 'Queue a synthetic delivery to a webhook endpoint.', 'testWebhook');
-  direct('retryWebhookDelivery', 'Retry one failed webhook delivery.', 'retryWebhookDelivery');
+  direct('testWebhook', 'Queue a signed synthetic delivery with the endpoint’s configured custom headers.', 'testWebhook');
+  direct('retryWebhookDelivery', 'Retry one webhook delivery using the endpoint’s current custom headers.', 'retryWebhookDelivery');
   direct('getMetrics', 'Query created-cohort sending, delivery, bounce, complaint, open and click metrics.', 'getMetrics');
   direct('getCampaignStats', 'Read lifetime delivery, unique opens/clicks, bounce/complaint/failure counts and progress for one campaign. Rates include explicit numerators/denominators and are fractions, not percentages. Delivery is receiving-server acceptance, not inbox placement; engagement includes bots/privacy proxies. Rates are null for simulated-only campaigns.', 'getCampaignStats');
   direct('createAgentToken', 'Create a nonrefreshable API token lasting 30 seconds to 24 hours for temporary uncommitted scripts. Supports read, send or manage delegation within the originating MCP approval and optional sender-domain restrictions. Cannot manage credentials.', 'createAgentToken');

@@ -57,10 +57,10 @@ export function jobConcurrency(value: unknown, maximum = 8) {
 // Input comes only from the actual claimed rows, never a caller-supplied endpoint. Hold the
 // endpoint lock until paused deliveries are parked, so a concurrent resume sees and requeues them.
 export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
-  SELECT j.id AS job_id,d.workspace_id,d.id AS delivery_id,d.generation,d.webhook_id,d.event_id,d.payload,d.synthetic,w.url,w.encrypted_secret,w.paused
+  SELECT j.id AS job_id,d.workspace_id,d.id AS delivery_id,d.generation,d.webhook_id,d.event_id,d.payload,d.synthetic,w.url,w.encrypted_secret,w.encrypted_headers,w.paused
   FROM claimed j JOIN operation_deliveries d ON d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId'
     AND to_jsonb(d.generation)=j.payload->'generation' AND d.status<>'delivered'
-  LEFT JOIN LATERAL (SELECT url,encrypted_secret,paused FROM operation_webhooks WHERE workspace_id=d.workspace_id AND id=d.webhook_id FOR SHARE) w ON true
+  LEFT JOIN LATERAL (SELECT url,encrypted_secret,encrypted_headers,paused FROM operation_webhooks WHERE workspace_id=d.workspace_id AND id=d.webhook_id FOR SHARE) w ON true
   WHERE j.type='operation.webhook'
 ), parked AS (UPDATE operation_deliveries d SET status=CASE WHEN h.url IS NULL THEN 'failed' ELSE 'paused' END,
   last_error=CASE WHEN h.url IS NULL THEN 'ENDPOINT_DELETED' ELSE 'ENDPOINT_PAUSED' END,updated_at=now()
