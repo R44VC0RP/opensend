@@ -144,7 +144,7 @@ Resources:
                 Action: ['sns:GetTopicAttributes', 'sns:ListTagsForResource', 'sns:GetSubscriptionAttributes', 'sns:ListSubscriptionsByTopic']
                 Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${ResourcePrefix}-feedback'
               - Effect: Allow
-                Action: ['ses:GetConfigurationSetEventDestinations', 'ses:PutConfigurationSetSuppressionOptions', 'ses:CreateConfigurationSetEventDestination', 'ses:UpdateConfigurationSetEventDestination', 'ses:DeleteConfigurationSetEventDestination', 'ses:DeleteConfigurationSet', 'sns:SetTopicAttributes', 'sns:DeleteTopic']
+                Action: ['ses:GetConfigurationSetEventDestinations', 'ses:PutConfigurationSetSuppressionOptions', 'ses:CreateConfigurationSetEventDestination', 'ses:UpdateConfigurationSetEventDestination', 'ses:DeleteConfigurationSet', 'sns:SetTopicAttributes', 'sns:DeleteTopic']
                 Resource:
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-transactional'
                   - !Sub 'arn:aws:ses:*:${AWS::AccountId}:configuration-set/${ResourcePrefix}-marketing'
