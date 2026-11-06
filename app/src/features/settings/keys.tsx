@@ -29,8 +29,6 @@ export function ApiKeysPage() {
   const revokeAgentToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
   const revokeMcpConnection = useApiMutation((api, id: string) => api.credentials.revokeMcpConnection(id), 'MCP connection revoked')
   const [open, setOpen] = useState(false)
-  const [dialogKey, setDialogKey] = useState(0)
-  const openCreate = () => { setDialogKey(value => value + 1); setOpen(true) }
   const [secret, setSecret] = useState<{ value: string; title: string } | null>(null)
   const [revokeKey, setRevokeKey] = useState<KeyRow | null>(null)
   const [revokeToken, setRevokeToken] = useState<AgentTokenSummary | null>(null)
@@ -48,7 +46,7 @@ export function ApiKeysPage() {
   const connectionName = (grantId: string) => mcpConnections.data?.find(connection => connection.id === grantId)?.name
 
   return <div className="stack">
-    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={openCreate}>Create key</Button></>} />
+    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
@@ -85,7 +83,7 @@ export function ApiKeysPage() {
         ]} />}
       </section>}
     </div>
-    <CreateKeyDialog key={dialogKey} open={open} onOpenChange={setOpen} onCreated={(value, title) => setSecret({ value, title })} />
+    {open && <CreateKeyDialog open onOpenChange={setOpen} onCreated={(value, title) => setSecret({ value, title })} />}
     <SecretDialog secret={secret?.value ?? null} title={secret?.title ?? 'Key created'} onClose={() => setSecret(null)} />
     <ConfirmDialog open={revokeKey !== null} onOpenChange={next => { if (!next) setRevokeKey(null) }} title={`Revoke ${revokeKey?.key.name ?? 'key'}?`}
       description={revokeKey?.kind === 'inbound' ? 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.' : 'Requests using this key will stop working. Revoking a key cannot be undone.'}

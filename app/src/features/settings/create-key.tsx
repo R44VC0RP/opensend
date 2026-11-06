@@ -34,7 +34,7 @@ export function accessLabel(permissions: string[]) {
 export const domainScope = (domains: string[]) => domains.length ? domains.join(', ') : 'All domains'
 export const permissionList = (permissions: string[]) => capitalize(list.format(permissions))
 
-/** One dialog for every key: a plain choice up front, exact scope and permissions under Advanced. Mount with a new key per opening to start fresh. */
+/** One dialog for every key: a plain choice up front, exact scope and permissions under Advanced. Render only while open, so form state and the created secret in mutation state go away on close. */
 export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (secret: string, title: string) => void }) {
   const api = useApi()
   const createApiKey = useApiMutation((api, input: ApiKeyInput) => api.keys.create(input), 'API key created')
