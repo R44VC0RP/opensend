@@ -178,7 +178,9 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
   const transactional = sql`(e.snapshot->>'kind' = 'transactional')`;
   const priority = sql`ORDER BY ${transactional} DESC, created_at, id`;
   const dueForOwner = sql`FROM sending_emails e WHERE ${queued} AND e.workspace_id = o.workspace_id AND ${available}
-    ${priorityOnly ? sql`AND ${transactional} = true` : sql``}
+    -- A boolean range is an index condition on 061's expression. Equality to true is
+    -- simplified to a text comparison and can scan the kind index over delivered mail.
+    ${priorityOnly ? sql`AND ${transactional} > false` : sql``}
     ${deferred.length ? sql`AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${JSON.stringify(deferred)}::jsonb) d(workspace_id text, stream text)
       WHERE d.workspace_id = e.workspace_id AND d.stream = e.snapshot->>'kind')` : sql``}`;
   // Seek to the next distinct owner rather than scanning a large campaign to discover its neighbors.
