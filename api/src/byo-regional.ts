@@ -3,7 +3,7 @@ import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
 import { ApiError, id, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume } from './provider-credentials.js';
-import { awsError, byoFeedback, provisionByoRegion, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
+import { awsError, byoFeedback, provisionJournaledFeedback, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
@@ -298,7 +298,7 @@ const provision=runV5(async(r,c,p,attempt)=>{
         if (!verified.size && imports.size===pending.length) throw defer(1000,{...p,generation:gen}); // Recheck selections added during the SES reads.
       }
     }
-    const result=await provisionByoRegion(await scoped(r,c,region,'provision'),region,c.id,journal.ownership_journal,
+    const result=await provisionJournaledFeedback(await scoped(r,c,region,'provision'),region,c.id,journal.ownership_journal,
       async()=>fenced((await r.db.execute(sql`SELECT FROM provider_connection_regions WHERE ${owned}`)).rowCount),
       async entry=>fenced((await r.db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=(SELECT coalesce(jsonb_agg(e),'[]') FROM jsonb_array_elements(ownership_journal) e WHERE NOT(e->>'kind'=${entry.kind} AND e->>'resource'=${entry.resource}))||${JSON.stringify([entry])}::jsonb WHERE ${owned}`)).rowCount),
       async arn=>fenced((await r.db.execute(sql`UPDATE provider_connection_regions SET feedback_topic_arn=${arn} WHERE ${owned} AND (feedback_topic_arn IS NULL OR feedback_topic_arn=${arn})`)).rowCount));

@@ -12,6 +12,7 @@ import { mailboxIngestJobs } from './mailbox-ingest.js';
 import { mailboxEventJobs } from './mailbox-events.js';
 import { byoVerifyJob, tenantJob } from './provider-connections.js';
 import { regionalByoJobs } from './byo-regional.js';
+import { trustedProvision } from './trusted-pool.js';
 import { finishCampaigns } from './states.js';
 const mailboxJobs = { ...mailboxSetupJobs, ...mailboxIngestJobs, ...mailboxEventJobs };
 const deleteAttachment: JobHandler = async (runtime, payload, job) => {
@@ -21,7 +22,7 @@ const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   catch { throw new ApiError(503, 'STORAGE_DELETE_FAILED', 'Attachment deletion failed; retrying the retained object key.', undefined, true); }
 };
 /** Background jobs only (campaign orchestration, feedback recovery, webhooks, maintenance). Cloudflare's queue consumer uses this; mail is dispatched by Durable Objects. */
-export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...regionalByoJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'byo.verify': byoVerifyJob, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
+export async function drainJobs(runtime: Runtime, limit = 20, concurrency = 2, maxDurationMs = 20000) { return processJobs(runtime, { ...jobHandlers, ...operationJobs, ...regionalByoJobs, ...sesRegionJobs, ...reputationAlertJobs, ...mailboxJobs, 'hosted.trusted':trustedProvision,'byo.verify': byoVerifyJob, 'tenant.provision': tenantJob, 'maintenance.deleteAttachment': deleteAttachment }, limit, concurrency, maxDurationMs); }
 type Partition = { region: string; accountId?: string; kind?: 'shared' | 'byo' };
 export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = false): Promise<Partition[]> {
   // Recover once per sweep, even if a disconnected account has no queued mail. A stale attempt may

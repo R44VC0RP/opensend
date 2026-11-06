@@ -308,7 +308,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       const scoped = { ...runtime, config: { ...runtime.config, workspaceId, regions: [default_region as string, ...(enabled_regions as string[]).filter(r => r !== default_region),...(pc?[region]:[])], configurationSets: { transactional, marketing } } };
       owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, forDelivery(pc,{purpose:'quota'}), runClients),
         sendClient:pc?.template_version==='v5'?domainId=>providerClient(scoped,region,forDelivery(pc,{purpose:'send',domainId}),runClients):undefined,
-        tenantName: pc?.kind === 'shared' ? pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
+        tenantName: pc?.kind === 'shared' ? pc.pool_tenant_name ?? (pc.managed_tenant ? mxResourceName(workspaceId) : `opensend-${workspaceId}`) : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
     const shared = mail.reviewId && reviews.get(reviewKey(row));

@@ -1,4 +1,5 @@
 import { cachedDashboardRead } from './dashboard-cache.js';
+import { matchesAdoption } from './adopted-identity.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, gte, inArray, isNull, like, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
@@ -23,7 +24,7 @@ import { forDelivery, workspaceConnection, type ReadyConnection } from './provid
 import { byoStackTopic } from './provider-connections.js';
 import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
-import { awsError, byoFeedback, mxOwnerTag, mxResourceName } from './ses-setup.js';
+import { awsError, byoFeedback, mxOwnerTag, mxResourceName, POOL_INSTALLATION } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -289,9 +290,10 @@ function derivedReadiness(row: ClaimRow): Readiness {
   else if (!held && report.verificationStatus==='SUCCESS') report.verificationStatus='PENDING';
   report.receiving=state(row.receiving_state==='active' || row.receiving_state==='lost');
   report.dns=report.dns.map(r=>r.purpose==='receiving' ? {...r,status:state(row.receiving_host!==null)} : r);
+  if (facts?.adopted) report.dns=[]; // No DNS setup is authorized by send-only operator attestation.
   return report;
 }
-const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.managed_tenant?mxResourceName(wid):`opensend-${wid}`, ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
+const identityBinding = (row:Pick<HostedDomain,'name'|'region'|'connection'>,wid:string) => ({TenantName:row.connection.pool_tenant_name??(row.connection.managed_tenant?mxResourceName(wid):`opensend-${wid}`), ResourceArn:`arn:aws:ses:${row.region}:${row.connection.aws_account_id}:identity/${row.name}`});
 type ReceivingObservation={mx:MxReport;note?:string};
 // The caller holds the claim lock. Only a full identity check can change eligibility; an MX-only
 // observation may change routing but can never grant ownership or qualify an unverified SES identity.
@@ -310,7 +312,7 @@ async function saveObservation(db:DbExecutor,row:HostedDomain,wid:string,ses:Ide
   // Managed sending identities confer no receiving rights (including Virginia). Only a
   // separately reviewed receiving binding may change that projection in phase 2.
   if (row.connection.legacy===false) {
-    await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported},null);
+    await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx:row.identity?.mx??null,note,imported:row.identity?.imported,adopted:row.identity?.adopted},null);
     return next;
   }
   await applyClaim(db,{name:row.name,token:row.token,connectionId:row.connection.id,workspaceId:wid,domainId:row.id,region:row.region},next,{ses,dmarc,proven:evidence.proven,mx,note,imported:row.identity?.imported},mx?.expected.name ?? expectedMx(row.name,row.region).name);
@@ -349,9 +351,10 @@ const identityJournalEntry=(row:Pick<HostedDomain,'connection'|'region'|'name'|'
 function recoverIdentity(runtime:Runtime,wid:string,domainId:string,token:string,client:ReturnType<typeof getSes>) {
   return runtime.db.transaction(async db=>{
     const current=await hostedDomain(db,wid,domainId,true);
-    if (current && current.token===token && !current.expired) {
+    if (current && current.token===token && !current.expired && !current.identity?.adopted) {
       const regionalByo=current.connection.kind==='byo' && current.connection.legacy===false;
-      const identity=await ensureIdentity(client,current.name,token,current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo);
+      const pooled=current.connection.kind==='shared' && runtime.config.trustedPool;
+      const identity=await ensureIdentity(client,current.name,token,pooled?POOL_INSTALLATION:current.connection.legacy===false || (runtime.config.regionalSending && current.connection.kind==='shared')?current.connection.id:undefined,regionalByo || pooled);
       if (regionalByo) {
         const entry=JSON.stringify([identityJournalEntry(current)]);
         await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=ownership_journal||${entry}::jsonb WHERE connection_id=${current.connection.id} AND region=${current.region} AND NOT ownership_journal @> ${entry}::jsonb`);
@@ -384,8 +387,8 @@ async function deleteClaimIdentity(runtime:Runtime,wid:string,row:Pick<HostedDom
 /** Disconnect: shared identities are deleted, BYO identities stay in AWS, and only exclusive claims are retained. */
 export async function releaseConnectionDomains(runtime:Runtime,db:DbExecutor,wid:string,connection:HostedDomain['connection'] & {region:string}) {
   if (connection.kind==='shared') {
-    const claims=(await db.execute<{name:string;token:string;region:string;managed_tenant:boolean}>(sql`SELECT dc.name,dc.token,b.region,r.managed_tenant FROM domain_claims dc JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) JOIN provider_connection_regions r USING(connection_id,region) WHERE dc.workspace_id=${wid} AND dc.connection_id=${connection.id} FOR UPDATE OF dc`)).rows;
-    for (const claim of claims) await deleteClaimIdentity(runtime,wid,{...claim,connection:{...connection,managed_tenant:claim.managed_tenant}});
+    const claims=(await db.execute<{name:string;token:string;region:string;managed_tenant:boolean;pool_tenant_name:string|null}>(sql`SELECT dc.name,dc.token,b.region,r.managed_tenant,r.pool_tenant_name FROM domain_claims dc JOIN domain_sending_bindings b USING(workspace_id,name,connection_id) JOIN regional_connections r ON r.id=b.connection_id AND r.region=b.region WHERE dc.workspace_id=${wid} AND dc.connection_id=${connection.id} AND NOT coalesce(dc.identity ? 'adopted',false) FOR UPDATE OF dc`)).rows;
+    for (const claim of claims) await deleteClaimIdentity(runtime,wid,{...claim,connection:{...connection,managed_tenant:claim.managed_tenant,pool_tenant_name:claim.pool_tenant_name}});
   }
   await db.execute(sql`WITH ${releaseConnectionClaims(wid,sql`SELECT ${connection.id}::text AS id`)} SELECT 1`);
 }
@@ -473,6 +476,13 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       if (!recovered) return;
       identity={...recovered,VerificationStatus:'PENDING',$metadata:{}};
     }
+    else if (row.identity?.adopted) {
+      // Runtime IAM intentionally denies membership reads/writes on these ARNs. An SES send
+      // requires the pinned tenant; only the migration operator can attest membership anew.
+      const verified=matchesAdoption(identity,row.identity.adopted.fingerprint);
+      if (!verified) await runtime.db.execute(sql`UPDATE domain_claims SET sending_state='pending',lost_since=NULL WHERE workspace_id=${job.workspaceId} AND token=${row.token} AND connection_id=${row.connection.id}`);
+      return;
+    }
     else if (!(row.connection.kind==='byo' && row.identity?.imported) && !ownsIdentity(identity,row.token)) throw unavailableDomain();
     const shared=row.connection.kind==='shared';
     const identityVerified=identity.VerificationStatus==='SUCCESS';
@@ -501,8 +511,18 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
         defer(5000); // The newer configuration has its own poll; never replace it with a stale observation.
       }
       if (shared && report.ready && !sends(current)) {
-        try { await sesCall(()=>client.send(new CreateTenantResourceAssociationCommand(identityBinding(current,job.workspaceId)))); }
-        catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e; }
+        const binding=identityBinding(current,job.workspaceId);
+        const exclusive=async()=>{
+          const page=await sesCall(()=>client.send(new ListResourceTenantsCommand({ResourceArn:binding.ResourceArn,PageSize:2})));
+          if (!page.ResourceTenants || page.NextToken || page.ResourceTenants.length>1 || page.ResourceTenants.some(t=>t.ResourceArn!==binding.ResourceArn || t.TenantName!==binding.TenantName)) throw unavailableDomain();
+          return page.ResourceTenants.length===1;
+        };
+        const trusted=!!current.connection.pool_tenant_name && current.region==='us-east-1';
+        if (!trusted || !await exclusive()) {
+          try { await sesCall(()=>client.send(new CreateTenantResourceAssociationCommand(binding))); }
+          catch (e) { if (!(e instanceof ApiError) || e.code!=='SES_IDENTITY_EXISTS') throw e; }
+          if (trusted && !await exclusive()) defer(5000);
+        }
       }
       return saveObservation(db,current,job.workspaceId,sesFacts(identity),observation,{sending:report.ready,sendingRevoked:current.identity?.imported && !report.ready,identityVerified,proven:positive},dmarc);
     });
@@ -614,7 +634,8 @@ export function registerOperations(app: App) {
       let identity: Partial<GetEmailIdentityCommandOutput>|undefined;
       try {
         const client=getSes(runtime,row.region,claim.connection);
-        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token,c.env.config.regionalSending && (claim.connection.kind==='shared' || claim.connection.legacy_names===false)?claim.connection.id:undefined));
+        const pooled=claim.connection.kind==='shared' && c.env.config.trustedPool;
+        identity=await (claim.recovering ? recoverIdentity(runtime,a.workspaceId,row.id,claim.token,client) : ensureIdentity(client,row.name,claim.token,pooled?POOL_INSTALLATION:c.env.config.regionalSending && (claim.connection.kind==='shared' || claim.connection.legacy_names===false)?claim.connection.id:undefined,pooled));
       }
       catch(e) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
@@ -860,7 +881,8 @@ function registerPublicEvents(app: App) {
       SELECT r.region,c.aws_account_id,c.kind,r.sending_state='ready' AS ready,false AS inbound,CASE WHEN NOT r.legacy THEN c.id END AS managed_id,r.generation
         FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state='ready' OR
           (r.sending_state='provisioning' AND r.ownership_journal @> ${JSON.stringify([{kind:'subscription',resource:arn,target:byoFeedback}])}::jsonb))
-      UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,NULL,NULL FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
+      UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,CASE WHEN NOT legacy_names THEN 'pool' END,generation FROM provider_pool_regions p WHERE feedback_topic_arn=${arn} AND (legacy_names OR ${poolSends()} OR
+        (${!!runtime.config.trustedPool} AND p.region='us-east-1' AND pool_tier='trusted' AND ownership_journal @> ${JSON.stringify([{kind:'subscription',resource:arn,target:byoFeedback}])}::jsonb))
       UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
       UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' AND c.template_version<>'v5' WHERE r.topic_arn=${arn}
       ${!confirming ? sql`UNION ALL SELECT region,aws_account_id,kind,true,false,NULL,NULL FROM provider_feedback_history WHERE topic_arn=${arn}` : sql``} ORDER BY ready DESC LIMIT 1`)).rows[0];
@@ -911,6 +933,13 @@ function registerPublicEvents(app: App) {
             if (error.retryable || error.code==='AWS_ACCESS_DENIED') throw new ApiError(503,error.code,error.message,undefined,true);
             throw error;
           }
+        } else if (binding?.kind==='shared' && binding.managed_id==='pool') {
+          if (!c.env.config.trustedPool || binding.ready) throw new ApiError(403,'SNS_TOPIC_NOT_ALLOWED','No pending trusted subscription.');
+          const fence=sql`region=${binding.region} AND aws_account_id=${binding.aws_account_id} AND NOT legacy_names AND pool_tier='trusted' AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='pending'`;
+          await c.env.db.transaction(async db=>{
+            if (!(await db.execute(sql`SELECT FROM provider_pool_regions WHERE ${fence} FOR UPDATE`)).rowCount) throw new ApiError(503,'PROVISION_LEASE_LOST','Pool confirmation raced setup; retry.',undefined,true);
+            await confirm();await db.execute(sql`UPDATE provider_pool_regions SET confirmed_generation=generation WHERE ${fence}`);
+          });
         } else if (binding?.managed_id && !binding.ready) {
           const fence=sql`connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`;
           // Lock only this topic generation across the bounded confirmation GET. If
