@@ -1305,7 +1305,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v4.yaml';
+        runtime.config.byoV2=true; // Global rollout alone must not change the existing dashboard signup.
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
+        runtime.config.byoV2=false;
         externalIds = [ac,bc].map(reply => {
           const row = ok(reply, 201); assert.equal(row.state, 'awaiting_role'); assert.equal(row.tenant, 'ready'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
           assert.equal(row.templateVersion,'v4');assert.equal(params.get('param_ConnectionId'),row.id);assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
@@ -4549,10 +4551,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return true;
     };
     runtime.config.byoV2=false;error(await post('/scan'),404);runtime.config.byoV2=true;
+    error(await post('/scan'),404);error(await post('',{kind:'byo',awsAccountId:account}),422,'VALIDATION_ERROR');
+    const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
     error(await post('',{kind:'byo',awsAccountId:'438095551154'}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
     assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'opensendmx-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
+    await assert.rejects(setByoV2(db,[wid,'disable']),/Disconnect/);
     const rs=(await db.query('SELECT region FROM provider_connection_regions WHERE connection_id=$1',[v5.id])).rows;assert.equal(rs.length,32);
     for (const {region} of rs) for(let page=0;!await run('byo.scan',region);page++)assert.ok(page<8);
     const initial=await poll(),rev=initial.scan.revision, rows=initial.candidates;

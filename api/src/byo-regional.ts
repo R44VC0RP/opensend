@@ -8,6 +8,7 @@ import { JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { acquireRegionProvisioning, finishRegionProvisioning, verifyImportedClaims } from './states.js';
 import { claimNameAllowed } from './domain-claims.js';
 import { getRegionSettings } from './ses-region-state.js';
+import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
 export const platformAccount='438095551154';
@@ -17,15 +18,15 @@ type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
 const stale=()=>conflict('SCAN_STALE','Refresh the list and select verified domains from a completed regional scan.');
 const defer=(ms:number,payload?:Record<string,unknown>)=>new JobDeferred(new Date(Date.now()+ms).toISOString(),payload);
-function writable(r:Runtime) {
-  if (!r.config.multiTenant || !r.config.byoV2) return notFound('Endpoint');
+async function writable(r:Runtime,wid:string,db?:DbExecutor) {
+  if (!await byoEnabled(r,wid,db)) return notFound('Endpoint');
   if (!r.config.regionalSending) throw conflict('REGIONAL_SENDING_REQUIRED','Enable regional sending before enrolling a regional AWS connection.');
 }
 async function connection(db:DbExecutor,wid:string,lock=false) {
   return (await db.execute<V5Connection>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid} AND template_version='v5' AND kind='byo' ${lock?sql`FOR UPDATE`:sql``}`)).rows[0];
 }
 export async function requiredV5(r:Runtime,wid:string) {
-  writable(r);return await connection(r.db,wid)??notFound('Regional connection');
+  await writable(r,wid);return await connection(r.db,wid)??notFound('Regional connection');
 }
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 type Op={operationId:string;regions:string[]};
@@ -54,11 +55,11 @@ export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:st
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
 export async function enrollV5(r:Runtime,wid:string,account:string) {
-  writable(r);
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
   const cid=id('conn'),roleRegion='us-east-2',external=crypto.randomUUID();
   v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external});
   return r.db.transaction(async db=>{
+    await writable(r,wid,db);
     const inserted=await db.execute(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,external_id,platform_principal_arn,template_version,resource_prefix,requested_account,inventory_revision)
       VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account},1) ON CONFLICT(workspace_id) DO NOTHING`);
     const c=await connection(db,wid,true);
@@ -91,7 +92,7 @@ async function beginScan(db:DbExecutor,c:V5Connection) {
       jsonb_build_object('connectionId',${c.id}::text,'region',region,'revision',${c.inventory_revision}::integer,'stage','account','run',gen_random_uuid()) FROM regions`);
 }
 export async function refreshScan(r:Runtime,wid:string,key?:string) {
-  writable(r);return r.db.transaction(async db=>{
+  await writable(r,wid);return r.db.transaction(async db=>{
     const c=await connection(db,wid,true)??notFound('Regional connection');
     const op=receipt<ScanOp>(c,'scan',key,''),prior=await op.read(db);if (prior) return prior;
     if (!c.aws_account_id) { await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});return op.save(db,{revision:c.inventory_revision,operationId:proofId(c)}); }
@@ -103,7 +104,7 @@ export async function refreshScan(r:Runtime,wid:string,key?:string) {
 }
 const runV5=(handler:(r:Runtime,c:V5Connection,p:Record<string,unknown>,attempt:number)=>Promise<void>):JobHandler=>retryDatabaseFailures(async(r,p,j)=>{
   // Preserve accepted work on rollout pause, without touching AWS or consuming attempts.
-  if (!r.config.byoV2 || !r.config.regionalSending) throw defer(300_000);
+  if (!r.config.regionalSending || !await byoEnabled(r,j.workspaceId)) throw defer(300_000);
   const c=await connection(r.db,j.workspaceId);if (!c || c.id!==p.connectionId) return;
   await handler(r,c,p,j.attempts);
 });
@@ -232,7 +233,7 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
 export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:boolean,override?:string,key?:string) {
   const c=await connection(r.db,wid);if (!c) return null;
   if (!owner) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to enable a regional domain.');
-  writable(r);if (!claimNameAllowed(name,r.config.publicUrl)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
+  await writable(r,wid);if (!claimNameAllowed(name,r.config.publicUrl)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
   return r.db.transaction(async db=>{
     await getRegionSettings(db,wid,'update');await connection(db,wid,true);
     const op=receipt<Op>(c,'domain',key,JSON.stringify([name,override])),prior=await op.read(db);if(prior)return prior;

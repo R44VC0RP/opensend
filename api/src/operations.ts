@@ -20,6 +20,7 @@ import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './
 import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
+import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
 import { awsError, byoFeedback, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
@@ -456,7 +457,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) {
       defer(1000+Math.random()*1000);
     }
-    if (row.connection.kind==='byo' && row.connection.legacy===false && !runtime.config.byoV2) defer(300_000);
+    if (row.connection.kind==='byo' && row.connection.legacy===false && !await byoEnabled(runtime,job.workspaceId)) defer(300_000);
     const client=getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
     let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }

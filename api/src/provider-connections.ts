@@ -8,6 +8,7 @@ import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { preparePoolReceiving } from './mailbox-setup.js';
 import { releaseConnectionDomains } from './operations.js';
+import { byoEnabled } from './byo-pilot.js';
 import { Accepted, Imports, InventoryFields, RegionStatus, enrollV5, inventory, platformAccount, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
@@ -318,13 +319,13 @@ export function registerProviderConnections(app: App) {
     const row = await get(c.env, owner(c)); return c.json({ connection: row ? {...view(c.env, row),...(row.template_version==='v5'?await inventory(c.env.db,row as Row & V5Connection):{})} : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
-    owner(c); return c.json({ shared: sharedRegions(c.env), byo: c.env.config.byoV2?Object.keys(regionLabels):byoRegions }, 200);
+    const wid=owner(c); return c.json({ shared: sharedRegions(c.env), byo: await byoEnabled(c.env,wid)?Object.keys(regionLabels):byoRegions }, 200);
   });
   app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.', request: { body: json(Create) }, responses: { 201: response(Connection),202:response(Connection.extend({operationId:z.string(),revision:z.number()})), ...errors } }), async c => {
     const wid = owner(c);
     try {
       const input=c.req.valid('json');
-      if (input.kind==='byo' && c.env.config.byoV2) {
+      if (input.kind==='byo' && await byoEnabled(c.env,wid)) {
         if (input.awsAccountId===platformAccount) throw new ApiError(409,'AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
         const existing=await get(c.env,wid);
         if (!existing || existing.template_version==='v5') {
