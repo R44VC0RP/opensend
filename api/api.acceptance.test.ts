@@ -4617,6 +4617,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       }
       queries.mock.restore(); t.diagnostic(`100 MX dispatches (99 shared workspaces + 1 BYO): ${counts[0]} + ${counts[1]} = ${counts[0]+counts[1]} pg statements (two lanes, cold quotas)`);
       assert.ok(counts[0]+counts[1]<=60,'Connection and readiness resolution must not add per-email statements.');
+
+      // An idle singleton uses the same authorization and consent locks as the grouped claim.
+      const wid='bench-1';
+      for (const status of ['accepted','suppressed','canceled'] as const) {
+        const id=unique('single');
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+          SELECT $1,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,true FROM sending_emails WHERE id='email_bench-1'`,[id]);
+        if(status==='suppressed') await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES ($1,$2,'fixture@example.net',true)`,[unique('contact'),wid]);
+        if(status==='canceled') await db.query('UPDATE api_keys SET revoked_at=now() WHERE id=$1',[wid]);
+        if(status!=='accepted') await db.query("UPDATE provider_account_limits SET checked_at=clock_timestamp()-interval '90 seconds',refresh_after='-infinity' WHERE aws_account_id=$1 AND region=$2",[accounts[0],REGION]);
+        const statements=t.mock.method(db,'query'); await runDispatcher(runtime,{region:REGION,accountId:accounts[0]}); const total=statements.mock.callCount(); statements.mock.restore();
+        assert.equal(total,status==='accepted'?2:1, 'Only a send that reaches SES needs a second (record) statement.');
+        const row=(await db.query(`SELECT status,provider_id,(SELECT count(*)::int FROM sending_email_events WHERE email_id=$1 AND type='dispatch_attempt') AS attempts FROM sending_emails WHERE id=$1`,[id])).rows[0];
+        assert.equal(row.status,status); assert.equal(row.attempts,status==='accepted'?1:0); assert.equal(!!row.provider_id,status==='accepted');
+      }
     });
   });
 
@@ -5421,6 +5436,120 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         gate.refreshAt=0; // A restarted host reads the *same* still-fresh database snapshot.
         const report=await dispatchDue(runtime,REGION,{gate});
         assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1); assert.ok(report.quotaRetryAt! - Date.now() > 50_000);
+      }
+    });
+  });
+
+  test('a stale quota refresh follows transactional acceptance except near the daily reserve', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string, peer = false;
+      t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof GetAccountCommand) visible.push(!!(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[pending])).rows[0].provider_id);
+        else if (peer) await db.query('UPDATE sending_region_limits SET checked_at=clock_timestamp(),next_allowed_at=NULL WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
+        return Reflect.apply(send,this,[cmd]);
+      });
+      for (const used of [0,899]) {
+        pending = ok(await local('POST','/v1/emails/send',mail()),202).id;
+        await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+          VALUES($1,$2,100,1000,$3,clock_timestamp()-interval '2 minutes') ON CONFLICT(workspace_id,region) DO UPDATE SET
+          max_24_hour_send=1000,sent_last_24_hours=excluded.sent_last_24_hours,checked_at=excluded.checked_at,next_allowed_at=NULL`,[runtime.config.workspaceId,REGION,used]);
+        assert.equal((await dispatchDue(runtime,REGION)).sent,1);
+      }
+      assert.deepEqual(visible,[true,false]);
+      // A peer owns the refresh fence and does not publish its sample until our send starts.
+      // No quota polling on the critical path, no duplicate GetAccount, and no refilled credit.
+      peer=true; const gate=initialGate();
+      pending=ok(await local('POST','/v1/emails/send',mail()),202).id;
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send=1000,sent_last_24_hours=0,checked_at=clock_timestamp()-interval '2 minutes',next_allowed_at=clock_timestamp()+interval '1 minute' WHERE workspace_id=$1 AND region=$2`,[runtime.config.workspaceId,REGION]);
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,1); assert.equal(gate.sentSinceRefresh,1);
+      assert.deepEqual(visible,[true,false]);
+    });
+  });
+
+  test('a fast provider ID is visible while its claimed sibling is still waiting for SES', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const fast = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      const slow = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      let enter!: () => void, release!: () => void;
+      const entered = new Promise<void>(r => { enter = r; }), pending = new Promise<void>(r => { release = r; });
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof SendEmailCommand && cmd.input.EmailTags?.some(tag => tag.Value === slow)) { enter(); await pending; }
+        return Reflect.apply(send,this,[cmd]);
+      });
+      const draining = dispatchDue(runtime,REGION);
+      try {
+        await entered;
+        for (const deadline=Date.now()+1000; ; ) {
+          const row=(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[fast])).rows[0];
+          if (row.provider_id) break;
+          assert.ok(Date.now()<deadline,'An outstanding SES call must not delay a completed result.');
+          await new Promise(r => setTimeout(r,5));
+        }
+        assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[slow])).rows[0].status,'attempting');
+      } finally { release(); await draining; }
+      assert.equal((await draining).sent,2);
+    });
+  });
+
+  test('an elected post-send refresh with lagging SES usage cannot clear a daily denial', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const contact = ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      const marketing = ok(await local('POST','/v1/emails/send',mail({to:contact.email,kind:'marketing'})),202).id;
+      const tx = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+        VALUES($1,$2,1000,1000,0,clock_timestamp()-interval '90 seconds') ON CONFLICT(workspace_id,region) DO UPDATE SET
+        max_send_rate=1000,max_24_hour_send=1000,sent_last_24_hours=0,checked_at=excluded.checked_at,next_allowed_at=NULL`,[runtime.config.workspaceId,REGION]);
+      const calls: string[] = [];
+      t.mock.method(SESv2Client.prototype,'send',async (cmd:any) => {
+        if (cmd instanceof GetAccountCommand) { calls.push('quota'); return { SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:1000,SentLast24Hours:0} }; }
+        const id = cmd.input.EmailTags.find((t:any)=>t.Name==='opensend_email_id').Value; calls.push(id);
+        if (id===tx) throw Object.assign(new Error('Daily message quota exceeded.'),{$metadata:{httpStatusCode:429}});
+        return {MessageId:'unexpected-marketing'};
+      });
+      const gate=initialGate(), start=Date.now(), report=await dispatchDue(runtime,REGION,{gate});
+      assert.deepEqual(calls,[tx,'quota']); assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1);
+      assert.ok(gate.dailyBlockedUntil! >= start+60_000); assert.ok(report.quotaRetryAt! >= gate.dailyBlockedUntil!);
+      const { rows:[denied] } = await db.query('SELECT status,error_code,scheduled_at FROM sending_emails WHERE id=$1',[tx]);
+      assert.equal(denied.status,'queued'); assert.equal(denied.error_code,'SES_DAILY_QUOTA_EXHAUSTED'); assert.ok(denied.scheduled_at.getTime() >= start+59_900);
+      assert.deepEqual((await db.query('SELECT status,attempt_started_at,lease_until FROM sending_emails WHERE id=$1',[marketing])).rows,[{status:'queued',attempt_started_at:null,lease_until:null}]);
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,0); assert.deepEqual(calls,[tx,'quota']);
+    });
+  });
+
+  test('MX shard leases wait for fresh quota before claiming against old or thin daily headroom', async t => {
+    await simulatedSesFixture(t, async ({runtime, local, db}) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const ws=runtime.config.workspaceId, accountId='111122223333';
+      const ids=[ok(await local('POST','/v1/emails/send',mail()),202).id,ok(await local('POST','/v1/emails/send',mail()),202).id];
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,accountId,`arn:aws:sns:${REGION}:${accountId}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[ws,REGION,accountId]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('example.com',$1,$1,'verified')`,[ws]);
+      let reads=0,sends=0;
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any) => {
+        if (!(cmd instanceof GetAccountCommand)) { sends++; return {MessageId:unique('unexpected')}; }
+        reads++; return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:1000,SentLast24Hours:1000}};
+      });
+      for (const [ageSeconds,used] of [[90,800],[3600,0]]) for (const batchSize of [1,2]) {
+        // 100 credits above reserve would pass the old per-shard 51-credit threshold. The
+        // other case has abundant credits but is an hour old. Neither can authorize an attempt.
+        await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after)
+          VALUES($1,$2,1000,1000,$3,clock_timestamp()-$4::int*interval '1 second','-infinity') ON CONFLICT(aws_account_id,region) DO UPDATE SET
+          sent_last_24_hours=excluded.sent_last_24_hours,checked_at=excluded.checked_at,refresh_after=excluded.refresh_after`,[accountId,REGION,used,ageSeconds]);
+        const before=reads;
+        await Promise.all([0,1].map(index=>dispatchDue(runtime,REGION,{accountId,batchSize,lanes:1,shard:{index,count:4}})));
+        assert.equal(reads-before,1); assert.equal(sends,0);
+        assert.equal((await db.query("SELECT id FROM sending_emails WHERE id=ANY($1) AND status='queued' AND attempt_started_at IS NULL AND lease_until IS NULL",[ids])).rowCount,2);
+        assert.equal((await db.query("SELECT id FROM sending_email_events WHERE email_id=ANY($1) AND type='dispatch_attempt'",[ids])).rowCount,0);
       }
     });
   });
