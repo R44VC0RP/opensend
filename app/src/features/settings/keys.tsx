@@ -54,7 +54,7 @@ export function ApiKeysPage() {
           columns={[
             { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} /> },
             { ...settingsColumns.keys[1], render: row => row.kind === 'api'
-              ? <TwoLines first={accessLabel(row.key.permission.split(', '))} second={domainScope(row.key.domains)} />
+              ? <TwoLines first={accessLabel(row.key.permission.split(', '), row.key.domains.length === 0)} second={domainScope(row.key.domains)} />
               : <TwoLines first={`Inbound: ${row.key.addressIds ? row.key.addressIds.map(address).join(', ') : 'every address'}`} second={permissionList(row.key.permissions)} /> },
             { ...settingsColumns.keys[2], render: row => <code>{row.key.prefix}</code> },
             { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt) },
@@ -73,8 +73,8 @@ export function ApiKeysPage() {
             ? <TwoLines first={row.item.name || 'MCP client'} second={row.item.userEmail} />
             : <TwoLines first={row.item.purpose} second={`Agent token${connectionName(row.item.grantId) ? ` from ${connectionName(row.item.grantId)}` : ''}`} /> },
           { key: 'access', label: 'Access', width: '30%', render: row => row.kind === 'mcp'
-            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('opensend:', '')))} second={row.item.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')} />
-            : <TwoLines first={accessLabel(row.item.permissions)} second={domainScope(row.item.domains)} /> },
+            ? <TwoLines first={accessLabel(row.item.scopes.map(scope => scope.replace('opensend:', '')), true)} second={row.item.scopes.map(scope => scope.replace('opensend:', '').replaceAll('_', ' ')).join(', ')} />
+            : <TwoLines first={accessLabel(row.item.permissions, false)} second={domainScope(row.item.domains)} /> },
           { key: 'when', label: 'Connected / expires', width: '18%', render: row => row.kind === 'mcp' ? `Connected ${date(row.item.createdAt)}` : row.item.revokedAt ? 'Revoked' : tokenInactive(row.item) ? 'Expired' : `Expires ${shortDateTime(row.item.expiresAt)} UTC` },
           { key: 'used', label: 'Last used', render: row => row.kind === 'mcp' ? '—' : lastUsed(row.item.lastUsedAt) },
           { key: 'actions', label: '', align: 'right', width: 100, render: row => row.kind === 'mcp'

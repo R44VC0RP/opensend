@@ -24,9 +24,13 @@ const EVERY_ADDRESS = '*'
 const list = new Intl.ListFormat('en', { type: 'conjunction' })
 const capitalize = (value: string) => value.replace(/^./, c => c.toUpperCase())
 
-/** Plain words for read/send/manage permission sets. */
-export function accessLabel(permissions: string[]) {
-  if (permissions.includes('manage')) return 'Full access'
+/**
+ * Plain words for read/send/manage permission sets. Manage is only "Full access" for credentials that can also
+ * administer keys, inbound and settings: unrestricted API keys and MCP connections. Domain-restricted keys and
+ * agent tokens can't, so they name the permissions instead.
+ */
+export function accessLabel(permissions: string[], admin: boolean) {
+  if (permissions.includes('manage')) return admin ? 'Full access' : 'Read, send and manage'
   const known = permissions.filter(permission => permission === 'read' || permission === 'send')
   if (known.length === 1) return known[0] === 'send' ? 'Send only' : 'Read only'
   return capitalize(list.format(known.length ? known : permissions))
@@ -148,6 +152,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
             </div>
             {domainOptions.isError && <div className="stack"><MutationError error={domainOptions.error} /><Button onClick={() => { void (domainOptions.isFetchNextPageError ? domainOptions.fetchNextPage() : domainOptions.refetch()) }}>Retry loading domains</Button></div>}
             {domainOptions.hasNextPage && !domainOptions.isError && <Button variant="ghost" loading={domainOptions.isFetchingNextPage} onClick={() => void domainOptions.fetchNextPage()}>Load more domains</Button>}
+            {purpose === 'manage' && !allDomains && <p className="ui-field__hint">Limited to domains, it can’t manage keys, inbound or settings.</p>}
             {!allDomains && selectedDomains.length >= 50 && <p className="ui-field__hint">50-domain limit reached.</p>}
             {domainError && <p id="key-domain-error" className="ui-field__error" role="alert">{domainError}</p>}
           </fieldset>}
