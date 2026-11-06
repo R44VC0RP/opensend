@@ -82,8 +82,9 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
     event.preventDefault()
     const next: Record<string, string> = {}
     if (!name.trim()) next.name = 'Enter a name for this key.'
+    const chosenAddresses = addressIds.filter(Boolean)
     if (inbound) {
-      if (!allAddresses && !addressIds.length) next.addressIds = 'Choose an address.'
+      if (!allAddresses && !chosenAddresses.length) next.addressIds = 'Choose an address.'
       if (!granted.length) next.permissions = 'Choose at least one permission.'
     } else if (!allDomains && !selectedDomains.length) next.domains = 'Select at least one domain, or choose All domains.'
     else if (!allDomains && selectedDomains.length > 50) next.domains = 'Select up to 50 domains.'
@@ -92,7 +93,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
     if (Object.keys(next).length) return
     try {
       const result = inbound
-        ? await createInboundKey.mutateAsync({ name: name.trim(), addressIds: allAddresses ? null : addressIds, permissions: granted })
+        ? await createInboundKey.mutateAsync({ name: name.trim(), addressIds: allAddresses ? null : chosenAddresses, permissions: granted })
         : await createApiKey.mutateAsync({ name: name.trim(), permission: purpose, domains: allDomains ? [] : selectedDomains })
       onOpenChange(false)
       onCreated(result.secret, inbound ? 'Inbound key created' : 'API key created')
@@ -101,6 +102,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
     }
   }
 
+  // With several addresses (or none) chosen the Select shows a placeholder; its hidden native select then reports '' on change, which is ignored.
   const addressValue = allAddresses ? EVERY_ADDRESS : addressIds.length === 1 ? addressIds[0] : ''
   const addressPlaceholder = addressIds.length > 1 ? `${addressIds.length} addresses` : addresses.isPending ? 'Loading addresses…' : 'Choose an address'
   const summary = inbound ? granted.length ? permissionList(granted) : 'No permissions' : allDomains ? 'All domains' : selectedDomains.length ? selectedDomains.join(', ') : 'No domains'
@@ -118,7 +120,7 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
       </fieldset>
       {inbound && <Field label="Address" htmlFor="key-address" error={addressError} hint={!addresses.isPending && !addresses.data?.length ? <>No inbound addresses yet. <Link to="/inbound/addresses">Create one</Link> first.</> : allAddresses ? 'Includes addresses created later.' : undefined}>
         <Select id="key-address" value={addressValue} placeholder={addressPlaceholder} disabled={pending || addresses.isPending || !addresses.data?.length}
-          onValueChange={value => { clearError('addressIds'); if (value === EVERY_ADDRESS) { setAllAddresses(true); setAddressIds([]) } else { setAllAddresses(false); setAddressIds([value]) } }}
+          onValueChange={value => { if (!value) return; clearError('addressIds'); if (value === EVERY_ADDRESS) { setAllAddresses(true); setAddressIds([]) } else { setAllAddresses(false); setAddressIds([value]) } }}
           options={[...(addresses.data ?? []).map(item => ({ value: item.id, label: item.address })), ...(addresses.data?.length ? [{ value: EVERY_ADDRESS, label: 'Every address' }] : [])]} />
       </Field>}
       <details className="keys-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
