@@ -48,7 +48,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
   await drain('api_request_budgets', batch(sql`api_request_budgets`, sql`window_start < now() - interval '1 day'`));
   if (runtime.config.multiTenant) {
     for (const table of ['hosted_usage_hourly','hosted_health_hourly','hosted_health_credits'])
-      await drain(table, batch(sql`${sql.identifier(table)}`, sql`hour < now()-interval '2 days'`));
+      // Keep only aggregate workspace evidence long enough to observe a 30-day clean span.
+      await drain(table, batch(sql`${sql.identifier(table)}`, table==='hosted_health_hourly' && runtime.config.placementShadow ? sql`hour < now()-interval '32 days'` : sql`hour < now()-interval '2 days'`));
   }
   // Do not cascade-delete a consent/token committed as we pick candidates: lock the parent first,
   // then check its indexed references again in a fresh statement while FK inserts are fenced.

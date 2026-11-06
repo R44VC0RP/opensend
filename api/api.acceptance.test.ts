@@ -4278,6 +4278,109 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX shadow placement enqueues without probing, persists one private observation and never routes',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,jobs})=>{
+      const {loadConfig}=await import('./src/config.js'), {operationJobs}=await import('./src/operations.js');
+      const {SESv2Client}=await import('@aws-sdk/client-sesv2'), tls=(await import('node:tls')).default,{EventEmitter}=await import('node:events');
+      const cfg={BETTER_AUTH_SECRET:'fixture-'.repeat(6),PUBLIC_URL:'https://fixture.example.com'};
+      assert.equal(loadConfig({...cfg,MX_PLACEMENT_SHADOW:'true'}).placementShadow,false);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true'}).placementShadow,true);
+      assert.equal(loadConfig({...cfg,MULTI_TENANT:'true',MX_PLACEMENT_SHADOW:'false'}).placementShadow,false);
+      const wid=runtime.config.workspaceId,oh='us-east-2',type='domain.placement',zone='licensed-dbl.invalid';
+      const create=(name:string)=>local('POST','/v1/domains',{name});
+      const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(cmd.constructor.name));
+        return {DkimAttributes:{Tokens:['aaa','bbb','ccc'],SigningHostedZone:'dkim.fixture',Status:'PENDING'}};
+      });
+      t.mock.method(tls,'connect',(opts:{host:string;servername:string;rejectUnauthorized:boolean},ready:()=>void)=>{
+        ips.push(opts.host);assert.equal(opts.host,'93.184.216.34');assert.equal(opts.rejectUnauthorized,true);
+        const socket=Object.assign(new EventEmitter(),{destroy(){ socket.emit('close'); },write(s:string){
+          assert.equal(s,`HEAD / HTTP/1.1\r\nHost: ${opts.servername}\r\nAccept: text/html\r\nConnection: close\r\n\r\n`);
+          socket.emit('data',Buffer.from(mode==='redirect'?'HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1/\r\n\r\n':'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n'));
+        }});queueMicrotask(ready);return socket;
+      });
+      const forbiddenFetch=globalThis.fetch;
+      globalThis.fetch=async(input:RequestInfo|URL,init?:RequestInit)=>{
+        const u=new URL(String(input));wire.push(u.href);assert.equal(init?.redirect,'manual');
+        if(mode==='timeout') return new Promise<Response>((_,reject)=>init!.signal!.addEventListener('abort',()=>reject(new Error('fixture timeout')),{once:true}));
+        if(u.hostname!=='cloudflare-dns.com') {assert.equal(u.hostname,'rdap.verisign.com');return Response.json({ldhName:u.pathname.split('/').at(-1),events:[{eventAction:'registration',eventDate:'2018-01-01T00:00:00Z'}]});}
+        const name=u.searchParams.get('name')!,q=u.searchParams.get('type');
+        const reply=(type:number,data:string)=>Response.json({Status:0,Answer:[{name,type,data}]});
+        if(name.endsWith('.'+zone)) return mode==='listed' && name==='example.com.'+zone ? reply(1,'127.0.1.2'):Response.json({Status:3,Authority:[{name:zone,type:6,data:'fixture SOA'}]});
+        if(q==='MX') return reply(15,'10 inbound.example.net.');
+        if(q==='A') return reply(1,mode==='private'?'169.254.169.254':'93.184.216.34');
+        assert.equal(q,'TXT');return reply(16,name.startsWith('_dmarc.')?'"v=DMARC1; p=reject"':'"v=spf1 include:_spf.example.net ~all"');
+      };
+      try {
+      Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
+      ok(await create('selfhost.fixture.com'),201);assert.equal((await jobs(type)).length,0);assert.equal(wire.length,0);
+      Object.assign(runtime.config,{multiTenant:true,placementShadow:false});
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared','111122223333','ready')`,[wid,oh]);
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
+      await db.query(`UPDATE auth_user SET google_hosted_domain='example.com',email_verified=true WHERE id=$1`,[manager!.userId]);
+      await db.query(`UPDATE workspace_members m SET created_at=w.created_at FROM workspaces w WHERE m.workspace_id=w.id AND w.id=$1`,[wid]);
+      const prior=ok(await create('off.example.com'),201);
+      assert.equal((await jobs(type)).length,0); runtime.config.placementShadow=true;
+      const added=ok(await create('first.example.com'),201);
+      assert.equal(wire.length+ips.length,0,'No placement I/O before returning the ordinary 201 and SES DNS.');
+      assert.deepEqual([added.region,added.verified,added.ready,added.dns.map((r:Json)=>r.type)],[oh,prior.verified,prior.ready,prior.dns.map((r:Json)=>r.type)]);
+      const run=async(id:string)=>{
+        const pending=(await jobs(type)).filter(j=>j.payload.domainId===id);assert.equal(pending.length,1);
+        await operationJobs[type]!(runtime,pending[0].payload,{id:pending[0].id,attempts:1,workspaceId:wid});
+        return (await db.query('SELECT * FROM domain_placement_shadow WHERE domain_id=$1',[id])).rows[0];
+      };
+      runtime.config.multiTenant=false;assert.equal(await run(added.id),undefined);assert.equal(wire.length,0);runtime.config.multiTenant=true;
+      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,9);assert.equal(first.policy_version,1);
+      assert.ok(first.reasons.includes('dbl_unconfigured'));assert.equal(first.signals.dbl,'unconfigured');assert.ok(first.recorded_at>=first.started_at);
+      assert.equal(wire.filter(u=>u.includes('rdap.verisign.com')).length,1);assert.ok(wire.some(u=>u.endsWith('/domain/example.com')));
+      assert.deepEqual(wire.filter(u=>u.includes('type=A')).map(u=>new URL(u).searchParams.get('name')),['first.example.com'],'No DBL or second site resolution.');
+      const before=wire.length;assert.deepEqual(await run(added.id),first);assert.equal(wire.length,before);
+      const details=ok(await local('GET','/v1/domains/'+added.id));assert.deepEqual(details,added);assert.ok(!('placement' in details));
+      assert.deepEqual(ok(await create(added.name),201),added);assert.equal((await jobs(type)).length,1);
+      runtime.config.placementDblZone=zone;
+      const profile=async(host:string)=>run(ok(await create(host),201).id);
+      const trusted=await profile('yes.example.com');assert.equal(trusted.decision,'virginia');assert.equal(trusted.signals.verifiedSignup,true);
+      assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE domain_id=$1',[trusted.domain_id])).rows[0].region,oh);
+      const lookalike=await profile('xn--pypal-4ve.com');assert.equal(lookalike.decision,'hold');assert.ok(lookalike.reasons.includes('brand_lookalike'));
+      mode='listed';const listed=await profile('bad.example.com');assert.equal(listed.decision,'hold');assert.ok(listed.reasons.includes('blocklisted'));
+      mode='private';const sockets=ips.length;const refused=await profile('private.example.com');assert.equal(refused.signals.site,null);assert.equal(ips.length,sockets);
+      mode='redirect';assert.equal((await profile('redirect.example.com')).signals.site,'redirect');assert.equal(ips.length,sockets+1,'No follow to the private redirect target.');
+      mode='timeout';const start=performance.now(),timeout=await profile('new-fixture.com');
+      assert.ok(performance.now()-start<2600,'One 2s budget, not one timeout per lookup.');assert.equal(timeout.decision,'ohio');assert.equal(timeout.score,0);
+      assert.equal(timeout.signals.dbl,'unknown');assert.equal(timeout.signals.ageDays,null);assert.deepEqual(timeout.signals.exact,{mx:null,spf:null,dmarc:null});
+      mode='live';
+      await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
+      const shared=await profile('store.wordpress.com');assert.equal(shared.signals.root,'store.wordpress.com');assert.equal(shared.signals.ageDays,null);
+      assert.ok(!wire.some(u=>u.endsWith('/domain/wordpress.com') || new URL(u).searchParams.get('name')==='wordpress.com'));
+      const noAnchor=await profile('mail.other-fixture.com');assert.equal(noAnchor.score,7);assert.equal(noAnchor.decision,'ohio');assert.ok(noAnchor.reasons.includes('no_anchor'));
+      // These are historical database rows only; no dispatch, SMTP, or provider calls.
+      const hist='past.other-fixture.com';
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated,created_at)
+        SELECT 'shadow-history-'||i,$1,$2,'fixture','test@'||$3,to_jsonb(array_fill('dest@example.net'::text,ARRAY[50])),'[]','[]','fixture','accepted','shadow-provider-'||i,'{}',false,now()-(i||' days')::interval FROM generate_series(0,19) i`,[wid,oh,hist]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'shadow-event-'||id,$1,id,'accepted',false,created_at FROM sending_emails WHERE workspace_id=$1 AND id LIKE 'shadow-history-%'`,[wid]);
+      const tracked=await profile(hist);assert.equal(tracked.decision,'virginia');assert.equal(tracked.score,10);
+      assert.deepEqual(tracked.signals.domainHistory,{accepted:1000,bounces:0,complaints:0,spanDays:19});
+      await db.query(`UPDATE workspaces SET created_at=created_at-interval '40 days' WHERE id=$1`,[wid]);
+      await db.query(`INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '31 days',2,0,0)`,[wid]);
+      const mature=await profile('mature.other-fixture.com');assert.equal(mature.decision,'virginia');assert.ok(mature.reasons.includes('clean_workspace'));
+      await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='synthetic hold' WHERE workspace_id=$1`,[wid]);
+      const held=await profile('held.example.com');assert.equal(held.decision,'hold');assert.ok(held.reasons.includes('active_abuse_hold'));
+      const samples:number[][]=[[],[]], dbCounts:number[][]=[[],[]],probeCount=wire.length;
+      const queries=t.mock.method(db,'query');
+      for(let i=0;i<40;i++) {
+        await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1 AND NOT ever_proven`,[wid]);
+        const on=i%2;runtime.config.placementShadow=!!on;const from=queries.mock.callCount(),start=performance.now();
+        ok(await create(`latency-${i}.example.com`),201);samples[on].push(performance.now()-start);dbCounts[on].push(queries.mock.callCount()-from);
+      }
+      assert.equal(wire.length,probeCount);assert.deepEqual(dbCounts[0],dbCounts[1],'No added database round trip.');
+      const p95=samples.map(times=>times.sort((a,b)=>a-b)[18]!);t.diagnostic(`Synthetic fresh POST p95 (20 each, alternating): off ${p95[0].toFixed(1)} ms / on ${p95[1].toFixed(1)} ms; ${dbCounts[1][0]} DB calls.`);
+      assert.ok(p95[1]<250);queries.mock.restore();
+      assert.ok(aws.every(c=>['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(c)));
+      } finally { globalThis.fetch=forbiddenFetch; }
+    });
+  });
+
   test('MX regional delivery: legacy backfill, closest claim, mixed batch and frozen dispatch',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       const {readFile}=await import('node:fs/promises'),{runDispatcher}=await import('./src/dispatcher.js');

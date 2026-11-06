@@ -30,9 +30,15 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   assertSesConfigured(runtime);
   // The statement's snapshot predates the function's own insert, so a brand-new claim joins to nothing: that is
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
+  const reserve = regionalSending(runtime) ? sql`reserve_regional_claim(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`;
+  // One reservation, one statement. The profiler never gates or runs inside the create route.
+  const shadow = runtime.config.multiTenant && runtime.config.placementShadow;
   const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null }) | null; fresh: boolean; recovering: boolean; error_code: string | null}>(
-    sql`SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
-      FROM ${regionalSending(runtime) ? sql`reserve_regional_claim(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`} r
+    sql`${shadow ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve}), queued AS (
+      INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.placement:'||id,'domain.placement',${workspace},jsonb_build_object('domainId',id)
+      FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}
+      SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
+      FROM ${shadow ? sql`reserved` : reserve} r
       LEFT JOIN domain_claims dc ON dc.token=r.token`)).rows[0]!;
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
