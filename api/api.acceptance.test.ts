@@ -4208,6 +4208,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
       ]);
 
+      await db.query(`UPDATE sending_emails SET snapshot='{"kind":"marketing"}' WHERE workspace_id=$1 AND actor_key_id='fixture'`,[wid]);
+      ok(await send(simulator),202);
+      const mixedBatch=await request('POST','/v1/emails/batch',key,{emails:[mail({from,to:simulator}),mail({from,to:simulator,kind:'marketing'})]});
+      error(mixedBatch,429,'PENDING_EMAIL_LIMIT_EXCEEDED');
+
       // The scale run freezes the physical two-million-contact audience. Normal CI uses a sparse
       // tail fixture; neither run needs to render the previous days' 1,999,599 messages.
       await limits('100000','10001');

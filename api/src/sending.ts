@@ -70,20 +70,20 @@ function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
   return db.execute(claim ? sql`WITH claim AS (${claim}), locked AS (${lock}) SELECT 1 FROM claim` : lock);
 }
-const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0) => sql`SELECT count(*)::int AS total, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
+const pendingCounts = (runtime: Pick<Runtime, 'config'>, a: Actor, cost: number, marketing = 0, incoming = 1, marketingRows = 0) => sql`SELECT projected, ${hostedAllowance(runtime.config, a.workspaceId, cost, marketing)} AS hosted,
   (SELECT max(l.max_24_hour_send) FROM ${limitsTable(runtime)} l WHERE l.workspace_id = ${a.workspaceId}
     ${runtime.config.multiTenant ? sql`AND EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id = l.workspace_id AND pc.region = l.region AND pc.kind = 'byo')` : sql``}) AS quota
-  FROM sending_emails WHERE workspace_id = ${a.workspaceId} AND review_id IS NULL AND status IN ('queued','attempting')`;
-function assertPending(incoming: number, counts: { total: number; quota: number | string | null; hosted: HostedAllowance | null }) {
+  FROM direct_pending_load(${a.workspaceId},${incoming},${marketingRows})`;
+function assertPending(counts: { projected: number; quota: number | string | null; hosted: HostedAllowance | null }) {
   const cap = pendingCap(counts.quota, counts.hosted);
-  if (counts.total + incoming > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
+  if (counts.projected > cap) throw new ApiError(429, 'PENDING_EMAIL_LIMIT_EXCEEDED', `This submission exceeds the outstanding email limit of ${cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
 }
 async function checkPending(runtime: Runtime, db: DbExecutor, a: Actor, cost: number) {
   await lockAdmission(db, a);
   const charge = isSimulatedSes(runtime) ? 0 : cost;
-  const { rows: [counts] } = await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
+  const { rows: [counts] } = await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null }>(pendingCounts(runtime, a, charge));
   assertHostedAllowance(counts!.hosted, charge);
-  assertPending(1, counts!);
+  assertPending(counts!);
 }
 const Address = z.string().email().max(254).regex(/^[\x21-\x7e]+$/, 'Use ASCII email addresses (punycode domains are supported).');
 const Subject = z.string().min(1).max(998).refine(v => !/[\r\n]/.test(v), 'Subject cannot contain line breaks.');
@@ -593,10 +593,10 @@ function noteDispatch(a: Actor, { region, kind }: EmailSnapshot) {
   const target = targets.get(region) ?? { count: 0, priority: false };
   target.count++; target.priority ||= kind === 'transactional'; targets.set(region, target);
 }
-type AdmissionState = { total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
-function checkCapacity(state: AdmissionState, n: number, cost: number, marketing: number) {
+type AdmissionState = { projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (Pick<ReadyConnection,'aws_account_id'|'kind'> & { region: string; tenant_state: TenantState }) | null };
+function checkCapacity(state: AdmissionState, cost: number, marketing: number) {
   assertHostedAllowance(state.hosted, cost, marketing);
-  assertPending(n, state);
+  assertPending(state);
   if (state.default_region === null) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
 }
 function checkSender(runtime: Runtime, a: Actor, state: AdmissionState, mail: SendRequest) {
@@ -639,11 +639,11 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       // ordinary API policy checks below succeed and COMMIT; errors roll back the whole batch.
       const {rows:[result]} = await db.execute<{inserted: number; state: AdmissionState | {previous: typeof receipt | null; hash: string}}>(sql`WITH state AS MATERIALIZED (
         SELECT direct_admission_state(${a.workspaceId},${a.keyId},${c.req.path},${key ?? null},${hash},${JSON.stringify(receipt)}::jsonb,
-          ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
+          ${JSON.stringify(mails.map(m=>({host:m.from.split('@')[1]!.toLowerCase(), region:m.region,kind:m.kind})))}::jsonb,${JSON.stringify(assetIds)}::jsonb,${simulated},${cost},${marketing},${firstWeek},${secondWeek},${mature},${c.env.config.dispatch.dailyHeadroomPercent}) AS s
       ), submitted AS (
         SELECT m.id,m.hash,m.email,jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region'))) snapshot
         FROM state,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb) WHERE s->>'default_region' IS NOT NULL
-          AND (s->>'total')::int + ${mails.length} <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
+          AND (s->>'projected')::int <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
             least(${SENDING_LIMITS.pendingCeiling}, greatest(${SENDING_LIMITS.pendingFloor}, floor((s->>'quota')::numeric))))
           AND s#>>'{hosted,pauseReason}' IS NULL AND (s#>>'{hosted,cap}' IS NULL OR ${cost}::int=0 OR (
             (s#>>'{hosted,used}')::bigint + ${cost} <= (s#>>'{hosted,cap}')::int AND (${marketing}::int=0 OR
@@ -661,7 +661,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         if (!state.previous) throw new ApiError(500, 'IDEMPOTENCY_RESULT_MISSING', 'The stored idempotency result is unavailable.');
         return state.previous;
       }
-      checkCapacity(state, mails.length, cost, marketing);
+      checkCapacity(state, cost, marketing);
       const locked = new Map(state.assets?.map(row => [row.id,row]));
       let bytes = 0;
       for (const [i,mail] of mails.entries()) {
@@ -699,11 +699,11 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
       WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
-    const state = (await db.execute<{ total: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
+    const state = (await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection
-      FROM (${pendingCounts(c.env, a, cost, marketing)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
-    checkCapacity(state, mails.length, cost, marketing);
+      FROM (${pendingCounts(c.env, a, cost, marketing, mails.length, mails.filter(m => m.kind === 'marketing').length)}) counts LEFT JOIN settings ON true ${mx ? sql`LEFT JOIN ${sendingConnections(c.env)} pc ON pc.workspace_id=settings.workspace_id AND pc.region=coalesce(${mails[0]!.region ?? null},settings.default_region)` : sql``}`)).rows[0]!;
+    checkCapacity(state, cost, marketing);
     const runtime = { ...c.env, config: { ...c.env.config, workspaceId: a.workspaceId, regions: state.enabled_regions } };
     const locked = new Map(state.assets?.map(row => [row.id, row]));
     const rows = []; let expandedBytes = 0;
