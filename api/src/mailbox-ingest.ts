@@ -1,6 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
-import PostalMime, { type Address, type Email } from 'postal-mime';
+import PostalMime, { addressParser, decodeWords, type Address, type Email } from 'postal-mime';
 import { and, eq, sql } from 'drizzle-orm';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { ApiError, digest, log, type JobHandler, type Runtime } from './core.js';
@@ -13,6 +14,8 @@ import { claimReceives, connectionReady, poolReceives } from './states.js';
 
 const PARSE_LIMIT = 6 * 1024 * 1024; // Larger or line-heavy messages keep headers and raw MIME only (Worker memory).
 const PARSE_LINE_LIMIT = 30_000;
+const PARSE_ESCAPE_LIMIT = 131_072; // PostalMime escapeHtml expands [<>"'?&] 6x with per-match callbacks.
+const DEGRADED_PARSE_LIMIT = 256 * 1024; // Raw byte cap if postal-mime's internal hook is unavailable.
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
@@ -75,17 +78,258 @@ function headersOf(email: Email | null): MailHeader[] {
   for (const header of email?.headers ?? []) { if (header.key==='bcc' || header.key==='resent-bcc') continue; size += header.originalKey.length + header.value.length; if (size > HEADER_LIMIT || out.length >= 200) break; out.push({ name: header.originalKey, value: header.value }); }
   return out;
 }
-function automated(email: Email | null, from: string) {
-  const header = (name: string) => email?.headers.find(item => item.key === name)?.value.toLowerCase() ?? '';
-  const auto = header('auto-submitted');
-  return (auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(header('precedence')) || !!header('x-autoreply') || !!header('x-autorespond')
-    || /^(?:mailer-daemon|postmaster)@/.test(from) || /multipart\/report/.test(header('content-type'));
+const AUTOMATED_HEADERS = new Set(['auto-submitted', 'precedence', 'x-autoreply', 'x-autorespond', 'content-type', 'from']);
+const RAW_HEADER_SCAN_LIMIT = 2 * 1024 * 1024;
+const RAW_HEADER_FIELD_LIMIT = 16 * 1024;
+const utf8 = new TextEncoder();
+// UTF-16 length bounds UTF-8 bytes from below and a third of them from above, so encoding only runs in the narrow middle band.
+const withinFieldLimit = (value: string) => value.length * 3 <= RAW_HEADER_FIELD_LIMIT || (value.length <= RAW_HEADER_FIELD_LIMIT && utf8.encode(value).byteLength <= RAW_HEADER_FIELD_LIMIT);
+const rawHeaderDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
+let incompleteAutomatedHeaderScans = 0;
+const trimWsp = (s: string) => {
+  let a = 0, b = s.length;
+  while (a < b && (s.charCodeAt(a) === 32 || s.charCodeAt(a) === 9)) a++;
+  while (b > a && (s.charCodeAt(b - 1) === 32 || s.charCodeAt(b - 1) === 9)) b--;
+  return s.slice(a, b);
+};
+function unfoldHeaderValue(s: string): string {
+  const parts: string[] = [];
+  let copyFrom = 0, i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c !== 13 && c !== 10) { i++; continue; }
+    if (i > copyFrom) parts.push(s.slice(copyFrom, i));
+    while (i < s.length && s.charCodeAt(i) === 13) i++;
+    if (i < s.length && s.charCodeAt(i) === 10) i++;
+    else if (i < s.length) parts.push(' ');
+    copyFrom = i;
+  }
+  if (copyFrom === 0) return trimWsp(s);
+  if (copyFrom < s.length) parts.push(s.slice(copyFrom));
+  return trimWsp(parts.join(''));
+}
+function stripHeaderComments(input: string): string {
+  let out = '', depth = 0, commentStart = 0, quote = false, esc = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]!;
+    if (esc) { if (depth === 0) out += ch; esc = false; continue; }
+    if (ch === '\\' && (quote || depth > 0)) { esc = true; if (depth === 0) out += ch; continue; }
+    if (depth === 0 && ch === '"') { quote = !quote; out += ch; continue; }
+    if (!quote) {
+      if (ch === '(') { if (depth === 0) commentStart = i; depth++; continue; }
+      if (ch === ')' && depth > 0) { depth--; continue; }
+    }
+    if (depth === 0) out += ch;
+  }
+  return depth === 0 || input.indexOf(';', commentStart) < 0 ? out : input;
+}
+function unquoteMimeToken(s: string): string {
+  const t = trimWsp(s);
+  return t.length >= 2 && t.startsWith('"') && t.endsWith('"') ? t.slice(1, -1).replace(/\\([\s\S])/g, '$1') : t;
+}
+function parseStructuredField(raw: string): { value: string; params: Map<string, string> } {
+  const cleaned = stripHeaderComments(raw);
+  const parts: string[] = [];
+  let cur = '', quote = false, esc = false;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i]!;
+    if (esc) { cur += ch; esc = false; continue; }
+    if (quote && ch === '\\') { cur += ch; esc = true; continue; }
+    if (ch === '"') { quote = !quote; cur += ch; continue; }
+    if (!quote && ch === ';') { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  const decodedHead = trimWsp(decodeWords(unquoteMimeToken(parts[0] ?? '')));
+  const semi = decodedHead.indexOf(';');
+  const value = (semi < 0 ? decodedHead : trimWsp(decodedHead.slice(0, semi))).toLowerCase();
+  const params = new Map<string, string>();
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i]!, eq = p.indexOf('=');
+    if (eq < 0) continue;
+    const k = trimWsp(p.slice(0, eq)).toLowerCase();
+    if (k && !params.has(k)) params.set(k, trimWsp(decodeWords(unquoteMimeToken(p.slice(eq + 1)))).toLowerCase());
+  }
+  return { value, params };
+}
+function rawAutomatedHeaders(raw: Uint8Array): Map<string, string> | null {
+  const out = new Map<string, string>();
+  const head = raw.subarray(0, Math.min(raw.byteLength, RAW_HEADER_SCAN_LIMIT));
+  let pos = 0, ended = false, capped = false;
+  while (pos < head.byteLength) {
+    const start = pos;
+    let nl = head.indexOf(10, pos);
+    const lineEnd = nl < 0 ? head.byteLength : nl;
+    let firstEnd = lineEnd;
+    while (firstEnd > pos && head[firstEnd - 1] === 13) firstEnd--;
+    if (firstEnd === pos) { ended = nl >= 0; break; }
+    if (nl < 0 && raw.byteLength > head.byteLength) break;
+    pos = nl < 0 ? head.byteLength : nl + 1;
+    let foldTruncated = false;
+    while (pos < head.byteLength && (head[pos] === 32 || head[pos] === 9)) {
+      nl = head.indexOf(10, pos);
+      if (nl < 0 && raw.byteLength > head.byteLength) { foldTruncated = true; break; }
+      pos = nl < 0 ? head.byteLength : nl + 1;
+    }
+    if (foldTruncated) break;
+    let k = start;
+    while (k < firstEnd && (head[k] === 32 || head[k] === 9)) k++;
+    let key = '';
+    while (k < pos && key.length <= 14) {
+      const b = head[k]!;
+      if (b === 58 || b === 32 || b === 9 || b === 13 || b === 10) break;
+      key += String.fromCharCode(b >= 65 && b <= 90 ? b + 32 : b);
+      k++;
+    }
+    if (!AUTOMATED_HEADERS.has(key) || out.has(key)) continue;
+    while (k < pos) {
+      if (head[k] === 32 || head[k] === 9 || head[k] === 10) { k++; continue; }
+      if (head[k] === 13) {
+        let cr = k;
+        while (cr < pos && head[cr] === 13) cr++;
+        if (cr < pos && head[cr] === 10) { k = cr + 1; continue; }
+      }
+      break;
+    }
+    if (k >= pos || head[k] !== 58) continue;
+    let v = k + 1;
+    while (v < pos && (head[v] === 32 || head[v] === 9 || head[v] === 13 || head[v] === 10)) {
+      if (head[v] === 13) {
+        let cr = v;
+        while (cr < pos && head[cr] === 13) cr++;
+        if (cr < pos && head[cr] === 10) { v = cr + 1; continue; }
+        v = cr;
+        continue;
+      }
+      v++;
+    }
+    if (pos - v > RAW_HEADER_FIELD_LIMIT) { capped = true; break; }
+    out.set(key, unfoldHeaderValue(rawHeaderDecoder.decode(head.subarray(v, pos))));
+  }
+  return ended && !capped ? out : null;
+}
+function automated(email: Email | null, raw: Uint8Array, from: string) {
+  let fallback: Map<string, string> | null = null;
+  if (!email) {
+    fallback = rawAutomatedHeaders(raw);
+    if (!fallback) {
+      log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
+      return false;
+    }
+  }
+  let parsedCapped = false;
+  const header = (name: string) => {
+    if (!email) return fallback!.get(name) ?? '';
+    const value = email.headers.find(item => item.key === name)?.value ?? '';
+    if (withinFieldLimit(value)) return value;
+    parsedCapped = true;
+    return '';
+  };
+  const auto = parseStructuredField(header('auto-submitted')).value;
+  const precedence = parseStructuredField(header('precedence')).value;
+  const contentType = parseStructuredField(header('content-type'));
+  const report = contentType.value === 'multipart/report' && /^(?:(?:global-)?delivery-status|(?:global-)?disposition-notification)$/.test(contentType.params.get('report-type') ?? '');
+  const xAutoreply = trimWsp(decodeWords(stripHeaderComments(header('x-autoreply'))));
+  const xAutorespond = trimWsp(decodeWords(stripHeaderComments(header('x-autorespond'))));
+  const rawFrom = fallback?.get('from') ?? '';
+  const rawSenders = rawFrom ? flatten(addressParser(rawFrom)).map(item => item.address) : [];
+  const daemonSender = /^(?:mailer-daemon|postmaster)@/.test(from) || rawSenders.some(addr => /^(?:mailer-daemon|postmaster)@/.test(addr));
+  if ((auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto[-_]reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report) return true;
+  if (parsedCapped) log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
+  return false;
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 function withinLineLimit(raw: Uint8Array) {
   let lines = raw.byteLength > 0 && raw[raw.byteLength - 1] !== 10 ? 1 : 0;
   for (let i = 0; i < raw.byteLength; i++) if (raw[i] === 10 && ++lines > PARSE_LINE_LIMIT) return false;
   return lines <= PARSE_LINE_LIMIT;
+}
+function countEscaped(value: string | undefined, count: number) {
+  if (!value) return count;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 63 && (c === 60 || c === 62 || c === 34 || c === 39 || c === 63 || c === 38) && ++count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  return count;
+}
+function countAddressesEscaped(list: Address[] | undefined, count: number): number {
+  for (const addr of list ?? []) {
+    if (addr.group) {
+      count = countEscaped(addr.name, count);
+      if (count <= PARSE_ESCAPE_LIMIT) count = countAddressesEscaped(addr.group, count);
+    } else {
+      count = countEscaped(addr.address, count);
+      if (count <= PARSE_ESCAPE_LIMIT) count = addr.name ? countEscaped(addr.name, count) : countEscaped(addr.address, count + 2);
+    }
+    if (count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  return count;
+}
+function countHeaderEscaped(msg: Email, count: number) {
+  if (msg.from) { count = countAddressesEscaped([msg.from], count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  if (msg.subject) { count = countEscaped(msg.subject, count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  if (msg.date) {
+    count = countEscaped(msg.date, count);
+    if (count <= PARSE_ESCAPE_LIMIT && Number.isNaN(Date.parse(msg.date))) count = countEscaped(msg.date, count);
+    if (count > PARSE_ESCAPE_LIMIT) return count;
+  }
+  for (const list of [msg.to, msg.cc, msg.bcc]) if (list?.length) { count = countAddressesEscaped(list, count); if (count > PARSE_ESCAPE_LIMIT) return count; }
+  return count;
+}
+type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
+type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
+const escapeBudgetStore = new AsyncLocalStorage<{ count: number }>();
+const postalProto = PostalMime.prototype as unknown as {
+  parse?: (this: unknown, buf: unknown) => Promise<Email>;
+  renderTextContent?: (this: InternalParser) => void;
+};
+const origParse = postalProto.parse;
+const origRenderTextContent = postalProto.renderTextContent;
+let escapeGuardWarned = false;
+function warnMissingEscapeGuard() {
+  if (escapeGuardWarned) return;
+  escapeGuardWarned = true;
+  log('warn', { code: 'MAILBOX_MIME_ESCAPE_GUARD_UNAVAILABLE' });
+}
+const guardedRenderTextContent = function (this: InternalParser) {
+  if (this.textTypes.has('html')) {
+    const budget = escapeBudgetStore.getStore() ?? { count: 0 };
+    let count = budget.count;
+    for (const entry of this.textMap.values()) {
+      const own = entry.html;
+      for (const item of own || entry.plain || []) {
+        count = item.type === 'subMessage' ? countHeaderEscaped(item.value, count) : !own ? countEscaped(item.value, count) : count;
+        if (count > PARSE_ESCAPE_LIMIT) { budget.count = count; throw new RangeError('MIME entity expansion limit exceeded'); }
+      }
+    }
+    budget.count = count;
+  }
+  return origRenderTextContent!.call(this);
+};
+const escapeGuardInstalled = (() => {
+  try {
+    if (typeof origParse !== 'function' || typeof origRenderTextContent !== 'function') return false;
+    const probe = new PostalMime() as unknown as Partial<InternalParser>;
+    if (!(probe.textTypes instanceof Set) || !(probe.textMap instanceof Map)) return false;
+    postalProto.parse = function (buf: unknown) {
+      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse.call(this, buf));
+    };
+    postalProto.renderTextContent = guardedRenderTextContent;
+    return true;
+  } catch {
+    return false;
+  }
+})();
+if (!escapeGuardInstalled) warnMissingEscapeGuard();
+export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
+export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
+  if (raw.byteLength > PARSE_LIMIT || !withinLineLimit(raw)) return null;
+  if (!isPostalMimeEscapeGuardInstalled()) {
+    warnMissingEscapeGuard();
+    if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
+  }
+  try { return await escapeBudgetStore.run({ count: 0 }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
+  catch { return null; }
 }
 
 const ingestJob: JobHandler = async (runtime, payload, job) => {
@@ -111,13 +355,12 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
     }
     throw new ApiError(503, 'MAILBOX_RAW_UNAVAILABLE', 'The stored message could not be read from S3; retrying.', undefined, true);
   }
-  let email: Email | null = null, status = 'received';
-  if (raw.byteLength <= PARSE_LIMIT && withinLineLimit(raw)) {
-    try { email = await PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' }); } catch { status = 'unparsed'; }
-  } else status = 'unparsed';
+  const email = await parseInboundMime(raw);
+  const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
-  const from = flatten(email?.from)[0] ?? { name: null, address: (common.from?.[0]?.match(/<([^>]+)>/)?.[1] ?? common.from?.[0] ?? notification.mail?.source ?? '').trim().toLowerCase() };
+  const commonFrom = common.from?.[0] && withinFieldLimit(common.from[0]) ? flatten(addressParser(common.from[0]))[0] : undefined;
+  const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';
   const messageId = normalizeMessageId(email?.messageId ?? common.messageId);
@@ -159,7 +402,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
         envelopeFrom: notification.mail?.source?.toLowerCase() ?? null, envelopeTo: receipt.recipients, sentAt, receivedAt,
         text: text.value, html: html.value, bodyTruncated: text.truncated || html.truncated || status === 'unparsed' || skipAttachments, snippet: snippetOf(text.value, html.value),
         headers: headersOf(email), attachmentCount: attachments.length, sizeBytes: raw.byteLength, rawBucket: receipt.bucket, rawKey,
-        verdicts, spam, automated: automated(email, from.address), status,
+        verdicts, spam, automated: automated(email, raw, from.address), status,
       },attachments);
   });
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED', status, bytes: raw.byteLength, attachments: attachments.length });

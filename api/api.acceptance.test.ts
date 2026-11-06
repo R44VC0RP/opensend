@@ -4524,11 +4524,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   test('inbound MIME parsing enforces the 6 MiB byte cap and 30,000-line cap, storing oversized or line-heavy messages raw with SES headers', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { readFileSync } = await import('node:fs');
       const PostalMime = (await import('postal-mime')).default;
-      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { acceptInboundNotification, isPostalMimeEscapeGuardInstalled, mailboxIngestJobs, parseInboundMime } = await import('./src/mailbox-ingest.js');
+      const apiPkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+      assert.equal(apiPkg.dependencies['postal-mime'], '4.0.0', 'postal-mime must be pinned to an exact version.');
+      assert.equal(typeof (PostalMime.prototype as { renderTextContent?: unknown }).renderTextContent, 'function');
+      const probe = new PostalMime() as unknown as { textTypes?: unknown; textMap?: unknown };
+      assert.ok(probe.textTypes instanceof Set && probe.textMap instanceof Map, 'PostalMime internal textTypes/textMap must match the escape guard hook.');
+      assert.equal(isPostalMimeEscapeGuardInstalled(), true, 'PostalMime renderTextContent escape guard hook must be installed in CI.');
       const scope = runtime.config.workspaceId, topic = `arn:aws:sns:${REGION}:111122223333:inbound-caps`;
       const domainId = unique('domain');
       runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query(`INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)`, [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
       await db.query(`INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3)`, [domainId, scope, REGION]);
       await db.query(`INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)`, [scope, REGION, topic]);
       await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,'example.com',$4,'active','store')`, [unique('mdom'), scope, domainId, REGION]);
@@ -4542,17 +4551,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return { Body: { transformToByteArray: async () => bytes } };
       });
       const parseSpy = t.mock.method(PostalMime, 'parse');
-      async function ingest(bytes: Uint8Array, subject: string, messageId: string) {
+      async function ingest(bytes: Uint8Array, subject: string, messageId: string, commonFrom = ['Sender <sender@example.net>']) {
         const receiptId = unique('cap'), objectKey = `raw/${receiptId}`;
         raw.set(objectKey, bytes);
         const message = {
           notificationType: 'Received',
-          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: ['Sender <sender@example.net>'], subject, messageId: `<${messageId}>` } },
+          mail: { messageId: receiptId, source: 'sender@example.net', commonHeaders: { from: commonFrom, subject, messageId: `<${messageId}>` } },
           receipt: { timestamp: new Date().toISOString(), recipients: [box.address], spfVerdict: { status: 'PASS' }, dmarcVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } },
         };
         assert.equal(await acceptInboundNotification(runtime, { region: REGION, topicArn: topic, message }), 1);
         await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receiptId }, { id: unique('job'), workspaceId: scope, attempts: 1 });
-        const { rows: [row] } = await db.query('SELECT id, status, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
+        const { rows: [row] } = await db.query('SELECT id, thread_id, status, automated, body_truncated, subject, from_address, message_id FROM mail_messages WHERE workspace_id = $1 AND ses_message_id = $2', [scope, receiptId]);
         return row;
       }
 
@@ -4613,6 +4622,173 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(firstEmpty.status, 'received');
       assert.equal(laterUnparsed.status, 'unparsed');
       assert.notEqual(laterUnparsed.id, firstEmpty.id, 'A later unparsed receipt must not deduplicate onto an earlier empty-body parsed message.');
+
+      // PostalMime textToHtml escapes all 6 characters [<>"'?&] across decoded text/plain leaves rendered into HTML.
+      // Cap total decoded matches at 131,072 (including quoted-printable and base64 parts) without penalizing multipart/alternative.
+      const mixedMime = (encoding: string, body: string) => Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="mix"\r\n\r\n--mix\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: ${encoding}\r\n\r\n${body}\r\n--mix\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>tail</p>\r\n--mix--\r\n`
+      );
+      const qpGroup = '=3C=3E=22=27=3F=26'; // 6 escaped characters in decoded text, zero raw [<>"'?&] bytes in body.
+      const qpLine = qpGroup.repeat(40) + '=\r\n'; // 240 decoded matches per line.
+      const qpAtCap = qpLine.repeat(546) + qpGroup.repeat(5) + '=3C=3E'; // 546*240 + 30 + 2 = 131,072 decoded matches.
+      const parsedQp = await ingest(mixedMime('quoted-printable', qpAtCap), 'QP at 131,072', 'qp-at-cap@example.net');
+      assert.equal(parsedQp.status, 'received');
+
+      const unparsedQp = await ingest(mixedMime('quoted-printable', qpAtCap + '=26'), 'QP over 131,072', 'qp-over-cap@example.net');
+      assert.equal(unparsedQp.status, 'unparsed');
+      assert.equal(unparsedQp.body_truncated, true);
+      assert.equal(unparsedQp.subject, 'QP over 131,072');
+
+      const b64OverCap = Buffer.from('<>"\'?&'.repeat(21_845) + '<>"').toString('base64').replace(/.{76}/g, '$&\r\n'); // 131,073 decoded matches.
+      const unparsedB64 = await ingest(mixedMime('base64', b64OverCap), 'Base64 over 131,072', 'b64-over-cap@example.net');
+      assert.equal(unparsedB64.status, 'unparsed');
+      assert.equal(unparsedB64.body_truncated, true);
+
+      const raw6MibLt = mixedMime('8bit', '<'.repeat(5_900_000));
+      assert.ok(raw6MibLt.byteLength <= 6 * 1024 * 1024);
+      const unparsedRawLt = await ingest(raw6MibLt, 'Raw 14-line < expansion', 'raw-lt-over-cap@example.net');
+      assert.equal(unparsedRawLt.status, 'unparsed');
+      assert.equal(unparsedRawLt.body_truncated, true);
+
+      // multipart/alternative with both text/plain and text/html never runs textToHtml, so >131,072 [<>"'?&] stays parsed.
+      const altBody = '<div class="r"><a href="https://example.com/?a=1&amp;b=2">item \'x\'</a></div>\r\n'.repeat(18_000); // >180,000 [<>"'?&] chars, <30k lines.
+      const altPlain = 'quote "a" & \'b\' <c> ?\r\n'.repeat(28_000 - 18_000 - 20); // >50,000 in plain too; total lines < 30,000.
+      const parsedAlt = await ingest(Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n--alt\r\nContent-Type: text/plain\r\n\r\n${altPlain}\r\n--alt\r\nContent-Type: text/html\r\n\r\n${altBody}\r\n--alt--\r\n`
+      ), 'Alternative HTML', 'alt-html-ok@example.net');
+      assert.equal(parsedAlt.status, 'received');
+
+      // Concurrent root parses isolate their escape counters via AsyncLocalStorage while nested message/rfc822 parts share their root's counter.
+      const mixed70kA = mixedMime('8bit', '<'.repeat(70_000));
+      const mixed70kB = mixedMime('8bit', '&'.repeat(70_000));
+      const nested140k = Buffer.from(
+        `From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="outer"\r\n\r\n--outer\r\nContent-Type: message/rfc822\r\n\r\n${mixed70kA.toString('utf8')}\r\n--outer\r\nContent-Type: text/html\r\n\r\n<p>outer</p>\r\n--outer--\r\n`
+      );
+      const [concA, concNested, concB] = await Promise.all([parseInboundMime(mixed70kA), parseInboundMime(nested140k), parseInboundMime(mixed70kB)]);
+      assert.ok(concA?.html && concB?.html, 'Two concurrent 70,000-escape root parses must both succeed without summing across roots.');
+      assert.equal(concNested, null, 'Nested message/rfc822 escape counts must accumulate onto their own root parse.');
+
+      // If postal-mime's hook is unavailable, log once (structured, no PII) and reject > 256 KiB by raw byte length alone before parsing.
+      const warnSpy = t.mock.method(console, 'warn');
+      const proto = PostalMime.prototype as { renderTextContent?: unknown };
+      const savedHook = proto.renderTextContent;
+      proto.renderTextContent = undefined;
+      try {
+        assert.equal(isPostalMimeEscapeGuardInstalled(), false);
+        const degradedHdr = Buffer.from('From: secret-sender@example.net\r\nSubject: Secret Subject\r\n\r\n');
+        const exact256k = Buffer.concat([degradedHdr, Buffer.alloc(256 * 1024 - degradedHdr.length - 2, 0x61), Buffer.from('\r\n')]);
+        assert.equal(exact256k.byteLength, 256 * 1024);
+        proto.renderTextContent = function () {}; // Non-guarded function: simulates missing guard while allowing <= 256 KiB parse to finish.
+        const callsBefore = parseSpy.mock.callCount();
+        assert.ok(await parseInboundMime(exact256k), 'Messages at or below 256 KiB raw bytes still parse in fallback mode.');
+        assert.equal(parseSpy.mock.callCount(), callsBefore + 1);
+        const over256k = Buffer.concat([exact256k, Buffer.from('x')]);
+        assert.equal(over256k.byteLength, 256 * 1024 + 1);
+        assert.equal(await parseInboundMime(over256k), null, 'Messages above 256 KiB raw bytes must become unparsed before parsing starts.');
+        const rfc2231Boundary = Buffer.from(
+          `From: secret-sender@example.net\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=first; boundary*=utf-8''second\r\n\r\n--first\r\nContent-Type: application/pdf\r\n\r\n${'A'.repeat(270_001)}\r\n--first--\r\n--second\r\nContent-Type: text/plain\r\n\r\n${'<'.repeat(270_001)}\r\n--second--\r\n`
+        );
+        assert.equal(await parseInboundMime(rfc2231Boundary), null, 'Raw byte-length fallback rejects > 256 KiB regardless of MIME headers.');
+        assert.equal(parseSpy.mock.callCount(), callsBefore + 1, 'Rejected > 256 KiB fallback messages must not invoke PostalMime.parse.');
+      } finally {
+        proto.renderTextContent = savedHook;
+      }
+      assert.equal(isPostalMimeEscapeGuardInstalled(), true);
+      const guardWarnings = warnSpy.mock.calls.map(c => String(c.arguments[0])).filter(line => line.includes('MAILBOX_MIME_ESCAPE_GUARD_UNAVAILABLE'));
+      assert.equal(guardWarnings.length, 1, 'Missing escape guard must log once across repeated parses.');
+      assert.doesNotMatch(guardWarnings[0]!, /secret-sender|Secret Subject/i);
+      warnSpy.mock.restore();
+
+      // Unparsed messages preserve header-based auto-reply detection from the raw header block so reply loop guards still hold.
+      const unparsedTail = 'x\r\n'.repeat(30_005);
+      const autoFolded = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted:\r\n auto-replied\r\n\r\n${unparsedTail}`), 'OOO unparsed', 'auto-folded@example.net');
+      assert.equal(autoFolded.status, 'unparsed');
+      assert.equal(autoFolded.automated, true);
+      error(await local('POST', `/v1/inbound/threads/${autoFolded.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoFolded.id, text: 'would loop' }, 'live'), 409, 'REPLY_TO_AUTOMATED');
+      ok(await local('POST', `/v1/inbound/threads/${autoFolded.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoFolded.id, text: 'explicit override', allowAutomated: true }, 'live'), 202);
+
+      const over6MibPrecedence = Buffer.concat([Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: bulk\r\n\r\n'), Buffer.alloc(6 * 1024 * 1024, 0x61)]);
+      const bulkUnparsed = await ingest(over6MibPrecedence, 'Bulk over 6 MiB', 'bulk-6m@example.net');
+      assert.equal(bulkUnparsed.status, 'unparsed');
+      assert.equal(bulkUnparsed.automated, true);
+      error(await local('POST', `/v1/inbound/threads/${bulkUnparsed.thread_id}/reply`, { addressId: box.id, replyToMessageId: bulkUnparsed.id, text: 'would loop' }, 'live'), 409, 'REPLY_TO_AUTOMATED');
+
+      const xAutoreply = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nX-Autoreply: yes\r\n\r\n${unparsedTail}`), 'X-Autoreply unparsed', 'x-auto@example.net');
+      assert.equal(xAutoreply.status, 'unparsed');
+      assert.equal(xAutoreply.automated, true);
+
+      const reportUnparsed = await ingest(Buffer.from(`From: bounce@isp.example\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type=delivery-status; boundary="r"\r\n\r\n${unparsedTail}`), 'DSN unparsed', 'dsn-unparsed@example.net');
+      assert.equal(reportUnparsed.status, 'unparsed');
+      assert.equal(reportUnparsed.automated, true);
+
+      const autoNo = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: NO\r\n\r\nAuto-Submitted: auto-replied\r\n${unparsedTail}`), 'Human over 30k', 'auto-no@example.net');
+      assert.equal(autoNo.status, 'unparsed');
+      assert.equal(autoNo.automated, false, 'Auto-Submitted: no and body text after the blank line must not flag a message as automated.');
+      ok(await local('POST', `/v1/inbound/threads/${autoNo.thread_id}/reply`, { addressId: box.id, replyToMessageId: autoNo.id, text: 'normal reply allowed' }, 'live'), 202);
+
+      // Structured header tokens, RFC 2047 encoded words, quoted display names, and incomplete header scan handling.
+      const autoNoParam = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: (human) no; owner=me\r\n\r\n${unparsedTail}`), 'Auto no param', 'auto-no-param@example.net');
+      assert.equal(autoNoParam.automated, false);
+
+      const autoEncoded = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: =?UTF-8?B?YXV0by1yZXBsaWVk?=; owner=me\r\n\r\n${unparsedTail}`), 'Encoded auto-replied', 'auto-enc@example.net');
+      assert.equal(autoEncoded.automated, true);
+
+      const precEncodedB = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: =?UTF-8?B?YnVsaw==?=\r\n\r\n${unparsedTail}`), 'Encoded bulk', 'prec-b64@example.net');
+      assert.equal(precEncodedB.automated, true);
+      const precEncodedQ = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: =?UTF-8?Q?auto=5Freply?=\r\n\r\n${unparsedTail}`), 'Encoded auto_reply', 'prec-qp@example.net');
+      assert.equal(precEncodedQ.automated, true);
+      const precHyphen = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: auto-reply\r\n\r\n${unparsedTail}`), 'Hyphenated auto-reply', 'prec-hyphen@example.net');
+      assert.equal(precHyphen.automated, true);
+      const precHyphenParsed = await ingest(Buffer.from('From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: auto-reply\r\n\r\nhi\r\n'), 'Parsed auto-reply', 'prec-hyphen-parsed@example.net');
+      assert.equal(precHyphenParsed.status, 'received');
+      assert.equal(precHyphenParsed.automated, true);
+
+      const filenameReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: application/octet-stream; name="multipart/report.eml"\r\n\r\n${unparsedTail}`), 'Filename report', 'fn-report@example.net');
+      assert.equal(filenameReport.automated, false, 'A parameter value containing multipart/report must not match Content-Type media type.');
+      const nonDsnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; boundary="r"\r\n\r\n${unparsedTail}`), 'Report without report-type', 'no-rtype@example.net');
+      assert.equal(nonDsnReport.automated, false);
+      const mdnReport = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type="disposition-notification"(comment); boundary="r"\r\n\r\n${unparsedTail}`), 'MDN trailing comment', 'mdn-unparsed@example.net');
+      assert.equal(mdnReport.automated, true);
+      const dsnTokenComment = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nContent-Type: multipart/report; report-type=delivery-status(dsn); boundary="r"\r\n\r\n${unparsedTail}`), 'DSN token comment', 'dsn-comment@example.net');
+      assert.equal(dsnTokenComment.automated, true);
+
+      const quotedPostmaster = '"<postmaster@example.net>" <human@example.net>';
+      const displayPostmaster = await ingest(Buffer.from(`From: ${quotedPostmaster}\r\nTo: caps@example.com\r\n\r\n${unparsedTail}`), 'Quoted display name', 'quoted-pm@example.net', [quotedPostmaster]);
+      assert.equal(displayPostmaster.from_address, 'human@example.net');
+      assert.equal(displayPostmaster.automated, false, 'Quoted display name containing <postmaster@...> must not mark the message automated.');
+      const realPostmaster = await ingest(Buffer.from(`From: "System" <postmaster@example.net>\r\nTo: caps@example.com\r\n\r\n${unparsedTail}`), 'Real postmaster', 'real-pm@example.net', []);
+      assert.equal(realPostmaster.automated, true);
+
+      const capWarnSpy = t.mock.method(console, 'warn');
+      const unterminatedHeaders = Buffer.concat([Buffer.from('From: Sender <sender@example.net>\r\nAuto-Submitted: auto-replied\r\nX-Pad: '), Buffer.alloc(2 * 1024 * 1024 + 1024, 0x61)]);
+      const cappedScan1 = await ingest(unterminatedHeaders, 'Capped header block', 'cap-hdr-1@example.net');
+      assert.equal(cappedScan1.status, 'unparsed');
+      assert.equal(cappedScan1.automated, false, 'Incomplete header scan must treat automated status as unknown and default to false.');
+      const cappedField = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nAuto-Submitted: ${'('.concat('a'.repeat(17_000), ') auto-replied')}\r\n\r\n${unparsedTail}`), 'Capped header field', 'cap-hdr-2@example.net');
+      assert.equal(cappedField.automated, false);
+      const parsedHugeAuto = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: ${'a'.repeat(1024 * 1024)}\r\n\r\nhi\r\n`), 'Parsed 1 MiB Auto-Submitted', 'cap-hdr-parsed@example.net');
+      assert.equal(parsedHugeAuto.status, 'received');
+      assert.equal(parsedHugeAuto.automated, false, 'Parsed messages must also enforce the 16 KiB field cap before tokenizing automated headers.');
+      const capLogs = capWarnSpy.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(entry => entry.code === 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE');
+      assert.deepEqual(capLogs.map(entry => entry.count), [1, 2, 3]);
+      capWarnSpy.mock.restore();
+      const utf8HeavyPrecedence = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nPrecedence: bulk; x="${'€'.repeat(6_000)}"\r\n\r\nhi\r\n`), 'UTF-8 heavy Precedence', 'cap-hdr-utf8@example.net');
+      assert.equal(utf8HeavyPrecedence.automated, false, 'The 16 KiB field cap counts UTF-8 bytes, not UTF-16 code units, on the parsed path too.');
+
+      // Internal CR runs (quadratic under the old /\r*\n/g chain) still classify correctly; scaling is measured outside CI, not by wall clock here.
+      const crRun16k = `no; x="${'\r'.repeat(16_000)}"`;
+      const crMime = Buffer.from([
+        'From: Sender <sender@example.net>',
+        'To: caps@example.com',
+        `Auto-Submitted: ${crRun16k}`,
+        `Precedence: normal\r${'\r'.repeat(16_000)}x`,
+        `Content-Type: text/plain; x="${'\r'.repeat(16_000)}"`,
+        '',
+        unparsedTail,
+      ].join('\r\n'));
+      const crRes = await ingest(crMime, 'Internal CR run', 'cr-linear@example.net');
+      assert.equal(crRes.status, 'unparsed');
+      assert.equal(crRes.automated, false);
     });
   });
 
