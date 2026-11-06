@@ -1,7 +1,7 @@
--- Apply with mail writers drained. The snapshot and trigger installation must be atomic.
-LOCK TABLE sending_emails, sending_email_events IN SHARE ROW EXCLUSIVE MODE;
+-- Apply with mail writers drained. Take the campaign lock before mail locks, as dispatch and release do.
 ALTER TABLE sending_campaigns DROP CONSTRAINT sending_campaigns_waiting_reason_check,
   ADD CHECK (waiting_reason IN ('pacing_window','ses_daily_quota','hosted_daily_quota'));
+LOCK TABLE sending_emails, sending_email_events IN SHARE ROW EXCLUSIVE MODE;
 -- A workspace may disconnect or switch to BYO. Operator policy survives, but is
 -- only consulted while the workspace has a Hosted connection.
 ALTER TABLE workspaces
@@ -25,9 +25,6 @@ CREATE VIEW hosted_real_envelopes AS SELECT e.id,e.workspace_id,e.created_at,e.s
   WHERE NOT e.simulated AND ((e.feedback_topic_arn IS NULL AND pc.kind='shared') OR e.feedback_topic_arn IN
     (SELECT feedback_topic_arn FROM provider_pool_regions WHERE feedback_topic_arn IS NOT NULL));
 
-INSERT INTO hosted_usage_hourly SELECT workspace_id,date_trunc('hour',created_at,'UTC'),sum(cost)
-  FROM hosted_real_envelopes WHERE created_at >= date_trunc('hour',now(),'UTC')-interval '23 hours' AND hosted_charged(status,provider_id)
-  GROUP BY 1,2;
 -- One counter write per workspace/hour in a batch admission or campaign release, not per envelope.
 CREATE FUNCTION hosted_charge_batch() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -87,8 +84,16 @@ CREATE VIEW hosted_health_projection AS WITH latest AS (
   count(*) FILTER(WHERE kind='complaint')::int AS complaints
   FROM ranked WHERE dest<>'' OR pos=1 GROUP BY 1,2,3,4;
 
-INSERT INTO hosted_health_credits SELECT * FROM hosted_health_projection;
-INSERT INTO hosted_health_hourly SELECT workspace_id,epoch,hour,sum(accepted),sum(bounces),sum(complaints) FROM hosted_health_credits GROUP BY 1,2,3;
+-- Without a Hosted connection, install the schema but never read mail or feedback history.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM provider_connections WHERE kind='shared') THEN
+    INSERT INTO hosted_usage_hourly SELECT workspace_id,date_trunc('hour',created_at,'UTC'),sum(cost)
+      FROM hosted_real_envelopes WHERE created_at >= date_trunc('hour',now(),'UTC')-interval '23 hours' AND hosted_charged(status,provider_id)
+      GROUP BY 1,2;
+    INSERT INTO hosted_health_credits SELECT * FROM hosted_health_projection;
+    INSERT INTO hosted_health_hourly SELECT workspace_id,epoch,hour,sum(accepted),sum(bounces),sum(complaints) FROM hosted_health_credits GROUP BY 1,2,3;
+  END IF;
+END $$;
 
 -- Reconcile only the affected envelope, using the existing (workspace_id,email_id) event index.
 -- Both a feedback insert and a suppression in the same statement may fire: the stored credits
