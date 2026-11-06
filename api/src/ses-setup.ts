@@ -427,13 +427,16 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
   } finally { c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy(); }
 }
 
-export async function readSelectedDomains(runtime:Runtime,region:string,names:string[]) {
+export async function readSelectedDomains(runtime:Runtime,region:string,names:string[],onRevoked?:(name:string)=>Promise<void>) {
   const ctx=setupContext(155_000), c=clients(runtime,region,ctx), values=new Map<string,CandidateIdentity>();
   try {
     for (const name of names) {
       let value:CandidateIdentity|undefined;
       try { value=identityDefaults(await c.ses.send(new GetEmailIdentityCommand({EmailIdentity:name}),{abortSignal:ctx.signal})); } catch(e) { if (!missing(e)) throw e; }
-      if (!value?.VerifiedForSendingStatus || value.VerificationStatus!=='SUCCESS') throw new ApiError(409,'CANDIDATE_NO_LONGER_VERIFIED','A selected SES identity is no longer verified. Refresh the domain list.');
+      if (!value?.VerifiedForSendingStatus || value.VerificationStatus!=='SUCCESS') {
+        if (!onRevoked) throw new ApiError(409,'CANDIDATE_NO_LONGER_VERIFIED','A selected SES identity is no longer verified. Refresh the domain list.');
+        await onRevoked(name);continue;
+      }
       values.set(name,value);
     }
     return values;

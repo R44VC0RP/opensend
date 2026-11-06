@@ -264,10 +264,28 @@ const provision=runV5(async(r,c,p,attempt)=>{
   if (!journal) return;
   try {
     if (!journal.ownership_journal.length) {
-      const pending=(await r.db.execute<{name:string;importing:boolean}>(sql`SELECT name,importing FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL`)).rows;
+      const pending=(await r.db.execute<Intent>(sql`SELECT * FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL`)).rows;
       if (!pending.length) throw conflict('NO_SELECTED_DOMAINS','No domains were selected for this region.');
-      const imports=pending.filter(i=>i.importing).map(i=>i.name);
-      if (imports.length) await readSelectedDomains(await scoped(r,c,region,'scan'),region,imports);
+      const imports=new Map(pending.filter(i=>i.importing).map(i=>[i.name,i.id]));
+      if (imports.size) {
+        let retired=false;
+        const verified=await readSelectedDomains(await scoped(r,c,region,'scan'),region,[...imports.keys()],async name=>{
+          await r.db.transaction(async db=>{
+            await connection(db,c.workspace_id,true); // Serialize last-intent retirement with accepting a new selection.
+            fenced((await db.execute(sql`UPDATE byo_domain_intents SET closed_reason='CANDIDATE_NO_LONGER_VERIFIED' WHERE id=${imports.get(name)!} AND closed_reason IS NULL
+              AND EXISTS(SELECT FROM provider_connection_regions WHERE ${owned})`)).rowCount);
+            if ((await db.execute(sql`UPDATE provider_connection_regions SET sending_state='unprovisioned',lease_until=NULL,provision_error=NULL WHERE ${owned}
+              AND NOT EXISTS(SELECT FROM byo_domain_intents WHERE connection_id=${c.id} AND region=${region} AND closed_reason IS NULL)`)).rowCount) {
+              // Make the queue row reusable before releasing the connection lock; the
+              // runner's settlement is fenced by run and cannot overwrite its successor.
+              fenced((await db.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL WHERE id=${task} AND status='running' AND attempts=${attempt} AND payload->>'run'=${p.run}`)).rowCount);
+              retired=true;
+            }
+          });
+        });
+        if (retired) return;
+        if (!verified.size && imports.size===pending.length) throw defer(1000,{...p,generation:gen}); // Recheck selections added during the SES reads.
+      }
     }
     const result=await provisionByoRegion(await scoped(r,c,region,'provision'),region,c.id,journal.ownership_journal,
       async()=>fenced((await r.db.execute(sql`SELECT FROM provider_connection_regions WHERE ${owned}`)).rowCount),

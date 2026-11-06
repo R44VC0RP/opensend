@@ -4502,7 +4502,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
-    let external='',failOnce=true,revoked=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined;
+    let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
@@ -4517,7 +4517,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
         case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
-        case 'GetEmailIdentityCommand':assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}return {VerificationStatus:revoked?'FAILED':'SUCCESS',VerifiedForSendingStatus:!revoked,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};
+        case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'DeleteEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);if(failDelete){failDelete=false;throw Object.assign(Error('synthetic delete denied'),{name:'AccessDenied'});}createdIdentity=undefined;return {};
         case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
@@ -4563,11 +4563,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     error(await select(ohId,va+':both.example'),409,'DUPLICATE_DOMAIN_SELECTION');error(await select(ie+':both.example'),409,'SCAN_STALE');
     revoked=true;error(await select(ohId),409,'CANDIDATE_NO_LONGER_VERIFIED');revoked=false;
     assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,0);
-    assert.deepEqual(ok(await api('POST','/v1/domains',{name:'first.example'}),202).regions,[oh]);
+    const regionStatus=async(region:string)=>ok(await api('GET',path+'/regions/status')).regions.find((r:Json)=>r.region===region);
+    await t.test('revocation before regional provisioning releases the selection without AWS writes',async()=>{
+      ok(await select(va+':both.example'),202);const start=trace.length;revoked=true;
+      try {assert.equal(await run('byo.provision',va),true);} finally {revoked=false;}
+      const result=await regionStatus(va);assert.deepEqual(result.pending,[]);assert.deepEqual(result.failedIntents,[{domain:'both.example',importing:true,error:'CANDIDATE_NO_LONGER_VERIFIED'}]);
+      assert.deepEqual(trace.slice(start),[{region:va,op:'GetEmailIdentityCommand'}]);assert.equal((await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND type='byo.bind'",[wid])).rowCount,0);
+      await db.query(`INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) SELECT $1,$2,'slot-'||n||'.example',true,'slot-'||n FROM generate_series(1,99) n`,[v5.id,oh]);
+      try {assert.deepEqual(ok(await api('POST','/v1/domains',{name:'first.example'}),202).regions,[oh]);} finally {await db.query("DELETE FROM byo_domain_intents WHERE connection_id=$1 AND id LIKE 'slot-%'",[v5.id]);}
+      ok(await select(ohId),202);assert.ok((await regionStatus(oh)).pending.some((i:Json)=>i.domain==='both.example'));
+    });
     const concurrent=await Promise.all([select(ohId,vaId),select(ohId,vaId)]);assert.equal(ok(concurrent[0]!,202).operationId,ok(concurrent[1]!,202).operationId);
     assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,2);
-    assert.equal(await run('byo.provision',oh),false);assert.equal(await run('byo.provision',va),false);
-    const regionStatus=async(region:string)=>ok(await api('GET',path+'/regions/status')).regions.find((r:Json)=>r.region===region);
+    ok(await select(oh+':reselect.example'),202);revoked='reselect.example';
+    try {assert.equal(await run('byo.provision',oh),false);} finally {revoked=false;}
+    assert.deepEqual((await regionStatus(oh)).failedIntents,[{domain:'reselect.example',importing:true,error:'CANDIDATE_NO_LONGER_VERIFIED'}]);
+    assert.equal(await run('byo.provision',va),false);
     assert.equal((await regionStatus(oh)).error,'AWS_SETUP_TIMEOUT');assert.equal((await regionStatus(oh)).sendingState,'provisioning');
     assert.equal((await poll()).importedDomains,0);assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE workspace_id=$1',[wid])).rowCount,0);
     const confirm=async(region:string)=>{const TopicArn=`arn:aws:sns:${region}:${account}:${params.get('param_ResourcePrefix')}-feedback`,host=`https://sns.${region}.amazonaws.com/`;
