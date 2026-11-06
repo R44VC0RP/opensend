@@ -4516,7 +4516,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
-        case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
+        case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example')throw missing();return {VerificationStatus:revoked?'FAILED':'SUCCESS',VerifiedForSendingStatus:!revoked,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);return {DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};
         case 'CreateConfigurationSetCommand':if(region===va&&failOnce){failOnce=false;throw Object.assign(Error('synthetic throttle'),{name:'ThrottlingException'});}assert.ok(!sets.has(key));assert.ok(i.Tags.some((t:Json)=>t.Key==='opensend:owner'&&t.Value==='mx'));sets.set(key,{...i,dest:[]});return {};
@@ -4542,7 +4542,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
     const path='/v1/connection',post=(suffix:string,b?:Json)=>api('POST',path+suffix,b),poll=async()=>ok(await api('GET',path)).connection;
     const run=async(type:string,region?:string)=>{
-      const j=(await db.query(`UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type=$2 AND ($3::text IS NULL OR payload->>'region'=$3) AND status<>'completed' ORDER BY id LIMIT 1) RETURNING *`,[wid,type,region??null])).rows[0];assert.ok(j,type+':'+region);
+      const j=(await db.query(`UPDATE jobs SET status='running',attempts=1,lease_until=now()+interval '3 minutes' WHERE id=(SELECT id FROM jobs WHERE workspace_id=$1 AND type=$2 AND ($3::text IS NULL OR payload->>'region'=$3) AND status='pending' ORDER BY id LIMIT 1) RETURNING *`,[wid,type,region??null])).rows[0];assert.ok(j,type+':'+region);
       try {await regionalByoJobs[type]!(runtime,j.payload,{workspaceId:wid,id:j.id,attempts:1});}
       catch(e){if(!(e instanceof JobDeferred)) {await db.query("UPDATE jobs SET status='failed' WHERE id=$1",[j.id]);throw e;}await db.query("UPDATE jobs SET status='pending',available_at=now()+interval '1 hour',payload=$2 WHERE id=$1",[j.id,e.payload??j.payload]);return false;}
       await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return true;
@@ -4604,8 +4604,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];
     await assert.rejects((await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,verify.payload,{workspaceId:wid,id:verify.id,attempts:1}),JobDeferred);
     assert.equal(trace.filter(t=>t.op==='CreateEmailIdentityCommand').length,1);assert.ok(policies.at(-1)!.includes(`arn:aws:ses:${oh}:${account}:identity/new.example`));
+    await t.test('terminal bind failures release both domain caps and allow regional reselection',async()=>{
+      ok(await select(oh+':reselect.example'),202);revoked=true;
+      try {await assert.rejects(run('byo.bind',oh),{code:'CANDIDATE_NO_LONGER_VERIFIED'});} finally {revoked=false;}
+      assert.deepEqual((await regionStatus(oh)).failedIntents,[{domain:'reselect.example',importing:true,error:'CANDIDATE_NO_LONGER_VERIFIED'}]);
+      const overlap=unique('claimed')+'.example';ok(await api('POST','/v1/domains',{name:overlap}),202);
+      await db.query("INSERT INTO domain_claims(name,workspace_id) VALUES($1,'default')",[overlap]);
+      try {await assert.rejects(run('byo.bind',oh),{code:'DOMAIN_CLAIMED'});} finally {await db.query("DELETE FROM domain_claims WHERE name=$1 AND workspace_id='default'",[overlap]);}
+      const failed=await regionStatus(oh);assert.deepEqual(failed.pending,[]);assert.ok(failed.failedIntents.some((i:Json)=>i.domain===overlap && i.error==='DOMAIN_CLAIMED'));
+      // Fill all but the final active slot in both the 100-total and 10-unproven quotas.
+      await db.query(`INSERT INTO byo_domain_intents(connection_id,region,name,importing,id) SELECT $1,$2,'cap-'||n||'.example',n>9-(SELECT count(*) FROM domain_claims WHERE workspace_id=$3 AND NOT ever_proven),'cap-'||n FROM generate_series(1,99-(SELECT count(*)::int FROM domain_claims WHERE workspace_id=$3)) n`,[v5.id,oh,wid]);
+      try {ok(await api('POST','/v1/domains',{name:'last-slot.example'}),202);error(await api('POST','/v1/domains',{name:'overflow.example'}),409,'DOMAIN_LIMIT_REACHED');}
+      finally {await db.query("DELETE FROM byo_domain_intents WHERE connection_id=$1 AND id LIKE 'cap-%'",[v5.id]);}
+      ok(await select(va+':reselect.example'),202);await run('byo.bind',va);
+      assert.equal((await db.query("SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name='reselect.example'",[wid])).rows[0].region,va);
+    });
     const selection={revision:rev,candidateIds:[ohId],confirm:true}, receipt=ok(await api('POST',path+'/imports',selection,'retry-selected'),202);
-    ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,2);
+    ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,3);
   });
 
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
