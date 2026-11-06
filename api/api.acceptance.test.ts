@@ -4171,21 +4171,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
       ]);
 
-      // A full direct queue does not consume campaign reservations. Exercise the last 401 frozen
-      // recipients of a two-million-recipient run without rendering two million messages in CI.
+      // The scale run freezes the physical two-million-contact audience. Normal CI uses a sparse
+      // tail fixture; neither run needs to render the previous days' 1,999,599 messages.
       await limits('100000','10001');
       const list = ok(await local('POST','/v1/lists',{name:unique('newsletter')}),201);
-      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
-        SELECT 'con_'||md5($1||n),$1,'subscriber-'||n||'@example.net','subscribed' FROM generate_series(1,401)n RETURNING *)
-        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [wid,list.id]);
+      const total=process.env.OPENSEND_SCALE_ACCEPTANCE==='1' ? 2_000_000 : 401;
+      if (total>401) await db.query("SET LOCAL statement_timeout='180s'");
+      for (let start=1;start<=total;start+=50000) await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent)
+        SELECT 'con_'||md5($1||n),$1,'subscriber-'||n||'@example.net','subscribed' FROM generate_series($3::int,$4::int)n RETURNING workspace_id,id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [wid,list.id,start,Math.min(start+49999,total)]);
       const c = ok(await local('POST','/v1/campaigns',{name:'Large newsletter',from,subject:'Fixture',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
       const path = `/v1/campaigns/${c.id}`, view = async () => ok(await local('GET',path));
-      ok(await local('POST',`${path}/schedule`,{revision:c.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202);
-      await run('campaign.run');
-      assert.equal((await view()).delivery.prepared,401);
-      await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes,content_hash,subject,snapshot_bytes)
-        SELECT review_id,ordinal+1999599,recipient,recipient_bytes,content_hash,subject,snapshot_bytes FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`, [c.id]);
-      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=2000000,expanded=1999599,scheduled_at=now() WHERE id=$1`, [c.id]);
+      assert.equal(ok(await local('POST',`${path}/schedule`,{revision:c.revision,scheduledAt:new Date(Date.now()+3600000).toISOString()}),202).queued,total);
+      if (total===401) await db.query(`INSERT INTO sending_review_recipients(review_id,ordinal,recipient,recipient_bytes)
+        SELECT review_id,ordinal+1999599,recipient,recipient_bytes FROM sending_review_recipients WHERE review_id=(SELECT review_id FROM sending_campaigns WHERE id=$1)`, [c.id]);
+      await db.query(`UPDATE sending_campaigns SET total=2000000,prepared=1999599,expanded=1999599,scheduled_at=now() WHERE id=$1`, [c.id]);
       await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at,refresh_after) VALUES ($1,$2,20,20000,17000,clock_timestamp(),now()+interval '1 minute')`, [pool,REGION]);
       await run('campaign.run');
       const full = await view(); assert.equal(full.delivery.expanded,1999999); assert.equal(full.counts.byStatus.queued,400);
@@ -4392,6 +4392,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
       await db.query(`UPDATE sending_emails SET status='rejected',provider_id='accepted-before-rejection' WHERE id=$1`,[wid+'2']);
       assert.equal((await runtime.db.execute<{used:number}>(sql`SELECT (${allowance}->>'used')::int AS used`)).rows[0].used,total-1);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES ('accepted',$1,$2,'accepted',false)`,[wid,wid+'2']);
+      const accepted=async()=>Number((await db.query('SELECT sum(accepted) n FROM hosted_health_hourly WHERE workspace_id=$1',[wid])).rows[0].n);
+      assert.equal(await accepted(),1);
+      await db.query(`UPDATE sending_emails SET status='suppressed' WHERE id=$1`,[wid+'2']);
+      assert.equal(await accepted(),0,'A later validation suppression removes the acceptance from reputation volume.');
     });
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {
