@@ -574,6 +574,22 @@ export function sizeCheck(snapshot: EmailSnapshot, rows: { size: number }[]) {
   const encoded = Math.ceil(bytes * 1.4) + rows.reduce((sum, r) => sum + Math.ceil(r.size / 3) * 4 * 1.04 + 2048, 0) + 16384;
   if (encoded > MAX_ENCODED_MESSAGE) throw new ApiError(413, 'ENCODED_MESSAGE_TOO_LARGE', 'Estimated encoded MIME exceeds the initial 16 MiB message limit.');
 }
+// The renderer owns the MIME content, not the envelope or custom headers. A
+// substituted Subject can contain physical header lines, including obsolete From : forms.
+function renderedMimeHeaders(block:string) {
+  const headers:string[]=[],seen=new Set<string>();
+  for (const field of block.split(/\r\n(?![ \t])/)) {
+    const allowed=/^(subject|mime-version|content-[a-z0-9-]+):/i.exec(field);
+    if (!allowed) continue; // Drop the entire untrusted field, continuations included.
+    const name=allowed[1]!.toLowerCase(),unfolded=field.replace(/\r\n[ \t]+/g,' ');
+    if (seen.has(name) || /[\x00-\x08\x0a-\x1f\x7f]/.test(unfolded)) throw new ApiError(422,'INVALID_RENDERED_MIME','SES rendered an ambiguous or invalid MIME header.');
+    seen.add(name);
+    // Preserve legal folding only when unfolding would exceed the SMTP line limit.
+    if (field.split('\r\n').some(line=>Buffer.byteLength(line)>998)) throw new ApiError(422,'INVALID_RENDERED_MIME','A rendered MIME header line exceeds the SMTP limit.');
+    headers.push(Buffer.byteLength(unfolded)>998?field:unfolded);
+  }
+  return headers;
+}
 function marketingFooter(snapshot: EmailSnapshot, url: string) {
   if (snapshot.html) {
     const footer = `<p style="font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#595959;margin:24px 0 0"><a href="${escaped(url)}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p>`;
@@ -615,7 +631,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
       const normalized = rendered.RenderedTemplate.replace(/\r?\n/g, '\r\n');
       const split = normalized.indexOf('\r\n\r\n');
       if (split < 0) throw new ApiError(422, 'INVALID_RENDERED_MIME', 'SES rendered content has no MIME header/body separator.');
-      const headers = normalized.slice(0, split).split(/\r\n(?![ \t])/).filter(h => !/^(?:from|to|cc|bcc|reply-to|return-path|date|message-id):/i.test(h));
+      const headers = renderedMimeHeaders(normalized.slice(0,split));
       snapshot.raw = [`From: ${formattedSender(snapshot.from, snapshot.fromName, true)}`, `To: ${snapshot.to.join(', ')}`, ...(snapshot.cc.length ? [`Cc: ${snapshot.cc.join(', ')}`] : []), ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(', ')}`] : []), ...headers, ...snapshot.headers.map(header => `${header.Name}: ${header.Value}`)].join('\r\n') + normalized.slice(split);
     }
   }
