@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { ApiError, id, log } from './core.js';
-import type { DbExecutor, JobHandler, Runtime } from './core.js';
+import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
 export const MAX_ATTEMPTS = 6;
@@ -54,6 +54,19 @@ export function jobConcurrency(value: unknown, maximum = 8) {
   const number = Number(value);
   return Number.isInteger(number) && number >= 1 ? Math.min(number, maximum) : 2;
 }
+// Input comes only from the actual claimed rows, never a caller-supplied endpoint. Hold the
+// endpoint lock until paused deliveries are parked, so a concurrent resume sees and requeues them.
+export const webhookClaimCtes = sql`hook_inputs AS MATERIALIZED (
+  SELECT j.id AS job_id,d.workspace_id,d.id AS delivery_id,d.generation,d.webhook_id,d.event_id,d.payload,d.synthetic,w.url,w.encrypted_secret,w.paused
+  FROM claimed j JOIN operation_deliveries d ON d.workspace_id=j.workspace_id AND d.id=j.payload->>'deliveryId'
+    AND to_jsonb(d.generation)=j.payload->'generation' AND d.status<>'delivered'
+  LEFT JOIN LATERAL (SELECT url,encrypted_secret,paused FROM operation_webhooks WHERE workspace_id=d.workspace_id AND id=d.webhook_id FOR SHARE) w ON true
+  WHERE j.type='operation.webhook'
+), parked AS (UPDATE operation_deliveries d SET status=CASE WHEN h.url IS NULL THEN 'failed' ELSE 'paused' END,
+  last_error=CASE WHEN h.url IS NULL THEN 'ENDPOINT_DELETED' ELSE 'ENDPOINT_PAUSED' END,updated_at=now()
+  FROM hook_inputs h WHERE d.id=h.delivery_id AND d.workspace_id=h.workspace_id AND d.generation=h.generation AND (h.url IS NULL OR (h.paused AND NOT h.synthetic)))`;
+const hookJoin = sql`LEFT JOIN hook_inputs h ON h.job_id=j.id AND h.url IS NOT NULL AND (NOT h.paused OR h.synthetic)`;
+export const claimedWithWebhooks = sql`SELECT j.*,to_jsonb(h) AS webhook FROM claimed j ${hookJoin}`;
 export async function processJobs(runtime: Runtime, handlers: Record<string, JobHandler>, limit = 1, concurrency = 1, maxDurationMs = 20000) {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
@@ -67,7 +80,8 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
   const budgetMs = Math.min(20000, Math.max(1, maxDurationMs));
   const maximumClaims = Math.min(Math.max(1, limit), 100);
   const regionalRuntime = workspaceRuntimes(runtime);
-  const handle = async (job: { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number }, index: number, claimMs: number, claimBatchSize: number) => {
+  type Claimed = { id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number; webhook: ClaimedWebhook | null };
+  const handle = async (job: Claimed, index: number, claimMs: number, claimBatchSize: number) => {
     const jobStarted = Date.now();
     processed++; laneJobs[index]!++;
     peakActiveJobs = Math.max(peakActiveJobs, ++activeJobs);
@@ -75,15 +89,22 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
     // a worker that still holds the retired run from completing or requeueing the row the new run now owns.
     const fence = and(eq(jobs.id, job.id), eq(jobs.attempts, job.attempts), eq(jobs.status, 'running'), typeof job.payload.run === 'string' ? sql`${jobs.payload}->>'run' = ${job.payload.run}` : undefined);
     const context = { jobId: job.id, operation: job.type, attempt: job.attempts, workspaceId: job.workspace_id, requestId: typeof job.payload.requestId === 'string' ? job.payload.requestId : undefined };
+    let records: SQL | undefined, settling = false;
+    const settle = (update: SQLWrapper) => {
+      settling = true;
+      return runtime.db.execute(records ? sql`WITH settled AS (${update.getSQL()} RETURNING id), ${records} SELECT 1` : update.getSQL());
+    };
     try {
       const handler = handlers[job.type];
       if (!handler) throw new ApiError(500, 'JOB_HANDLER_MISSING', 'No handler is registered for this job type.');
       const ownerRuntime = job.type.startsWith('campaign.') || job.type.startsWith('ses.') || job.type === 'mailbox.reconcile' || job.type === 'operation.ses'
         ? await regionalRuntime(job.workspace_id) : { ...runtime, config: { ...runtime.config, workspaceId: job.workspace_id } };
-      await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id });
-      await runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence);
+      await handler(ownerRuntime, job.payload, { id: job.id, attempts: job.attempts, workspaceId: job.workspace_id,
+        webhook: job.webhook, recordWithSettlement: ctes => { records = ctes; } });
+      await settle(runtime.db.update(jobs).set({ status: 'completed', leaseUntil: null, lastError: null }).where(fence));
       log('info', { ...context, code: 'JOB_COMPLETED', claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } catch (error) {
+      if (settling) throw error; // Outcome and job settle atomically. Let the durable lease recover a failed commit.
       if (error instanceof JobDeferred) {
         // The claim incremented attempts; undo it so intentional polling never reaches MAX_ATTEMPTS.
         await runtime.db.update(jobs).set({ status: 'pending', attempts: sql`${jobs.attempts} - 1`, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(error.payload ? { payload: error.payload } : {}) }).where(fence);
@@ -94,7 +115,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
       const retry = error instanceof ApiError && error.retryable && (job.attempts < MAX_ATTEMPTS || error.code === 'JOB_FINALIZATION_FAILED');
-      await runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + Math.min(3600000, 15000 * 4 ** (job.attempts - 1))).toISOString() }).where(fence);
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + Math.min(3600000, 15000 * 4 ** (job.attempts - 1))).toISOString() }).where(fence));
       log('error', { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted, message: error instanceof ApiError ? error.message : 'Unexpected background failure; inspect stack frames.', stack: error instanceof ApiError ? undefined : error instanceof Error ? error.stack?.split('\n').slice(1).join('\n') : undefined });
     } finally {
       activeJobs--;
@@ -109,9 +130,7 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
       const claimBatchSize = Math.min(freeLanes.size, maximumClaims - claims);
       const activeAtClaim = active.size;
       const claimStarted = Date.now();
-      const claimed = await runtime.db.execute<{
-        id: string; workspace_id: string; type: string; payload: Record<string, unknown>; attempts: number;
-      }>(sql`WITH feedback AS (
+      const claimed = await runtime.db.execute<Claimed>(sql`WITH feedback AS (
         SELECT j.id FROM jobs j WHERE ${effectiveConcurrency > 1 && activeFeedback === 0}
           AND j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery')
           AND ((j.status = 'pending' AND j.available_at <= now()) OR (j.status = 'running' AND j.lease_until < now()))
@@ -125,8 +144,8 @@ export async function processJobs(runtime: Runtime, handlers: Record<string, Job
           j.available_at, j.id FOR UPDATE OF j SKIP LOCKED LIMIT (${claimBatchSize} - (SELECT count(*) FROM feedback))
       ), due AS (
         SELECT id FROM feedback UNION ALL SELECT id FROM regular
-      ) UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
-        FROM due WHERE jobs.id = due.id RETURNING jobs.*`);
+      ), claimed AS (UPDATE jobs SET status = 'running', attempts = jobs.attempts + 1, lease_until = now() + interval '3 minutes'
+        FROM due WHERE jobs.id = due.id RETURNING jobs.*), ${webhookClaimCtes} ${claimedWithWebhooks}`);
       claimRequests++;
       const claimMs = Date.now() - claimStarted;
       if (!claimed.rows.length) {

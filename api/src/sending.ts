@@ -1216,7 +1216,9 @@ export const rank: Record<EmailStatus, number> = { queued: 0, attempting: 1, acc
 type EmailEventInput = { workspaceId: string; type: string; providerId?: string; errorCode?: string; data?: Record<string, unknown>; recipientHashes?: string[]; externalId?: string; createdAt?: string; receipt?: { topicArn: string; messageId: string } };
 type IncomingReceipt = { topicArn: string; messageId: string; region: string; payload: Record<string, unknown>; recoveryType?: 'operation.ses' | 'operation.simulatedFeedbackRecovery' };
 export async function recordEmailEvent(runtime: Runtime, input: EmailEventInput & { emailId: string }) {
-  return (await persistEmailEvent(runtime, input)).event;
+  const { event, runnable } = await persistEmailEvent(runtime, input);
+  if (runnable) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
+  return event;
 }
 // Only authenticated ingress and the guarded test-only callback handler use this.
 export async function ingestRoutineSesEvent(runtime: Runtime, input: RoutineIngress) {

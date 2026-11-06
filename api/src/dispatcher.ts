@@ -555,7 +555,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM simulated_callbacks r RETURNING id
     ) SELECT (SELECT count(*) FROM inserted)::int AS events, (SELECT count(*) FROM updated)::int AS updated, (SELECT count(*) FROM webhook_jobs)::int AS webhooks, (SELECT count(*) FROM simulated_jobs)::int AS simulated`);
   const readyJobs = result.rows[0]!.webhooks;
-  if (readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
+  if (readyJobs > 0) try { await runtime.wake?.(readyJobs, 'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
   // With a feedback sink, simulated Send/Delivery callbacks travel the same queue live SNS feedback does.
   if (simulated && runtime.feedback) {
     const recorded = new Date().toISOString();

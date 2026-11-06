@@ -24,8 +24,8 @@ function initHttpDeps() {
     import('./app.js'), import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { app }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage }]) => ({
-    Pool, drizzle, sql, app, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { app }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackMessage, workWake }]) => ({
+    Pool, drizzle, sql, app, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackMessage, workWake,
   }));
 }
 let httpDepsPromise: ReturnType<typeof initHttpDeps> | undefined;
@@ -63,7 +63,7 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'WORK_QUEUE_NAME', fal
   return typeof value === 'string' && value ? value : fallback;
 };
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
-  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink } = await loadHttpDeps();
+  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake } = await loadHttpDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
   const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
@@ -89,44 +89,32 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   });
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1) => {
-      // A bounded burst advertises newly committed work to Queues autoscaling.
-      // These are hints, not email jobs; Postgres still owns every claim.
-      const count = Math.min(8, Math.max(1, Math.ceil(readyJobs / concurrency)));
-      if (count === 1) {
-        // Compute conflict expiry under its row lock, not from an earlier EXCLUDED timestamp.
-        const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)
-          VALUES (${WAKE_SCHEDULE_KEY}, clock_timestamp() + interval '1 second')
-          ON CONFLICT (workspace_id) DO UPDATE SET wake_not_before = clock_timestamp() + interval '1 second'
-          WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before <= clock_timestamp()
-          RETURNING wake_not_before::text`);
-        const fence = reserved.rows[0]?.wake_not_before;
-        if (!fence) {
-          core.log('info', { code: 'QUEUE_WAKE_COALESCED', readyJobs });
-          return;
-        }
-        try {
-          // Delay past the window so the signal cannot be consumed before later coalesced job commits.
-          await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds: 1 });
-        } catch (error) {
-          // Keep the exact database timestamp: an older failed send must not clear a newer reservation.
-          try {
-            await db.execute(sql`UPDATE job_schedule SET wake_not_before = NULL
-              WHERE workspace_id = ${WAKE_SCHEDULE_KEY} AND wake_not_before = ${fence}::timestamptz`);
-          } catch { /* Preserve the original send error; the window also expires on its own. */ }
-          throw error;
-        }
-      } else {
-        await env.WAKE_QUEUE.sendBatch(Array.from({ length: count }, () => ({ body: { kind: 'wake' } })));
+    const notify = workWake(env.WAKE_QUEUE, concurrency);
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      if (immediate || readyJobs > concurrency) return notify(readyJobs);
+      // Only orchestration singletons coalesce. Delay past the window so the signal cannot
+      // be consumed before a later coalesced commit; callback delivery never waits here.
+      const reserved = await db.execute<{ wake_not_before: string }>(sql`INSERT INTO job_schedule(workspace_id, wake_not_before)
+        VALUES (${WAKE_SCHEDULE_KEY}, clock_timestamp() + interval '1 second')
+        ON CONFLICT (workspace_id) DO UPDATE SET wake_not_before = clock_timestamp() + interval '1 second'
+        WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before <= clock_timestamp()
+        RETURNING wake_not_before::text`);
+      const fence = reserved.rows[0]?.wake_not_before;
+      if (!fence) { core.log('info', { code: 'QUEUE_WAKE_COALESCED', readyJobs }); return; }
+      try { await env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds: 1 }); }
+      catch (error) {
+        try { await db.execute(sql`UPDATE job_schedule SET wake_not_before = NULL WHERE workspace_id = ${WAKE_SCHEDULE_KEY} AND wake_not_before = ${fence}::timestamptz`); }
+        catch { /* Preserve the send error; this reservation also expires on its own. */ }
+        throw error;
       }
-      core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: count });
+      core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
     }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
-    // A dispatch-only nudge opens no connection. A queue reservation uses its own lazy connection.
+    // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
@@ -186,7 +174,7 @@ export default {
       return fastSecure(Response.json({ error: { code, message: 'Server runtime is unavailable; use the request ID to inspect logs.', requestId, retryable: true } }, { status: 503, headers: { 'x-request-id': requestId, 'cache-control': 'no-store' } }));
     }
   },
-  // Queue/scheduled continuations bypass coalescing to preserve active worker chains and future due times.
+  // Queue/scheduled continuations preserve worker chains and retry due times.
   async queue(batch, env) {
     const { jobConcurrency, followDueJobs, core, settleFeedbackMessage } = await loadHttpDeps();
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
@@ -238,7 +226,7 @@ export default {
       if (controller.cron !== '* * * * *') return;
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
-      // Minute cron: recover orchestration jobs whose wake was coalesced or lost.
+      // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }));
       await reconcileSharedConnections(runtime);
     }, concurrency);

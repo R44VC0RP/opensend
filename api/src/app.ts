@@ -49,7 +49,7 @@ export function createApp() {
     const dispatch = targets?.size && c.res.status < 300 ? c.env.dispatch : undefined;
     if (!wake && !dispatch) return;
     const nudge = async (runtime: Runtime) => {
-      if (wake) try { await runtime.wake?.(wakeJobs); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
+      if (wake) try { await runtime.wake?.(wakeJobs, c.req.path.startsWith('/v1/webhooks/') ? 'webhook' : undefined); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, { count, priority }] of targets) {
         try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }

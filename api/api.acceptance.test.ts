@@ -3944,7 +3944,7 @@ describe('Operational configuration and public event boundaries', () => {
   });
 
   test('MOCK REDIRECT TRANSPORT: SNS certificates and webhook delivery refuse redirects and retain retryable failures', async t => {
-    const [{ createServer }, { once }, { createApp }, { nodeRuntime }, { drizzle }, { drain }, regional, { setupResources }, { sesRegions }] = await Promise.all([
+    const [{ createServer }, { once }, { createApp }, { nodeRuntime }, { drizzle }, { drainJobs }, regional, { setupResources }, { sesRegions }] = await Promise.all([
       import('node:http'), import('node:events'), import('./src/app.js'), import('./src/adapters/node.js'), import('drizzle-orm/node-postgres'),
       import('./src/dispatch.js'), import('./src/ses-region-state.js'), import('./src/ses-setup.js'), import('./src/db/ses-regions.js'),
     ]);
@@ -4011,7 +4011,10 @@ describe('Operational configuration and public event boundaries', () => {
         // These rows never commit: the external runner cannot see or deliver this
         // synthetic endpoint test. Only this normal drain uses the loopback transport.
         const queued = ok(await local('POST', `/v1/webhooks/${endpoint.id}/test`), 202);
-        await drain(runtime);
+        const wire = t.mock.method(db, 'query');
+        await drainJobs(runtime,1,1);
+        assert.equal(wire.mock.callCount(),2,'Claim plus atomic attempt/delivery/job settlement, including a retry.');
+        wire.mock.restore();
         const delivery = ok(await local('GET', `/v1/webhooks/${endpoint.id}/deliveries/${queued.id}`));
         assert.equal(delivery.status, 'pending');
         assert.equal(delivery.lastStatusCode, 302);
@@ -4022,6 +4025,14 @@ describe('Operational configuration and public event boundaries', () => {
         assert.equal(delivery.attempts[0].error, 'WEBHOOK_HTTP_ERROR');
         const jobs = await db.query("SELECT status, attempts, last_error, available_at > now() AS delayed FROM jobs WHERE workspace_id = $1 AND type = 'operation.webhook' AND payload->>'deliveryId' = $2", [runtime.config.workspaceId, queued.id]);
         assert.deepEqual(jobs.rows, [{ status: 'pending', attempts: 1, last_error: 'WEBHOOK_HTTP_ERROR', delayed: true }]);
+        // A normal delivery (unlike the synthetic test POST above) parks under the endpoint
+        // lock. Resuming discovers it and queues exactly one new generation.
+        await db.query('UPDATE operation_deliveries SET synthetic=false WHERE id=$1',[queued.id]);
+        await db.query("UPDATE jobs SET available_at=now() WHERE workspace_id=$1 AND payload->>'deliveryId'=$2",[runtime.config.workspaceId,queued.id]);
+        await drainJobs(runtime,1,1);
+        assert.equal((await db.query('SELECT status FROM operation_deliveries WHERE id=$1',[queued.id])).rows[0].status,'paused');
+        ok(await local('PATCH', `/v1/webhooks/${endpoint.id}`, {paused:false}));
+        assert.equal((await db.query("SELECT 1 FROM jobs WHERE payload->>'deliveryId'=$1 AND payload->>'generation'='1' AND status='pending'",[queued.id])).rowCount,1);
         assert.deepEqual(requests, [{ path: '/certificate', method: 'GET' }, { path: '/webhook', method: 'POST' }], 'Neither 302 may contact the redirect target.');
         throw rollback;
       });

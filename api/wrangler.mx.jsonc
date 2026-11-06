@@ -52,7 +52,7 @@
     ],
     "consumers": [
       { "queue": "opensend-mx-production-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
-      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 2, "max_retries": 5, "max_concurrency": 10 }
+      { "queue": "opensend-mx-production-feedback", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 10 }
     ]
   },
   "triggers": { "crons": ["* * * * *", "7 * * * *"] },

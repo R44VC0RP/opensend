@@ -67,7 +67,7 @@ export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'ima
 export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
-  wake?: (readyJobs?: number) => Promise<void>;
+  wake?: (readyJobs?: number, immediate?: 'webhook') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
@@ -85,7 +85,9 @@ export type MailboxAccess = { keyId: string; workspaceId: string; admin: boolean
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
-export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string }) => Promise<void>;
+export type ClaimedWebhook = { delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string };
+export type JobHandler = (runtime: Runtime, payload: Record<string, unknown>, job: { id: string; attempts: number; workspaceId: string;
+  webhook?: ClaimedWebhook | null; recordWithSettlement?: (ctes: import('drizzle-orm').SQL) => void }) => Promise<void>;
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }

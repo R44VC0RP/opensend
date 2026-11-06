@@ -8,8 +8,8 @@ function initDeps() {
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
     import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey }, { ApiError, log }, { feedbackSink }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey, ApiError, log, feedbackSink,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey }, { ApiError, log }, { feedbackSink, workWake }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey, ApiError, log, feedbackSink, workWake,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -124,14 +124,14 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   private async runtime(): Promise<Runtime> {
-    const { Pool, drizzle, loadConfig, r2Storage, feedbackSink } = await loadDeps();
+    const { Pool, drizzle, loadConfig, r2Storage, feedbackSink, workWake } = await loadDeps();
     const config = loadConfig({ ...this.env });
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.
     if (!this.pool) {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE) };
+    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE), wake: workWake(this.env.WAKE_QUEUE, 6) };
   }
 
   private async closePool() {

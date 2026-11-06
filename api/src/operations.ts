@@ -5,7 +5,7 @@ import { CreateEmailIdentityCommand, CreateTenantResourceAssociationCommand, Del
 import { X509Certificate, verify } from 'node:crypto';
 import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, isSimulatedSes, digest, errors, getSes, id, IdParams, json, notFound, PageQuery, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, log, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
-import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
+import { claimedWithWebhooks, enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 import { jobs } from './db/core.js';
 import { recordUnsubscribe } from './audience.js';
@@ -155,7 +155,7 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
     }
     return count;
   });
-  if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
+  if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs,'webhook'); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
 export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, email: string) {
@@ -857,7 +857,7 @@ function registerPublicEvents(app: App) {
     if (error === 'SES_ACCOUNT_MISMATCH') throw new ApiError(403, error, 'The SES sending account is missing or does not match this deployment.');
     // SNS retries 5xx, not 4xx. Without a verified owner we cannot store a tenant-scoped recovery job yet.
     if (error) throw new ApiError(503, error, 'The feedback owner is not yet available; retry this notification.', undefined, true);
-    if (runnable > 0) try { await c.env.wake?.(runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+    if (runnable > 0) try { await c.env.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
     return c.json({ accepted: true }, 202);
   });
   // Hono matches HEAD as GET; intercept the original method before the mutating GET route.
@@ -1012,31 +1012,26 @@ async function cachedMetrics(origin: string, key: string, compute: () => Promise
 }
 
 const webhookJob: JobHandler = async (runtime, payload, job) => {
-  const [delivery] = await runtime.db.select().from(deliveries).where(and(scoped(deliveries, job), eq(deliveries.id, String(payload.deliveryId))));
-  if (!delivery || delivery.generation !== payload.generation || delivery.status === 'delivered') return;
-  const [endpoint] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, job), eq(webhooks.id, delivery.webhookId)));
-  const where = and(scoped(deliveries, job), eq(deliveries.id, delivery.id), eq(deliveries.generation, delivery.generation));
-  if (!endpoint) { await runtime.db.update(deliveries).set({ status: 'failed', lastError: 'ENDPOINT_DELETED', updatedAt: now() }).where(where); return; }
-  if (endpoint.paused && !delivery.synthetic) {
-    const stopped = await runtime.db.transaction(async tx => {
-      const [locked] = await tx.select().from(webhooks).where(and(scoped(webhooks, job), eq(webhooks.id, endpoint.id))).for('update');
-      if (locked && !locked.paused) return false;
-      await tx.update(deliveries).set({ status: locked ? 'paused' : 'failed', lastError: locked ? 'ENDPOINT_PAUSED' : 'ENDPOINT_DELETED', updatedAt: now() }).where(where); return true;
-    }); if (stopped) return;
-  }
+  const delivery = job.webhook !== undefined ? job.webhook : (await runtime.db.execute<{webhook: import('./core.js').ClaimedWebhook | null}>(sql`WITH claimed AS (
+    SELECT ${job.id}::text id,${job.workspaceId}::text workspace_id,${JSON.stringify(payload)}::jsonb payload,'operation.webhook'::text type
+  ), ${webhookClaimCtes} ${claimedWithWebhooks}`)).rows[0]?.webhook;
+  if (!delivery) return;
   const start = Date.now(); let statusCode: number | null = null, error: string | null = null, retryable = true;
   try {
-    const url = webhookUrl(runtime, endpoint.url), secret = await decrypt(runtime, endpoint.encryptedSecret, secretBinding(job, endpoint.id));
+    const url = webhookUrl(runtime, delivery.url), secret = await decrypt(runtime, delivery.encrypted_secret, secretBinding(job, delivery.webhook_id));
     const body = JSON.stringify(eventSchema.parse(delivery.payload)), timestamp = String(Math.floor(Date.now() / 1000));
-    const signature = await hmac(secret, `${delivery.eventId}.${timestamp}.${body}`);
-    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.eventId, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body);
+    const signature = await hmac(secret, `${delivery.event_id}.${timestamp}.${body}`);
+    const result = await postWebhook(runtime, url, { 'Webhook-Id': delivery.event_id, 'Webhook-Timestamp': timestamp, 'Webhook-Signature': `v1,${signature}`, 'User-Agent': 'OpenSend-Webhooks/1.0', ...(delivery.synthetic ? { 'OpenSend-Test': 'true' } : {}) }, body);
     statusCode = result.status; if (statusCode < 200 || statusCode >= 300) error = 'WEBHOOK_HTTP_ERROR';
   } catch (e) { error = e instanceof ApiError ? e.code : 'WEBHOOK_NETWORK_ERROR'; retryable = !(e instanceof ApiError) || e.retryable; }
   const retry = Boolean(error) && retryable && job.attempts < MAX_ATTEMPTS;
-  await runtime.db.transaction(async tx => {
-    await tx.insert(deliveryAttempts).values({ id: id('wha'), workspaceId: job.workspaceId, deliveryId: delivery.id, statusCode, error, durationMs: Date.now() - start });
-    await tx.update(deliveries).set({ attemptCount: sql`${deliveries.attemptCount} + 1`, status: !error ? 'delivered' : retry ? 'pending' : 'failed', lastStatusCode: statusCode, lastError: error, updatedAt: now() }).where(where);
-  });
+  const records = sql`attempt AS (INSERT INTO operation_delivery_attempts(id,workspace_id,delivery_id,status_code,error,duration_ms)
+    SELECT ${id('wha')},${job.workspaceId},${delivery.delivery_id},${statusCode}::int,${error}::text,${Date.now()-start}::int FROM settled),
+    recorded AS (UPDATE operation_deliveries SET attempt_count=attempt_count+1,status=${!error ? 'delivered' : retry ? 'pending' : 'failed'},
+      last_status_code=${statusCode}::int,last_error=${error}::text,updated_at=now() FROM settled
+      WHERE workspace_id=${job.workspaceId} AND operation_deliveries.id=${delivery.delivery_id} AND generation=${delivery.generation})`;
+  if (job.recordWithSettlement) job.recordWithSettlement(records);
+  else await runtime.db.execute(sql`WITH settled AS (SELECT 1), ${records} SELECT 1`);
   if (error) throw new ApiError(503, error, 'Webhook delivery failed; inspect the stored delivery attempts.', undefined, retry);
 };
 
@@ -1093,7 +1088,7 @@ export async function ingestFeedbackBatch(runtime: Runtime, items: FeedbackItem[
         log('info', { code: 'SES_FEEDBACK_INGESTED', workspaceId: result.workspaceId, kind: entry.input.type, outcome: result.event ? 'processed' : result.runnable > 0 ? 'deferred' : 'duplicate', runnable: result.runnable });
       }
       // Deferred recoveries and webhook deliveries are jobs; nudge the scheduler once per batch.
-      if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
+      if (results.some(result => result.runnable > 0)) try { await runtime.wake?.(1,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Feedback recovery and webhook jobs remain durable.' }); }
     } catch (error) {
       for (const entry of group) outcomes[entry.index] = { ok: false, error: error instanceof ApiError ? error.code : 'FEEDBACK_PERSIST_FAILED' };
     }
