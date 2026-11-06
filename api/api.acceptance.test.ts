@@ -5140,6 +5140,24 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
+      const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      ok(await local('POST','/v1/emails/batch',{emails:Array.from({length:9},()=>mail({to:contact.email,kind:'marketing'}))}),202);
+      await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at) VALUES($1,$2,1000,100,82,clock_timestamp())
+        ON CONFLICT(workspace_id,region) DO UPDATE SET max_send_rate=1000,max_24_hour_send=100,sent_last_24_hours=82,checked_at=clock_timestamp()`,[ws,REGION]);
+      const drain=(index:number)=>dispatchDue(runtime,REGION,{shard:{index,count:4}});
+      assert.equal((await drain(3)).sent,2);
+      assert.equal((await db.query("SELECT id FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND lease_until IS NULL",[ws])).rowCount,7);
+      assert.equal((await drain(0)).sent,2,'Sibling can lease immediately.');
+      await db.query('UPDATE sending_region_limits SET sent_last_24_hours=89,checked_at=clock_timestamp() WHERE workspace_id=$1',[ws]);
+      assert.equal((await drain(3)).sent,1,'Sharding must not round a positive global remainder to zero.');
+      assert.equal((await drain(2)).sent,0,'A separate cold shard cannot spend the same last credit twice.');
+    });
+  });
+
   test('rolling daily headroom holds a sending campaign, admits transactional recipients and drains after quota refresh', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
