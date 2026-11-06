@@ -4660,12 +4660,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       switch(op){
         case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
           const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/opensend-pilot`);
-          return op==='GetEmailTemplateCommand'?{TemplateContent:{Subject:'Fixture'}}:{RenderedTemplate:'Subject: Fixture\r\n\r\nFixture.'};
+          return op==='GetEmailTemplateCommand'?{TemplateContent:{Subject:'{{subject}}'}}:{RenderedTemplate:`Subject: ${JSON.parse(i.TemplateData).subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain;\r\n charset=UTF-8\r\n\r\nBody line.\r\nSender: body text`};
         }
         case 'SendEmailCommand':{
           const statements=JSON.parse((await this.config.credentials()).sessionToken!).Statement, prefix=`arn:aws:ses:${oh}:${account}:`, resource=params.get('param_ResourcePrefix');
           assert.deepEqual(statements.map((s:Json)=>s.Action),[['ses:SendEmail'],['ses:ApplyTrackingConfigurationOverrides']]);assert.deepEqual(statements[0].Resource,[prefix+'identity/both.example',prefix+'configuration-set/'+resource+'-transactional',prefix+'configuration-set/'+resource+'-marketing']);
-          assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);return {MessageId:randomUUID()};
+          assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);
+          assert.equal(Buffer.from(i.Content.Raw.Data).toString(),'From: pilot@sub.both.example\r\nTo: success@simulator.amazonses.com\r\nSubject: Fixture\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nBody line.\r\nSender: body text');return {MessageId:randomUUID()};
         }
         case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
@@ -4758,7 +4759,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
     await t.test('v5 dispatch signs a rendered template with separate quota, template and selected-identity sessions',async()=>{
       const {dispatchDue}=await import('./src/dispatcher.js');const scoped={...runtime,config:{...runtime.config,workspaceId:wid,regions:[oh,va]}};
-      const mail=ok(await api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{}}}),202);
+      const sendSubject=(subject:string)=>api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{subject}}});
+      error(await sendSubject('Fixture\rSender: x@evil'),422,'INVALID_RENDERED_MIME');
+      error(await sendSubject('Fixture\r\nContent-Type: text/html'),422,'INVALID_RENDERED_MIME');
+      const mail=ok(await sendSubject('Fixture\r\nSender: x@evil\r\nFrom : x@evil\r\nReturn-Path : x@evil\r\nResent-From: x@evil\r\nX-SES-SOURCE-ARN: foreign\r\n\tcontinued\r\nX-Unrequested: value'),202);
       await dispatchDue(scoped,oh,{accountId:account});assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[mail.id])).rows[0].status,'accepted');
       assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===oh;}));
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),pc=await workspaceConnection(scoped,oh),other=(await db.query('SELECT domain_id FROM domain_sending_bindings WHERE workspace_id=$1 AND region=$2',[wid,va])).rows[0].domain_id;
