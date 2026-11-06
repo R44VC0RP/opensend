@@ -252,7 +252,7 @@ async function sendingRegion(runtime: Runtime, db: DbExecutor, a: Actor, from: s
   }
   const selected = sql`coalesce(${requested ?? null}, s.default_region)`;
   const state = (await db.execute<{ region: string; enabled_regions: string[]; verified: boolean; aws_account_id: string | null; kind: ReadyConnection['kind']; tenant_state: TenantState; pause_reason: string | null }>(sql`SELECT ${selected} AS region, s.enabled_regions, pc.aws_account_id, pc.kind, pc.tenant_state, pc.pause_reason,
-    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)} AS verified
+    ${verifiedClaim(sql`s.workspace_id`, selected, sql`${from.split('@')[1]!.toLowerCase()}::text`)} AS verified
     FROM ses_installation_settings s LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id=s.workspace_id AND pc.region=${selected}
     WHERE s.workspace_id=${a.workspaceId} FOR SHARE OF s`)).rows[0];
   if (!state) throw new ApiError(503, 'REGION_SETTINGS_NOT_INITIALIZED', 'Run database migrations to initialize SES region settings.');
@@ -714,7 +714,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
       ORDER BY id FOR UPDATE) asset)` : sql`NULL`;
     const verified = c.env.config.multiTenant ? sql`ARRAY(SELECT m.host || ':' || coalesce(m.region, settings.default_region)
       FROM jsonb_to_recordset(${JSON.stringify(mails.map(m => ({ host: m.from.split('@')[1]!.toLowerCase(), region: m.region })))}::jsonb) m(host text,region text)
-      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`,c.env)})` : sql`ARRAY[]::text[]`;
+      WHERE ${verifiedClaim(sql`settings.workspace_id`, sql`coalesce(m.region, settings.default_region)`, sql`m.host`)})` : sql`ARRAY[]::text[]`;
     const state = (await db.execute<{ projected: number; quota: number | null; hosted: HostedAllowance | null; default_region: string | null; enabled_regions: string[]; ready: string[]; verified: string[]; assets: AttachmentSize[] | null; connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null }>(sql`
       WITH settings AS (SELECT workspace_id, default_region, enabled_regions FROM ses_installation_settings WHERE workspace_id = ${a.workspaceId} FOR SHARE)
       SELECT counts.*, settings.default_region, settings.enabled_regions, ${ready} AS ready, ${assets} AS assets, ${verified} AS verified, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection

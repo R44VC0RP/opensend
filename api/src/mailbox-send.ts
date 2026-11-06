@@ -30,7 +30,7 @@ type MessageRow = typeof mailMessages.$inferSelect;
 /** Resolve to immutable sending uploads before admission, never inside a message transaction. */
 export async function resolveAttachments(runtime:Runtime, mailbox:MailboxRow, items:AttachmentInput[],from:string):Promise<ResolvedAttachment[]> {
   const scope={workspaceId:mailbox.workspaceId}, out:ResolvedAttachment[]=[];
-  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`,runtime)}`)).rowCount)throw unverifiedSender();
+  if(items.length && runtime.config.multiTenant && !(await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId} AND ${verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${from.split('@')[1]!.toLowerCase()}::text`)}`)).rowCount)throw unverifiedSender();
   for(const item of items){
     if ('content' in item){
       out.push(await storeAttachmentBytes(runtime,scope,{filename:item.filename,contentType:item.contentType??'application/octet-stream',contentId:item.contentId,disposition:item.disposition},decodeBase64(item.content,'attachments')));
@@ -144,7 +144,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
       LEFT JOIN provider_pool_regions p ON p.region=c.region AND p.aws_account_id=c.aws_account_id
       LEFT JOIN mailbox_regions r ON r.region=c.region AND r.workspace_id=c.workspace_id AND r.account_id=c.aws_account_id
       WHERE c.workspace_id=d.workspace_id AND c.region=d.region AND ${connectionReady(sql`c`)})` : sql`(SELECT r.bucket FROM mailbox_regions r WHERE r.region=d.region AND r.workspace_id=d.workspace_id)`;
-  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`,runtime) : sql`true`} AS verified
+  const domain=(await tx.execute<{id:string;region:string;bucket:string|null;verified:boolean}>(sql`SELECT d.id,d.region,${bucket} AS bucket,${runtime.config.multiTenant ? verifiedClaim(sql`d.workspace_id`,sql`d.region`,sql`${message.from.split('@')[1]!.toLowerCase()}::text`) : sql`true`} AS verified
     FROM mailbox_domains d WHERE d.id=${message.mailbox.domainId} AND d.workspace_id=${message.scope.workspaceId}`)).rows[0];
   if (domain && !domain.verified) throw unverifiedSender(); // Before any attachment is written outside PostgreSQL.
   if (!domain?.bucket) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_READY', 'The mailbox domain has no receiving setup; enable it again.');
