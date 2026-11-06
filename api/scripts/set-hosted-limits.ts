@@ -15,8 +15,9 @@ export async function setHostedLimits(db: Client, args: string[]) {
   if (!wid || positionals.length !== 1 || !values['send-cap'] || !values['pending-cap']) throw new Error('Usage: set-hosted-limits.ts WORKSPACE_ID --send-cap <n|default> --pending-cap <n|default>');
   const next = { sendCap: cap(values['send-cap'], '--send-cap', 10_000_000), pendingCap: cap(values['pending-cap'], '--pending-cap', 4_000_000) };
   const { rows: [old] } = await db.query(`WITH previous AS (
-    SELECT id, send_cap_override, pending_cap_override FROM provider_connections WHERE workspace_id = $1 AND kind = 'shared' FOR UPDATE
-  ) UPDATE provider_connections c SET send_cap_override = $2, pending_cap_override = $3 FROM previous p WHERE c.id = p.id
+    SELECT w.id, w.send_cap_override, w.pending_cap_override FROM provider_connections c JOIN workspaces w ON w.id=c.workspace_id
+    WHERE c.workspace_id = $1 AND c.kind = 'shared' FOR SHARE OF c FOR UPDATE OF w
+  ) UPDATE workspaces w SET send_cap_override = $2, pending_cap_override = $3 FROM previous p WHERE w.id = p.id
     RETURNING p.send_cap_override AS "sendCap", p.pending_cap_override AS "pendingCap"`, [wid, next.sendCap, next.pendingCap]);
   if (!old) throw new Error('No Hosted connection for this workspace.');
   log('info', { code: 'HOSTED_LIMITS_CHANGED', workspaceId: wid, old, new: next });

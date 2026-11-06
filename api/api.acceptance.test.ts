@@ -4350,8 +4350,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.multiTenant=true;
       const getCap=async(wid:string)=>(await runtime.db.execute<{cap:number}>(sql`SELECT (${hostedAllowance(runtime.config,wid,1)}->>'cap')::int AS cap`)).rows[0].cap;
       assert.equal(await getCap('mature'),10000);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
+      await db.query(`INSERT INTO workspaces(id,created_at) VALUES('new',now()); INSERT INTO provider_connections(id,workspace_id,kind,tenant_state,state) VALUES('new','new','shared','ready','ready')`);
       assert.equal(await getCap('new'),100);
+    });
+  });
+  test('MX: disconnect and reconnect cannot reset operator policy', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local}) => {
+      const {setHostedLimits}=await import('./scripts/set-hosted-limits.js'), {hostedAllowance}=await import('./src/hosted-sending.js'), {sql}=await import('drizzle-orm');
+      const wid=runtime.config.workspaceId; runtime.config.multiTenant=true; runtime.config.sharedRegions=[REGION];
+      runtime.config.liveEnabled=true; runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
+      const connect=()=>local('POST','/v1/connection',{kind:'shared',region:REGION});
+      ok(await connect(),201); await setHostedLimits(db,[wid,'--send-cap','2','--pending-cap','3']);
+      ok(await local('DELETE','/v1/connection')); await assert.rejects(setHostedLimits(db,[wid,'--send-cap','default','--pending-cap','default']),/No Hosted connection/);
+      ok(await connect(),201);
+      const allowance=(await runtime.db.execute<{a:{cap:number;pendingCapOverride:number}}>(sql`SELECT ${hostedAllowance(runtime.config,wid,1)} a`)).rows[0].a;
+      assert.deepEqual([allowance.cap,allowance.pendingCapOverride],[2,3]);
     });
   });
   test('MX: an hourly health-check timeout does not prevent retention', async t => {

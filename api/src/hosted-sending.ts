@@ -20,10 +20,10 @@ export function hostedAllowance(config: Config, wid: string, incoming: number) {
   if (!config.multiTenant) return sql<HostedAllowance | null>`NULL`;
   const { firstWeek, secondWeek, mature } = config.hostedSendCaps;
   return sql<HostedAllowance | null>`(SELECT jsonb_build_object('cap',c.cap,'used',usage.used,'resetAt',least(usage.next_expiry,c.next_tier),'pauseReason',c.pause_reason,'pendingCapOverride',c.pending_cap_override)
-    FROM (SELECT workspace_id,pause_reason,pending_cap_override,coalesce(send_cap_override,CASE WHEN created_at > now()-interval '7 days' THEN ${firstWeek}::int
-      WHEN created_at > now()-interval '14 days' THEN ${secondWeek}::int ELSE ${mature}::int END) AS cap,
-      CASE WHEN send_cap_override IS NOT NULL THEN NULL WHEN created_at > now()-interval '7 days' THEN created_at+interval '7 days' WHEN created_at > now()-interval '14 days' THEN created_at+interval '14 days' END AS next_tier
-      FROM provider_connections WHERE workspace_id=${wid} AND kind='shared' FOR SHARE) c
+    FROM (SELECT pc.workspace_id,pc.pause_reason,w.pending_cap_override,coalesce(w.send_cap_override,CASE WHEN pc.created_at > now()-interval '7 days' THEN ${firstWeek}::int
+      WHEN pc.created_at > now()-interval '14 days' THEN ${secondWeek}::int ELSE ${mature}::int END) AS cap,
+      CASE WHEN w.send_cap_override IS NOT NULL THEN NULL WHEN pc.created_at > now()-interval '7 days' THEN pc.created_at+interval '7 days' WHEN pc.created_at > now()-interval '14 days' THEN pc.created_at+interval '14 days' END AS next_tier
+      FROM provider_connections pc JOIN workspaces w ON w.id=pc.workspace_id WHERE pc.workspace_id=${wid} AND pc.kind='shared' FOR SHARE) c
     CROSS JOIN LATERAL (SELECT coalesce(max(running),0) AS used,
       max(created_at) FILTER (WHERE running+least(${incoming}::int,c.cap)>c.cap)+interval '24 hours' AS next_expiry FROM (
       SELECT e.created_at,sum(${realDestinations}) OVER (ORDER BY e.created_at DESC) AS running FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND NOT e.simulated
