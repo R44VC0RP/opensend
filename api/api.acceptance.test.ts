@@ -5459,6 +5459,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a fast provider ID is visible while its claimed sibling is still waiting for SES', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const fast = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      const slow = ok(await local('POST','/v1/emails/send',mail()),202).id;
+      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      const send = SESv2Client.prototype.send;
+      t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
+        if (cmd instanceof SendEmailCommand && cmd.input.EmailTags?.some(tag => tag.Value === slow)) { entered.resolve(); await release.promise; }
+        return Reflect.apply(send,this,[cmd]);
+      });
+      const draining = dispatchDue(runtime,REGION);
+      try {
+        await entered.promise;
+        for (const deadline=Date.now()+1000; ; ) {
+          const row=(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[fast])).rows[0];
+          if (row.provider_id) break;
+          assert.ok(Date.now()<deadline,'An outstanding SES call must not delay a completed result.');
+          await new Promise(r => setTimeout(r,5));
+        }
+        assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[slow])).rows[0].status,'attempting');
+      } finally { release.resolve(); await draining; }
+      assert.equal((await draining).sent,2);
+    });
+  });
+
   test('exhausted shard gives marketing back immediately and any shard can take the last shared credit once', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
       const { dispatchDue } = await import('./src/dispatcher.js'), ws=runtime.config.workspaceId;
