@@ -5235,6 +5235,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return Reflect.apply(send, this, [cmd]);
       });
       // The budget stops new normal leases; it must not disable hints while the last batch drains.
+      const dbExecute = runtime.db.execute.bind(runtime.db);
+      const leaseSizes: number[] = [];
+      t.mock.method(runtime.db, 'execute', async (...args: Parameters<typeof dbExecute>) => {
+        const result = await dbExecute(...args);
+        if (result.rows.length === 24 && result.rows[0]?.campaignId === campaign.id) {
+          leaseSizes.push(result.rows.filter(r => r.review_draft && r.review_rendered).length);
+        }
+        return result;
+      });
       const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1, until: Date.now() });
       await first;
       let receipt: Json;
@@ -5247,6 +5256,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(next.at - calls[0]!.at < 140, 'Priority should start before the next normal slot.');
       assert.ok(calls[2]!.at - calls[0]!.at >= 290, 'The next marketing send repays the borrowed slot.');
       assert.equal(calls.length, 25);
+      assert.deepEqual(leaseSizes, [1], 'All 24 campaign emails materialize from one returned review.');
     });
   });
 

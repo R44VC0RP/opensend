@@ -215,6 +215,10 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       ) e WHERE o.candidates > o.slots LIMIT ${limit}
     ), leased AS (
       UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes' FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id RETURNING e.*
+    ), reviews AS (
+      SELECT carrier, r.draft, r.rendered FROM (
+        SELECT workspace_id, campaign_id, review_id, min(id) AS carrier FROM leased WHERE review_id IS NOT NULL GROUP BY 1,2,3
+      ) refs JOIN sending_campaign_reviews r ON r.workspace_id=refs.workspace_id AND r.campaign_id=refs.campaign_id AND r.id=refs.review_id
     ), settings AS MATERIALIZED (
       SELECT p.*, s.installation_id, s.default_region, s.enabled_regions, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection, ${mx || isSimulatedSes(runtime) ? sql`true` : sql`(
         d.report->'provisioned' = 'true'::jsonb AND d.report #> '{account,sendingEnabled}' = 'true'::jsonb
@@ -230,10 +234,15 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       r.draft AS review_draft, r.rendered AS review_rendered, rr.content_hash AS review_content_hash, rr.recipient AS review_recipient
     FROM leased
     JOIN settings s ON s.workspace_id = leased.workspace_id AND s.stream = leased.snapshot->>'kind'
-    LEFT JOIN sending_campaign_reviews r ON r.id = leased.review_id AND r.campaign_id = leased.campaign_id AND r.workspace_id = leased.workspace_id
+    LEFT JOIN reviews r ON r.carrier = leased.id
     LEFT JOIN sending_review_recipients rr ON rr.review_id = leased.review_id AND rr.ordinal = leased.review_ordinal
     ORDER BY (leased.snapshot->>'kind' = 'transactional') DESC, leased.created_at, leased.id`);
   const owners = new Map<string, Owner>();
+  const reviews = new Map<string, Pick<Review, 'draft' | 'rendered'>>();
+  const reviewKey = (row: Record<string, unknown>) => JSON.stringify([row.workspaceId, row.campaignId, row.reviewId]);
+  for (const row of result.rows) if (row.review_draft && row.review_rendered) {
+    reviews.set(reviewKey(row), { draft: row.review_draft as CampaignDraft, rendered: row.review_rendered as Review['rendered'] });
+  }
   return result.rows.map(row => {
     const { review_draft, review_rendered, review_content_hash, review_recipient, installation_id, default_region, enabled_regions, ready:regionReady, connection, rate_retries, ...fields } = row;
     // Admission refuses hosted sends until the tenant is ready; mail admitted earlier waits here, never provisions.
@@ -255,7 +264,8 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       owner = { runtime: scoped, a: { workspaceId, keyId: 'worker', domains: [], permissions: ['manage'] }, ses: providerClient(scoped, region, pc), tenantName: pc?.kind === 'shared' ? `opensend-${workspaceId}` : undefined, feedbackTopic: pc?.feedback_topic_arn };
       owners.set(workspaceId, owner);
     }
-    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), review: review_draft && review_rendered && review_recipient ? { draft: review_draft as CampaignDraft, rendered: review_rendered as Review['rendered'], contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
+    const shared = mail.reviewId && reviews.get(reviewKey(row));
+    return { mail, owner: ready ? owner! : null, rateRetries: Number(rate_retries), review: shared && review_recipient ? { ...shared, contentHash: review_content_hash as string | null, recipient: review_recipient as ReviewedRecipient } : null };
   });
 }
 
