@@ -38,6 +38,11 @@ export function ApiKeysPage() {
   // Inbound keys aren't paginated, so they join the first page of API keys, newest first.
   const firstPage = !cursor
   const listLoading = keys.isPending || firstPage && (inboundKeys.isPending || addresses.isPending)
+  // Each source fails on its own: a failed API key page still lists inbound keys, and the other way round.
+  const apiFailed = Boolean(keys.error)
+  const inboundFailed = firstPage && Boolean(inboundKeys.error)
+  const listFailed = apiFailed && (!firstPage || inboundFailed)
+  const emptyTitle = cursor ? 'No keys on this page' : `No ${showRevoked ? '' : 'active '}${apiFailed ? 'inbound keys' : inboundFailed ? 'API keys' : 'keys'}`
   const rows: KeyRow[] = [...(keys.data ?? []).map(key => ({ kind: 'api' as const, key })), ...(firstPage ? inboundKeys.data ?? [] : []).map(key => ({ kind: 'inbound' as const, key }))]
     .sort((a, b) => b.key.createdAt.localeCompare(a.key.createdAt))
   const connected: ConnectedRow[] = [...(mcpConnections.data ?? []).map(item => ({ kind: 'mcp' as const, item })), ...(agentTokens.data ?? []).map(item => ({ kind: 'token' as const, item }))]
@@ -49,8 +54,8 @@ export function ApiKeysPage() {
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)}>Create key</Button></>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
-        {keys.error ? <ErrorState error={keys.error} onRetry={() => void keys.refetch()} /> : <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
-          empty={<EmptyState title={cursor ? 'No keys on this page' : showRevoked ? 'No keys' : 'No active keys'} description={cursor || showRevoked ? undefined : 'Create a key to send from your app or let an agent work on an inbound address.'} />}
+        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.key.id}
+          empty={<EmptyState title={emptyTitle} description={cursor || showRevoked || apiFailed || inboundFailed ? undefined : 'Create a key to send from your app or let an agent work on an inbound address.'} />}
           columns={[
             { ...settingsColumns.keys[0], render: row => <TwoLines first={row.key.name} second={`Created ${date(row.key.createdAt)}`} /> },
             { ...settingsColumns.keys[1], render: row => row.kind === 'api'
@@ -60,8 +65,9 @@ export function ApiKeysPage() {
             { ...settingsColumns.keys[3], render: row => lastUsed(row.key.lastUsedAt) },
             { ...settingsColumns.keys[4], render: row => row.key.revokedAt ? 'Revoked' : <Button variant="danger" aria-label={`Revoke ${row.key.name}`} onClick={() => setRevokeKey(row)}>Revoke</Button> },
           ]} />}
-        {firstPage && inboundKeys.error && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
-        {!listLoading && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
+        {apiFailed && <ErrorState error={keys.error} onRetry={() => void keys.refetch()} />}
+        {inboundFailed && <ErrorState error={inboundKeys.error} onRetry={() => void inboundKeys.refetch()} />}
+        {!listLoading && !apiFailed && <Pagination page={pagination.page} pageSize={20} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
       {showConnected && <section className="section stack">
         <div className="keys-head">
