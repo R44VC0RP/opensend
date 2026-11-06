@@ -101,7 +101,10 @@ export class DispatcherShard extends DurableObject<Env> {
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the
       // next API nudge or the scheduler's minute ping; queued mail never depends on this alarm alone.
       if (!report.idle) await this.ctx.storage.setAlarm(Date.now());
-      else if (report.quotaRetryAt && (await this.ctx.storage.getAlarm() ?? Infinity) > report.quotaRetryAt) await this.ctx.storage.setAlarm(report.quotaRetryAt);
+      else {
+        const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
+        if ((await this.ctx.storage.getAlarm() ?? Infinity) > retry) await this.ctx.storage.setAlarm(retry);
+      }
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error('DISPATCHER_DEPS_FAILED', error);

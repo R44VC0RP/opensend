@@ -4,7 +4,7 @@ import { ApiError, getSes, isSimulatedSes, id, log, type Actor, type DbExecutor,
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, verifiedAttachment } from './sending.js';
 import { sendingConnections, verifiedClaim } from './domain-claims.js';
-import { finishCampaigns, type TenantState } from './states.js';
+import { finishCampaigns, reopenQueuedCampaigns, type TenantState } from './states.js';
 import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import { POOL_INSTALLATION, setupResources } from './ses-setup.js';
 import type { ReadyConnection } from './provider-credentials.js';
@@ -22,7 +22,8 @@ type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; tenantName?: string; feedbackTopic?: string };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
-type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
+type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
+const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === 'dispatch_deferred';
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
@@ -30,6 +31,9 @@ export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null;
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
+// Far below interrupted-attempt recovery (3 min) and the queue lease (2 min). Ordinary groups
+// can share a claim, but an unsent item never waits behind a long envelope or priority flood.
+const MAX_PRE_SEND_MS = 5000;
 
 export interface DispatcherOptions {
   region: string; accountId?: string;
@@ -50,7 +54,7 @@ export interface DispatcherOptions {
   /** Refresh quota from the provider at most this often. */
   quotaRefreshMs?: number;
 }
-export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number; quotaRetryAt?: number }
+export interface DispatcherReport { claimed: number; sent: number; deferred: number; skipped: number; batches: number; idle: boolean; durationMs: number; timings: Record<string, number>; statements: number; quotaRetryAt?: number; paceRetryAt?: number }
 
 // Timestamps are cast to text so raw rows match Drizzle's string-mode timestamp columns.
 const mailColumns = Object.entries(getTableColumns(emails)).map(([key, column]) => sql`leased.${sql.identifier(column.name)}${column.columnType.startsWith('PgTimestamp') ? sql`::text` : sql``} AS ${sql.identifier(key)}`);
@@ -485,15 +489,15 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
   const input = outcomes.map(o => ({
     email_id: o.mail.id, workspace_id: o.mail.workspaceId, dispatch_version: o.mail.dispatchVersion, type: o.type, provider_id: o.providerId ?? null,
     event_id: id('event'), external_id: `attempt-result:${o.mail.id}:${o.mail.dispatchVersion}`, data: o.data, error_code: o.errorCode ?? null,
-    next_status: o.type === 'provider_throttled' ? 'queued' : statusForEvent[o.type] ?? null,
-    next_rank: o.type === 'provider_throttled' ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
+    next_status: requeued(o) ? 'queued' : statusForEvent[o.type] ?? null,
+    next_rank: requeued(o) ? 0 : rank[statusForEvent[o.type]!], public_type: publicEventType[o.type] ?? null,
     wait_ms: o.requeueAt ? Math.max(0, Date.parse(o.requeueAt) - Date.now()) : null,
   }));
   const result = await runtime.db.execute<{ webhooks: number }>(sql`WITH input AS (
       SELECT * FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb)
         AS x(email_id text, workspace_id text, dispatch_version int, type text, provider_id text, event_id text, external_id text, data jsonb, error_code text, next_status text, next_rank int, public_type text, wait_ms float8)
     ), mail AS MATERIALIZED (
-      SELECT e.id, e.workspace_id, e.status, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
+      SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
       ORDER BY e.id FOR UPDATE
     ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
@@ -501,16 +505,17 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       FROM input x JOIN mail m ON m.id = x.email_id ON CONFLICT DO NOTHING RETURNING *
     ), updated AS (
       UPDATE sending_emails e SET
-        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.type = 'accepted' AND e.error_code = 'SES_DAILY_QUOTA_EXHAUSTED' THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
-        dispatch_version = CASE WHEN x.type = 'provider_throttled' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
-        scheduled_at = CASE WHEN x.type = 'provider_throttled' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,
-        attempt_started_at = CASE WHEN x.type = 'provider_throttled' THEN NULL ELSE e.attempt_started_at END,
+        status = x.next_status, provider_id = coalesce(x.provider_id, e.provider_id), error_code = CASE WHEN x.next_status='queued' THEN x.error_code WHEN x.type = 'accepted' AND e.error_code = 'SES_DAILY_QUOTA_EXHAUSTED' THEN NULL ELSE coalesce(x.error_code, e.error_code) END,
+        dispatch_version = CASE WHEN x.next_status = 'queued' THEN e.dispatch_version + 1 ELSE e.dispatch_version END,
+        scheduled_at = CASE WHEN x.next_status = 'queued' THEN clock_timestamp() + x.wait_ms * interval '1 millisecond' ELSE e.scheduled_at END,
+        attempt_started_at = CASE WHEN x.next_status = 'queued' THEN NULL ELSE e.attempt_started_at END,
         lease_until = NULL, updated_at = clock_timestamp()
       FROM input x JOIN inserted i ON i.email_id = x.email_id JOIN mail m ON m.id = x.email_id
       WHERE e.workspace_id = x.workspace_id AND e.id = x.email_id AND e.dispatch_version = x.dispatch_version
-        AND ((x.type = 'provider_throttled' AND m.status = 'attempting') OR (x.type <> 'provider_throttled' AND x.next_rank >= (${rankJson()}::jsonb ->> m.status)::int))
-      RETURNING e.id
-    ), published AS (
+        AND ((x.next_status = 'queued' AND (m.status IN ('queued','attempting') OR (m.status='acceptance_unknown' AND m.error_code='INTERRUPTED_PROVIDER_ATTEMPT')))
+          OR (x.next_status <> 'queued' AND x.next_rank >= (${rankJson()}::jsonb ->> m.status)::int))
+      RETURNING e.id, e.workspace_id, e.campaign_id, (m.status='acceptance_unknown' AND e.status='queued') AS recovered
+    ), reopened AS (${reopenQueuedCampaigns(sql`SELECT workspace_id,campaign_id FROM updated WHERE recovered AND campaign_id IS NOT NULL`)}), published AS (
       INSERT INTO operation_events(id, workspace_id, type, region, created_at, data)
       SELECT i.id, i.workspace_id, x.public_type, m.region, i.created_at,
         x.data || jsonb_build_object('emailId', m.id, 'simulated', ${simulated}::boolean) || CASE WHEN x.provider_id IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('providerId', x.provider_id) END
@@ -548,7 +553,7 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
 
 // `finishing` collects campaigns whose rows this run moved out of the queue; they are checked for completion in one
 // statement once the queue is draining (a short batch, the time budget or the end of the run), never per group.
-type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared) => Promise<Outcome>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
+type Lane = { deferred: DeferredStream[]; gate: GateState; refresh?: Promise<boolean>; held: { recipients: number }; pacing: Pacing; options: Required<Pick<DispatcherOptions, 'batchSize' | 'sendConcurrency' | 'quotaRefreshMs'>> & DispatcherOptions; finishing: Map<string, CampaignRef>; send: (item: Prepared, deadline: number) => Promise<Outcome>; counters: DispatcherReport; phase: <T>(name: string, work: () => Promise<T>) => Promise<T> };
 function chunk<T>(items: T[], size: number): T[][] { const out: T[][] = []; for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size)); return out; }
 const cost = (item: Prepared) => item.snapshot.to.length + item.snapshot.cc.length + item.snapshot.bcc.length;
 const quotaRetry = (gate: GateState, refreshMs: number) => Math.ceil(Math.max(Date.now() + Math.min(1000, refreshMs), gate.refreshAt ?? 0, gate.dailyBlockedUntil ?? 0));
@@ -578,22 +583,33 @@ async function tailClaim(runtime: Runtime, lane: Lane, group: Prepared[], credit
 // There is only one slot timer and one in-flight limit for every stream and lane. Choose who owns
 // the slot when it opens, not when an earlier batch was claimed. In-flight calls are never canceled.
 function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing, counters: DispatcherReport, held: Lane['held']) {
-  const queues: Record<EmailSnapshot['kind'], (() => void)[]> = { transactional: [], marketing: [] };
+  type Waiting = { deadline: number; start(): void; defer(): void };
+  const queues: Record<EmailSnapshot['kind'], Waiting[]> = { transactional: [], marketing: [] };
   let active = 0, timer: ReturnType<typeof setTimeout> | undefined;
   function pump() {
-    if (timer || active >= (options.sendConcurrency ?? 6) || !(queues.transactional.length || queues.marketing.length)) return;
-    const wait = gate.nextAllowedAt - Date.now();
-    if (wait > 0) { timer = setTimeout(() => { timer = undefined; pump(); }, Math.ceil(wait)); return; }
-    (queues.transactional.shift() ?? queues.marketing.shift())!();
+    if (timer) { clearTimeout(timer); timer = undefined; }
+    const now = Date.now(); let earliest = Infinity;
+    for (const queue of [queues.transactional, queues.marketing]) for (let i = queue.length - 1; i >= 0; i--) {
+      const entry = queue[i]!;
+      if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, gate.nextAllowedAt)) { queue.splice(i, 1); entry.defer(); }
+      else earliest = Math.min(earliest, entry.deadline);
+    }
+    if (earliest === Infinity) return;
+    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, gate.nextAllowedAt);
+    if (wakeAt > now) { timer = setTimeout(pump, Math.ceil(wakeAt - now)); return; }
+    (queues.transactional.shift() ?? queues.marketing.shift())!.start();
     pump();
   }
-  return (item: Prepared) => new Promise<Outcome>((resolve, reject) => {
+  return (item: Prepared, deadline: number) => new Promise<Outcome>((resolve, reject) => {
     const queuedAt = Date.now(), s = item.snapshot;
-    queues[s.kind].push(() => {
+    queues[s.kind].push({ deadline, defer() {
       held.recipients -= cost(item);
-      if (gate.dailyBlockedUntil) {
-        resolve({ mail: item.mail, type: 'provider_throttled', errorCode: 'SES_DAILY_QUOTA_EXHAUSTED', data: { code: 'SES_DAILY_QUOTA_EXHAUSTED', providerCalled: false, retryable: true }, requeueAt: new Date(gate.dailyBlockedUntil!).toISOString() }); return;
-      }
+      const daily = gate.dailyBlockedUntil;
+      if (!daily) counters.idle = false; // Work is still due, possibly on a different shard.
+      resolve({ mail: item.mail, type: 'dispatch_deferred', ...(daily ? { errorCode: 'SES_DAILY_QUOTA_EXHAUSTED' } : {}),
+        data: { code: daily ? 'SES_DAILY_QUOTA_EXHAUSTED' : 'PACING_WAIT', providerCalled: false }, requeueAt: new Date(daily ?? Date.now()).toISOString() });
+    }, start() {
+      held.recipients -= cost(item);
       active++;
       counters.timings.pace = (counters.timings.pace ?? 0) + Date.now() - queuedAt;
       reserve(gate, cost(item), options.shard, pacing);
@@ -605,7 +621,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
         }
         resolve(outcome);
       }, reject).finally(() => { active--; pump(); });
-    });
+    } });
     pump();
   });
 }
@@ -653,14 +669,19 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   if (!prepared.length) return { processed: leased.length, blocked: false };
   const origins = base.config.multiTenant ? new Map<string, boolean>() : await originDecisions(prepared, base.db);
   const pendingRecords: Promise<void>[] = [];
-  const delayed: Mail[] = [];
+  const delayed: Mail[] = [], unpaced: Mail[] = [];
   for (const candidates of chunk(prepared, options.sendConcurrency)) {
     // Hold daily capacity synchronously across lanes before the durable attempt. A canceled/lost
     // claim returns it; a provider start moves it from held to sent. Rate slots are never held here.
+    const claimDeadline = Date.now() + MAX_PRE_SEND_MS, rate = shardRate(gate, options.shard, lane.pacing);
+    let expectedSlot = Math.max(gate.nextAllowedAt, Date.now());
     let group = candidates.filter(item => {
+      // Don't enter attempting in the first place for a predictably distant slot. The actual
+      // sender also enforces this deadline if priority arrivals or a concurrent lane change it.
+      if (expectedSlot >= claimDeadline) { unpaced.push(item.mail); counters.claimed--; counters.deferred++; return false; }
       const percent = item.snapshot.kind === 'marketing' ? base.config.dispatch.dailyHeadroomPercent : undefined;
       const left = dailyRemaining(gate, percent, options.shard);
-      if (cost(item) <= left - lane.held.recipients) { lane.held.recipients += cost(item); return true; }
+      if (cost(item) <= left - lane.held.recipients) { lane.held.recipients += cost(item); expectedSlot += cost(item) * 1000 / rate; return true; }
       const until = counters.quotaRetryAt = quotaRetry(gate, options.quotaRefreshMs);
       if (left <= 0 && !lane.deferred.some(d => d.workspace_id === item.mail.workspaceId && d.stream === item.snapshot.kind)) {
         lane.deferred.push({ workspace_id: item.mail.workspaceId, stream: item.snapshot.kind, until });
@@ -691,22 +712,23 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     if (lost.length) log('warn', { code: 'DISPATCH_CLAIM_LOST', count: lost.length, message: 'Rows changed between lease and claim; they will be reconsidered on the next pass.' });
     // A campaign row settled by the claim itself (canceled or suppressed) may have been the campaign's last; check now.
     const settled = group.filter(item => item.mail.campaignId && ['canceled', 'suppressed'].includes(statuses.get(item.mail.id) ?? ''));
-    if (settled.length) await phase('finish', () => finishSettledCampaigns(base, [...new Map(settled.map(item => [item.mail.campaignId!, { workspace_id: item.mail.workspaceId, campaign_id: item.mail.campaignId! }])).values()]));
+    if (settled.length) pendingRecords.push(phase('finish', () => finishSettledCampaigns(base, [...new Map(settled.map(item => [item.mail.campaignId!, { workspace_id: item.mail.workspaceId, campaign_id: item.mail.campaignId! }])).values()])));
     if (!attempting.length) continue;
     // Each message takes its own evenly spaced slot, so the provider sees a steady stream at the target
     // rate rather than one burst per group; a throttled response brakes every lane on this shard.
-    const outcomes = await phase('send', () => Promise.all(attempting.map(lane.send)));
+    const outcomes = await phase('send', () => Promise.all(attempting.map(item => lane.send(item, claimDeadline))));
     pendingRecords.push(phase('record', () => recordOutcomes(base, outcomes)).then(async () => {
       for (const outcome of outcomes) {
-        if (outcome.type === 'accepted') counters.sent++; else if (outcome.type === 'provider_throttled') counters.deferred++; else counters.skipped++;
-        if (outcome.mail.campaignId && outcome.type !== 'provider_throttled') lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
+        if (outcome.type === 'accepted') counters.sent++; else if (requeued(outcome)) counters.deferred++; else counters.skipped++;
+        if (outcome.mail.campaignId && !requeued(outcome)) lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
       }
     }));
   }
   // Local marketing allowance is not a regional hold: a sibling may still have capacity. Do not
   // hide the tail of its queue for a minute. Oversize transactional envelopes still get backoff.
   const marketing = delayed.filter(m => m.snapshot.kind === 'marketing'), direct = delayed.filter(m => m.snapshot.kind !== 'marketing');
-  if (marketing.length) await releaseLeases(base, marketing);
+  if (unpaced.length) counters.idle = false;
+  if (marketing.length || unpaced.length) await releaseLeases(base, [...marketing, ...unpaced]);
   if (direct.length) await releaseLeases(base, direct, counters.quotaRetryAt);
   await Promise.all(pendingRecords);
   return { processed: leased.length, blocked: false };
@@ -735,6 +757,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const lane: Lane = { deferred: [], gate, pacing, held, finishing: new Map(), send: pacedSender(gate, options, pacing, counters, held), counters, phase, options: { ...options, batchSize: options.batchSize ?? 24, sendConcurrency: options.sendConcurrency ?? 6, quotaRefreshMs: options.quotaRefreshMs ?? QUOTA_REFRESH_MS } };
   const lease = async (priorityOnly = false) => {
     const now = Date.now();
+    if (gate.nextAllowedAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); return []; }
     for (let i = lane.deferred.length - 1; i >= 0; i--) if ((lane.deferred[i]!.until ?? Infinity) <= now) lane.deferred.splice(i, 1);
     if (gate.quota && now < (gate.refreshAt ?? 0) && dailyRemaining(gate, runtime.config.dispatch.dailyHeadroomPercent, options.shard) <= held.recipients) {
       counters.quotaRetryAt = quotaRetry(gate, lane.options.quotaRefreshMs);
@@ -764,7 +787,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   options.priorityWake?.addEventListener(key, wake);
   const priority = async () => {
     if (!options.priorityWake) return;
-    while (!done && !blocked && Date.now() < (options.until ?? Infinity)) {
+    while (!done && !blocked) { // Keep serving priority wakes while the last normal batch drains past the lease budget.
       if (!dirty) await new Promise<void>(resolve => { resume = resolve; });
       if (done || blocked) return;
       resume = undefined; dirty = false;
@@ -787,6 +810,7 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   for (const result of results) if (result.status === 'rejected') throw result.reason;
   await flushFinishing(runtime, lane);
   if (blocked) counters.idle = true;
+  if (gate.nextAllowedAt >= Date.now() + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(gate.nextAllowedAt); counters.idle = true; }
   counters.durationMs = Date.now() - started;
   // Idle polls are silent; runs that moved mail (or hit the budget) are the throughput record.
   if (counters.claimed || !counters.idle) log('info', { code: 'DISPATCH_RUN', accountId: options.accountId, region: options.region, shard: options.shard?.index ?? 0, ...counters, quota: gate.quota?.maxSendRate ?? null, rate: shardRate(gate, options.shard, pacing), braked: (gate.brakeUntil ?? 0) > Date.now() });

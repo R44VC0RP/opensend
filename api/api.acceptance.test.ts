@@ -5110,7 +5110,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof SendEmailCommand) { calls.push({ id: cmd.input.EmailTags!.find(t => t.Name === 'opensend_email_id')!.Value!, at: Date.now() }); started(); }
         return Reflect.apply(send, this, [cmd]);
       });
-      const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1 });
+      // The budget stops new normal leases; it must not disable hints while the last batch drains.
+      const draining = runDispatcher(runtime, { region: REGION, priorityWake, lanes: 1, until: Date.now() });
       await first;
       let receipt: Json;
       try {
@@ -5121,6 +5122,70 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(admitted > 0); assert.equal(next.id, receipt.id, 'Already-leased marketing must not own future slots.');
       assert.ok(next.at - admitted < 100, `14/s slot + wake latency: ${next.at - admitted} ms`);
       assert.equal(calls.length, 25);
+    });
+  });
+
+  test('a low-rate shard returns queued work instead of holding attempts behind a 50-recipient envelope', async t => {
+    await simulatedSesFixture(t, async ({runtime,local,db}) => {
+      const {dispatchDue,initialGate}=await import('./src/dispatcher.js');
+      runtime.config.simulatedSes.maxSendRate=1;
+      const big=ok(await local('POST','/v1/emails/send',mail({to:Array.from({length:50},(_,i)=>`bulk-${i}@example.net`)})),202);
+      await db.query("UPDATE sending_emails SET created_at=now()-interval '1 hour' WHERE id=$1",[big.id]);
+      const next=ok(await local('POST','/v1/emails/send',mail()),202);
+      const gate=initialGate(), started=Date.now();
+      const r=await dispatchDue(runtime,REGION,{gate,shard:{index:0,count:4}});
+      assert.equal(r.sent,1); assert.ok(Date.now()-started<4000); assert.ok(r.paceRetryAt!-Date.now()>190_000);
+      assert.deepEqual((await db.query('SELECT status,attempt_started_at,lease_until FROM sending_emails WHERE id=$1',[next.id])).rows,[{status:'queued',attempt_started_at:null,lease_until:null}]);
+      assert.equal((await db.query("SELECT 1 FROM sending_email_events WHERE email_id=$1 AND type='dispatch_attempt'",[next.id])).rowCount,0);
+      assert.equal((await dispatchDue(runtime,REGION,{gate,shard:{index:0,count:4}})).claimed,0);
+      assert.equal((await dispatchDue(runtime,REGION,{shard:{index:1,count:4}})).sent,1);
+
+      // Now make the distant slot *unpredictable* at claim time: a 50-recipient transactional
+      // admission preempts an already-attempting marketing sibling on a six-recipient/s gate.
+      await db.query('UPDATE sending_region_limits SET max_send_rate=6 WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
+      const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Fixture',occurredAt:new Date().toISOString()}));
+      ok(await local('POST','/v1/emails/batch',{emails:[1,2].map(()=>mail({to:contact.email,kind:'marketing'}))}),202);
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'), orig=SESv2Client.prototype.send;
+      const {dispatchWakeKey}=await import('./src/dispatcher.js'), priorityWake=new EventTarget();
+      runtime.dispatch=async (region,account,_count,_kind,priority)=>{if(priority)priorityWake.dispatchEvent(new Event(dispatchWakeKey(region,account)));};
+      let startedSend!:()=>void; const first=new Promise<void>(r=>{startedSend=r;});
+      t.mock.method(SESv2Client.prototype,'send',function(this:InstanceType<typeof SESv2Client>,cmd:any){if(cmd instanceof SendEmailCommand)startedSend(); return Reflect.apply(orig,this,[cmd]);});
+      const draining=dispatchDue(runtime,REGION,{priorityWake}); await first;
+      try { ok(await local('POST','/v1/emails/send',mail({to:Array.from({length:50},(_,i)=>`priority-${i}@example.net`)})),202); }
+      finally { await draining; }
+      assert.equal((await draining).sent,2);
+      assert.equal((await db.query(`SELECT e.id FROM sending_emails e JOIN sending_email_events v ON v.email_id=e.id
+        WHERE e.workspace_id=$1 AND e.status='queued' AND e.attempt_started_at IS NULL AND v.type='dispatch_deferred' AND v.data->>'providerCalled'='false'`,[runtime.config.workspaceId])).rowCount,1);
+    });
+  });
+
+  test('a definitive daily denial and a known uncalled sibling survive an interrupted-attempt sweep', async t => {
+    await simulatedSesFixture(t,async({runtime,local,db,run})=>{
+      const {dispatchDue}=await import('./src/dispatcher.js'), {dispatchPartitions}=await import('./src/dispatch.js');
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
+      runtime.config.simulatedSes.maxSendRate=4;
+      const list=ok(await local('POST','/v1/lists',{name:unique('late-denial')}),201);
+      await db.query(`WITH contacts AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT gen_random_uuid()::text,$1,'late-'||n||'@example.net','subscribed' FROM generate_series(1,2)n RETURNING *)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`,[runtime.config.workspaceId,list.id]);
+      const c=ok(await local('POST','/v1/campaigns',{name:unique('late-denial'),from:'sender@example.com',subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201);
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202); await run('campaign.run');
+      const orig=SESv2Client.prototype.send; let calls=0;
+      const provider=t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if (!(cmd instanceof SendEmailCommand)) return Reflect.apply(orig,this,[cmd]);
+        calls++;
+        await db.query("UPDATE sending_emails SET attempt_started_at=now()-interval '4 minutes' WHERE campaign_id=$1 AND status='attempting'",[c.id]);
+        await dispatchPartitions(runtime,true);
+        assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'done');
+        throw Object.assign(new Error('Daily message quota exceeded.'),{$metadata:{httpStatusCode:429}});
+      });
+      const held=await dispatchDue(runtime,REGION);
+      assert.equal(calls,1); assert.equal(held.deferred,2);
+      assert.equal((await db.query("SELECT id FROM sending_emails WHERE campaign_id=$1 AND status='queued' AND dispatch_version=1 AND attempt_started_at IS NULL",[c.id])).rowCount,2);
+      assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'sending');
+      provider.mock.restore(); await db.query('UPDATE sending_emails SET scheduled_at=clock_timestamp() WHERE campaign_id=$1',[c.id]);
+      assert.equal((await dispatchDue(runtime,REGION)).sent,2);
+      assert.equal((await db.query('SELECT state FROM sending_campaigns WHERE id=$1',[c.id])).rows[0].state,'done');
     });
   });
 
