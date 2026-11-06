@@ -2,14 +2,11 @@ import { sql, type SQL } from 'drizzle-orm';
 import { z } from '@hono/zod-openapi';
 import { ApiError, assertSesConfigured, id, isSimulatedSes, type Runtime, type DbExecutor } from './core.js';
 import type { ReadyConnection } from './provider-credentials.js';
+import { placementRoot } from './domain-registry.js';
 import { assertTenantReady, connectionReady, detachedClaim, verifyImportedClaims, type ClaimState, type IdentityFacts, type TenantState } from './states.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
-// Registry suffixes have independently owned children. Platform-controlled DNS trees do not.
-const publicSuffixes = new Set(`co.uk org.uk ac.uk gov.uk me.uk ltd.uk plc.uk net.uk sch.uk nhs.uk police.uk
-  com.au net.au org.au edu.au gov.au asn.au id.au co.nz org.nz net.nz govt.nz ac.nz co.jp or.jp ne.jp ac.jp go.jp
-  com.br org.br net.br com.cn net.cn org.cn gov.cn co.in net.in org.in ac.in gov.in co.za org.za net.za com.mx org.mx
-  co.kr com.sg com.hk com.tw com.tr com.ar com.co co.id co.il co.th com.my com.ph com.vn co.ke co.ug`.split(/\s+/));
+// Separate from the PSL: these platform-controlled trees also prohibit child claims.
 const reservedRoots = `amazonses.com amazonaws.com github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
   azurewebsites.net web.app firebaseapp.com appspot.com blogspot.com fly.dev onrender.com ngrok.io`.split(/\s+/);
 const notAllowed = () => new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
@@ -18,21 +15,27 @@ export const claimName = z.preprocess(value=>{
   if (typeof value==='string' && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i.test(value.trim())) throw notAllowed();
   return value;
 },domainName);
-export function claimNameAllowed(name:string,publicUrl:string) {
+export async function claimNameAllowed(name:string,publicUrl:string) {
   const host=new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
-  return name.includes('.') && !publicSuffixes.has(name) && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
-    && !reservedRoots.some(root=>name===root || name.endsWith('.'+root));
+  return name.includes('.') && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
+    && !reservedRoots.some(root=>name===root || name.endsWith('.'+root)) && (await placementRoot(name)).root!==null;
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
 // A hosted workspace has exactly one connection, so the region may be omitted and defaults to it.
 export async function reserveClaim(runtime: Runtime, workspace: string, name: string, region?: string) {
-  if (!claimNameAllowed(name,runtime.config.publicUrl)) throw notAllowed();
+  if (!await claimNameAllowed(name,runtime.config.publicUrl)) throw notAllowed();
   assertSesConfigured(runtime);
   // The statement's snapshot predates the function's own insert, so a brand-new claim joins to nothing: that is
   // exactly its start state. A retried or reconnected claim existed before and joins to its current states.
+  const reserve = regionalSending(runtime) ? sql`reserve_regional_claim(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`;
+  // One reservation, one statement. The profiler never gates or runs inside the create route.
+  const shadow = runtime.config.multiTenant && runtime.config.placementShadow;
   const row = (await runtime.db.execute<{connection: (ReadyConnection & { region: string; tenant_state: TenantState }) | null; token: string | null; id: string; claim: (ClaimState & { identity: IdentityFacts | null }) | null; fresh: boolean; recovering: boolean; error_code: string | null}>(
-    sql`SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
-      FROM ${regionalSending(runtime) ? sql`reserve_regional_claim(${workspace},${name},${region ?? null},${id('dom')})` : sql`reserve_domain_claim(${workspace},${name},coalesce(${region ?? null}::text,(SELECT region FROM provider_connections pc WHERE workspace_id=${workspace} AND ${connectionReady()})),${id('dom')})`} r
+    sql`${shadow ? sql`WITH reserved AS MATERIALIZED (SELECT * FROM ${reserve}), queued AS (
+      INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.placement:'||id,'domain.placement',${workspace},jsonb_build_object('domainId',id)
+      FROM reserved WHERE fresh AND id IS NOT NULL AND error_code IS NULL AND connection->>'kind'='shared' ON CONFLICT DO NOTHING)` : sql``}
+      SELECT r.connection,r.token,r.id,r.fresh,r.error_code,NOT r.fresh OR dc.token IS NOT NULL AS recovering,CASE WHEN dc.connection_id=r.connection->>'id' THEN to_jsonb(dc) END AS claim
+      FROM ${shadow ? sql`reserved` : reserve} r
       LEFT JOIN domain_claims dc ON dc.token=r.token`)).rows[0]!;
   if (!row.connection) throw new ApiError(409,'CONNECTION_REQUIRED','Set up a sending connection for this workspace and region.');
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
