@@ -203,7 +203,14 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
       return false;
     }
   }
-  const header = (name: string) => email ? (email.headers.find(item => item.key === name)?.value ?? '') : (fallback!.get(name) ?? '');
+  let parsedCapped = false;
+  const header = (name: string) => {
+    if (!email) return fallback!.get(name) ?? '';
+    const value = email.headers.find(item => item.key === name)?.value ?? '';
+    if (value.length <= RAW_HEADER_FIELD_LIMIT) return value;
+    parsedCapped = true;
+    return '';
+  };
   const auto = parseStructuredField(header('auto-submitted')).value;
   const precedence = parseStructuredField(header('precedence')).value;
   const contentType = parseStructuredField(header('content-type'));
@@ -213,7 +220,9 @@ function automated(email: Email | null, raw: Uint8Array, from: string) {
   const rawFrom = fallback?.get('from') ?? '';
   const rawSenders = rawFrom ? flatten(addressParser(rawFrom)).map(item => item.address) : [];
   const daemonSender = /^(?:mailer-daemon|postmaster)@/.test(from) || rawSenders.some(addr => /^(?:mailer-daemon|postmaster)@/.test(addr));
-  return (auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report;
+  if ((auto !== '' && auto !== 'no') || /^(?:bulk|junk|list|auto_reply)$/.test(precedence) || !!xAutoreply || !!xAutorespond || daemonSender || report) return true;
+  if (parsedCapped) log('warn', { code: 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE', count: ++incompleteAutomatedHeaderScans });
+  return false;
 }
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
 function withinLineLimit(raw: Uint8Array) {
@@ -394,7 +403,7 @@ const ingestJob: JobHandler = async (runtime, payload, job) => {
   const status = email ? 'received' : 'unparsed';
   const common = notification.mail?.commonHeaders ?? {};
   const messageRowId = `msg_${(await digest(`${scope.workspaceId}:${sesMessageId}`)).slice(0, 32)}`;
-  const commonFrom = common.from?.[0] ? flatten(addressParser(common.from[0]))[0] : undefined;
+  const commonFrom = common.from?.[0] && common.from[0].length <= RAW_HEADER_FIELD_LIMIT ? flatten(addressParser(common.from[0]))[0] : undefined;
   const from = flatten(email?.from)[0] ?? { name: null, address: (commonFrom?.address ?? notification.mail?.source ?? '').trim().toLowerCase() };
   const verdicts: Verdicts = { spf: verdict(notification.receipt?.spfVerdict), dkim: verdict(notification.receipt?.dkimVerdict), dmarc: verdict(notification.receipt?.dmarcVerdict), spam: verdict(notification.receipt?.spamVerdict), virus: verdict(notification.receipt?.virusVerdict) };
   const spam = verdicts.spam === 'FAIL' || verdicts.virus === 'FAIL';

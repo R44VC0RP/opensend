@@ -4755,8 +4755,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(cappedScan1.automated, false, 'Incomplete header scan must treat automated status as unknown and default to false.');
       const cappedField = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nAuto-Submitted: ${'('.concat('a'.repeat(17_000), ') auto-replied')}\r\n\r\n${unparsedTail}`), 'Capped header field', 'cap-hdr-2@example.net');
       assert.equal(cappedField.automated, false);
+      const parsedHugeAuto = await ingest(Buffer.from(`From: Sender <sender@example.net>\r\nTo: caps@example.com\r\nAuto-Submitted: ${'a'.repeat(1024 * 1024)}\r\n\r\nhi\r\n`), 'Parsed 1 MiB Auto-Submitted', 'cap-hdr-parsed@example.net');
+      assert.equal(parsedHugeAuto.status, 'received');
+      assert.equal(parsedHugeAuto.automated, false, 'Parsed messages must also enforce the 16 KiB field cap before tokenizing automated headers.');
       const capLogs = capWarnSpy.mock.calls.map(c => JSON.parse(String(c.arguments[0]))).filter(entry => entry.code === 'MAILBOX_AUTOMATED_HEADER_SCAN_INCOMPLETE');
-      assert.deepEqual(capLogs.map(entry => entry.count), [1, 2]);
+      assert.deepEqual(capLogs.map(entry => entry.count), [1, 2, 3]);
       capWarnSpy.mock.restore();
     });
   });
