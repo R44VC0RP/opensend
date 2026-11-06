@@ -417,7 +417,7 @@ export async function scanRegionPage(runtime:Runtime,region:string,installation:
       if (!Array.isArray(p.EmailIdentities)) throw unknownInventory();
       for (const v of p.EmailIdentities) {
         const n=domainName.safeParse(v.IdentityName);
-        if (v.IdentityType!=='DOMAIN' || !n.success || !claimNameAllowed(n.data,runtime.config.publicUrl)) continue;
+        if (v.IdentityType!=='DOMAIN' || !n.success || !await claimNameAllowed(n.data,runtime.config.publicUrl)) continue;
         try { page.domains.push({name:n.data,identity:identityDefaults(await c.ses.send(new GetEmailIdentityCommand({EmailIdentity:n.data}),opts))}); }
         catch(e) { if (!missing(e)) throw e; }
       }
@@ -449,7 +449,7 @@ export async function verifiedByoDomains(runtime: Runtime, region: string, curso
     const page = await c.ses.send(new ListEmailIdentitiesCommand({ PageSize: 10, NextToken: cursor }), opts);
     for (const identity of page.EmailIdentities ?? []) {
       const name = domainName.safeParse(identity.IdentityName);
-      if (identity.IdentityType !== 'DOMAIN' || identity.VerificationStatus !== 'SUCCESS' || !name.success || !claimNameAllowed(name.data,runtime.config.publicUrl)) continue;
+      if (identity.IdentityType !== 'DOMAIN' || identity.VerificationStatus !== 'SUCCESS' || !name.success || !await claimNameAllowed(name.data,runtime.config.publicUrl)) continue;
       try {
         const { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } = await c.ses.send(new GetEmailIdentityCommand({ EmailIdentity: name.data }), opts);
         if (VerificationStatus === 'SUCCESS' && VerifiedForSendingStatus) domains.push({ name: name.data, ses: { VerificationStatus, VerifiedForSendingStatus, DkimAttributes, MailFromAttributes } });

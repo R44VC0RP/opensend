@@ -3,25 +3,10 @@ import tls from 'node:tls';
 import { domainToUnicode } from 'node:url';
 import { z } from 'zod';
 import type { Runtime } from './core.js';
-import { icannRules, privateRules, rdapServices } from './placement-registries.js';
+import { rdapBase } from './domain-registry.js';
 
 const day = 86_400_000;
-const rules = new Set(icannRules.trim().split(/\s+/)), privateSuffixes = new Set([...privateRules.trim().split(/\s+/),
-  'wordpress.com','weebly.com','myshopify.com','tumblr.com','squarespace.com']); // Not every hosting provider registers its suffix.
-const registries = new Map(rdapServices.flatMap(([tlds,base]) => tlds.split(' ').map(tld => [tld,base] as const)));
 const hostSyntax = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
-// PSL longest match, including wildcard and exception rules. Never borrow a hosting
-// provider's registration date, signup, or mail records for one of its tenants.
-export function placementRoot(host:string) {
-  const labels=host.split('.'); let suffix=1, shared=false;
-  for(let i=0;i<labels.length;i++) {
-    const name=labels.slice(i).join('.'), wildcard='*.'+labels.slice(i+1).join('.');
-    if(privateSuffixes.has('!'+name) || rules.has('!'+name)) { suffix=labels.length-i-1; shared=privateSuffixes.has('!'+name); break; }
-    if(privateSuffixes.has(name) || privateSuffixes.has(wildcard)) { suffix=labels.length-i; shared=true; break; }
-    if(rules.has(name) || rules.has(wildcard)) { suffix=labels.length-i; break; }
-  }
-  return {root:labels.length>suffix ? labels.slice(-suffix-1).join('.') : null, shared};
-}
 
 const protectedBrands = ['paypal.com','google.com','microsoft.com','apple.com','amazon.com','stripe.com','opensend.mx'];
 const confusables:Record<string,string> = { '0':'o','1':'l','3':'e','4':'a','5':'s','7':'t','а':'a','α':'a','е':'e','ε':'e','і':'i','ι':'i','ӏ':'l','о':'o','ο':'o','р':'p','ρ':'p','с':'c','ѕ':'s','т':'t','у':'y','х':'x','ν':'v','к':'k','м':'m' };
@@ -46,7 +31,7 @@ const registrations = new Map<string,{created:number;expires:number}>(); // Publ
 async function rdapAge(root:string,signal:AbortSignal) {
   const now=Date.now(), cached=registrations.get(root);
   if(cached && cached.expires>now) return Math.floor((now-cached.created)/day);
-  const base=registries.get(root.split('.').at(-1)!); if(!base) return null;
+  const base=await rdapBase(root.split('.').at(-1)!); if(!base) return null;
   const data=z.object({ldhName:z.string(),events:z.array(z.object({eventAction:z.string(),eventDate:z.string()}))}).parse(
     await boundedJson(`${base.replace(/\/$/,'')}/domain/${root}`,'application/rdap+json',signal,256*1024));
   if(data.ldhName.toLowerCase()!==root) return null;

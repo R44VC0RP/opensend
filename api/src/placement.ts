@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { log, type JobHandler, type Runtime } from './core.js';
-import { placementRoot, publicSignals } from './placement-probes.js';
+import { placementRoot } from './domain-registry.js';
+import { publicSignals } from './placement-probes.js';
 
 const policyVersion=2, budgetMs=2_000;
 type History={accepted:number;bounces:number;complaints:number;spanDays:number};
@@ -85,7 +86,7 @@ export const shadowPlacement:JobHandler=async(runtime,payload,{workspaceId:wid})
       FROM hosted_health_hourly h WHERE h.workspace_id=b.workspace_id AND h.epoch=coalesce(pc.resumed_at,'-infinity') AND h.hour>=now()-interval '32 days') AS "cleanDays"
     ${target} AND NOT EXISTS(SELECT FROM domain_placement_shadow WHERE domain_id=b.domain_id)`);
   if(!w) return;
-  const {root,shared}=placementRoot(w.name),signal=AbortSignal.timeout(Math.max(1,deadline-Date.now()));
+  const {root,shared}=await placementRoot(w.name),signal=AbortSignal.timeout(Math.max(1,deadline-Date.now()));
   const [net,history]=await Promise.all([publicSignals(w.name,root,shared,runtime.config.placementDblZone,signal,runtime.placementEdge),domainHistory(runtime,wid,w.name,deadline)]);
   const {decision,score,reasons,signals}=scorePlacement(net,w,history);
   const stored=await runtime.db.execute(sql`INSERT INTO domain_placement_shadow(domain_id,policy_version,started_at,decision,score,reasons,signals)
