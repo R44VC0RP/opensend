@@ -118,10 +118,10 @@ export function CreateKeyDialog({ open, onOpenChange, onCreated }: { open: boole
           <span className="settings-cell-stack"><span id={`key-purpose-${item.value}`}>{item.label}</span><span id={`key-purpose-${item.value}-hint`} className="ui-field__hint">{item.hint}</span></span>
         </label>)}
       </fieldset>
-      {inbound && <Field label="Address" htmlFor="key-address" error={addressError} hint={!addresses.isPending && !addresses.data?.length ? <>No inbound addresses yet. <Link to="/inbound/addresses">Create one</Link> first.</> : allAddresses ? 'Includes addresses created later.' : undefined}>
-        <Select id="key-address" value={addressValue} placeholder={addressPlaceholder} disabled={pending || addresses.isPending || !addresses.data?.length}
+      {inbound && <Field label="Address" htmlFor="key-address" error={addressError} hint={allAddresses ? 'Includes addresses created later.' : !addresses.isPending && !addresses.data?.length ? <>No inbound addresses yet. <Link to="/inbound/addresses">Create one</Link>, or choose Every address.</> : undefined}>
+        <Select id="key-address" value={addressValue} placeholder={addressPlaceholder} disabled={pending || addresses.isPending}
           onValueChange={value => { if (!value) return; clearError('addressIds'); if (value === EVERY_ADDRESS) { setAllAddresses(true); setAddressIds([]) } else { setAllAddresses(false); setAddressIds([value]) } }}
-          options={[...(addresses.data ?? []).map(item => ({ value: item.id, label: item.address })), ...(addresses.data?.length ? [{ value: EVERY_ADDRESS, label: 'Every address' }] : [])]} />
+          options={[...(addresses.data ?? []).map(item => ({ value: item.id, label: item.address })), { value: EVERY_ADDRESS, label: 'Every address' }]} />
       </Field>}
       <details className="keys-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
         <summary>Advanced <span className="muted">· {summary}</span></summary>
