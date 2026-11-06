@@ -5441,11 +5441,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
   test('a stale quota refresh follows transactional acceptance except near the daily reserve', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db }) => {
-      const { dispatchDue } = await import('./src/dispatcher.js');
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
       const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
-      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string;
+      const send = SESv2Client.prototype.send, visible: boolean[] = []; let pending: string, peer = false;
       t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
         if (cmd instanceof GetAccountCommand) visible.push(!!(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[pending])).rows[0].provider_id);
+        else if (peer) await db.query('UPDATE sending_region_limits SET checked_at=clock_timestamp(),next_allowed_at=NULL WHERE workspace_id=$1 AND region=$2',[runtime.config.workspaceId,REGION]);
         return Reflect.apply(send,this,[cmd]);
       });
       for (const used of [0,899]) {
@@ -5456,6 +5457,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await dispatchDue(runtime,REGION)).sent,1);
       }
       assert.deepEqual(visible,[true,false]);
+      // A peer owns the refresh fence and does not publish its sample until our send starts.
+      // No quota polling on the critical path, no duplicate GetAccount, and no refilled credit.
+      peer=true; const gate=initialGate();
+      pending=ok(await local('POST','/v1/emails/send',mail()),202).id;
+      await db.query(`UPDATE sending_region_limits SET max_24_hour_send=1000,sent_last_24_hours=0,checked_at=clock_timestamp()-interval '2 minutes',next_allowed_at=clock_timestamp()+interval '1 minute' WHERE workspace_id=$1 AND region=$2`,[runtime.config.workspaceId,REGION]);
+      assert.equal((await dispatchDue(runtime,REGION,{gate})).sent,1); assert.equal(gate.sentSinceRefresh,1);
+      assert.deepEqual(visible,[true,false]);
     });
   });
 
@@ -5465,15 +5473,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
       const fast = ok(await local('POST','/v1/emails/send',mail()),202).id;
       const slow = ok(await local('POST','/v1/emails/send',mail()),202).id;
-      const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+      let enter!: () => void, release!: () => void;
+      const entered = new Promise<void>(r => { enter = r; }), pending = new Promise<void>(r => { release = r; });
       const send = SESv2Client.prototype.send;
       t.mock.method(SESv2Client.prototype,'send',async function(this: InstanceType<typeof SESv2Client>, cmd: any) {
-        if (cmd instanceof SendEmailCommand && cmd.input.EmailTags?.some(tag => tag.Value === slow)) { entered.resolve(); await release.promise; }
+        if (cmd instanceof SendEmailCommand && cmd.input.EmailTags?.some(tag => tag.Value === slow)) { enter(); await pending; }
         return Reflect.apply(send,this,[cmd]);
       });
       const draining = dispatchDue(runtime,REGION);
       try {
-        await entered.promise;
+        await entered;
         for (const deadline=Date.now()+1000; ; ) {
           const row=(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[fast])).rows[0];
           if (row.provider_id) break;
@@ -5481,7 +5490,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await new Promise(r => setTimeout(r,5));
         }
         assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[slow])).rows[0].status,'attempting');
-      } finally { release.resolve(); await draining; }
+      } finally { release(); await draining; }
       assert.equal((await draining).sent,2);
     });
   });

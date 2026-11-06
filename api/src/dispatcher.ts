@@ -20,7 +20,7 @@ import { screenSnapshot } from './screen.js';
 export type Mail = typeof emails.$inferSelect;
 type Review = { draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient };
 type Owner = { runtime: Runtime; a: Actor; ses: SESv2Client; tenantName?: string; feedbackTopic?: string };
-type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number; refresh_due: boolean };
+type LeaseQuota = { rate: number; max: number; sent: number; checked: string; age_ms: number };
 type Leased = { mail: Mail; review: Review | null; owner: Owner | null; rateRetries: number; quota?: LeaseQuota; claimStatus?: EmailStatus | 'lost' };
 type Prepared = Leased & { owner: Owner; snapshot: EmailSnapshot; content: SendEmailCommandInput['Content']; unsubscribe?: { tokenHash: string; email: string }; stored?: EmailSnapshot };
 type Outcome = { mail: Mail; type: 'accepted' | 'reject' | 'acceptance_unknown' | 'provider_throttled' | 'dispatch_deferred'; providerId?: string; errorCode?: string; data: Record<string, unknown>; requeueAt?: string };
@@ -28,7 +28,7 @@ const requeued = (o: Outcome) => o.type === 'provider_throttled' || o.type === '
 
 export interface QuotaSnapshot { maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: number }
 // Serializable pacing state so a Durable Object survives eviction without bursting.
-export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; sentSinceRefresh: number; brakeUntil?: number; dailyBlockedUntil?: number; tailExhausted?: boolean }
+export interface GateState { nextAllowedAt: number; quota: QuotaSnapshot | null; refreshAt?: number; staleSampleUsed?: number; sentSinceRefresh: number; brakeUntil?: number; dailyBlockedUntil?: number; tailExhausted?: boolean }
 export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, sentSinceRefresh: 0 });
 export type Pacing = { rateFactor: number; targetRate?: number; live: boolean };
 const BRAKE_MS = 10000;
@@ -76,7 +76,7 @@ async function fetchQuota(ses: SESv2Client): Promise<QuotaSnapshot> {
 // Re-reading the same snapshot (including after restoring an old gate) cannot mint more capacity.
 function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number, ageMs = 0) {
   if (!gate.quota || sample.checkedAt > gate.quota.checkedAt) {
-    gate.quota = sample; gate.sentSinceRefresh = 0; delete gate.dailyBlockedUntil; delete gate.tailExhausted;
+    gate.quota = sample; gate.sentSinceRefresh = 0; delete gate.dailyBlockedUntil; delete gate.tailExhausted; delete gate.staleSampleUsed;
   }
   gate.refreshAt = Date.now() + Math.max(Math.min(1000, refreshMs), refreshMs - Math.max(0, ageMs));
   if (gate.dailyBlockedUntil) gate.dailyBlockedUntil = gate.refreshAt;
@@ -84,7 +84,7 @@ function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number,
 }
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
 // interrupted fetch keeps its fence until the next cache period; no DB lock is held over AWS I/O.
-async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: string | undefined, region: string, gate: GateState, refreshMs: number) {
+async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: string | undefined, region: string, gate: GateState, refreshMs: number, overlappingSends = 0) {
   const { runtime, ses, a } = owner;
   const table = sql.identifier(account ? 'provider_account_limits' : 'sending_region_limits');
   const subject = sql.identifier(account ? 'aws_account_id' : 'workspace_id'), fence = sql.identifier(account ? 'refresh_after' : 'next_allowed_at');
@@ -114,7 +114,12 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'>, account: str
       await sleep(delay); row = (await runtime.db.execute<Row>(cached)).rows[0];
     }
     if (!row) return false;
-    return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms);
+    const checkedAt = Date.parse(row.checked), advanced = !gate.quota || checkedAt > gate.quota.checkedAt, denied = gate.dailyBlockedUntil;
+    observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, checkedAt }, refreshMs, row.age_ms);
+    // A peer may have sampled before our provisional sends reached SES. Conservatively
+    // carry those recipients (and a daily denial) into its sample, never twice on a reread.
+    if (advanced && overlappingSends) { gate.sentSinceRefresh += overlappingSends; if (denied) gate.dailyBlockedUntil = gate.refreshAt; }
+    return true;
   }
 }
 
@@ -215,7 +220,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
       AND NOT (e.snapshot ?| array['raw','deferredCampaign']) AND NOT coalesce((e.snapshot->>'screen')::boolean,false)
       AND e.snapshot->'attachments'='[]'::jsonb AND e.snapshot->'cc'='[]'::jsonb AND e.snapshot->'bcc'='[]'::jsonb
       AND jsonb_array_length(e.snapshot->'to')=1 AND octet_length(e.snapshot::text)<65536
-      AND ((s.quota_sample->>'age_ms')::float8 < ${inline.period} OR (s.quota_sample->>'refresh_due')::boolean)
+      AND ((s.quota_sample->>'age_ms')::float8 < ${inline.period} OR floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) IS DISTINCT FROM ${inline.gate.staleSampleUsed ?? null}::numeric)
       AND floor(extract(epoch FROM (s.quota_sample->>'checked')::timestamptz)*1000) >= ${inline.gate.quota?.checkedAt ?? 0}
       AND ((s.quota_sample->>'max')::float8 < 0 OR (s.quota_sample->>'max')::float8 - (s.quota_sample->>'sent')::float8
         - ceil((s.quota_sample->>'max')::float8 * ${runtime.config.dispatch.dailyHeadroomPercent} / 100) > ${inline.gate.sentSinceRefresh + 51})`;
@@ -244,7 +249,7 @@ async function leaseDue(runtime: Runtime, region: string, limit: number, deferre
     ), settings AS MATERIALIZED (
       SELECT p.*, s.installation_id, s.default_region, s.enabled_regions, ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection,
         ${readQuota || inline ? sql`(SELECT jsonb_build_object('rate',max_send_rate,'max',max_24_hour_send,'sent',sent_last_24_hours,'checked',checked_at::text,
-          'age_ms',extract(epoch FROM clock_timestamp()-checked_at)*1000,'refresh_due',coalesce(${sql.identifier(accountId ? 'refresh_after' : 'next_allowed_at')} <= clock_timestamp(),true))
+          'age_ms',extract(epoch FROM clock_timestamp()-checked_at)*1000)
           FROM ${accountId ? sql`provider_account_limits WHERE aws_account_id=${accountId}` : sql`sending_region_limits WHERE workspace_id=p.workspace_id`}
           AND region=${region} AND max_send_rate>0 AND isfinite(checked_at))` : sql`NULL`} AS quota_sample,
         ${mx || isSimulatedSes(runtime) ? sql`true` : sql`(
@@ -704,7 +709,7 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   const first = ready[0]!.owner;
   // An absolute rate override is an operator setting for their account, not a BYO customer's quota.
   if (options.accountId && !first.tenantName) lane.pacing.targetRate = undefined;
-  const refresh = () => phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs));
+  const refresh = (overlappingSends = 0) => phase('quota', () => ensureQuota(first, options.accountId, options.region, gate, options.quotaRefreshMs, overlappingSends));
   // Only the first lease reads the shared sample. Its age is measured on Postgres, not by
   // subtracting unrelated clocks. Never give a shard fresh capacity for the same sample.
   let refreshAfterSend = false;
@@ -713,13 +718,14 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
     if (q) {
       const sample = { maxSendRate:q.rate, max24HourSend:options.accountId ? q.max : q.max || -1, sentLast24Hours:q.sent, checkedAt:Date.parse(q.checked) };
       if (q.age_ms < period) observeQuota(gate, sample, period, q.age_ms);
-      else if (q.refresh_due && !gate.dailyBlockedUntil && ready.some(item => item.mail.snapshot.kind === 'transactional')) {
+      else if (gate.staleSampleUsed !== sample.checkedAt && !gate.dailyBlockedUntil && ready.some(item => item.mail.snapshot.kind === 'transactional')) {
         // One idle transactional batch may use the last known rate while comfortably outside
-        // the daily reserve. A missing sample, failed refresh fence or daily hold fails closed.
+        // the daily reserve, even while another shard refreshes. A failed refresher cannot
+        // authorize another batch against the same sample on this shard.
         const spent = gate.quota && gate.quota.checkedAt >= sample.checkedAt ? gate.sentSinceRefresh : 0;
         const recipients = ready.reduce((n, {mail:{snapshot:s}}) => n + s.to.length + s.cc.length + s.bcc.length, 0);
         if ((!gate.quota || sample.checkedAt >= gate.quota.checkedAt) && (sample.max24HourSend < 0 || marketingCredits(sample, base.config.dispatch.dailyHeadroomPercent) > spent + recipients + 50)) {
-          observeQuota(gate, sample, period, q.age_ms); gate.refreshAt = 0; refreshAfterSend = true;
+          observeQuota(gate, sample, period, q.age_ms); gate.refreshAt = 0; gate.staleSampleUsed = sample.checkedAt; refreshAfterSend = true;
         }
       }
     }
@@ -729,7 +735,12 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
       // the entire run via waitUntil/alarm; no I/O escapes the invocation.
       const tx = ready.filter(item => item.mail.snapshot.kind === 'transactional');
       const rest = ready.filter(item => item.mail.snapshot.kind !== 'transactional');
-      lane.refresh = dispatchReady(base, lane, tx).then(refresh).finally(() => { lane.refresh = undefined; });
+      const spentBefore = gate.sentSinceRefresh;
+      lane.refresh = dispatchReady(base, lane, tx).then(async () => {
+        const spent = gate.sentSinceRefresh - spentBefore;
+        await options.onGate?.(gate); // Keep the spent sample marked even if the refresh fails.
+        return refresh(spent);
+      }).finally(() => { lane.refresh = undefined; });
       if (!await lane.refresh) { if (rest.length) await releaseLeases(base, rest.map(item => item.mail)); return { processed: tx.length, blocked: true }; }
       if (rest.length) await dispatchReady(base,lane,rest);
       return { processed: leased.length, blocked: false };
