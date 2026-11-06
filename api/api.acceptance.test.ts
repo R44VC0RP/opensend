@@ -900,6 +900,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           const zone=`${unique('dc')}.co.uk`, name=`mail.${zone}`, providerPath='/v2/domainTemplates/providers/opensend.mx/services/mail';
           const cf='https://api.cloudflare.com/client/v4/dns/domainconnect';
           let settingsHost=cf, api=cf, sync='https://dash.cloudflare.com/domainconnect', providerId='cloudflare.com', providerName='Cloudflare', supportStatus=200, alias=false, existingMx=false;
+          let deployedVersion:number|undefined;
           const requests:string[]=[];
           dc.mock.method(globalThis,'fetch',async (input:RequestInfo|URL,init?:RequestInit)=>{
             const url=new URL(String(input)); requests.push(url.href);
@@ -914,7 +915,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             }
             assert.equal(init?.redirect,'manual');
             if(url.href===`${settingsHost}/v2/${zone}/settings`) return Response.json({providerId,providerName,urlAPI:api,urlSyncUX:sync});
-            assert.equal(url.href,api+providerPath); return new Response(null,{status:supportStatus});
+            assert.equal(url.href,api+providerPath); return deployedVersion ? Response.json({version:deployedVersion},{status:supportStatus}) : new Response(null,{status:supportStatus});
           });
           const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
           dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
@@ -1007,6 +1008,20 @@ describe('Google dashboard sessions and current-policy authorization', () => {
           settingsHost=api='https://api.domainconnect.ionos.com'; sync='https://domainconnect.ionos.de/sync'; providerId='ionos.com'; providerName='IONOS'; alias=true;
           clock+=301_000; assert.equal(new URL((await getSetup()).applyUrl).origin,'https://domainconnect.ionos.de');
           api='https://unexpected.invalid'; clock+=301_000; assert.equal((await getSetup()).applyUrl,null); assert.ok(!requests.some(r=>r.startsWith(api)),'An advertised URL outside the provider allowlist is never requested.');
+          api=settingsHost;
+          for(const version of [1,2]) {
+            deployedVersion=version; clock+=301_000;
+            const signed=new URL((await getSetup()).applyUrl).searchParams;
+            assert.equal(signed.get('region'),region); assert.equal(signed.get('inboundRegion'),version===2?region:null);
+            assert.ok(!signed.get('groupId')!.includes('tracking'));
+          }
+          const {pendingGroups}=await import('./src/domain-connect.js');
+          const split={...manual,region:'us-east-1',dns:manual.dns.map((r:Json)=>r.type==='MX'?{...r,value:r.purpose==='receiving'?'inbound-smtp.us-east-2.amazonaws.com':'feedback-smtp.us-east-1.amazonses.com'}:r)};
+          for(const version of [1,undefined,2]) {
+            const selected=pendingGroups(split,true,true,['receivingReply','mailfrom'],version);
+            assert.deepEqual(selected,version===2?{groups:['receivingReply','mailfrom'],vars:{inboundRegion:'us-east-2',region:'us-east-1'}}:{groups:['mailfrom'],vars:{region:'us-east-1'}});
+          }
+          assert.ok(!template.records.some((r:Json)=>r.host==='_dmarc'));
         });
         // B owns a shared identity; later A connects BYO, and its discovery must skip B's claim.
         await providerTest.test('MX domains: exclusive claims, SES provenance, tenant binding and DNS proof', async dt => {

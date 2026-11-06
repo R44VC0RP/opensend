@@ -5,7 +5,7 @@ import type { Config } from './core.js';
 const template = '/v2/domainTemplates/providers/opensend.mx/services/mail';
 export const groupIds = ['sending', 'ownership', 'receiving', 'receivingReply', 'mailfrom'] as const;
 type Group = typeof groupIds[number];
-type Discovery = { zone: string; name: string; id: string; sync: string };
+type Discovery = { zone: string; name: string; id: string; sync: string; version?: number };
 
 // The TXT value is user-controlled (and may include a path, notably on Cloudflare).
 // Pin both ends of discovery, not just the advertised providerId. Never follow redirects.
@@ -64,8 +64,10 @@ async function probe(zone:string, signal:AbortSignal): Promise<Discovery|null|un
   const legacy=base===ionosApi[1] && !providerId && providerName==='1and1';
   if ((!legacy && providerId!==trusted.id) || !trusted.api.includes(api) || !trusted.sync.includes(sync)) return null;
   const support=await get(api+template);
-  await support.body?.cancel();
-  return support.status===200 ? {zone,id:trusted.id,name:providerDisplayName ?? (legacy?'IONOS':providerName),sync} : null;
+  if (support.status!==200) { await support.body?.cancel(); return null; }
+  // A 200 may be empty, disclose just the revision, or return the deployed template.
+  const details=z.object({version:z.number().int().positive()}).safeParse(await support.json().catch(()=>null));
+  return {zone,id:trusted.id,name:providerDisplayName ?? (legacy?'IONOS':providerName),sync,version:details.data?.version};
 }
 
 type CacheEntry = { value: Discovery|null; expiresAt:number };
@@ -94,7 +96,7 @@ export async function discover(name:string):Promise<Discovery|null> {
 }
 
 type RecordSet = { name:string; region:string; dns:{name:string;type:string;purpose:string;status:string;value:string}[] };
-export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:boolean, requested:readonly string[]=groupIds) {
+export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:boolean, requested:readonly string[]=groupIds, version?:number) {
   const groups:Group[]=[], vars:Record<string,string>={};
   const pending=domain.dns.filter(r=>r.status==='pending');
   const add=(group:Group, fields:Record<string,string>)=>{ if(requested.includes(group)) {groups.push(group); Object.assign(vars,fields);} };
@@ -109,9 +111,17 @@ export function pendingGroups(domain:RecordSet, shared:boolean, safeReceiving:bo
   }
   const proof=pending.find(r=>r.purpose==='sending' && r.type==='TXT' && r.name===`_opensend.${domain.name}`);
   if(shared && proof) add('ownership',{ownership:proof.value});
-  const mx=pending.find(r=>r.purpose==='receiving' && r.value===`inbound-smtp.${domain.region}.amazonaws.com`);
-  if(safeReceiving && mx?.name===domain.name) add('receiving',{region:domain.region});
-  if(safeReceiving && mx?.name===`reply.${domain.name}`) add('receivingReply',{region:domain.region});
+  const mx=pending.find(r=>r.purpose==='receiving' && r.type==='MX');
+  const inbound=mx && /^inbound-smtp\.([a-z]{2}(?:-[a-z]+)+-\d+)\.amazonaws\.com$/.exec(mx.value)?.[1];
+  // On an undisclosed revision sign both names only when they agree. A stale v1
+  // provider must never point the customer's receiving MX at the sending pool.
+  if(safeReceiving && inbound && ((version ?? 1)>=2 || inbound===domain.region)) {
+    const fields:Record<string,string>={};
+    if(version!==1) fields.inboundRegion=inbound;
+    if((version ?? 1)<2) fields.region=inbound;
+    if(mx.name===domain.name) add('receiving',fields);
+    if(mx.name===`reply.${domain.name}`) add('receivingReply',fields);
+  }
   const bounce=pending.find(r=>r.purpose==='mail_from' && r.type==='MX' && r.value===`feedback-smtp.${domain.region}.amazonses.com`);
   if(bounce?.name===`email.${domain.name}` && pending.some(r=>r.type==='TXT' && r.name===bounce.name && r.value==='v=spf1 include:amazonses.com ~all')) {
     add('mailfrom',{region:domain.region});

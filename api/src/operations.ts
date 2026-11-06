@@ -666,7 +666,7 @@ export function registerOperations(app: App) {
     const a=dnsSetupActor(c), wid=a.workspaceId, id=c.req.valid('param').id;
     const row=await hostedDomain(c.env.db,wid,id) ?? notFound('Domain');
     const found=await discover(row.name);
-    const selection=pendingGroups(derivedReadiness(row),row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','));
+    const selection=pendingGroups(derivedReadiness(row),row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','),found?.version);
     const provider=found && {id:found.id,name:found.name}, applyUrl=found && signedApply(c.env.config,found,row,selection,wid,a.keyId.slice(5));
     return c.json({provider,groups:selection.groups,applyUrl},200);
   });
