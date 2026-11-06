@@ -1114,6 +1114,23 @@ export type DomainReadiness = {
     verificationStatus: string;
     verified: boolean;
     dkimStatus: string;
+    /**
+     * Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.
+     */
+    dmarc: {
+        status: 'missing' | 'invalid' | 'none' | 'quarantine' | 'reject';
+        record: string | null;
+        /**
+         * Domain publishing the effective TXT record; may be the organizational domain.
+         */
+        source: string | null;
+        adkim: 'r' | 's';
+        aspf: 'r' | 's';
+        alignment: {
+            dkim: boolean;
+            spf: boolean;
+        };
+    } | null;
     ready: boolean;
     sending: 'pending' | 'verified';
     receiving: 'pending' | 'verified';
@@ -1126,7 +1143,7 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
-        purpose: 'sending' | 'receiving' | 'mail_from';
+        purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc';
         status: 'pending' | 'verified';
         note?: string;
     }>;

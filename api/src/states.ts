@@ -23,6 +23,7 @@ export const LOST_GRACE_MS = 2 * 3_600_000;
 
 /** Facts from the last SES read and DNS observation. Never a state: every boolean the API shows is derived from the state columns. */
 export type IdentityFacts = {
+  dmarc?: import('./dmarc.js').DmarcObservation|null;
   ses: Pick<GetEmailIdentityCommandOutput, 'VerificationStatus' | 'VerifiedForSendingStatus' | 'DkimAttributes' | 'MailFromAttributes'>;
   proven: boolean; mx: MxReport | null; note: string | null;
   /** Verified by the exclusive BYO account, not an identity managed by the claim's ownership tag. */
