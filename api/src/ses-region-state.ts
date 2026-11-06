@@ -43,12 +43,18 @@ export async function assertRegionEnabled(db: DbExecutor, workspaceId: string, r
 const orderedRegions = (settings: typeof sesSettings.$inferSelect) => [settings.defaultRegion, ...settings.enabledRegions.filter(region => region !== settings.defaultRegion)];
 // API routes validating a region don't need either set of SNS topic bindings.
 export async function withRegionSettings(runtime: Runtime, workspaceId: string): Promise<Runtime> {
+  if (runtime.config.multiTenant && runtime.config.regionalSending) {
+    const row=(await runtime.db.execute<{regions:string[]}>(sql`SELECT array_prepend(s.default_region,ARRAY(SELECT region FROM regional_simulated_connections c WHERE c.workspace_id=s.workspace_id AND c.region<>s.default_region ORDER BY region)) AS regions
+      FROM ses_installation_settings s WHERE s.workspace_id=${workspaceId}`)).rows[0];
+    if (!row) throw new ApiError(503,'REGION_SETTINGS_NOT_INITIALIZED','Run database migrations to initialize SES region settings.');
+    return {...runtime,config:{...runtime.config,workspaceId,regions:row.regions}};
+  }
   const settings = await getRegionSettings(runtime.db, workspaceId);
   return { ...runtime, config: { ...runtime.config, workspaceId, regions: orderedRegions(settings) } };
 }
 export async function assertLiveRegionReady(runtime: Runtime, db: DbExecutor, region: string, stream: 'transactional' | 'marketing', retryable = false, workspaceId = runtime.config.workspaceId) {
   if (runtime.config.multiTenant) {
-    if (!(await db.execute(sql`SELECT 1 FROM provider_sending_connections WHERE workspace_id=${workspaceId} AND region=${region}`)).rowCount) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.', 'region', retryable);
+    if (!(await db.execute(sql`SELECT 1 FROM regional_sending_connections WHERE workspace_id=${workspaceId} AND region=${region}`)).rowCount) throw new ApiError(409, 'CONNECTION_REQUIRED', 'Set up a sending connection for this workspace and region.', 'region', retryable);
     return;
   }
   const [row] = await db.select().from(sesRegions).where(regionWhere(workspaceId, region)).limit(1);

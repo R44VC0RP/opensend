@@ -4188,6 +4188,133 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX regional delivery: legacy backfill, closest claim, mixed batch and frozen dispatch',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+      const {readFile}=await import('node:fs/promises'),{runDispatcher}=await import('./src/dispatcher.js');
+      const {GetAccountCommand,SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,acct='111122223333',oh='us-east-2',va='us-east-1',byo=unique('byo');
+      const old=`arn:aws:sns:${oh}:${acct}:opensend-mx-feedback`,trusted=`arn:aws:sns:${va}:${acct}:opensendmx-trusted-feedback`;
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture-only'}});
+      assert.equal(runtime.config.regionalSending,false);
+      const attempts:string[][]=[];
+      t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
+        assert.ok(cmd instanceof SendEmailCommand);attempts.push([await this.config.region(),cmd.input.ConfigurationSetName!,cmd.input.TenantName!]);return {MessageId:unique('provider')};
+      });
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1`,[wid,oh,va]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES($1,$2,$3,'ready','ohio-fixture')`,[oh,acct,old]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`,[byo]);
+      const byoTopic=`arn:aws:sns:${oh}:444455556666:legacy-feedback`;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn,feedback_topic_arn) VALUES($1,$1,$2,'ready','byo','444455556666',gen_random_uuid(),'v4','fixture-role','fixture-platform',$3)`,[byo,oh,byoTopic]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('regional.example',$1,$1,'verified'),('legacy-byo.example',$2,$2,'verified')`,[wid,byo]);
+      await db.query(`INSERT INTO operation_domains(id,name,workspace_id,region) VALUES('oh-domain','regional.example',$1,$3),('v4-domain','legacy-byo.example',$2,$3)`,[wid,byo,oh]);
+      // Reproduce the push-1 database: only the old writer's rows exist. Execute the real backfill.
+      await db.query(`DELETE FROM provider_connection_regions WHERE connection_id IN ($1,$2)`,[wid,byo]);
+      await db.query(await readFile(new URL('./migrations/068_backfill_regional_bindings.sql',import.meta.url),'utf8'));
+      assert.deepEqual((await db.query(`SELECT c.region,c.feedback_topic_arn,b.domain_id,c.legacy_names FROM regional_sending_connections c JOIN domain_sending_bindings b ON b.connection_id=c.id AND b.region=c.region WHERE c.id IN ($1,$2) ORDER BY b.domain_id`,[wid,byo])).rows,[{region:oh,feedback_topic_arn:old,domain_id:'oh-domain',legacy_names:true},{region:oh,feedback_topic_arn:byoTopic,domain_id:'v4-domain',legacy_names:true}]);
+      const mail=(host:string)=>({from:`sender@${host}`,to:'success@simulator.amazonses.com',subject:'Regional fixture',text:'Mock SES only.'});
+      const send=(m:Json)=>local('POST','/v1/emails/send',m),batch=(...emails:Json[])=>local('POST','/v1/emails/batch',{emails});
+      const parent=mail('regional.example'),child=mail('leaf.trusted.regional.example');
+      const drain=(region:string)=>runDispatcher(runtime,{region,accountId:acct,lanes:1});
+      const legacy=ok(await send(parent),202);
+      assert.deepEqual((await db.query(`SELECT region,snapshot ? 'binding' AS pinned FROM sending_emails WHERE id=$1`,[legacy.id])).rows,[{region:oh,pinned:false}]);
+      await drain(oh);assert.deepEqual(attempts,[[oh,'opensend-mx-transactional',`opensend-${wid}`]]);
+      runtime.config.regionalSending=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,pool_tier,legacy_names) VALUES($1,$2,$3,'ready','trusted',false)`,[va,acct,trusted]);
+      await db.query(`INSERT INTO provider_connection_regions(connection_id,region) VALUES($1,$2)`,[wid,va]);
+      const {acquireRegionProvisioning,finishHostedRegion}=await import('./src/states.js'),ref={connectionId:wid,region:va};
+      const generation=Number((await runtime.db.execute(acquireRegionProvisioning(ref))).rows[0]!.generation);
+      assert.equal((await runtime.db.execute(finishHostedRegion(ref,generation))).rowCount,1);
+      const reserved=(await db.query(`SELECT * FROM reserve_regional_claim($1,'trusted.regional.example',$2,'va-domain',NULL,true)`,[wid,va])).rows[0];assert.equal(reserved.id,'va-domain');
+      assert.equal((await db.query(`SELECT error_code FROM reserve_regional_claim($1,'trusted.regional.example',$2,'conflict')`,[wid,oh])).rows[0].error_code,'DOMAIN_REGION_CONFLICT');
+      error(await send(child),403,'SENDER_DOMAIN_NOT_VERIFIED'); // A verified parent cannot override an unready child.
+      await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE token=$1`,[reserved.token]);
+      const before=(await db.query(`SELECT count(*) FROM sending_emails WHERE workspace_id=$1`,[wid])).rows;
+      error(await batch(parent,{...child,region:oh}),422,'SENDER_REGION_MISMATCH');
+      assert.deepEqual((await db.query(`SELECT count(*) FROM sending_emails WHERE workspace_id=$1`,[wid])).rows,before);
+      const mixed=ok(await batch(parent,child),202).data;
+      const frozen=async(id:string)=>(await db.query(`SELECT region,snapshot->'binding' AS binding,status,error_code FROM sending_emails WHERE id=$1`,[id])).rows[0];
+      assert.deepEqual((await frozen(mixed[1].id)).binding,{account:acct,topic:trusted,connection:wid,domain:'va-domain',generation});
+      await drain(oh);await drain(va);assert.deepEqual(attempts.slice(1),[[oh,'opensend-mx-transactional',`opensend-${wid}`],[va,'opensendmx-trusted-transactional',`opensendmx-${wid}`]]);
+      const c=ok(await local('POST','/v1/campaigns',{name:'Regional',from:child.from,subject:'Review',html:'<p>Fixture.</p>',audience:{listId:ok(await local('POST','/v1/lists',{name:'Regional'}),201).id}}),201);
+      assert.equal(c.draft.region,va);
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('regional-contact',$1,'reader@example.net','subscribed') RETURNING id) INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`,[wid,c.draft.audience.listId]);
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');
+      const reviewed=(await db.query(`SELECT r.draft->'binding' AS review,e.snapshot->'binding' AS queued,e.id FROM sending_emails e JOIN sending_campaign_reviews r ON r.id=e.review_id WHERE e.campaign_id=$1`,[c.id])).rows[0];
+      assert.deepEqual(reviewed.queued,reviewed.review);assert.equal(reviewed.review.domain,'va-domain');
+      const {createMailbox}=await import('./src/mailbox-store.js'),md=unique('mdom');
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,receiving_host,region,status,enabled_at) VALUES($1,$2,'va-domain','trusted.regional.example','trusted.regional.example',$3,'active',now())`,[md,wid,oh]);
+      const inbound=`arn:aws:sns:${oh}:${acct}:opensend-mx-inbound`;
+      await db.query(`UPDATE provider_pool_regions SET inbound_topic_arn=$1,receiving_state='ready' WHERE region=$2`,[inbound,oh]);
+      const {acceptInboundNotification}=await import('./src/mailbox-ingest.js');
+      const receive=()=>acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:'cross-region-fixture'},receipt:{timestamp:new Date().toISOString(),recipients:['reply@trusted.regional.example'],action:{type:'S3',bucketName:'ohio-fixture',topicArn:inbound,objectKey:'staging/cross-region-fixture'}}}});
+      assert.equal(await receive(),0); // Sending proof cannot grant receiving.
+      await db.query(`UPDATE domain_claims SET receiving_state='active',receiving_host=name WHERE token=$1`,[reserved.token]);
+      assert.equal(await receive(),1); // A separately active Ohio host routes regardless of its Virginia send binding.
+      const box=await createMailbox(runtime.db,{workspaceId:wid},{domainId:md,domainName:'trusted.regional.example',address:'reply@trusted.regional.example',origin:'api'});
+      const thread=ok(await local('POST','/v1/inbound/threads',{addressId:box.id,to:[parent.to],subject:'Thread',text:'Fixture.'}),202);
+      const stored=(await db.query(`SELECT m.region AS archive,e.region AS send_region,e.id FROM mail_messages m JOIN sending_emails e ON m.sending_email_id=e.id WHERE m.workspace_id=$1 AND m.thread_id=$2`,[wid,thread.threadId??thread.id])).rows[0];
+      assert.deepEqual([stored.archive,stored.send_region],[oh,va]);
+      const stale=ok(await send(child),202);
+      // Even flag rollback cannot release a pinned email under a different generation.
+      await db.query(`UPDATE provider_connection_regions SET generation=generation+1 WHERE connection_id=$1 AND region=$2`,[wid,va]);
+      runtime.config.regionalSending=false;await drain(va);
+      for (const id of [reviewed.id,stored.id,stale.id])assert.equal((await frozen(id)).error_code,'SENDER_BINDING_CHANGED');
+      assert.equal(attempts.length,3);
+      // A retired topic accepts delayed notifications only for the exact recorded ARN,
+      // account, region and provider/email ID. Rotating a shared topic cannot move an event.
+      const {ingestFeedbackBatch}=await import('./src/operations.js');
+      const providerId=(await db.query('SELECT provider_id FROM sending_emails WHERE id=$1',[mixed[1].id])).rows[0].provider_id;
+      const replacement=`arn:aws:sns:${va}:${acct}:opensendmx-replacement-feedback`;
+      await db.query('UPDATE provider_pool_regions SET feedback_topic_arn=$1 WHERE region=$2',[replacement,va]);
+      const feedback=(topicArn:string,region:string,account:string)=>({topicArn,region,messageId:unique('late'),message:{eventType:'Delivery',delivery:{timestamp:new Date().toISOString()},mail:{messageId:providerId,sendingAccountId:account,tags:{opensend_email_id:[mixed[1].id]}}}});
+      const results=await ingestFeedbackBatch(runtime,[feedback(replacement,va,acct),feedback(trusted,oh,acct),feedback(trusted,va,'000000000000'),feedback(trusted,va,acct)]);
+      assert.deepEqual(results.map(r=>!!r.error),[true,true,true,false]);assert.equal((await frozen(mixed[1].id)).status,'delivered');
+    });
+  });
+
+  test('MX regional BYO: a rescan is not authorization and first-ready regions provision independently',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>{
+      const {startRegionScan,finishRegionScan,acquireRegionProvisioning,finishRegionProvisioning,toggleRegionSending}=await import('./src/states.js');
+      const {setupResources}=await import('./src/ses-setup.js'),{SESv2Client,GetEmailTemplateCommand,TestRenderEmailTemplateCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,oh='us-east-2',va='us-east-1',account='444455556666';
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'unused',secretAccessKey:'fixture'}});
+      const names=setupResources(wid,'byo');assert.match(names.topicName,/^opensendmx-[0-9a-f]{20}-feedback$/);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,role_arn,platform_principal_arn) VALUES($1,$1,$2,'provisioning','byo',$3,gen_random_uuid(),'v5','fixture-role','fixture-platform')`,[wid,oh,account]);
+      const publish=async(region:string)=>{
+        const ref={connectionId:wid,region},topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
+        await db.query(`INSERT INTO provider_connection_regions(connection_id,region) VALUES($1,$2)`,[wid,region]);
+        const scan=Number((await runtime.db.execute(startRegionScan(ref))).rows[0]!.scan_revision);
+        await runtime.db.execute(finishRegionScan(ref,scan,true));
+        assert.equal((await db.query('SELECT 1 FROM regional_sending_connections WHERE id=$1 AND region=$2',[wid,region])).rowCount,0);
+        const gen=Number((await runtime.db.execute(acquireRegionProvisioning(ref))).rows[0]!.generation);
+        assert.equal((await runtime.db.execute(acquireRegionProvisioning(ref))).rowCount,0);
+        await db.query(`UPDATE provider_connection_regions SET feedback_topic_arn=$3 WHERE connection_id=$1 AND region=$2`,[wid,region,topic]);
+        assert.equal((await runtime.db.execute(finishRegionProvisioning(ref,gen,topic))).rowCount,0);
+        await db.query(`UPDATE provider_connection_regions SET confirmed_topic_arn=$3,confirmed_generation=generation WHERE connection_id=$1 AND region=$2`,[wid,region,topic]); // signed confirmation fixture
+        assert.equal((await runtime.db.execute(finishRegionProvisioning(ref,gen-1,topic))).rowCount,0);
+        assert.equal((await runtime.db.execute(finishRegionProvisioning(ref,gen,topic))).rowCount,1);
+        await runtime.db.execute(startRegionScan(ref));assert.equal((await db.query('SELECT 1 FROM regional_sending_connections WHERE id=$1 AND region=$2',[wid,region])).rowCount,1);
+        const reserved=(await db.query(`SELECT * FROM reserve_regional_claim($1,$2,$3,$4,$1)`,[wid,`${region}.example`,region,`byo-${region}`])).rows[0];assert.equal(reserved.id,`byo-${region}`);
+        await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE token=$1`,[reserved.token]);
+      };
+      await publish(oh);await publish(va);
+      const renders:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){
+        const region=await this.config.region();assert.equal(cmd.input.TemplateName,region);
+        if(cmd instanceof TestRenderEmailTemplateCommand){renders.push(region);return {RenderedTemplate:'Subject: fixture\r\n\r\nFixture.'};}
+        assert.ok(cmd instanceof GetEmailTemplateCommand);return {TemplateContent:{Subject:'fixture'}};
+      });
+      const batch=ok(await local('POST','/v1/emails/batch',{emails:[va,oh].map(r=>({from:`a@${r}.example`,to:'success@simulator.amazonses.com',template:{name:r,data:{}}}))}),202);
+      assert.deepEqual(renders,[va,oh]);assert.deepEqual((await db.query(`SELECT region,snapshot#>>'{binding,connection}' AS connection FROM sending_emails WHERE id=ANY($1) ORDER BY region`,[batch.data.map((m:Json)=>m.id)])).rows,[va,oh].map(region=>({region,connection:wid})));
+      assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,0))).rowCount,0);
+      assert.equal((await runtime.db.execute(toggleRegionSending({connectionId:wid,region:va},false,2))).rowCount,1);
+      error(await local('POST','/v1/emails/send',{from:`a@${va}.example`,to:address(),subject:'Blocked',text:'No fallback'}),409,'CONNECTION_REQUIRED');
+      ok(await local('POST','/v1/emails/send',{from:`a@${oh}.example`,to:address(),subject:'Independent',text:'Mock only'}),202);
+    });
+  });
+
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request, run }) => {
       const { setHostedLimits } = await import('./scripts/set-hosted-limits.js');
