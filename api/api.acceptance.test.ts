@@ -5209,7 +5209,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('a transactional admission takes the next paced slot during an already leased campaign', async t => {
+  test('a transactional admission borrows one slot from an already leased campaign', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { runDispatcher, dispatchWakeKey } = await import('./src/dispatcher.js');
       const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
@@ -5219,7 +5219,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT workspace_id,$2,id FROM contacts`, [runtime.config.workspaceId,list.id]);
       const campaign = ok(await local('POST', '/v1/campaigns', { name: unique('priority'), from: 'sender@example.com', subject: 'Campaign', html: '<p>Fixture</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
-      runtime.config.simulatedSes.maxSendRate = 14;
+      runtime.config.simulatedSes.maxSendRate = 6;
       await run('campaign.run');
       const priorityWake = new EventTarget();
       let admitted = 0;
@@ -5244,7 +5244,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       } finally { await draining; }
       const next = calls.find(c => c.at >= admitted)!;
       assert.ok(admitted > 0); assert.equal(next.id, receipt.id, 'Already-leased marketing must not own future slots.');
-      assert.ok(next.at - admitted < 100, `14/s slot + wake latency: ${next.at - admitted} ms`);
+      assert.ok(next.at - calls[0]!.at < 140, 'Priority should start before the next normal slot.');
+      assert.ok(calls[2]!.at - calls[0]!.at >= 290, 'The next marketing send repays the borrowed slot.');
       assert.equal(calls.length, 25);
     });
   });

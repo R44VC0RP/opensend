@@ -591,13 +591,17 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
   function pump() {
     if (timer) { clearTimeout(timer); timer = undefined; }
     const now = Date.now(); let earliest = Infinity;
+    // A transaction can use the next single-recipient slot early. reserve() still charges
+    // its full cost against the original clock; no accumulating credit and no bypass of a brake.
+    const rate = shardRate(gate, options.shard, pacing);
+    const priorityAt = gate.nextAllowedAt - ((gate.brakeUntil ?? 0) <= now && rate > 0 ? 1000 / rate : 0);
     for (const queue of [queues.transactional, queues.marketing]) for (let i = queue.length - 1; i >= 0; i--) {
       const entry = queue[i]!;
-      if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, gate.nextAllowedAt)) { queue.splice(i, 1); entry.defer(); }
+      if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, queue === queues.transactional ? priorityAt : gate.nextAllowedAt)) { queue.splice(i, 1); entry.defer(); }
       else earliest = Math.min(earliest, entry.deadline);
     }
     if (earliest === Infinity) return;
-    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, gate.nextAllowedAt);
+    const wakeAt = active >= (options.sendConcurrency ?? 6) ? earliest : Math.min(earliest, queues.transactional.length ? priorityAt : gate.nextAllowedAt);
     if (wakeAt > now) { timer = setTimeout(pump, Math.ceil(wakeAt - now)); return; }
     (queues.transactional.shift() ?? queues.marketing.shift())!.start();
     pump();
