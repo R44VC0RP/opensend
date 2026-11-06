@@ -8,7 +8,8 @@ import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { preparePoolReceiving } from './mailbox-setup.js';
 import { releaseConnectionDomains } from './operations.js';
-import { Accepted, Imports, InventoryFields, RegionStatus, enrollV5, inventory, platformAccount, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
+import { byoEnabled } from './byo-pilot.js';
+import { Accepted, Imports, InventoryFields, RegionStatus, disconnectV5, enrollV5, inventory, platformAccount, refreshScan, regionLabels, selectImports, statuses, v5Link, type V5Connection } from './byo-regional.js';
 import { CONNECTION_STATES, TENANT_STATES, assertConnectionTransition, campaignActive, finishProvisioning, notProvisioning, poolReceives, poolSends, setPoolState, setTenantState, startProvisioning, queueTenantJob, type ConnectionState, type TenantState } from './states.js';
 
 const tags = ['Workspaces'], security = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
@@ -56,7 +57,7 @@ const byoRegions = ['us-east-2', 'us-east-1', 'us-west-1', 'us-west-2', 'af-sout
 const stackName = (row: Row) => `OpenSendMX-${row.id.slice(-20)}`;
 function view(runtime: Runtime, row: Row) {
   let quickCreateUrl: string | null = null;
-  if (row.template_version==='v5' && runtime.config.byoV2 && runtime.config.byoV5TemplateUrl && !row.aws_account_id) quickCreateUrl=v5Link(runtime,row);
+  if (row.template_version==='v5' && row.state!=='disconnecting' && runtime.config.byoV2 && runtime.config.byoV5TemplateUrl && !row.aws_account_id) quickCreateUrl=v5Link(runtime,row);
   if (row.kind === 'byo' && row.template_version!=='v5' && (row.state === 'awaiting_role' || row.state === 'failed')) {
     const params = new URLSearchParams({ templateURL: template(runtime), stackName: stackName(row), param_ExternalId: row.external_id!, param_PlatformPrincipalArn: row.platform_principal_arn!, param_ReceiveMail: 'true',
       param_ConnectionId: row.id, param_ResourcePrefix: setupResources(row.id).topicName.replace(/-feedback$/, ''), param_FeedbackUrl: feedbackUrl({ publicUrl: runtime.config.publicUrl }) });
@@ -318,13 +319,13 @@ export function registerProviderConnections(app: App) {
     const row = await get(c.env, owner(c)); return c.json({ connection: row ? {...view(c.env, row),...(row.template_version==='v5'?await inventory(c.env.db,row as Row & V5Connection):{})} : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/connection/regions', operationId: 'listConnectionRegions', tags, security, description: 'Regions offered for shared sending, and the commercial AWS regions where Amazon SES supports sending for bring-your-own AWS. Owner/admin dashboard only.', responses: { 200: response(z.object({ shared: z.array(z.string()), byo: z.array(z.string()) }).openapi('ConnectionRegions')), ...errors } }), async c => {
-    owner(c); return c.json({ shared: sharedRegions(c.env), byo: c.env.config.byoV2?Object.keys(regionLabels):byoRegions }, 200);
+    const wid=owner(c); return c.json({ shared: sharedRegions(c.env), byo: await byoEnabled(c.env,wid)?Object.keys(regionLabels):byoRegions }, 200);
   });
   app.openapi(createRoute({ method: 'post', path, operationId: 'createConnection', tags, security, description: 'Choose a sending provider. Regional BYO enrollment requires an account ID and returns a role-only stack link and a read-only scan operation. Legacy enrollment and Hosted mail return 201.', request: { body: json(Create) }, responses: { 201: response(Connection),202:response(Connection.extend({operationId:z.string(),revision:z.number()})), ...errors } }), async c => {
     const wid = owner(c);
     try {
       const input=c.req.valid('json');
-      if (input.kind==='byo' && c.env.config.byoV2) {
+      if (input.kind==='byo' && await byoEnabled(c.env,wid)) {
         if (input.awsAccountId===platformAccount) throw new ApiError(409,'AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
         const existing=await get(c.env,wid);
         if (!existing || existing.template_version==='v5') {
@@ -357,9 +358,11 @@ export function registerProviderConnections(app: App) {
     const account = c.req.valid('json').awsAccountId;
     try { return c.json(view(c.env, await provision(c.env, row, account)), 200); } catch (e) { throw awsError(e); }
   });
-  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Disconnect only when no mail or campaign is in flight. Account-scoped BYO imports are forgotten; exclusive domain claims stay reserved but stop sending and receiving. AWS resources are retained. Delete the customer stack in AWS to revoke the role.', responses: { 200: response(z.object({ deleted: z.literal(true) })), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'delete', path, operationId: 'deleteConnection', tags, security, description: 'Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.', responses: { 200: response(z.object({ deleted: z.literal(true) })),202:response(z.object({operationId:z.string()})), ...errors } }), async c => {
     const wid = owner(c);
     try {
+      const current=await get(c.env,wid);
+      if (current?.template_version==='v5') {const result=await disconnectV5(c.env,wid,current.id);c.get('actor').wakeJobs=1;return c.json(result,202);}
       await c.env.db.transaction(async db => {
         await getRegionSettings(db, wid, 'update'); // Serialize with send admission, which takes FOR SHARE on this row.
         const row = (await db.execute<Row & { pause_reason: string | null }>(sql`SELECT * FROM provider_connections pc WHERE workspace_id=${wid} AND ${notProvisioning()}

@@ -13,7 +13,7 @@ import { getMcpGrantActor } from './mcp-auth.js';
 import { assertTenantReady, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, queueCampaignRun, recordExpanded, recordPrepared, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, wakeCampaignRun, type CampaignState, type TenantState } from './states.js';
 import { checkRoute, regionalSending, senderRoutes, sendingConnections, unverifiedSender, verifiedClaim, type SenderRoute, type SendingBinding } from './domain-claims.js';
 import { assertLiveRegionReady, assertRegionEnabled, credentialFingerprint, discoveryTarget, regionPattern } from './ses-region-state.js';
-import type { ReadyConnection } from './provider-credentials.js';
+import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { assertHostedAllowance, hostedAllowance, hostedCost, type HostedAllowance } from './hosted-sending.js';
 import { createUnsubscribeLink, unsubscribeUrl } from './operations.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
@@ -65,7 +65,7 @@ const drainDelayMs = (backlog: number, rate: number, floor = 1000) => rate > 0 ?
 // Called only inside admission transactions, before campaign/attachment locks.
 // A workspace row lock serializes admission without Hyperdrive-unsupported
 // advisory locks. Reuse the scheduler row without changing its rotation counter.
-function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
+export function lockAdmission(db: DbExecutor, a: Pick<Actor,'workspaceId'>, claim?: SQL) {
   // ON CONFLICT locks the existing tuple even when its UPDATE predicate is false. No dead tuple per send.
   const lock = sql`INSERT INTO job_schedule (workspace_id) SELECT ${a.workspaceId}::text ${claim ? sql`FROM claim` : sql``}
     ON CONFLICT (workspace_id) DO UPDATE SET turn = job_schedule.turn WHERE false`;
@@ -603,7 +603,7 @@ async function prepare(runtime: Runtime, db: DbExecutor, a: Actor, request: Send
     if (isSimulatedSes(runtime)) {
       throw new ApiError(422, 'SIMULATED_TEMPLATE_UNSUPPORTED', 'Simulated sending supports explicit content and campaigns, not AWS-stored templates.');
     } else {
-      const ses = getSes(runtime, input.region, connection);
+      const ses = getSes(runtime, input.region, forDelivery(connection,{purpose:'template',name:input.template.name}));
       const before = await ses.send(new GetEmailTemplateCommand({ TemplateName: input.template.name }));
       const rendered = await ses.send(new TestRenderEmailTemplateCommand({ TemplateName: input.template.name, TemplateData: templateData }));
       const after = await ses.send(new GetEmailTemplateCommand({ TemplateName: input.template.name }));

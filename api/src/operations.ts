@@ -14,12 +14,13 @@ import { contacts } from './db/audience.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
+import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { verifiedDashboardUser } from './google-auth.js';
-import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
+import { forDelivery, workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
+import { byoEnabled } from './byo-pilot.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
 import { awsError, byoFeedback, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
@@ -456,7 +457,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
       DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) {
       defer(1000+Math.random()*1000);
     }
-    if (row.connection.kind==='byo' && row.connection.legacy===false && !runtime.config.byoV2) defer(300_000);
+    if (row.connection.kind==='byo' && row.connection.legacy===false && !await byoEnabled(runtime,job.workspaceId)) defer(300_000);
     const client=getSes(scoped,row.region,{...row.connection,identitySession:{name:row.name,purpose:row.identity?.imported?'read':'verify'}});
     let identity: GetEmailIdentityCommandOutput | undefined;
     try { identity=await sesCall(()=>client.send(new GetEmailIdentityCommand({EmailIdentity:row.name}))); }
@@ -540,9 +541,9 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   assertSesConfigured(runtime);
   const connection=runtime.config.multiTenant ? await workspaceConnection({...runtime,config:{...runtime.config,workspaceId:wid}},requested) : undefined;
   if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
-  const selectedRegion=connection?.region ?? requested ?? runtime.config.regions[0]!;
-  if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[connection.region]}};
-  const a = await sesCall(() => getSes(runtime, selectedRegion,connection).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
+  const selectedRegion=connection?.template_version==='v5' && !requested ? (await getRegionSettings(runtime.db,wid)).defaultRegion : connection?.region ?? requested ?? runtime.config.regions[0]!;
+  if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[selectedRegion]}};
+  const a = await sesCall(() => getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'})).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
 export function registerOperations(app: App) {

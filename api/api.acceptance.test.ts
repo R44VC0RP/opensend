@@ -1305,7 +1305,9 @@ describe('Google dashboard sessions and current-policy authorization', () => {
         });
         for (const user of [a,b]) ok(await local('DELETE', path, undefined, user.cookie));
         runtime.config.byoTemplateUrl = 'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v4.yaml';
+        runtime.config.byoV2=true; // Global rollout alone must not change the existing dashboard signup.
         const [ac, bc] = await Promise.all([choose('byo', a.cookie), choose('byo', b.cookie)]);
+        runtime.config.byoV2=false;
         externalIds = [ac,bc].map(reply => {
           const row = ok(reply, 201); assert.equal(row.state, 'awaiting_role'); assert.equal(row.tenant, 'ready'); const params = new URLSearchParams(new URL(row.quickCreateUrl).hash.split('?')[1]);
           assert.equal(row.templateVersion,'v4');assert.equal(params.get('param_ConnectionId'),row.id);assert.equal(params.get('templateURL'), runtime.config.byoTemplateUrl); assert.equal(params.get('param_PlatformPrincipalArn'), callerArn); return params.get('param_ExternalId')!;
@@ -4645,20 +4647,30 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
-    let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined;
+    let external='',failOnce=true,revoked:boolean|string=false,loseSubscribe=true,throttlePoll=false,failDelete=true,createdIdentity:Json|undefined,denyCleanup=false,loseSetDelete=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
-      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
+      if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/OpenSendMX-${v5.id.slice(-20)}/OpenSendMX`};
       assert.equal(cmd.constructor.name,'AssumeRoleCommand');assert.equal(cmd.input.RoleSessionName,'OpenSendMX');assert.equal(cmd.input.DurationSeconds,900);assert.ok(cmd.input.Policy.length<=2048);policies.push(cmd.input.Policy);
       if (!external || cmd.input.ExternalId!==external) throw denied();
-      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:'fixture',Expiration:new Date(Date.now()+900000)}};
+      return {AssumedRoleUser:{Arn:`arn:aws:sts::${account}:assumed-role/${cmd.input.RoleArn.split('/')[1]}/OpenSendMX`},Credentials:{AccessKeyId:'v5-fixture-customer',SecretAccessKey:'fixture-only',SessionToken:cmd.input.Policy,Expiration:new Date(Date.now()+900000)}};
     });
     t.mock.method(SESClient.prototype,'send',async function(this:InstanceType<typeof SESClient>,cmd:any){assert.equal(cmd.constructor.name,'DescribeActiveReceiptRuleSetCommand');trace.push({region:await this.config.region(),op:cmd.constructor.name});return {Metadata:{Name:'customer'},Rules:[{Name:'existing',Enabled:true,Actions:[{StopAction:{Scope:'RuleSet'}}]}]};});
     t.mock.method(SESv2Client.prototype,'send',async function(this:InstanceType<typeof SESv2Client>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,key=region+':'+i.ConfigurationSetName;trace.push({region,op});assert.equal((await this.config.credentials()).accessKeyId,'v5-fixture-customer');
       switch(op){
+        case 'GetEmailTemplateCommand':case 'TestRenderEmailTemplateCommand':{
+          const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.deepEqual(s.Action,['ses:GetEmailTemplate','ses:TestRenderEmailTemplate']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:template/opensend-pilot`);
+          return op==='GetEmailTemplateCommand'?{TemplateContent:{Subject:'Fixture'}}:{RenderedTemplate:'Subject: Fixture\r\n\r\nFixture.'};
+        }
+        case 'SendEmailCommand':{
+          const statements=JSON.parse((await this.config.credentials()).sessionToken!).Statement, prefix=`arn:aws:ses:${oh}:${account}:`, resource=params.get('param_ResourcePrefix');
+          assert.deepEqual(statements.map((s:Json)=>s.Action),[['ses:SendEmail'],['ses:ApplyTrackingConfigurationOverrides']]);assert.deepEqual(statements[0].Resource,[prefix+'identity/both.example',prefix+'configuration-set/'+resource+'-transactional',prefix+'configuration-set/'+resource+'-marketing']);
+          assert.equal(statements[0].Condition.StringEquals['aws:RequestedRegion'],oh);assert.equal(i.ConfigurationSetName,resource+'-transactional');assert.ok(i.Content.Raw);return {MessageId:randomUUID()};
+        }
         case 'GetAccountCommand':if(![oh,ie,va].includes(region))throw denied();return {SendingEnabled:true,EnforcementStatus:'HEALTHY',ProductionAccessEnabled:region===va,SendQuota:{SentLast24Hours:1,Max24HourSend:1000,MaxSendRate:8}};
         case 'ListConfigurationSetsCommand':return i.NextToken?{ConfigurationSets:['opensend-legacy']}:{ConfigurationSets:['existing'],NextToken:'sets2'};
         case 'GetConfigurationSetCommand':if(i.ConfigurationSetName==='opensend-legacy')return {Tags:[{Key:'opensend:installation-id',Value:'legacy'}]};if(!sets.has(key))throw missing();return sets.get(key);
+        case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
         case 'ListEmailIdentitiesCommand':if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
         case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='opensend:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'opensend:owner',Value:'mx'},{Key:'opensend:installation-id',Value:v5.id},{Key:'opensend:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
@@ -4673,7 +4685,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     t.mock.method(SNSClient.prototype,'send',async function(this:InstanceType<typeof SNSClient>,cmd:any){const region=await this.config.region(),op=cmd.constructor.name,i=cmd.input,arn=i.TopicArn??i.ResourceArn??i.SubscriptionArn?.split(':').slice(0,6).join(':')??`arn:aws:sns:${region}:${account}:${i.Name}`,topic=topics.get(arn);trace.push({region,op});
       switch(op){
         case 'CreateTopicCommand':assert.ok(!topic);assert.equal(JSON.parse(i.Attributes.Policy).Statement.length,1);topics.set(arn,{Tags:i.Tags,Attributes:{...i.Attributes,Owner:account,TopicArn:arn},subs:[]});return {TopicArn:arn};
-        case 'GetTopicAttributesCommand':if(!topic)throw missing();return {Attributes:topic.Attributes};
+        case 'GetTopicAttributesCommand':if(denyCleanup)throw denied();if(!topic)throw missing();return {Attributes:topic.Attributes};
+        case 'DeleteTopicCommand':{assert.ok(!sets.has(region+':'+params.get('param_ResourcePrefix')+'-transactional')&&!sets.has(region+':'+params.get('param_ResourcePrefix')+'-marketing'));assert.ok(topics.delete(arn));return {};}
         case 'ListTagsForResourceCommand':return {Tags:topic!.Tags};
         case 'SetTopicAttributesCommand':assert.equal(i.AttributeName,'Policy');assert.ok(JSON.parse(i.AttributeValue).Statement.some((s:Json)=>s.Principal?.Service==='ses.amazonaws.com'&&s.Condition.StringEquals['AWS:SourceAccount']===account));topic!.Attributes.Policy=i.AttributeValue;return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
@@ -4692,10 +4705,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("UPDATE jobs SET status='completed' WHERE id=$1",[j.id]);return true;
     };
     runtime.config.byoV2=false;error(await post('/scan'),404);runtime.config.byoV2=true;
+    error(await post('/scan'),404);error(await post('',{kind:'byo',awsAccountId:account}),422,'VALIDATION_ERROR');
+    const {setByoV2}=await import('./scripts/set-byo-v2.js');await setByoV2(db,[wid,'enable']);
     error(await post('',{kind:'byo',awsAccountId:'438095551154'}),409,'AWS_ACCOUNT_IN_USE');assert.equal(policies.length,0);
     const v5=ok(await post('',{kind:'byo',awsAccountId:account}),202),params=new URLSearchParams(new URL(v5.quickCreateUrl).hash.split('?')[1]);external=params.get('param_ExternalId')!;
     assert.equal(params.get('param_WorkspaceId'),wid);assert.equal(params.get('param_ResourcePrefix'),'opensendmx-'+createHash('sha256').update(v5.id).digest('hex').slice(0,20));assert.equal(params.has('param_ReceiveMail'),false);assert.equal(v5.awsAccountId,null);
     await run('byo.prove');assert.equal(policies.length,3);
+    await assert.rejects(setByoV2(db,[wid,'disable']),/Disconnect/);
     const rs=(await db.query('SELECT region FROM provider_connection_regions WHERE connection_id=$1',[v5.id])).rows;assert.equal(rs.length,32);
     for (const {region} of rs) for(let page=0;!await run('byo.scan',region);page++)assert.ok(page<8);
     const initial=await poll(),rev=initial.scan.revision, rows=initial.candidates;
@@ -4740,6 +4756,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.ok(trace.slice(mark).every(v=>v.region===va));assert.equal((await poll()).importedDomains,2);
     for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,region===va?2:1);}
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
+    await t.test('v5 dispatch signs a rendered template with separate quota, template and selected-identity sessions',async()=>{
+      const {dispatchDue}=await import('./src/dispatcher.js');const scoped={...runtime,config:{...runtime.config,workspaceId:wid,regions:[oh,va]}};
+      const mail=ok(await api('POST','/v1/emails/send',{from:'pilot@sub.both.example',to:'success@simulator.amazonses.com',template:{name:'opensend-pilot',data:{}}}),202);
+      await dispatchDue(scoped,oh,{accountId:account});assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[mail.id])).rows[0].status,'accepted');
+      assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===oh;}));
+      const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),pc=await workspaceConnection(scoped,oh),other=(await db.query('SELECT domain_id FROM domain_sending_bindings WHERE workspace_id=$1 AND region=$2',[wid,va])).rows[0].domain_id;
+      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'send',domainId:other}}),{code:'BYO_SESSION_SCOPE_REQUIRED'});
+      await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'template',name:'opensend-*'}}),{code:'TEMPLATE_SCOPE_REQUIRED'});
+      // The enrollment link's Ohio region isn't necessarily the first enabled sender.
+      await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,va]);
+      try {assert.equal(ok(await api('GET','/v1/settings/ses')).region,va);assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===va;}));}
+      finally {await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,oh]);}
+    });
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
       const scoped={...runtime,config:{...runtime.config,workspaceId:wid}}, bucket='retained-v4-mail',topicArn=`arn:aws:sns:${oh}:${account}:opensend-legacy-inbound`;
@@ -4785,6 +4814,34 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
     const selection={revision:rev,candidateIds:[ohId],confirm:true}, receipt=ok(await api('POST',path+'/imports',selection,'retry-selected'),202);
     ok(await post('/scan'),202);error(await select(ohId),409,'SCAN_STALE');assert.deepEqual(ok(await api('POST',path+'/imports',selection,'retry-selected'),202),receipt);assert.equal((await poll()).importedDomains,3);
+    await t.test('disconnect fences admission, refuses drift and checkpoints only owned regional resources',async()=>{
+      const del=()=>api('DELETE',path),resource=params.get('param_ResourcePrefix')!,vset=sets.get(va+':'+resource+'-transactional')!,varn=`arn:aws:sns:${va}:${account}:${resource}-feedback`,vtopic=topics.get(varn)!;
+      assert.equal((await db.query("UPDATE sending_emails SET status='acceptance_unknown' WHERE workspace_id=$1 AND status='accepted'",[wid])).rowCount,1);
+      error(await del(),409,'CONNECTION_IN_USE');await db.query("UPDATE sending_emails SET status='accepted' WHERE workspace_id=$1 AND status='acceptance_unknown'",[wid]);
+      const campaign=ok(await api('POST','/v1/campaigns',{name:'disconnect fence'}),201);await db.query("UPDATE sending_campaigns SET state='paused',paused_at=now(),review_id='fixture-review' WHERE id=$1",[campaign.id]);
+      error(await del(),409,'CONNECTION_IN_USE');await db.query("UPDATE sending_campaigns SET state='canceled',paused_at=NULL WHERE id=$1",[campaign.id]);
+      // Stop the independent, flag-off harness runner from claiming the just-queued
+      // rescan. Let an already claimed turn finish its legitimate short deferral.
+      await db.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE workspace_id=$1 AND status='pending'",[wid]);
+      for(let n=0;(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND status='running'",[wid])).rowCount;n++){assert.ok(n<100);await new Promise(r=>setTimeout(r,10));}
+      const start=trace.length,operation=ok(await del(),202).operationId;
+      assert.equal((await poll()).state,'disconnecting');error(await post('/scan'),409,'CONNECTION_DISCONNECTING');
+      error(await api('POST','/v1/emails/send',{from:'a@both.example',to:'success@simulator.amazonses.com',subject:'blocked',text:'blocked'}),409,'CONNECTION_REQUIRED');
+      const retry=async()=>assert.equal(ok(await del(),202).operationId,operation);
+      vset.dest.push({Name:'foreign',Enabled:true});await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vset.dest.pop();await retry();
+      vtopic.subs.push({...vtopic.subs[0],Endpoint:'https://foreign.invalid/events'});await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vtopic.subs.pop();await retry();
+      const tags=vset.Tags;vset.Tags=[];await assert.rejects(run('byo.disconnect'),{code:'BYO_CLEANUP_DRIFT'});vset.Tags=tags;assert.ok(!trace.slice(start).some(e=>e.op.startsWith('Delete')));await retry();
+      loseSetDelete=true;await assert.rejects(run('byo.disconnect'),{code:'AWS_SETUP_TIMEOUT'});await retry();
+      assert.equal(await run('byo.disconnect'),false); // Explicit NotFound reconciles the lost response without repeating Delete.
+      denyCleanup=true;await assert.rejects(run('byo.disconnect'),{code:'AWS_ACCESS_DENIED'});const manifest=(await poll()).cleanup;
+      assert.deepEqual(manifest.lastError,{region:va,code:'AWS_ACCESS_DENIED'});assert.equal(manifest.remaining.length,2);assert.ok(!manifest.remaining.find((r:Json)=>r.region===va).resources.some((e:Json)=>e.resource.endsWith('-transactional')));
+      const foreign='opensend-self-hosted-fixture';sets.set(va+':'+foreign,{ConfigurationSetName:foreign});topics.set(varn.replace(resource+'-feedback',foreign),{});
+      denyCleanup=false;await retry();for(let steps=0;!await run('byo.disconnect');steps++)assert.ok(steps<7);
+      assert.equal(await poll(),null);assert.ok(sets.has(va+':'+foreign));assert.ok(topics.has(varn.replace(resource+'-feedback',foreign)));
+      const deletes=trace.slice(start).filter(e=>e.op.startsWith('Delete'));assert.equal(deletes.filter(e=>e.op==='DeleteConfigurationSetCommand').length,4);assert.equal(deletes.filter(e=>e.op==='DeleteTopicCommand').length,2);assert.equal(deletes.length,6);
+      assert.equal((await db.query("SELECT FROM domain_claims WHERE workspace_id=$1 AND name='first.example' AND connection_id IS NULL",[wid])).rowCount,1);
+      assert.equal((await db.query("SELECT FROM domain_claims WHERE workspace_id=$1 AND claim_scope='account'",[wid])).rowCount,0);await setByoV2(db,[wid,'disable']);
+    });
   });
 
   test('MX: only the operator can override Hosted limits; campaign buffers and SES headroom stay independent', async t => {

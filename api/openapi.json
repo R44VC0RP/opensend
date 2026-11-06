@@ -130,7 +130,8 @@
               "ready_to_import",
               "provisioning",
               "ready",
-              "failed"
+              "failed",
+              "disconnecting"
             ],
             "description": "awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again."
           },
@@ -8558,7 +8559,8 @@
               "ready_to_import",
               "provisioning",
               "ready",
-              "failed"
+              "failed",
+              "disconnecting"
             ],
             "description": "awaiting_role: waiting for the BYO stack. provisioning: verifying regional resources and importing verified domains. ready: sending allowed once the tenant is ready. failed: the last setup attempt failed; verify again."
           },
@@ -8945,6 +8947,90 @@
                 "overlap"
               ]
             }
+          },
+          "cleanup": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string"
+              },
+              "lastError": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "region": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "region",
+                  "code"
+                ]
+              },
+              "remaining": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "region": {
+                      "type": "string"
+                    },
+                    "resources": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string"
+                          },
+                          "resource": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "creating",
+                              "created"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "resource"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "region",
+                    "resources"
+                  ]
+                }
+              },
+              "retain": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "operationId",
+              "lastError",
+              "remaining",
+              "retain"
+            ]
           }
         },
         "required": [
@@ -36155,7 +36241,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Disconnect only when no mail or campaign is in flight. Account-scoped BYO imports are forgotten; exclusive domain claims stay reserved but stop sending and receiving. AWS resources are retained. Delete the customer stack in AWS to revoke the role.",
+        "description": "Refuses outstanding mail and campaigns. Regional BYO fences sending and queues verified cleanup of its sending sets and feedback topic. Poll getConnection for the remaining manifest; repeat DELETE to resume after fixing access or drift. Keeps identities, DNS and mailbox data. Remove the customer role stack last. Legacy connections retain AWS resources.",
         "responses": {
           "200": {
             "description": "Success",
@@ -36173,6 +36259,24 @@
                   },
                   "required": [
                     "deleted"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "operationId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operationId"
                   ]
                 }
               }

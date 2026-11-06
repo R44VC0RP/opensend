@@ -4,7 +4,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from '@hono/zod-openapi';
 import { CreateTenantCommand, GetTenantCommand, PutTenantSuppressionAttributesCommand, UpdateReputationEntityPolicyCommand, CreateTenantResourceAssociationCommand, type Tenant } from '@aws-sdk/client-sesv2';
 import { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, ListEmailIdentitiesCommand, GetConfigurationSetCommand, GetConfigurationSetEventDestinationsCommand, CreateConfigurationSetCommand, CreateConfigurationSetEventDestinationCommand, UpdateConfigurationSetEventDestinationCommand, PutConfigurationSetSuppressionOptionsCommand } from '@aws-sdk/client-sesv2';
-import { ListConfigurationSetsCommand } from '@aws-sdk/client-sesv2';
+import { DeleteConfigurationSetCommand, ListConfigurationSetsCommand } from '@aws-sdk/client-sesv2';
+import { DeleteTopicCommand } from '@aws-sdk/client-sns';
 import { SESClient, DescribeActiveReceiptRuleSetCommand } from '@aws-sdk/client-ses';
 import { SNSClient, GetTopicAttributesCommand, ListTagsForResourceCommand, ListSubscriptionsByTopicCommand, GetSubscriptionAttributesCommand, CreateTopicCommand, SetTopicAttributesCommand, SubscribeCommand, SetSubscriptionAttributesCommand } from '@aws-sdk/client-sns';
 import type { Subscription } from '@aws-sdk/client-sns';
@@ -470,6 +471,67 @@ export function assertProvisionable(runtime: Runtime): void {
 
 export type JournalEntry={kind:'set'|'topic'|'destination'|'subscription'|'identity';resource:string;target?:string;state?:'creating'|'created';requestedAt?:number};
 export const byoFeedback='https://opensend.mx/v1/events/ses';
+// One destructive command per durable checkpoint. Re-read the full regional
+// feedback topology on every turn (including after an ambiguous delete). Only
+// explicit NotFound is evidence of absence; a denied read never prunes a journal.
+export async function removeByoFeedbackResource(runtime:Runtime,region:string,installationId:string,journal:JournalEntry[],registered:string|null) {
+  const account=runtime.config.awsAccountId!,names=setupResources(installationId,'byo'),arn=arns(account,region,names);
+  const opts={installationId,region,namespace:'byo' as const}, drift=()=>new ApiError(409,'BYO_CLEANUP_DRIFT','The regional resources no longer match the ownership journal. Review the cleanup manifest before retrying.');
+  const entries=journal.filter(e=>e.kind!=='identity'), destName=names.eventDestinationName;
+  if (registered!==null && (registered!==arn.topic || !entries.some(e=>e.kind==='topic'))) throw drift();
+  for (const e of entries) {
+    if (entries.filter(v=>v.kind===e.kind && v.resource===e.resource).length!==1) throw drift();
+    if (e.kind==='set' && arn.sets.includes(e.resource) || e.kind==='topic' && e.resource===arn.topic) continue;
+    if (e.kind==='destination' && e.target===arn.topic && arn.sets.some(a=>e.resource===a+'/'+destName && entries.some(v=>v.kind==='set' && v.resource===a))) continue;
+    if (e.kind==='subscription' && e.resource===arn.topic && registered===arn.topic && e.target===byoFeedback && entries.some(v=>v.kind==='topic')) continue;
+    throw drift();
+  }
+  const context=setupContext(45_000),c=clients(runtime,region,context),request={abortSignal:context.signal};
+  const present=async<T>(read:()=>Promise<T>)=>{try{return await read();}catch(e){if (!missing(e)) throw e;return null;}};
+  try {
+    const role=await c.sts.send(new GetCallerIdentityCommand({}),request);
+    if (role.Account!==account || role.Arn!==`arn:aws:sts::${account}:assumed-role/OpenSendMX-${installationId.slice(-20)}/OpenSendMX`) throw drift();
+    const topic=entries.find(e=>e.kind==='topic'),sub=entries.find(e=>e.kind==='subscription');
+    const attrs=await present(()=>c.sns.send(new GetTopicAttributesCommand({TopicArn:arn.topic}),request));
+    if (attrs) {
+      const a=attrs.Attributes;
+      if (topic?.state!=='created' || a?.TopicArn!==arn.topic || a.Owner!==account || a.FifoTopic==='true' || a.KmsMasterKeyId || !policyReady(a.Policy,topicPolicy(account,region,names))) throw drift();
+      if (!owned((await c.sns.send(new ListTagsForResourceCommand({ResourceArn:arn.topic}),request)).Tags,opts)) throw drift();
+      let next:string|undefined, count=0;const seen=new Set<string>();
+      do {
+        const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:arn.topic,NextToken:next}),request);
+        if (!page.Subscriptions) throw drift();
+        for (const s of page.Subscriptions) {
+          const subscription=subscriptionArn(s,arn.topic);
+          if (++count>1 || !sub || !subscription || s.TopicArn!==arn.topic || s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback) throw drift();
+          const v=(await c.sns.send(new GetSubscriptionAttributesCommand({SubscriptionArn:subscription}),request)).Attributes;
+          if (v?.TopicArn!==arn.topic || v.Owner!==account || v.Protocol!=='https' || v.Endpoint!==byoFeedback || v.PendingConfirmation!=='false' || v.RawMessageDelivery!=='false' || v.FilterPolicy && v.FilterPolicy!=='{}' || v.RedrivePolicy || v.DeliveryPolicy) throw drift();
+        }
+        next=page.NextToken;if (next && (seen.has(next)||seen.size>=10)) throw drift();if (next) seen.add(next);
+      } while(next);
+      if (sub && count!==1) throw drift();
+    }
+    let chosen:{resource:string;name:string;exists:boolean}|undefined;
+    for (const [i,name] of [names.transactional,names.marketing].entries()) {
+      const resource=arn.sets[i]!,entry=entries.find(e=>e.kind==='set' && e.resource===resource),destination=entries.find(e=>e.kind==='destination' && e.resource===resource+'/'+destName);
+      const s=await present(()=>c.ses.send(new GetConfigurationSetCommand({ConfigurationSetName:name}),request));
+      if (s) {
+        if (entry?.state!=='created' || s.ConfigurationSetName!==name || !owned(s.Tags,opts)) throw drift();
+        const ds=(await c.ses.send(new GetConfigurationSetEventDestinationsCommand({ConfigurationSetName:name}),request)).EventDestinations;
+        if (!ds || ds.length!==(destination?1:0)) throw drift();
+        if (destination && (destination.state!=='created' || canonical(ds[0])!==canonical({Name:destName,Enabled:true,MatchingEventTypes:EVENTS,SnsDestination:{TopicArn:arn.topic}}))) throw drift();
+      }
+      if (entry && !chosen) chosen={resource,name,exists:!!s};
+    }
+    if (chosen) {
+      if (chosen.exists) await c.ses.send(new DeleteConfigurationSetCommand({ConfigurationSetName:chosen.name}),request);
+      return journal.filter(e=>!(e.kind==='set' && e.resource===chosen.resource || e.kind==='destination' && e.resource===chosen.resource+'/'+destName));
+    }
+    if (!topic) throw drift();
+    if (attrs) await c.sns.send(new DeleteTopicCommand({TopicArn:arn.topic}),request);
+    return journal.filter(e=>e.kind!=='topic' && e.kind!=='subscription');
+  } finally {c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy();}
+}
 // Unlike self-hosted setup, this is create-only. Never adopt even a tagged resource
 // without its journal, repair a drifted destination, or rewrite an existing topic policy.
 // If a create's acknowledgement was lost, stop for review rather than assume ownership.

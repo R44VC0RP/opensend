@@ -3,29 +3,36 @@ import { z } from '@hono/zod-openapi';
 import { createHash } from 'node:crypto';
 import { ApiError, id, notFound, type Runtime, type DbExecutor, type JobHandler } from './core.js';
 import { assume } from './provider-credentials.js';
-import { awsError, byoFeedback, provisionByoRegion, readSelectedDomains, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
+import { awsError, byoFeedback, provisionByoRegion, readSelectedDomains, removeByoFeedbackResource, scanRegionPage, setupResources, type Inventory, type CandidateIdentity, type JournalEntry, type ScanStage } from './ses-setup.js';
 import { JobDeferred, retryDatabaseFailures } from './jobs.js';
-import { acquireRegionProvisioning, finishRegionProvisioning, verifyImportedClaims } from './states.js';
-import { claimNameAllowed } from './domain-claims.js';
+import { acquireRegionProvisioning, campaignReserved, finishRegionProvisioning, verifyImportedClaims } from './states.js';
+import { claimNameAllowed, releaseConnectionClaims } from './domain-claims.js';
+import { lockAdmission } from './sending.js';
 import { getRegionSettings } from './ses-region-state.js';
+import { byoEnabled } from './byo-pilot.js';
 
 export const regionLabels:Record<string,string>={'us-east-2':'Ohio','us-east-1':'N. Virginia','us-west-1':'N. California','us-west-2':'Oregon','af-south-1':'Cape Town','ap-south-1':'Mumbai','ap-south-2':'Hyderabad','ap-southeast-1':'Singapore','ap-southeast-2':'Sydney','ap-southeast-3':'Jakarta','ap-southeast-4':'Melbourne','ap-southeast-5':'Malaysia','ap-southeast-6':'New Zealand','ap-southeast-7':'Thailand','ap-northeast-1':'Tokyo','ap-northeast-2':'Seoul','ap-northeast-3':'Osaka','ca-central-1':'Canada Central','ca-west-1':'Calgary','eu-central-1':'Frankfurt','eu-central-2':'Zurich','eu-west-1':'Ireland','eu-west-2':'London','eu-west-3':'Paris','eu-south-1':'Milan','eu-south-2':'Spain','eu-north-1':'Stockholm','il-central-1':'Tel Aviv','mx-central-1':'Mexico Central','me-south-1':'Bahrain','me-central-1':'UAE','sa-east-1':'São Paulo'};
 export const platformAccount='438095551154';
 const platformArn=`arn:aws:iam::${platformAccount}:user/opensend-mx`;
-export type V5Connection={id:string;workspace_id:string;requested_account:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string};
+export type V5Connection={id:string;workspace_id:string;requested_account:string;aws_account_id:string|null;role_arn:string|null;external_id:string;inventory_revision:number;state:string;region:string;disconnect_error:{region:string|null;code:string}|null};
 type ScanRow={region:string;scan_state:string;scan_error:string|null;scan_facts:Inventory;scan_revision:string;sending_state:string;receiving_state:string;provision_error:string|null;ownership_journal:JournalEntry[]};
 const conflict=(code:string,message:string)=>new ApiError(409,code,message);
 const stale=()=>conflict('SCAN_STALE','Refresh the list and select verified domains from a completed regional scan.');
 const defer=(ms:number,payload?:Record<string,unknown>)=>new JobDeferred(new Date(Date.now()+ms).toISOString(),payload);
-function writable(r:Runtime) {
-  if (!r.config.multiTenant || !r.config.byoV2) return notFound('Endpoint');
+async function writable(r:Runtime,wid:string,db?:DbExecutor) {
+  if (!await byoEnabled(r,wid,db)) return notFound('Endpoint');
   if (!r.config.regionalSending) throw conflict('REGIONAL_SENDING_REQUIRED','Enable regional sending before enrolling a regional AWS connection.');
 }
 async function connection(db:DbExecutor,wid:string,lock=false) {
   return (await db.execute<V5Connection>(sql`SELECT * FROM provider_connections WHERE workspace_id=${wid} AND template_version='v5' AND kind='byo' ${lock?sql`FOR UPDATE`:sql``}`)).rows[0];
 }
 export async function requiredV5(r:Runtime,wid:string) {
-  writable(r);return await connection(r.db,wid)??notFound('Regional connection');
+  await writable(r,wid);return usable(await connection(r.db,wid));
+}
+function usable(c:V5Connection|undefined) {
+  if (!c) return notFound('Regional connection');
+  if (c.state==='disconnecting') throw conflict('CONNECTION_DISCONNECTING','Regional cleanup is in progress.');
+  return c;
 }
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
 type Op={operationId:string;regions:string[]};
@@ -54,14 +61,14 @@ export function v5Link(r:Runtime,c:{id:string;workspace_id:string;external_id:st
   return `https://${c.region}.console.aws.amazon.com/cloudformation/home?region=${c.region}#/stacks/create/review?${params}`;
 }
 export async function enrollV5(r:Runtime,wid:string,account:string) {
-  writable(r);
   if (account===platformAccount) throw conflict('AWS_ACCOUNT_IN_USE','The shared sending account cannot be connected.');
   const cid=id('conn'),roleRegion='us-east-2',external=crypto.randomUUID();
   v5Link(r,{id:cid,region:roleRegion,workspace_id:wid,external_id:external});
   return r.db.transaction(async db=>{
+    await writable(r,wid,db);
     const inserted=await db.execute(sql`INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,external_id,platform_principal_arn,template_version,resource_prefix,requested_account,inventory_revision)
       VALUES(${cid},${wid},'byo',${roleRegion},'awaiting_role','ready',${external},${platformArn},'v5',${setupResources(cid,'byo').topicName.slice(0,-9)},${account},1) ON CONFLICT(workspace_id) DO NOTHING`);
-    const c=await connection(db,wid,true);
+    const c=await connection(db,wid,true);if (c) usable(c);
     if (!c || c.requested_account!==account) throw conflict('CONNECTION_EXISTS','A different sending connection already exists.');
     if (inserted.rowCount) await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});
     return {operationId:proofId(c),revision:c.inventory_revision};
@@ -71,12 +78,14 @@ export async function enrollV5(r:Runtime,wid:string,account:string) {
 // Inline STS policies intersect with v5's tag, endpoint, and trust conditions. No
 // scanner can send, provision, or read an email address identity; provisioning cannot
 // read other sets/topics. The proof probes use the same limited policy.
-async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision',verify=false) {
+async function scoped(r:Runtime,c:V5Connection,region:string,purpose:'scan'|'provision'|'cleanup',verify=false) {
   const account=c.requested_account, role=`arn:aws:iam::${account}:role/OpenSendMX-${c.id.slice(-20)}`;
   if (account===platformAccount || !/^\d{12}$/.test(account) || !(region in regionLabels) || (!verify && (c.aws_account_id!==account || c.role_arn!==role))) throw conflict('AWS_ACCOUNT_MISMATCH','The regional role is not bound to this account.');
   const names=setupResources(c.id,'byo'),ses=`arn:aws:ses:${region}:${account}:`,sets=[names.transactional,names.marketing].map(n=>ses+'configuration-set/'+n),topic=`arn:aws:sns:${region}:${account}:${names.topicName}`;
   const allow=(Action:string[],Resource:string|string[])=>({Effect:'Allow',Action,Resource,Condition:{StringEquals:{'aws:RequestedRegion':region}}});
-  const Statement=purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/opensend-*'])]:[
+  const Statement=purpose==='cleanup'?[
+    allow(['ses:GetConfigurationSet','ses:GetConfigurationSetEventDestinations','ses:DeleteConfigurationSet'],sets),allow(['sns:GetTopicAttributes','sns:ListTagsForResource','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:DeleteTopic'],topic)
+  ]:purpose==='scan'?[allow(['ses:GetAccount','ses:ListEmailIdentities','ses:ListConfigurationSets','ses:DescribeActiveReceiptRuleSet'],'*'),allow(['ses:GetEmailIdentity'],ses+'identity/?*.??*'),allow(['ses:GetConfigurationSet'],[...sets,ses+'configuration-set/opensend-*'])]:[
     allow(['ses:GetAccount'],'*'),allow(['ses:GetConfigurationSet','ses:CreateConfigurationSet','ses:TagResource','ses:PutConfigurationSetSuppressionOptions','ses:GetConfigurationSetEventDestinations','ses:CreateConfigurationSetEventDestination'],sets),
     allow(['sns:CreateTopic','sns:TagResource','sns:GetTopicAttributes','sns:ListTagsForResource','sns:SetTopicAttributes','sns:ListSubscriptionsByTopic','sns:GetSubscriptionAttributes','sns:Subscribe'],topic)];
   const aws=await assume(r,region,role,c.external_id,verify,JSON.stringify({Version:'2012-10-17',Statement}));
@@ -91,8 +100,8 @@ async function beginScan(db:DbExecutor,c:V5Connection) {
       jsonb_build_object('connectionId',${c.id}::text,'region',region,'revision',${c.inventory_revision}::integer,'stage','account','run',gen_random_uuid()) FROM regions`);
 }
 export async function refreshScan(r:Runtime,wid:string,key?:string) {
-  writable(r);return r.db.transaction(async db=>{
-    const c=await connection(db,wid,true)??notFound('Regional connection');
+  await writable(r,wid);return r.db.transaction(async db=>{
+    const c=usable(await connection(db,wid,true));
     const op=receipt<ScanOp>(c,'scan',key,''),prior=await op.read(db);if (prior) return prior;
     if (!c.aws_account_id) { await job(db,c,'byo.prove',proofId(c),{revision:c.inventory_revision});return op.save(db,{revision:c.inventory_revision,operationId:proofId(c)}); }
     if (!(await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND scan_state='scanning' LIMIT 1`)).rowCount) {
@@ -103,8 +112,8 @@ export async function refreshScan(r:Runtime,wid:string,key?:string) {
 }
 const runV5=(handler:(r:Runtime,c:V5Connection,p:Record<string,unknown>,attempt:number)=>Promise<void>):JobHandler=>retryDatabaseFailures(async(r,p,j)=>{
   // Preserve accepted work on rollout pause, without touching AWS or consuming attempts.
-  if (!r.config.byoV2 || !r.config.regionalSending) throw defer(300_000);
-  const c=await connection(r.db,j.workspaceId);if (!c || c.id!==p.connectionId) return;
+  if (!r.config.regionalSending || !await byoEnabled(r,j.workspaceId)) throw defer(300_000);
+  const c=await connection(r.db,j.workspaceId);if (!c || c.id!==p.connectionId || c.state==='disconnecting') return;
   await handler(r,c,p,j.attempts);
 });
 const prove=runV5(async(r,c,p)=>{
@@ -154,7 +163,8 @@ const FailedIntent=Pending.extend({error:z.string()});
 const Region=z.object({region:z.string(),regionLabel:z.string(),scanState:z.string(),scanError:z.string().nullable(),sendingState:z.string(),receivingState:z.string(),error:z.string().nullable(),facts:Facts,resources:z.array(z.object({kind:z.string(),resource:z.string(),target:z.string().optional(),state:z.enum(['creating','created']).optional()})),pending:z.array(Pending),failedIntents:z.array(FailedIntent)});
 export const RegionStatus=z.object({regions:z.array(Region)});
 export const ScanView=z.object({revision:z.number(),cursor:z.object({checked:z.number(),total:z.number()}),state:z.enum(['awaiting_role','failed','scanning','partial','ready_to_import']),error:z.string().nullable(),alreadySendsEmail:z.boolean().nullable(),regions:z.array(Region)});
-export const InventoryFields={scan:ScanView.optional(),candidates:z.array(Candidate).optional()};
+const Cleanup=z.object({operationId:z.string(),lastError:z.object({region:z.string().nullable(),code:z.string()}).nullable(),remaining:z.array(z.object({region:z.string(),resources:Region.shape.resources})),retain:z.array(z.string())});
+export const InventoryFields={scan:ScanView.optional(),candidates:z.array(Candidate).optional(),cleanup:Cleanup.optional()};
 export async function statuses(db:DbExecutor,cid:string) {
   const rows=(await db.execute<ScanRow & {pending:z.infer<typeof Pending>[];failed:z.infer<typeof FailedIntent>[]}>(sql`SELECT r.*,i.pending,i.failed FROM provider_connection_regions r CROSS JOIN LATERAL (SELECT
     coalesce(jsonb_agg(jsonb_build_object('domain',i.name,'importing',i.importing,'error',j.last_error) ORDER BY i.name) FILTER(WHERE i.closed_reason IS NULL),'[]') AS pending,
@@ -177,7 +187,8 @@ export async function inventory(db:DbExecutor,c:V5Connection) {
   const state=!c.aws_account_id?(c.state==='failed'?'failed':'awaiting_role'):checked<Object.keys(regionLabels).length?'scanning':regions.every(s=>s.scanError)?'failed':regions.some(s=>s.scanError)?'partial':'ready_to_import';
   const evidence=list.length>0 || regions.some(({facts:f})=>(f.sentLast24Hours??0)>0 || Object.keys(f.configurationSets??{}).length>0 || !!f.receiving?.rules.length);
   const scan={revision:c.inventory_revision,cursor:{checked,total:Object.keys(regionLabels).length},state,error:proof,regions,alreadySendsEmail:evidence?true:state==='ready_to_import'?false:null} satisfies z.infer<typeof ScanView>;
-  return {candidates:list,scan};
+  const cleanup=c.state==='disconnecting'?{operationId:disconnectId(c),lastError:c.disconnect_error,remaining:regions.map(r=>({region:r.region,resources:r.resources.filter(e=>e.kind!=='identity')})).filter(r=>r.resources.length),retain:['SES identities','DNS records','mailbox data']}:undefined;
+  return {candidates:list,scan,cleanup};
 }
 
 export const Imports=z.object({revision:z.number().int().positive(),candidateIds:z.array(z.string().min(1).max(300)).min(1).max(100),confirm:z.literal(true)}).strict();
@@ -220,8 +231,8 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
   for (const [region,domains] of groups) try { await readSelectedDomains(await scoped(r,c,region,'scan'),region,domains); } catch(e) { throw awsError(e); }
   return r.db.transaction(async db=>{
     await getRegionSettings(db,wid,'update');
-    const locked=await connection(db,wid,true),replay=await op.read(db);if (replay) return replay;
-    if (locked?.inventory_revision!==input.revision) throw stale();
+    const locked=usable(await connection(db,wid,true)),replay=await op.read(db);if (replay) return replay;
+    if (locked.id!==c.id || locked.inventory_revision!==input.revision) throw stale();
     for (const [region,domains] of groups) for (const name of domains) await saveIntent(db,c,region,name,true);
     return op.save(db,{operationId:'byo.import:'+hash(request),regions:[...groups.keys()].sort()});
   });
@@ -232,9 +243,9 @@ export async function selectImports(r:Runtime,wid:string,input:z.infer<typeof Im
 export async function newRegionalDomain(r:Runtime,wid:string,name:string,owner:boolean,override?:string,key?:string) {
   const c=await connection(r.db,wid);if (!c) return null;
   if (!owner) throw new ApiError(403,'PERMISSION_DENIED','Use an owner or admin dashboard session to enable a regional domain.');
-  writable(r);if (!await claimNameAllowed(name,r.config.publicUrl)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
+  await writable(r,wid);if (!await claimNameAllowed(name,r.config.publicUrl)) throw new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
   return r.db.transaction(async db=>{
-    await getRegionSettings(db,wid,'update');await connection(db,wid,true);
+    await getRegionSettings(db,wid,'update');if (usable(await connection(db,wid,true)).id!==c.id) throw stale();
     const op=receipt<Op>(c,'domain',key,JSON.stringify([name,override])),prior=await op.read(db);if(prior)return prior;
     const current=(await db.execute<{region:string}>(sql`SELECT region FROM domain_sending_bindings WHERE workspace_id=${wid} AND name=${name} UNION ALL SELECT region FROM byo_domain_intents WHERE connection_id=${c.id} AND name=${name} AND closed_reason IS NULL LIMIT 1`)).rows[0];
     const first=(await db.execute<{region:string}>(sql`SELECT region FROM provider_connection_regions WHERE connection_id=${c.id} AND sending_state='ready' ORDER BY ready_at,region LIMIT 1`)).rows[0];
@@ -351,4 +362,54 @@ const bind=runV5(async(r,c,p,attempt)=>{
     throw e;
   }
 });
-export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind};
+const disconnectId=(c:V5Connection)=>'byo.disconnect:'+c.id;
+export async function disconnectV5(r:Runtime,wid:string,connectionId:string) {
+  await writable(r,wid);
+  return r.db.transaction(async db=>{
+    await lockAdmission(db,{workspaceId:wid});await getRegionSettings(db,wid,'update');
+    const c=await connection(db,wid,true);if (!c || c.id!==connectionId) throw stale();
+    if (c.state!=='disconnecting') {
+      const busy=()=>conflict('CONNECTION_IN_USE','Finish outstanding mail, campaigns and running setup jobs before disconnecting.');
+      if ((await db.execute(sql`SELECT FROM sending_emails WHERE workspace_id=${wid} AND status IN ('queued','attempting','acceptance_unknown') LIMIT 1`)).rowCount ||
+          (await db.execute(sql`SELECT FROM sending_campaigns c WHERE workspace_id=${wid} AND ${campaignReserved()} LIMIT 1`)).rowCount) throw busy();
+      if ((await db.execute(sql`SELECT FROM provider_connection_regions WHERE connection_id=${c.id} AND (legacy OR receiving_state<>'off' OR inbound_topic_arn IS NOT NULL) LIMIT 1`)).rowCount) throw conflict('REGIONAL_DISCONNECT_REQUIRED','Receiving resources require separate reviewed cleanup.');
+      const setup=sql`workspace_id=${wid} AND ((type LIKE 'byo.%' AND payload->>'connectionId'=${c.id}) OR type IN ('domain.verify','domain.mx','mailbox.reconcile')) AND status IN ('pending','running')`;
+      const jobs=(await db.execute<{status:string}>(sql`SELECT status FROM jobs WHERE ${setup} ORDER BY id FOR UPDATE`)).rows;
+      if (jobs.some(j=>j.status==='running')) throw busy();
+      await db.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL WHERE ${setup}`);
+      await db.execute(sql`UPDATE provider_connections SET state='disconnecting' WHERE id=${c.id}`);
+      await db.execute(sql`UPDATE provider_connection_regions SET sending_state='disabled',generation=generation+1,lease_until=NULL WHERE connection_id=${c.id}`);
+    }
+    await job(db,c,'byo.disconnect',disconnectId(c));return {operationId:disconnectId(c)};
+  });
+}
+
+const disconnect:JobHandler=retryDatabaseFailures(async(r,p,j)=>{
+  if (!await byoEnabled(r,j.workspaceId)) throw defer(300_000);
+  let region:string|null=null;
+  const ticket=sql`id=${j.id} AND workspace_id=${j.workspaceId} AND status='running' AND attempts=${j.attempts} AND payload->>'run'=${p.run}`;
+  try {
+    const more=await r.db.transaction(async db=>{
+      await getRegionSettings(db,j.workspaceId,'update');const c=await connection(db,j.workspaceId,true);
+      if (!c || c.id!==p.connectionId || c.state!=='disconnecting') return false;
+      // Fence the worker through one bounded AWS removal and its checkpoint. Losing
+      // the response leaves the old journal; a retry proves absence or checks ownership anew.
+      if (!(await db.execute(sql`SELECT FROM jobs WHERE ${ticket} AND lease_until>clock_timestamp() FOR UPDATE`)).rowCount) return false;
+      const rr=(await db.execute<{region:string;ownership_journal:JournalEntry[];feedback_topic_arn:string|null}>(sql`SELECT region,ownership_journal,feedback_topic_arn FROM provider_connection_regions WHERE connection_id=${c.id} AND
+        (feedback_topic_arn IS NOT NULL OR EXISTS(SELECT FROM jsonb_array_elements(ownership_journal) e WHERE e->>'kind' IS DISTINCT FROM 'identity')) ORDER BY region LIMIT 1 FOR UPDATE`)).rows[0];
+      if (!rr) {
+        await db.execute(sql`WITH ${releaseConnectionClaims(c.workspace_id,sql`SELECT ${c.id}::text AS id`)} SELECT 1`);
+        await db.execute(sql`DELETE FROM provider_connections WHERE id=${c.id} AND state='disconnecting'`);return false;
+      }
+      region=rr.region;
+      const remaining=await removeByoFeedbackResource(await scoped(r,c,region,'cleanup'),region,c.id,rr.ownership_journal,rr.feedback_topic_arn);
+      await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=${JSON.stringify(remaining)}::jsonb,feedback_topic_arn=${remaining.some(e=>e.kind==='topic')?rr.feedback_topic_arn:null} WHERE connection_id=${c.id} AND region=${region}`);
+      await db.execute(sql`UPDATE provider_connections SET disconnect_error=NULL WHERE id=${c.id}`);return true;
+    });
+    if (more) throw defer(1000,p);
+  } catch(e) {
+    if (e instanceof JobDeferred) throw e;
+    const err=awsError(e);await r.db.execute(sql`UPDATE provider_connections SET disconnect_error=${JSON.stringify({region,code:err.code})}::jsonb WHERE id=${p.connectionId} AND state='disconnecting' AND EXISTS(SELECT FROM jobs WHERE ${ticket})`);throw err;
+  }
+});
+export const regionalByoJobs:Record<string,JobHandler>={'byo.prove':prove,'byo.scan':scan,'byo.provision':provision,'byo.bind':bind,'byo.disconnect':disconnect};

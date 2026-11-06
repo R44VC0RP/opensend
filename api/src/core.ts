@@ -140,8 +140,8 @@ export function getSes(runtime: Runtime, selectedRegion: string, connection?: Re
   // sign for all Hosted tenants (TenantName is on the command); BYO role rotations must get
   // a new provider. Never put a request-bound client or pending STS promise across invocations.
   const key = runClients && connection
-    ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id])
-    : connection ? `${selectedRegion}:${connection.id}:${connection.identitySession?.name??''}:${connection.identitySession?.purpose??''}` : selectedRegion;
+    ? JSON.stringify([selectedRegion, connection.kind, connection.aws_account_id, connection.role_arn, connection.external_id,connection.deliverySession])
+    : connection ? JSON.stringify([selectedRegion,connection.id,connection.identitySession,connection.deliverySession]) : selectedRegion;
   let client = clients.get(key);
   if (!client) { client = new SESv2Client({ region: selectedRegion, ...(runtime.config.multiTenant ? { credentials: () => workspaceCredentials(runtime, selectedRegion, connection), ignoreConfiguredEndpointUrls: true } : { credentials: runtime.config.aws }), maxAttempts: 1, cacheMiddleware: !!runClients, requestHandler: new FetchHttpHandler({ requestTimeout: 15000 }) }); clients.set(key, client); }
   return client;
