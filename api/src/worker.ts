@@ -90,7 +90,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const nudges: ((runtime: Runtime) => Promise<void>)[] = [];
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
       // be consumed before a later coalesced commit; callback delivery never waits here.

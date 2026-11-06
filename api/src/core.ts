@@ -72,6 +72,8 @@ export interface PublicImage { data: Uint8Array; contentType: 'image/png' | 'ima
 export type FeedbackItem = { region: string; topicArn: string; messageId: string; message: Record<string, unknown> };
 export interface Runtime {
   db: Database; storage: Storage; config: Config;
+  // Workers' public egress guards connect-time DNS; Node instead pins the checked IP in TLS.
+  placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch

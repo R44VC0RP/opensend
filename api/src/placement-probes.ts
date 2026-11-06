@@ -2,6 +2,7 @@ import { isIPv4, isIPv6 } from 'node:net';
 import tls from 'node:tls';
 import { domainToUnicode } from 'node:url';
 import { z } from 'zod';
+import type { Runtime } from './core.js';
 import { icannRules, privateRules, rdapServices } from './placement-registries.js';
 
 const day = 86_400_000;
@@ -79,6 +80,16 @@ function observe<T>(signal:AbortSignal,work:()=>Promise<T>):Promise<T|null> {
     signal.addEventListener('abort',cancel,{once:true});void work().then(finish,cancel);
   });
 }
+// A slot covers the whole lookup (including consuming/canceling its body). The site
+// consumes one slot for its sequential address check + HEAD. Never start queued I/O
+// after the common deadline; keep observations invocation-local in Workers.
+function probeQueue(signal:AbortSignal,slots:number) {
+  const waiting:Array<()=>void>=[]; let active=0;
+  return <T>(work:()=>Promise<T>)=>new Promise<T|null>((resolve,reject)=>{
+    const run=()=>{active++;void observe(signal,work).then(resolve,reject).finally(()=>{active--;waiting.shift()?.();});};
+    if(active<slots) run(); else waiting.push(run);
+  });
+}
 const txt=(values:string[])=>values.map(s=>s.replace(/^"|"$/g,'').replace(/"\s+"/g,''));
 // Validate mechanisms locally; never execute someone else's SPF include/redirect tree.
 function spf(values:string[]) {
@@ -99,8 +110,8 @@ function dmarc(values:string[]) {
   const records=txt(values).filter(s=>/^v=DMARC1(?:;|$)/i.test(s)); if(!records.length) return 'absent';
   return records.length===1 && /^v=DMARC1\s*;\s*p=(?:none|quarantine|reject)\s*(?:;|$)/i.test(records[0]!) && !/;\s*p=.*;\s*p=/i.test(records[0]!) ? 'valid':'invalid';
 }
-async function mailDns(name:string,signal:AbortSignal) {
-  const [mx,policy,report]=await Promise.all([observe(signal,()=>dns(name,'MX',signal)),observe(signal,()=>dns(name,'TXT',signal)),observe(signal,()=>dns('_dmarc.'+name,'TXT',signal))]);
+async function mailDns(name:string,signal:AbortSignal,probe:ReturnType<typeof probeQueue>) {
+  const [mx,policy,report]=await Promise.all([probe(()=>dns(name,'MX',signal)),probe(()=>dns(name,'TXT',signal)),probe(()=>dns('_dmarc.'+name,'TXT',signal))]);
   return {mx:mx && mx.values.length>0 && mx.values.every(v=>{const m=/^(\d+)\s+(\S+)$/.exec(v);return !!m && +m[1]!<=65535 && hostSyntax.test(fqdn(m[2]!));}),
     spf:policy && spf(policy.values),dmarc:report && dmarc(report.values)};
 }
@@ -144,22 +155,35 @@ function httpsHead(host:string,ip:string,signal:AbortSignal):Promise<string> {
   });
 }
 const parking=/\b(?:sedoparking|parkingcrew|bodis|afternic|dan\.com|domainparking|hugedomains)\b/i;
-async function website(host:string,signal:AbortSignal) {
+function classifySite(status:number,mime:string|undefined,parked:boolean) {
+  if(status>=300 && status<400) return 'redirect';
+  if(status!==200 || !/^(?:text\/html|application\/xhtml\+xml)(?:\s*;|$)/i.test(mime??'')) return null;
+  return parked?'parked':'live';
+}
+async function website(host:string,signal:AbortSignal,edge:boolean) {
   if(!hostSyntax.test(host) || /\.(?:localhost|internal|local|lan|home|invalid|test|example|arpa|onion)$/.test(host)) return null;
   let a=await dns(host,'A',signal);
   if(a.status===0 && !a.values.length) { a=await dns(host,'AAAA',signal); if(!a.values.every(publicIPv6)) return null; }
   else if(!a.values.every(publicIPv4)) return null;
   if(a.status!==0 || !a.values.length) return null;
   if(a.aliases.some(alias=>parking.test(alias))) return 'parked';
+  if(edge) {
+    // Workers enforce public egress at connect time, including a rebound private IP.
+    // Native fetch preserves hostname TLS verification and can reach proxied sites.
+    const res=await fetch(`https://${host}/`,{method:'HEAD',redirect:'manual',headers:{accept:'text/html'},signal});
+    await res.body?.cancel();
+    const parked=[...res.headers].some(([k,v])=>/^x-(?:parking|parked)(?:-|$)/i.test(k) || parking.test(k) || parking.test(v));
+    return classifySite(res.status,res.headers.get('content-type')??undefined,parked);
+  }
   const headers=await httpsHead(host,a.values[0]!,signal);
-  if(/^HTTP\/1\.[01] 3\d\d\b/.test(headers)) return 'redirect';
-  if(!/^HTTP\/1\.[01] 200\b/.test(headers) || !/\r\ncontent-type:\s*(?:text\/html|application\/xhtml\+xml)\b/i.test(headers)) return null;
-  return parking.test(headers) || /\r\nx-(?:parking|parked)[-:]/i.test(headers) ? 'parked':'live';
+  return classifySite(Number(/^HTTP\/1\.[01] (\d{3})\b/.exec(headers)?.[1]),/\r\ncontent-type:\s*([^\r\n]+)/i.exec(headers)?.[1]?.trim(),
+    parking.test(headers) || /\r\nx-(?:parking|parked)[-:]/i.test(headers));
 }
-export async function publicSignals(host:string,root:string|null,shared:boolean,zone:string|undefined,signal:AbortSignal) {
+export async function publicSignals(host:string,root:string|null,shared:boolean,zone:string|undefined,signal:AbortSignal,edge?:Runtime['placementEdge']) {
   const names=root && root!==host ? [host,root]:[host];
-  const [ageDays,mail,site,lists]=await Promise.all([root && !shared ? observe(signal,()=>rdapAge(root,signal)):null,
-    Promise.all(names.map(n=>mailDns(n,signal))),observe(signal,()=>website(host,signal)),Promise.all(names.map(n=>zone ? observe(signal,()=>dbl(n,zone,signal)):null))]);
+  const probe=probeQueue(signal,edge?.probesPerJob??3);
+  const [lists,site,ageDays,mail]=await Promise.all([Promise.all(names.map(n=>zone ? probe(()=>dbl(n,zone,signal)):null)),
+    probe(()=>website(host,signal,!!edge)),root && !shared ? probe(()=>rdapAge(root,signal)):null,Promise.all(names.map(n=>mailDns(n,signal,probe)))]);
   return {root,shared,ageDays,exact:mail[0]!,parent:mail[1]??null,site,lookalike:brandLookalike(host),
     dbl:!zone?'unconfigured':lists.includes('listed')?'listed':root && lists.every(v=>v==='clear')?'clear':'unknown',dblExact:lists[0],dblParent:lists[1]??null};
 }

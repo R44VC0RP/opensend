@@ -4278,6 +4278,35 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('MX Worker placement uses bounded public edge HEAD probes, not raw TLS',async t=>{
+    const {publicSignals}=await import('./src/placement-probes.js'),tls=(await import('node:tls')).default;
+    const sockets=t.mock.method(tls,'connect',()=>{throw Error('No Worker TCP');});
+    const host='edge.placement-fixture.com',root='placement-fixture.com',zone='dbl.invalid';
+    let active=0,peak=0,heads=0,canceled=0,mode='ok';
+    t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const u=new URL(String(input));peak=Math.max(peak,++active);
+      try {
+        assert.equal(init?.redirect,'manual');assert.ok(init?.signal);
+        await new Promise(r=>setTimeout(r,2));
+        if(u.hostname===host) {
+          assert.equal(init!.method,'HEAD');assert.equal(u.href,`https://${host}/`); heads++;
+          if(mode==='rebound') throw new TypeError('Edge refused private destination');
+          return new Response(new ReadableStream({cancel(){canceled++;}}),{status:mode==='redirect'?302:200,
+            headers:mode==='redirect'?{location:'https://127.0.0.1/'}:{'content-type':'text/html'}});
+        }
+        if(u.hostname==='rdap.verisign.com') return Response.json({ldhName:root,events:[{eventAction:'registration',eventDate:'2018-01-01'}]});
+        assert.equal(u.hostname,'cloudflare-dns.com');const name=u.searchParams.get('name');
+        if(name===host && u.searchParams.get('type')==='A') return Response.json({Status:0,Answer:[{name,type:1,data:mode==='private'?'10.2.3.4':'104.16.0.1'}]});
+        return Response.json({Status:3,Authority:[{name:zone,type:6,data:'fixture SOA'}]});
+      } finally {active--;}
+    });
+    const run=(slots:number)=>publicSignals(host,root,false,zone,AbortSignal.timeout(2000),{probesPerJob:slots});
+    assert.equal((await run(3)).site,'live');assert.equal(peak,3);assert.equal(canceled,1);
+    peak=0;mode='redirect';assert.equal((await run(1)).site,'redirect');assert.equal(peak,1);assert.equal(heads,2);assert.equal(canceled,2);
+    mode='private';assert.equal((await run(1)).site,null);assert.equal(heads,2,'A private DoH answer must not reach edge fetch.');
+    mode='rebound';assert.equal((await run(1)).site,null);assert.equal(heads,3);assert.equal(sockets.mock.callCount(),0,'Never bypass a failed edge check with raw TLS.');
+  });
+
   test('MX shadow placement enqueues without probing, persists one private observation and never routes',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,jobs})=>{
       const {loadConfig}=await import('./src/config.js'), {operationJobs}=await import('./src/operations.js');

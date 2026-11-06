@@ -85,7 +85,7 @@ export const shadowPlacement:JobHandler=async(runtime,payload,{workspaceId:wid})
     ${target} AND NOT EXISTS(SELECT FROM domain_placement_shadow WHERE domain_id=b.domain_id)`);
   if(!w) return;
   const {root,shared}=placementRoot(w.name),signal=AbortSignal.timeout(Math.max(1,deadline-Date.now()));
-  const [net,history]=await Promise.all([publicSignals(w.name,root,shared,runtime.config.placementDblZone,signal),domainHistory(runtime,wid,w.name,deadline)]);
+  const [net,history]=await Promise.all([publicSignals(w.name,root,shared,runtime.config.placementDblZone,signal,runtime.placementEdge),domainHistory(runtime,wid,w.name,deadline)]);
   const {decision,score,reasons,signals}=scorePlacement(net,w,history);
   const stored=await runtime.db.execute(sql`INSERT INTO domain_placement_shadow(domain_id,policy_version,started_at,decision,score,reasons,signals)
     SELECT b.domain_id,${policyVersion},${new Date(started).toISOString()}::timestamptz,${decision},${score},${JSON.stringify(reasons)}::jsonb,${JSON.stringify(signals)}::jsonb
