@@ -4502,7 +4502,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const pem=(await import('node:child_process')).execFileSync('openssl',['req','-new','-x509','-key','/dev/stdin','-days','1','-subj','/CN=fixture'],{input:signedKey.export({format:'pem',type:'pkcs8'}),encoding:'utf8'});
     const topics=new Map<string,Json>(),sets=new Map<string,Json>(),trace:{region:string;op:string}[]=[], policies:string[]=[];
     const denied=()=>Object.assign(new Error('fixture denial'),{name:'AccessDenied'}), missing=()=>Object.assign(new Error('fixture missing'),{name:'NotFoundException'});
-    let external='',failOnce=true,revoked=false;
+    let external='',failOnce=true,revoked=false,loseSubscribe=true,throttlePoll=false;
     t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL)=>{const u=new URL(String(input));assert.match(u.hostname,/^sns\.us-east-[12]\.amazonaws\.com$/);if(u.pathname.endsWith('.pem'))return new Response(pem);const topic=topics.get(u.searchParams.get('TopicArn')!)!;topic.confirmed=true;return new Response(null);});
     t.mock.method(STSClient.prototype,'send',async function(this:InstanceType<typeof STSClient>,cmd:any){
       if(cmd.constructor.name==='GetCallerIdentityCommand')return {Account:account,Arn:`arn:aws:sts::${account}:assumed-role/test/OpenSendMX`};
@@ -4533,8 +4533,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'ListTagsForResourceCommand':return {Tags:topic!.Tags};
         case 'SetTopicAttributesCommand':assert.equal(i.AttributeName,'Policy');assert.ok(JSON.parse(i.AttributeValue).Statement.some((s:Json)=>s.Principal?.Service==='ses.amazonaws.com'&&s.Condition.StringEquals['AWS:SourceAccount']===account));topic!.Attributes.Policy=i.AttributeValue;return {};
         case 'ListSubscriptionsByTopicCommand':return {Subscriptions:topic!.subs};
-        case 'SubscribeCommand':assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);topic!.subs.push({...i,Owner:account,SubscriptionArn:arn+':test'});return {SubscriptionArn:arn+':test'};
-        case 'GetSubscriptionAttributesCommand':return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:'false'}};
+        case 'SubscribeCommand':assert.equal(i.Endpoint,'https://opensend.mx/v1/events/ses');assert.equal((await db.query('SELECT FROM provider_connection_regions WHERE feedback_topic_arn=$1',[arn])).rowCount,1);
+          if (!topic!.subs.length) topic!.subs.push({...i,Owner:account,SubscriptionArn:arn+':test'}); // Same endpoint, protocol and topic: SNS idempotent Subscribe.
+          if(region===oh && loseSubscribe){loseSubscribe=false;throw Object.assign(Error('accepted before timeout'),{name:'TimeoutError'});}return {SubscriptionArn:arn+':test'};
+        case 'GetSubscriptionAttributesCommand':if(throttlePoll){throttlePoll=false;throw Object.assign(Error('poll throttled'),{name:'ThrottlingException'});}return {Attributes:{...topic!.subs[0],PendingConfirmation:String(!topic!.confirmed),RawMessageDelivery:'false'}};
         default:throw Error('unexpected SNS call '+op);
       }
     });
@@ -4563,7 +4565,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.deepEqual(ok(await api('POST','/v1/domains',{name:'first.example'}),202).regions,[oh]);
     const concurrent=await Promise.all([select(ohId,vaId),select(ohId,vaId)]);assert.equal(ok(concurrent[0]!,202).operationId,ok(concurrent[1]!,202).operationId);
     assert.equal((await db.query("SELECT FROM jobs WHERE type='byo.provision' AND workspace_id=$1",[wid])).rowCount,2);
-    assert.equal(await run('byo.provision',oh),false);await assert.rejects(run('byo.provision',va),{code:'AWS_THROTTLED'});
+    assert.equal(await run('byo.provision',oh),false);assert.equal(await run('byo.provision',va),false);
+    const regionStatus=async(region:string)=>ok(await api('GET',path+'/regions/status')).regions.find((r:Json)=>r.region===region);
+    assert.equal((await regionStatus(oh)).error,'AWS_SETUP_TIMEOUT');assert.equal((await regionStatus(oh)).sendingState,'provisioning');
     assert.equal((await poll()).importedDomains,0);assert.equal((await db.query('SELECT FROM domain_sending_bindings WHERE workspace_id=$1',[wid])).rowCount,0);
     const confirm=async(region:string)=>{const TopicArn=`arn:aws:sns:${region}:${account}:${params.get('param_ResourcePrefix')}-feedback`,host=`https://sns.${region}.amazonaws.com/`;
       const signed={Message:'fixture',MessageId:randomUUID(),SubscribeURL:host+'?'+new URLSearchParams({Action:'ConfirmSubscription',TopicArn,Token:'fixture'}),Timestamp:new Date().toISOString(),Token:'fixture',TopicArn,Type:'SubscriptionConfirmation'};
@@ -4571,9 +4575,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await api('POST','/v1/events/ses',{...body,Message:'tampered'}),403,'SNS_INVALID_SIGNATURE');ok(await api('POST','/v1/events/ses',body),202);
     };
     await confirm(oh);assert.ok(await run('byo.provision',oh));await run('byo.bind',oh);await run('byo.bind',oh);assert.equal((await poll()).importedDomains,1);
-    const mark=trace.length;ok(await select(vaId),202);assert.equal(await run('byo.provision',va),false);await confirm(va);assert.ok(await run('byo.provision',va));await run('byo.bind',va);
+    const mark=trace.length;ok(await select(vaId),202);assert.equal(await run('byo.provision',va),false);
+    throttlePoll=true;assert.equal(await run('byo.provision',va),false);assert.equal((await regionStatus(va)).error,'AWS_THROTTLED');assert.equal((await regionStatus(va)).sendingState,'provisioning');
+    // The first confirmation never arrived. Normal polls must not renew the token
+    // on every turn, but an overdue pending subscription re-requests it.
+    assert.equal(await run('byo.provision',va),false);assert.equal(trace.filter(v=>v.region===va && v.op==='SubscribeCommand').length,1);
+    await db.query(`UPDATE provider_connection_regions SET ownership_journal=(SELECT jsonb_agg(CASE WHEN e->>'kind'='subscription' THEN e||'{"requestedAt":0}' ELSE e END) FROM jsonb_array_elements(ownership_journal) e) WHERE connection_id=$1 AND region=$2`,[v5.id,va]);
+    assert.equal(await run('byo.provision',va),false);assert.equal((await poll()).importedDomains,1);await confirm(va);assert.ok(await run('byo.provision',va));await run('byo.bind',va);
     assert.ok(trace.slice(mark).every(v=>v.region===va));assert.equal((await poll()).importedDomains,2);
-    for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,1);}
+    for (const region of [va,oh]) {assert.equal(trace.filter(v=>v.region===region&&v.op==='CreateTopicCommand').length,1);assert.equal(trace.filter(v=>v.region===region&&v.op==='SubscribeCommand').length,region===va?2:1);}
     const status=ok(await api('GET',path+'/regions/status')).regions;assert.equal(status.filter((r:Json)=>r.resources.length===6&&r.sendingState==='ready').length,2);
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');

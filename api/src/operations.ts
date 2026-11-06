@@ -21,7 +21,7 @@ import { verifiedDashboardUser } from './google-auth.js';
 import { workspaceConnection, type ReadyConnection } from './provider-credentials.js';
 import { byoStackTopic } from './provider-connections.js';
 import { Accepted as RegionalAccepted, newRegionalDomain } from './byo-regional.js';
-import { awsError, mxOwnerTag, mxResourceName } from './ses-setup.js';
+import { awsError, byoFeedback, mxOwnerTag, mxResourceName } from './ses-setup.js';
 import { ingestRoutineSesEvent, ingestRoutineSesEvents, recordEmailEvent, taggedEmailId, type RoutineIngress } from './sending.js';
 import type { FeedbackItem } from './core.js';
 import { realDestination } from './hosted-sending.js';
@@ -840,7 +840,8 @@ function registerPublicEvents(app: App) {
     if (!confirming && cached && cached.expires > Date.now()) return cached.binding;
     const binding = (await runtime.db.execute<TopicBinding>(sql`
       SELECT r.region,c.aws_account_id,c.kind,r.sending_state='ready' AS ready,false AS inbound,CASE WHEN NOT r.legacy THEN c.id END AS managed_id,r.generation
-        FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state IN ('ready','provisioning'))
+        FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id WHERE c.kind='byo' AND r.feedback_topic_arn=${arn} AND (r.legacy OR r.sending_state='ready' OR
+          (r.sending_state='provisioning' AND r.ownership_journal @> ${JSON.stringify([{kind:'subscription',resource:arn,target:byoFeedback}])}::jsonb))
       UNION ALL SELECT region, aws_account_id, 'shared', ${poolSends()},false,NULL,NULL FROM provider_pool_regions p WHERE feedback_topic_arn=${arn}
       UNION ALL SELECT region,aws_account_id,'shared',${poolReceives()},true,NULL,NULL FROM provider_pool_regions p WHERE inbound_topic_arn=${arn}
       UNION ALL SELECT r.region,r.account_id,'byo',${connectionReady(sql`c`)},true,NULL,NULL FROM mailbox_regions r JOIN provider_connections c ON c.workspace_id=r.workspace_id AND c.aws_account_id=r.account_id AND c.region=r.region AND c.kind='byo' AND c.template_version<>'v5' WHERE r.topic_arn=${arn}
@@ -892,11 +893,15 @@ function registerPublicEvents(app: App) {
             if (error.retryable || error.code==='AWS_ACCESS_DENIED') throw new ApiError(503,error.code,error.message,undefined,true);
             throw error;
           }
-        } else {
-          await confirm();
-          if (binding?.managed_id) await c.env.db.execute(sql`UPDATE provider_connection_regions SET confirmed_topic_arn=${envelope.TopicArn},confirmed_generation=generation
-            WHERE connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`);
-        }
+        } else if (binding?.managed_id && !binding.ready) {
+          const fence=sql`connection_id=${binding.managed_id} AND region=${binding.region} AND generation=${binding.generation} AND feedback_topic_arn=${envelope.TopicArn} AND sending_state='provisioning'`;
+          // Lock only this topic generation across the bounded confirmation GET. If
+          // it changed during signature verification, retry BEFORE consuming the token.
+          await c.env.db.transaction(async db=>{
+            if (!(await db.execute(sql`SELECT FROM provider_connection_regions WHERE ${fence} FOR UPDATE`)).rowCount) throw new ApiError(503,'PROVISION_LEASE_LOST','The confirmation raced a new regional setup generation. Retry the signed callback.',undefined,true);
+            await confirm();await db.execute(sql`UPDATE provider_connection_regions SET confirmed_topic_arn=feedback_topic_arn,confirmed_generation=generation WHERE ${fence}`);
+          });
+        } else await confirm();
       }
       // An authenticated UnsubscribeConfirmation is acknowledged, never automatically resubscribed.
       return c.json({ accepted: true }, 202);

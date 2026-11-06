@@ -288,6 +288,12 @@ const provision=runV5(async(r,c,p,attempt)=>{
   } catch(e) {
     if (e instanceof JobDeferred) throw e;
     const err=awsError(e);
+    if (err.retryable) {
+      // Keep the journaled topic eligible for signed confirmations during backoff,
+      // including when SNS accepted Subscribe but its response never reached us.
+      await r.db.execute(sql`UPDATE provider_connection_regions SET provision_error=${err.code} WHERE ${owned}`);
+      throw defer(30_000,{...p,generation:gen});
+    }
     await r.db.execute(sql`UPDATE provider_connection_regions SET sending_state='failed',lease_until=NULL,provision_error=${err.code} WHERE ${owned}`);
     throw err;
   }

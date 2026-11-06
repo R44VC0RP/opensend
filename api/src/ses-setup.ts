@@ -465,7 +465,7 @@ export function assertProvisionable(runtime: Runtime): void {
   assertSesConfigured(runtime);
 }
 
-export type JournalEntry={kind:'set'|'topic'|'destination'|'subscription'|'identity';resource:string;target?:string;state?:'creating'|'created'};
+export type JournalEntry={kind:'set'|'topic'|'destination'|'subscription'|'identity';resource:string;target?:string;state?:'creating'|'created';requestedAt?:number};
 export const byoFeedback='https://opensend.mx/v1/events/ses';
 // Unlike self-hosted setup, this is create-only. Never adopt even a tagged resource
 // without its journal, repair a drifted destination, or rewrite an existing topic policy.
@@ -483,12 +483,13 @@ export async function provisionByoRegion(runtime:Runtime,region:string,installat
     if (entry?.state==='creating' ? exists : !!entry!==exists) throw drift();
   };
   const blocker=report.blockers.find(b=>!['SES_SANDBOX','SNS_CONFIRMATION_PENDING'].includes(b.code));
-  if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,blocker.code.startsWith('AWS_'));
+  if (blocker) throw new ApiError(409,blocker.code,blocker.message,undefined,['AWS_THROTTLED','AWS_SETUP_TIMEOUT','AWS_SETUP_FAILED','AWS_STATE_UNKNOWN','SNS_SUBSCRIPTION_UNKNOWN'].includes(blocker.code));
   if (report.account?.id!==account || report.feedbackUrl!==byoFeedback) throw drift();
   const topic=report.resources.topic;
   check('topic',a.topic,topic.exists===true);
   if (topic.exists && (!topic.owned || !topic.policyReady)) throw drift();
-  check('subscription',a.topic,subscriptions.length>0,byoFeedback);
+  const subscription=journal.find(e=>e.kind==='subscription');
+  if (subscription ? subscription.resource!==a.topic || subscription.target!==byoFeedback || (!subscriptions.length && subscription.state!=='creating') : subscriptions.length>0) throw drift();
   if (subscriptions.length>1 || subscriptions.some(s=>s.Owner!==account || s.Endpoint!==byoFeedback || s.Protocol!=='https' || s.TopicArn!==a.topic) || topic.subscriptionsTruncated || topic.subscription==='confirmed' && topic.rawMessageDelivery!==false) throw drift();
   const streams=['transactional','marketing'] as const;
   for (const [i,stream] of streams.entries()) {
@@ -532,13 +533,18 @@ export async function provisionByoRegion(runtime:Runtime,region:string,installat
       await record({kind:'destination',resource:a.sets[i]!+'/'+names.eventDestinationName,target:a.topic,state:'created'});
     }
     await register(a.topic);
-    if (!subscriptions.length) {
+    // Subscribe is idempotent for this exact topic/protocol/endpoint. A timeout can
+    // leave it pending (or not yet visible); retry that tuple, never create another.
+    // Leave a delivery window before re-requesting so normal polls don't churn tokens.
+    if (!subscription || ((topic.subscription==='pending' || !subscriptions.length) && Date.now()-(subscription.requestedAt??0)>=300_000)) {
       const page=await c.sns.send(new ListSubscriptionsByTopicCommand({TopicArn:a.topic}),opts);
-      if (page.NextToken || page.Subscriptions?.length!==0) throw drift();
-      // The signed callback may beat the Subscribe response. Register its topic and
-      // record the intended endpoint first. An ambiguous timeout must not resubscribe.
-      await record({kind:'subscription',resource:a.topic,target:byoFeedback});
+      if (page.NextToken || page.Subscriptions?.length!==subscriptions.length || page.Subscriptions.some(s=>s.Owner!==account || s.Protocol!=='https' || s.Endpoint!==byoFeedback || s.TopicArn!==a.topic)) throw drift();
+      const intent={kind:'subscription' as const,resource:a.topic,target:byoFeedback,requestedAt:Date.now()};
+      await record({...intent,state:'creating'}); // The signed callback may beat the Subscribe response.
       await fence();await c.sns.send(new SubscribeCommand({TopicArn:a.topic,Protocol:'https',Endpoint:byoFeedback,ReturnSubscriptionArn:true,Attributes:{RawMessageDelivery:'false'}}),opts);
+      await record({...intent,state:'created'});
+    } else if (subscription.state==='creating' && topic.subscription==='confirmed') {
+      await record({...subscription,state:'created'});
     }
     return {topic:a.topic,verified:report.provisioned};
   } finally { c.ses.destroy();c.sns.destroy();c.sts.destroy();c.cw.destroy(); }
