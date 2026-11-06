@@ -4146,16 +4146,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const ctx = { storage: { get:(k:string)=>stored.get(k), put:(k:string,v:unknown)=>stored.set(k,v), getAlarm:()=>null, setAlarm:(at:number)=>alarms.push(at) }, waitUntil:(p:Promise<unknown>)=>pending.push(p) };
       let probes = 0, statusAtProbe: string | undefined;
       const receipt = ok(await local('POST', '/v1/emails/send', mail()), 202);
-      t.mock.method(globalThis, 'fetch', async () => {
+      const previousFetch = globalThis.fetch;
+      globalThis.fetch = async () => {
         probes++; statusAtProbe = (await db.query('SELECT status FROM sending_emails WHERE id=$1',[receipt.id])).rows[0].status;
         return new Response('colo=TEST');
-      });
-      for (let i = 0; i < 2; i++) {
+      };
+      try { for (let i = 0; i < 2; i++) {
         const shard = new DispatcherShard(ctx as unknown as DurableObjectState, {} as Env);
         Object.assign(shard, { runtime: async () => runtime });
         assert.equal((await shard.fetch(new Request(`https://dispatcher/wake?region=${REGION}`))).status, 200);
         while (pending.length) await Promise.all(pending.splice(0));
-      }
+      } } finally { globalThis.fetch = previousFetch; }
       assert.deepEqual(alarms, []); assert.equal(probes, 1); assert.equal(statusAtProbe, 'accepted');
     });
   });
@@ -4397,6 +4398,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         CREATE TABLE workspaces AS SELECT id,created_at FROM public.workspaces WITH NO DATA;
         CREATE TABLE provider_connections AS SELECT id,workspace_id,kind,region,aws_account_id,role_arn,external_id,feedback_topic_arn,tenant_state,state FROM public.provider_connections WITH NO DATA;
         CREATE TABLE provider_pool_regions (LIKE public.provider_pool_regions);
+        CREATE TABLE domain_claims (LIKE public.domain_claims);
         CREATE TABLE sending_email_events AS SELECT created_at,workspace_id,email_id,type,simulated,data FROM public.sending_email_events WITH NO DATA;
         CREATE TABLE sending_emails (LIKE public.sending_emails INCLUDING DEFAULTS);
         CREATE TABLE sending_campaigns (LIKE public.sending_campaigns INCLUDING CONSTRAINTS);
@@ -4407,6 +4409,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         VALUES('backfill','mature','us-east-1','key','a@example.org','["b@example.org"]','["c@example.org"]','["success@simulator.amazonses.com"]','fixture','{}',false,'accepted','ses-id');
         INSERT INTO sending_email_events(created_at,workspace_id,email_id,type,simulated,data) SELECT now(),'mature','backfill',v,false,'{}' FROM unnest(array['accepted','send','complaint']) v`);
       await db.query(await readFile(new URL('./migrations/062_hosted_limit_overrides.sql',import.meta.url),'utf8'));
+      await db.query(await readFile(new URL('./migrations/063_direct_admission.sql',import.meta.url),'utf8'));
       assert.deepEqual((await db.query('SELECT recipients::int FROM hosted_usage_hourly')).rows,[{recipients:2}]);
       assert.deepEqual((await db.query('SELECT accepted::int, complaints::int FROM hosted_health_hourly')).rows,[{accepted:2,complaints:1}]);
       runtime.config.multiTenant=true;
