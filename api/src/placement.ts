@@ -2,7 +2,7 @@ import { sql } from 'drizzle-orm';
 import { log, type JobHandler, type Runtime } from './core.js';
 import { placementRoot, publicSignals } from './placement-probes.js';
 
-const policyVersion=1, budgetMs=2_000;
+const policyVersion=2, budgetMs=2_000;
 type History={accepted:number;bounces:number;complaints:number;spanDays:number};
 
 // The per-envelope health credits are deliberately short-lived. Use the retained
@@ -79,7 +79,8 @@ export const shadowPlacement:JobHandler=async(runtime,payload,{workspaceId:wid})
     (SELECT u.google_hosted_domain FROM workspace_members m JOIN auth_user u ON u.id=m.user_id JOIN workspaces w ON w.id=m.workspace_id
       WHERE m.workspace_id=b.workspace_id AND m.created_at=w.created_at AND m.role='owner' AND u.email_verified AND u.google_hosted_domain IS NOT NULL
       ORDER BY m.id LIMIT 1) AS "verifiedDomain",
-    (SELECT CASE WHEN sum(h.bounces)=0 AND sum(h.complaints)=0 AND max(h.hour) FILTER(WHERE h.accepted>0)>=now()-interval '2 days'
+    (SELECT CASE WHEN sum(h.accepted)>0 AND sum(h.bounces)*100<sum(h.accepted) AND sum(h.complaints)*5000<sum(h.accepted)
+      AND max(h.hour) FILTER(WHERE h.accepted>0)>=now()-interval '2 days'
       THEN floor(extract(epoch FROM max(h.hour) FILTER(WHERE h.accepted>0)-min(h.hour) FILTER(WHERE h.accepted>0))/86400)::int END
       FROM hosted_health_hourly h WHERE h.workspace_id=b.workspace_id AND h.epoch=coalesce(pc.resumed_at,'-infinity') AND h.hour>=now()-interval '32 days') AS "cleanDays"
     ${target} AND NOT EXISTS(SELECT FROM domain_placement_shadow WHERE domain_id=b.domain_id)`);

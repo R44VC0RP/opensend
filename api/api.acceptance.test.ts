@@ -4318,6 +4318,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid=runtime.config.workspaceId,oh='us-east-2',type='domain.placement',zone='licensed-dbl.invalid';
       const create=(name:string)=>local('POST','/v1/domains',{name});
       const wire:string[]=[],ips:string[]=[],aws:string[]=[]; let mode:'live'|'private'|'redirect'|'timeout'|'listed'='live';
+      let spfRecord='v=spf1 include:_spf.example.net ~all';
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
         aws.push(cmd.constructor.name);assert.ok(['GetEmailIdentityCommand','CreateEmailIdentityCommand'].includes(cmd.constructor.name));
         return {DkimAttributes:{Tokens:['aaa','bbb','ccc'],SigningHostedZone:'dkim.fixture',Status:'PENDING'}};
@@ -4339,7 +4340,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(name.endsWith('.'+zone)) return mode==='listed' && name==='example.com.'+zone ? reply(1,'127.0.1.2'):Response.json({Status:3,Authority:[{name:zone,type:6,data:'fixture SOA'}]});
         if(q==='MX') return reply(15,'10 inbound.example.net.');
         if(q==='A') return reply(1,mode==='private'?'169.254.169.254':'93.184.216.34');
-        assert.equal(q,'TXT');return reply(16,name.startsWith('_dmarc.')?'"v=DMARC1; p=reject"':'"v=spf1 include:_spf.example.net ~all"');
+        assert.equal(q,'TXT');return reply(16,name.startsWith('_dmarc.')?'"v=DMARC1; p=reject"':JSON.stringify(spfRecord));
       };
       try {
       Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
@@ -4360,7 +4361,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return (await db.query('SELECT * FROM domain_placement_shadow WHERE domain_id=$1',[id])).rows[0];
       };
       runtime.config.multiTenant=false;assert.equal(await run(added.id),undefined);assert.equal(wire.length,0);runtime.config.multiTenant=true;
-      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,9);assert.equal(first.policy_version,1);
+      const first=await run(added.id);assert.equal(first.decision,'ohio');assert.equal(first.score,9);assert.equal(first.policy_version,2);
       assert.ok(first.reasons.includes('dbl_unconfigured'));assert.equal(first.signals.dbl,'unconfigured');assert.ok(first.recorded_at>=first.started_at);
       assert.equal(wire.filter(u=>u.includes('rdap.verisign.com')).length,1);assert.ok(wire.some(u=>u.endsWith('/domain/example.com')));
       assert.deepEqual(wire.filter(u=>u.includes('type=A')).map(u=>new URL(u).searchParams.get('name')),['first.example.com'],'No DBL or second site resolution.');
@@ -4380,6 +4381,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(timeout.signals.dbl,'unknown');assert.equal(timeout.signals.ageDays,null);assert.deepEqual(timeout.signals.exact,{mx:null,spf:null,dmarc:null});
       mode='live';
       await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
+      for(const [i,term] of ['+all','all','?all','mx','~all','-all'].entries()) {
+        spfRecord='v=spf1 '+term;const sample=await profile(`spf-${i}.example.com`),closed=['~all','-all'].includes(term);
+        assert.equal(sample.signals.exact.spf,closed,spfRecord);assert.equal(sample.score,closed?9:8,spfRecord);
+      }
+      await db.query(`UPDATE domain_claims SET ever_proven=true WHERE workspace_id=$1`,[wid]);
       const shared=await profile('store.wordpress.com');assert.equal(shared.signals.root,'store.wordpress.com');assert.equal(shared.signals.ageDays,null);
       assert.ok(!wire.some(u=>u.endsWith('/domain/wordpress.com') || new URL(u).searchParams.get('name')==='wordpress.com'));
       const noAnchor=await profile('mail.other-fixture.com');assert.equal(noAnchor.score,7);assert.equal(noAnchor.decision,'ohio');assert.ok(noAnchor.reasons.includes('no_anchor'));
@@ -4391,8 +4397,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const tracked=await profile(hist);assert.equal(tracked.decision,'virginia');assert.equal(tracked.score,10);
       assert.deepEqual(tracked.signals.domainHistory,{accepted:1000,bounces:0,complaints:0,spanDays:19});
       await db.query(`UPDATE workspaces SET created_at=created_at-interval '40 days' WHERE id=$1`,[wid]);
-      await db.query(`INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '31 days',2,0,0)`,[wid]);
+      await db.query('DELETE FROM hosted_health_hourly WHERE workspace_id=$1',[wid]);
+      await db.query(`INSERT INTO hosted_health_hourly VALUES($1,'-infinity',date_trunc('hour',now())-interval '31 days',5000,99,1),($1,'-infinity',date_trunc('hour',now()),5000,0,0)`,[wid]);
       const mature=await profile('mature.other-fixture.com');assert.equal(mature.decision,'virginia');assert.ok(mature.reasons.includes('clean_workspace'));
+      for(const [bounces,complaints] of [[100,1],[99,2]]) {
+        await db.query(`UPDATE hosted_health_hourly SET bounces=$2,complaints=$3 WHERE workspace_id=$1 AND hour<now()-interval '30 days'`,[wid,bounces,complaints]);
+        const boundary=await profile(`edge-${complaints}.other-fixture.com`);assert.equal(boundary.decision,'ohio');assert.equal(boundary.signals.cleanWorkspaceDays,null);
+      }
       await db.query(`UPDATE provider_connections SET paused_at=now(),pause_reason='synthetic hold' WHERE workspace_id=$1`,[wid]);
       const held=await profile('held.example.com');assert.equal(held.decision,'hold');assert.ok(held.reasons.includes('active_abuse_hold'));
       const samples:number[][]=[[],[]], dbCounts:number[][]=[[],[]],probeCount=wire.length;

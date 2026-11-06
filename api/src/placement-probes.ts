@@ -94,17 +94,21 @@ const txt=(values:string[])=>values.map(s=>s.replace(/^"|"$/g,'').replace(/"\s+"
 // Validate mechanisms locally; never execute someone else's SPF include/redirect tree.
 function spf(values:string[]) {
   const records=txt(values).filter(s=>/^v=spf1(?: |$)/i.test(s)); if(records.length!==1) return false;
-  const modifiers=new Set<string>();
+  const modifiers=new Set<string>(); let closed=false;
   return records[0]!.trim().split(/ +/).slice(1).every(token=>{
     const term=token.toLowerCase(), mod=/^([a-z][\w.-]*)=(\S+)$/.exec(term);
     if(mod) { if(modifiers.has(mod[1]!)) return false; modifiers.add(mod[1]!); return !['redirect','exp'].includes(mod[1]!) || hostSyntax.test(mod[2]!); }
     const mech=term.replace(/^[+?~-]/,''), ip=/^ip([46]):([^/]+)(?:\/(\d+))?$/.exec(mech);
+    // A syntactic SPF record isn't necessarily a restrictive sending policy. Only
+    // credit a final soft/hard fail, not pass, neutral, or an implicit neutral.
+    if(closed) return false;
+    if(mech==='all') { closed=term==='-all' || term==='~all'; return closed; }
     if(ip) return (ip[1]==='4'?isIPv4(ip[2]!):isIPv6(ip[2]!)) && (ip[3]===undefined || Number(ip[3])<=(ip[1]==='4'?32:128));
     const mx=/^(?:a|mx)(?::([^/]+))?(?:\/(\d+))?(?:\/\/(\d+))?$/.exec(mech);
     if(mx) return (!mx[1] || hostSyntax.test(mx[1])) && Number(mx[2]??0)<=32 && Number(mx[3]??0)<=128;
     const ref=/^(?:include|exists|ptr):(.+)$/.exec(mech);
-    return ref ? /^[a-z0-9_.-]+\.[a-z]{2,63}$/.test(ref[1]!) : ['all','ptr'].includes(mech);
-  });
+    return ref ? /^[a-z0-9_.-]+\.[a-z]{2,63}$/.test(ref[1]!) : mech==='ptr';
+  }) && closed;
 }
 function dmarc(values:string[]) {
   const records=txt(values).filter(s=>/^v=DMARC1(?:;|$)/i.test(s)); if(!records.length) return 'absent';
