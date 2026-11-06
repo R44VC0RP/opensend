@@ -5124,6 +5124,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('a host ahead of Postgres cannot refill a spent daily sample or spin quota alarms', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
+      ok(await local('POST', '/v1/emails/send', mail()), 202);
+      const { rows: [sample] } = await db.query(`INSERT INTO sending_region_limits(workspace_id,region,max_send_rate,max_24_hour_send,sent_last_24_hours,checked_at)
+        VALUES($1,$2,100,100,99,clock_timestamp()) ON CONFLICT(workspace_id,region) DO UPDATE SET max_send_rate=100,max_24_hour_send=100,sent_last_24_hours=99,checked_at=clock_timestamp() RETURNING checked_at`,[runtime.config.workspaceId,REGION]);
+      const gate = initialGate(); gate.quota = { maxSendRate:100,max24HourSend:100,sentLast24Hours:99,checkedAt:sample.checked_at.getTime() }; gate.sentSinceRefresh=1;
+      const now=Date.now.bind(Date); t.mock.method(Date,'now',() => now()+300_000);
+      for (let i=0; i<2; i++) {
+        gate.refreshAt=0; // A restarted host reads the *same* still-fresh database snapshot.
+        const report=await dispatchDue(runtime,REGION,{gate});
+        assert.equal(report.sent,0); assert.equal(gate.sentSinceRefresh,1); assert.ok(report.quotaRetryAt! - Date.now() > 50_000);
+      }
+    });
+  });
+
   test('rolling daily headroom holds a sending campaign, admits transactional recipients and drains after quota refresh', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run }) => {
       const { dispatchDue, initialGate } = await import('./src/dispatcher.js');
