@@ -4621,6 +4621,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),pc=await workspaceConnection(scoped,oh),other=(await db.query('SELECT domain_id FROM domain_sending_bindings WHERE workspace_id=$1 AND region=$2',[wid,va])).rows[0].domain_id;
       await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'send',domainId:other}}),{code:'BYO_SESSION_SCOPE_REQUIRED'});
       await assert.rejects(workspaceCredentials(scoped,oh,{...pc,deliverySession:{purpose:'template',name:'opensend-*'}}),{code:'TEMPLATE_SCOPE_REQUIRED'});
+      // The enrollment link's Ohio region isn't necessarily the first enabled sender.
+      await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,va]);
+      try {assert.equal(ok(await api('GET','/v1/settings/ses')).region,va);assert.ok(policies.some(p=>{const s=JSON.parse(p).Statement;return s.length===1 && s[0].Action.join()==='ses:GetAccount' && s[0].Condition.StringEquals['aws:RequestedRegion']===va;}));}
+      finally {await db.query('UPDATE ses_installation_settings SET default_region=$2 WHERE workspace_id=$1',[wid,oh]);}
     });
     await t.test('a retained v4 mailbox cannot authorize storage, ingestion or SNS confirmation on a v5 reconnect',async()=>{
       const {workspaceCredentials,workspaceConnection}=await import('./src/provider-credentials.js'),{mailboxS3}=await import('./src/mailbox-setup.js'),{acceptInboundNotification}=await import('./src/mailbox-ingest.js');
@@ -4673,6 +4677,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await del(),409,'CONNECTION_IN_USE');await db.query("UPDATE sending_emails SET status='accepted' WHERE workspace_id=$1 AND status='acceptance_unknown'",[wid]);
       const campaign=ok(await api('POST','/v1/campaigns',{name:'disconnect fence'}),201);await db.query("UPDATE sending_campaigns SET state='paused',paused_at=now(),review_id='fixture-review' WHERE id=$1",[campaign.id]);
       error(await del(),409,'CONNECTION_IN_USE');await db.query("UPDATE sending_campaigns SET state='canceled',paused_at=NULL WHERE id=$1",[campaign.id]);
+      // Stop the independent, flag-off harness runner from claiming the just-queued
+      // rescan. Let an already claimed turn finish its legitimate short deferral.
+      await db.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE workspace_id=$1 AND status='pending'",[wid]);
+      for(let n=0;(await db.query("SELECT FROM jobs WHERE workspace_id=$1 AND status='running'",[wid])).rowCount;n++){assert.ok(n<100);await new Promise(r=>setTimeout(r,10));}
       const start=trace.length,operation=ok(await del(),202).operationId;
       assert.equal((await poll()).state,'disconnecting');error(await post('/scan'),409,'CONNECTION_DISCONNECTING');
       error(await api('POST','/v1/emails/send',{from:'a@both.example',to:'success@simulator.amazonses.com',subject:'blocked',text:'blocked'}),409,'CONNECTION_REQUIRED');

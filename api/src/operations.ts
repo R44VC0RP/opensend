@@ -14,7 +14,7 @@ import { contacts } from './db/audience.js';
 import { workspaces } from './db/workspaces.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
-import { resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
+import { getRegionSettings, resolveRegionRuntime, withRegionSettings } from './ses-region-state.js';
 import { claimName, domainName, releaseConnectionClaims, releasedClaimCleanup, reserveClaim } from './domain-claims.js';
 import { discover, groupIds, pendingGroups, signedApply, verifyReturn } from './domain-connect.js';
 import { verifiedDashboardUser } from './google-auth.js';
@@ -541,8 +541,8 @@ async function account(runtime: Runtime, wid: string, requested?: string) {
   assertSesConfigured(runtime);
   const connection=runtime.config.multiTenant ? await workspaceConnection({...runtime,config:{...runtime.config,workspaceId:wid}},requested) : undefined;
   if (connection?.kind==='shared') throw new ApiError(403,'SHARED_ACCOUNT_PRIVATE','Account-wide SES settings are not available on hosted mail.');
-  const selectedRegion=connection?.region ?? requested ?? runtime.config.regions[0]!;
-  if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[connection.region]}};
+  const selectedRegion=connection?.template_version==='v5' && !requested ? (await getRegionSettings(runtime.db,wid)).defaultRegion : connection?.region ?? requested ?? runtime.config.regions[0]!;
+  if (connection) runtime={...runtime,config:{...runtime.config,workspaceId:wid,regions:[selectedRegion]}};
   const a = await sesCall(() => getSes(runtime, selectedRegion,forDelivery(connection,{purpose:'quota'})).send(new GetAccountCommand({}))); return { region: selectedRegion, productionAccess: a.ProductionAccessEnabled === true, sendingEnabled: a.SendingEnabled === true, enforcementStatus: a.EnforcementStatus ?? 'UNKNOWN', quota: { max24HourSend: a.SendQuota?.Max24HourSend ?? 0, maxSendRate: a.SendQuota?.MaxSendRate ?? 0, sentLast24Hours: a.SendQuota?.SentLast24Hours ?? 0 } }; }
 async function getWebhook(runtime: Runtime, a: Actor, webhookId: string) { const [row] = await runtime.db.select().from(webhooks).where(and(scoped(webhooks, a), eq(webhooks.id, webhookId))); return row ?? notFound('Webhook'); }
 
