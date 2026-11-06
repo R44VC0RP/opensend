@@ -5033,6 +5033,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query('SELECT 1 FROM jobs WHERE id=$1',[expired])).rowCount,0);
     });
   });
+  test('MX keeps the 32-day workspace health window when shadow placement is disabled',async t=>{
+    await simulatedSesFixture(t,async({runtime,db})=>{
+      const {cleanup}=await import('./src/maintenance.js'),wid=runtime.config.workspaceId;
+      Object.assign(runtime.config,{multiTenant:true,placementShadow:false});
+      await db.query(`INSERT INTO hosted_health_hourly SELECT $1,'-infinity',now()-days*interval '1 day',days,0,0 FROM unnest(ARRAY[1,3,31,33]) days`,[wid]);
+      await db.query(`INSERT INTO hosted_usage_hourly VALUES($1,now()-interval '3 days',1)`,[wid]);
+      await cleanup(runtime);
+      assert.deepEqual((await db.query('SELECT accepted::int AS days FROM hosted_health_hourly WHERE workspace_id=$1 ORDER BY days',[wid])).rows.map(r=>r.days),[1,3,31]);
+      assert.equal((await db.query('SELECT 1 FROM hosted_usage_hourly WHERE workspace_id=$1',[wid])).rowCount,0,'The two-day usage window did not change.');
+    });
+  });
   test('MX: account shards isolate sends, stored templates, quota and feedback', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, db, run, jobs }) => {
       const { SESv2Client, GetAccountCommand, SendEmailCommand, GetEmailTemplateCommand, TestRenderEmailTemplateCommand } = await import('@aws-sdk/client-sesv2');
