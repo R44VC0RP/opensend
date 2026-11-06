@@ -711,6 +711,14 @@ async function dispatchBatch(base: Runtime, lane: Lane, leased: Leased[]): Promi
   counters.deferred += leased.length - ready.length;
   // Only unready owner/stream pairs keep their leases as backoff. The gate still paces the region.
   if (!ready.length) return { processed: leased.length, blocked: false };
+  // The fused singleton claim already decided there is nothing to send. Leave the stale
+  // sample and its one provisional batch available for a subsequent deliverable message.
+  const status = ready[0]!.claimStatus;
+  if (status && status !== 'attempting') {
+    counters.skipped++;
+    if (status === 'lost') logLost(1);
+    return { processed: 1, blocked: false };
+  }
   const first = ready[0]!.owner;
   // An absolute rate override is an operator setting for their account, not a BYO customer's quota.
   if (options.accountId && !first.tenantName) lane.pacing.targetRate = undefined;
@@ -775,16 +783,11 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     return { processed: 0, blocked: true };
   }
   const single = ready[0]!;
-  if (single.claimStatus) {
-    if (single.claimStatus === 'attempting') {
-      const snapshot = single.mail.snapshot;
-      lane.held.recipients++;
-      const result = await phase('send', () => lane.send({ ...single, snapshot, content: simpleContent(snapshot, []) }, Date.now() + MAX_PRE_SEND_MS));
-      await lane.record(result);
-    } else {
-      counters.skipped++;
-      if (single.claimStatus === 'lost') logLost(1);
-    }
+  if (single.claimStatus === 'attempting') {
+    const snapshot = single.mail.snapshot;
+    lane.held.recipients++;
+    const result = await phase('send', () => lane.send({ ...single, snapshot, content: simpleContent(snapshot, []) }, Date.now() + MAX_PRE_SEND_MS));
+    await lane.record(result);
     return { processed: 1, blocked: false };
   }
   const loadAttachments = batchAttachments(base, ready);

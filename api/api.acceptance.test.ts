@@ -4626,6 +4626,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           SELECT $1,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,true FROM sending_emails WHERE id='email_bench-1'`,[id]);
         if(status==='suppressed') await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES ($1,$2,'fixture@example.net',true)`,[unique('contact'),wid]);
         if(status==='canceled') await db.query('UPDATE api_keys SET revoked_at=now() WHERE id=$1',[wid]);
+        if(status!=='accepted') await db.query("UPDATE provider_account_limits SET checked_at=clock_timestamp()-interval '90 seconds',refresh_after='-infinity' WHERE aws_account_id=$1 AND region=$2",[accounts[0],REGION]);
         const statements=t.mock.method(db,'query'); await runDispatcher(runtime,{region:REGION,accountId:accounts[0]}); const total=statements.mock.callCount(); statements.mock.restore();
         assert.equal(total,status==='accepted'?2:1, 'Only a send that reaches SES needs a second (record) statement.');
         const row=(await db.query(`SELECT status,provider_id,(SELECT count(*)::int FROM sending_email_events WHERE email_id=$1 AND type='dispatch_attempt') AS attempts FROM sending_emails WHERE id=$1`,[id])).rows[0];
