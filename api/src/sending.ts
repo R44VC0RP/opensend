@@ -1499,7 +1499,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // This works with an empty queue and does not release a probe/buffer of speculative emails.
   const dbNow = Date.parse(row.dbNow);
   let max = Number(row.max24), sent = Number(row.sent24), refreshAt = Date.parse(row.quotaCheckedAt ?? '') + QUOTA_REFRESH_MS;
-  if (!(refreshAt > dbNow)) {
+  // A brand-new region has no previous allowance to preserve. Keep its normal cold-start
+  // buffer and Hosted admission checks; the first dispatch populates its quota cache.
+  if ((row.quotaCheckedAt !== null || max > 0 || row.waitingReason === 'ses_daily_quota') && !(refreshAt > dbNow)) {
     const { campaignQuota } = await import('./dispatcher.js');
     const q = await campaignQuota(runtime, a, row.reviewDraft!.region, row.account?.aws_account_id).catch(() => null);
     if (!q) return hold('ses_daily_quota', new Date(dbNow + QUOTA_REFRESH_MS).toISOString());
