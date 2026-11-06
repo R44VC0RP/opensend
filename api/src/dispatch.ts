@@ -29,21 +29,26 @@ export async function dispatchPartitions(runtime: Runtime, recoverInterrupted = 
   // A disabled region has no dispatcher by design. Settle pinned, not-yet-attempted mail
   // in bounded batches in the minute recovery sweep, even on flag rollback. Never acquire
   // credentials, consume quota, or reinterpret an attempting/unknown send as unsent.
-  const disabled = runtime.config.multiTenant ? sql`disabled AS MATERIALIZED (
+  // Match cancel/claim: lock the parent before locking any of its envelopes, skipping a
+  // busy campaign as well as busy mail. Direct mail has no parent. Commit cancellation
+  // before the global finisher below so it never waits on another campaign with these locks.
+  if (recoverInterrupted && runtime.config.multiTenant) await runtime.db.execute(sql`WITH disabled AS MATERIALIZED (
     SELECT q.id FROM provider_connection_regions r JOIN provider_connections c ON c.id=r.connection_id
     CROSS JOIN LATERAL (SELECT e.id FROM sending_emails e WHERE e.workspace_id=c.workspace_id AND e.region=r.region AND e.status='queued'
-      AND e.snapshot#>>'{binding,connection}'=r.connection_id LIMIT 1000 FOR UPDATE OF e SKIP LOCKED) q
+      AND e.snapshot#>>'{binding,connection}'=r.connection_id AND (e.campaign_id IS NULL OR EXISTS (
+        SELECT 1 FROM sending_campaigns p WHERE p.workspace_id=e.workspace_id AND p.id=e.campaign_id FOR NO KEY UPDATE OF p SKIP LOCKED))
+      LIMIT 1000 FOR UPDATE OF e SKIP LOCKED) q
     WHERE NOT r.legacy AND r.sending_state='disabled' LIMIT 1000
-  ), canceled AS (UPDATE sending_emails e SET status='canceled',error_code='SENDER_BINDING_CHANGED',lease_until=NULL,updated_at=clock_timestamp()
-    FROM disabled d WHERE e.id=d.id AND e.status='queued' RETURNING e.id),` : sql``;
-  const recovery = recoverInterrupted ? sql`WITH ${disabled} stale AS (
+  ) UPDATE sending_emails e SET status='canceled',error_code='SENDER_BINDING_CHANGED',lease_until=NULL,updated_at=clock_timestamp()
+    FROM disabled d WHERE EXISTS (SELECT FROM disabled) AND e.id=d.id AND e.status='queued'`);
+  const recovery = recoverInterrupted ? sql`WITH stale AS (
     UPDATE sending_emails SET status='acceptance_unknown', error_code='INTERRUPTED_PROVIDER_ATTEMPT', lease_until=NULL, updated_at=now()
     WHERE status='attempting' AND attempt_started_at < now() - interval '3 minutes' RETURNING id, workspace_id, simulated, dispatch_version
   ), events AS (
     INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
     SELECT 'event_' || replace(gen_random_uuid()::text,'-',''), workspace_id, id, 'acceptance_unknown', 'interrupted:' || id || ':' || dispatch_version,
       simulated, '{"code":"INTERRUPTED_PROVIDER_ATTEMPT"}'::jsonb FROM stale ON CONFLICT DO NOTHING
-  ), finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale ${runtime.config.multiTenant ? sql`UNION ALL SELECT id FROM canceled` : sql``}`)})` : sql``;
+  ), finished AS (${finishCampaigns(sql`SELECT workspace_id, id AS campaign_id FROM sending_campaigns WHERE state='sending' AND expanded=total`, sql`SELECT id FROM stale`)})` : sql``;
   const due = sql`e.status='queued' AND (e.scheduled_at IS NULL OR e.scheduled_at <= now()) AND (e.lease_until IS NULL OR e.lease_until < now())`;
   const partitions = runtime.config.multiTenant ? sql`
     SELECT DISTINCT c.aws_account_id AS "accountId", c.region, c.kind FROM ${sendingConnections(runtime)} c
