@@ -4668,28 +4668,32 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(concA?.html && concB?.html, 'Two concurrent 70,000-escape root parses must both succeed without summing across roots.');
       assert.equal(concNested, null, 'Nested message/rfc822 escape counts must accumulate onto their own root parse.');
 
-      // If postal-mime's internal state is unavailable at runtime, log once (structured, no PII) and cap text parts at 256 KiB.
+      // If postal-mime's hook is unavailable, log once (structured, no PII) and reject > 256 KiB by raw byte length alone before parsing.
       const warnSpy = t.mock.method(console, 'warn');
-      const backingMaps = new WeakMap<object, Map<unknown, unknown>>();
-      Object.defineProperty(PostalMime.prototype, 'textMap', {
-        configurable: true,
-        set(value: Map<unknown, unknown>) { backingMaps.set(this, value); },
-        get() { const m = backingMaps.get(this)!; return { get: (k: unknown) => m.get(k), set: (k: unknown, v: unknown) => m.set(k, v), forEach: (fn: (v: unknown, k: unknown) => void) => m.forEach(fn) }; },
-      });
+      const proto = PostalMime.prototype as { renderTextContent?: unknown };
+      const savedHook = proto.renderTextContent;
+      proto.renderTextContent = undefined;
       try {
-        const smallDegraded = await parseInboundMime(Buffer.from('From: secret-sender@example.net\r\nSubject: Secret Subject\r\n\r\nhello world\r\n'));
-        assert.equal(smallDegraded?.text?.trim(), 'hello world');
-        const pdfWithSmallText = Buffer.from(
-          `From: secret-sender@example.net\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="att"\r\n\r\n--att\r\nContent-Type: text/plain\r\n\r\nshort body\r\n--att\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename="doc.pdf"\r\nContent-Transfer-Encoding: base64\r\n\r\n${Buffer.alloc(240_000, 0x41).toString('base64').replace(/.{76}/g, '$&\r\n')}\r\n--att--\r\n`
+        assert.equal(isPostalMimeEscapeGuardInstalled(), false);
+        const degradedHdr = Buffer.from('From: secret-sender@example.net\r\nSubject: Secret Subject\r\n\r\n');
+        const exact256k = Buffer.concat([degradedHdr, Buffer.alloc(256 * 1024 - degradedHdr.length - 2, 0x61), Buffer.from('\r\n')]);
+        assert.equal(exact256k.byteLength, 256 * 1024);
+        proto.renderTextContent = function () {}; // Non-guarded function: simulates missing guard while allowing <= 256 KiB parse to finish.
+        const callsBefore = parseSpy.mock.callCount();
+        assert.ok(await parseInboundMime(exact256k), 'Messages at or below 256 KiB raw bytes still parse in fallback mode.');
+        assert.equal(parseSpy.mock.callCount(), callsBefore + 1);
+        const over256k = Buffer.concat([exact256k, Buffer.from('x')]);
+        assert.equal(over256k.byteLength, 256 * 1024 + 1);
+        assert.equal(await parseInboundMime(over256k), null, 'Messages above 256 KiB raw bytes must become unparsed before parsing starts.');
+        const rfc2231Boundary = Buffer.from(
+          `From: secret-sender@example.net\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=first; boundary*=utf-8''second\r\n\r\n--first\r\nContent-Type: application/pdf\r\n\r\n${'A'.repeat(270_001)}\r\n--first--\r\n--second\r\nContent-Type: text/plain\r\n\r\n${'<'.repeat(270_001)}\r\n--second--\r\n`
         );
-        assert.ok(pdfWithSmallText.byteLength > 256 * 1024);
-        const parsedDegradedAtt = await parseInboundMime(pdfWithSmallText);
-        assert.equal(parsedDegradedAtt?.attachments.length, 1);
-        const largeTextDegraded = await parseInboundMime(Buffer.from(`From: secret-sender@example.net\r\nSubject: Secret Subject\r\n\r\n${'a'.repeat(270_000)}\r\n`));
-        assert.equal(largeTextDegraded, null, 'Text-bearing messages above 256 KiB must stay unparsed when the escape guard is unavailable.');
+        assert.equal(await parseInboundMime(rfc2231Boundary), null, 'Raw byte-length fallback rejects > 256 KiB regardless of MIME headers.');
+        assert.equal(parseSpy.mock.callCount(), callsBefore + 1, 'Rejected > 256 KiB fallback messages must not invoke PostalMime.parse.');
       } finally {
-        delete (PostalMime.prototype as { textMap?: unknown }).textMap;
+        proto.renderTextContent = savedHook;
       }
+      assert.equal(isPostalMimeEscapeGuardInstalled(), true);
       const guardWarnings = warnSpy.mock.calls.map(c => String(c.arguments[0])).filter(line => line.includes('MAILBOX_MIME_ESCAPE_GUARD_UNAVAILABLE'));
       assert.equal(guardWarnings.length, 1, 'Missing escape guard must log once across repeated parses.');
       assert.doesNotMatch(guardWarnings[0]!, /secret-sender|Secret Subject/i);

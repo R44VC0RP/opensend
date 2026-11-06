@@ -15,7 +15,7 @@ import { claimReceives, connectionReady, poolReceives } from './states.js';
 const PARSE_LIMIT = 6 * 1024 * 1024; // Larger or line-heavy messages keep headers and raw MIME only (Worker memory).
 const PARSE_LINE_LIMIT = 30_000;
 const PARSE_ESCAPE_LIMIT = 131_072; // PostalMime escapeHtml expands [<>"'?&] 6x with per-match callbacks.
-const DEGRADED_TEXT_LIMIT = 256 * 1024; // Conservative text-part cap if postal-mime's internal hook is unavailable.
+const DEGRADED_PARSE_LIMIT = 256 * 1024; // Raw byte cap if postal-mime's internal hook is unavailable.
 const BODY_LIMIT = 1_000_000;
 const MAX_ATTACHMENTS = 100; // More parts would exhaust the Worker subrequest budget; the message is stored without them.
 const HEADER_LIMIT = 64 * 1024;
@@ -262,117 +262,59 @@ function countHeaderEscaped(msg: Email, count: number) {
   for (const list of [msg.to, msg.cc, msg.bcc]) if (list?.length) { count = countAddressesEscaped(list, count); if (count > PARSE_ESCAPE_LIMIT) return count; }
   return count;
 }
-const STRICT_BINARY_TYPE = /^(?:application|image|audio|video)\/(?!ics\b)[\w.+-]+(?:\s*;|$)/i;
-function singlePartHeaderInfo(part: Uint8Array): { sep: number; contentType: string } | null {
-  const limit = Math.min(part.byteLength, HEADER_LIMIT);
-  let pos = 0, contentType: string | null = null;
-  while (pos < limit) {
-    const start = pos, nl = part.indexOf(10, pos);
-    if (nl < 0 || nl >= limit) return null;
-    let firstEnd = nl;
-    while (firstEnd > pos && part[firstEnd - 1] === 13) firstEnd--;
-    if (firstEnd === pos) return { sep: nl + 1, contentType: contentType ?? '' };
-    pos = nl + 1;
-    while (pos < limit && (part[pos] === 32 || part[pos] === 9)) {
-      const next = part.indexOf(10, pos);
-      if (next < 0 || next >= limit) return null;
-      pos = next + 1;
-    }
-    const line = rawHeaderDecoder.decode(part.subarray(start, pos)).replace(/\r*\n/g, '');
-    const colon = line.indexOf(':');
-    if (colon < 0) continue;
-    if (trimWsp(line.slice(0, colon)).toLowerCase() === 'content-type') {
-      if (contentType !== null) return null;
-      contentType = trimWsp(line.slice(colon + 1));
-    }
-  }
-  return null;
-}
-function withinDegradedTextLimit(raw: Uint8Array): boolean {
-  if (raw.byteLength <= DEGRADED_TEXT_LIMIT) return true;
-  const top = singlePartHeaderInfo(raw);
-  if (!top || top.contentType.includes('(')) return false;
-  if (STRICT_BINARY_TYPE.test(top.contentType)) return true;
-  const multi = /^multipart\/(?!digest\b)[\w.+-]+\s*;\s*boundary\s*=\s*(?:"([^"\\]+)"|([\w'()+_,-./:=?]+))\s*(?:;|$)/i.exec(top.contentType);
-  if (!multi) return false;
-  const delim = new TextEncoder().encode(`--${multi[1] ?? multi[2]!}`);
-  const body = raw.subarray(top.sep);
-  let pos = 0, partStart = -1, textBytes = 0, closed = false;
-  while (pos <= body.byteLength) {
-    const nl = body.indexOf(10, pos);
-    const lineEnd = nl < 0 ? body.byteLength : nl;
-    let trimEnd = lineEnd;
-    while (trimEnd > pos && (body[trimEnd - 1] === 13 || body[trimEnd - 1] === 32 || body[trimEnd - 1] === 9)) trimEnd--;
-    const len = trimEnd - pos;
-    const isBoundary = (len === delim.byteLength || (len === delim.byteLength + 2 && body[pos + delim.byteLength] === 45 && body[pos + delim.byteLength + 1] === 45))
-      && body.subarray(pos, pos + delim.byteLength).every((b, i) => b === delim[i]);
-    if (isBoundary) {
-      if (partStart >= 0) {
-        const part = body.subarray(partStart, pos);
-        const info = singlePartHeaderInfo(part);
-        if (!info || info.contentType.includes('(') || !STRICT_BINARY_TYPE.test(info.contentType)) {
-          textBytes += part.byteLength;
-          if (textBytes > DEGRADED_TEXT_LIMIT) return false;
-        }
-      }
-      if (len === delim.byteLength + 2) { closed = true; break; }
-      partStart = nl < 0 ? body.byteLength : nl + 1;
-    }
-    if (nl < 0) break;
-    pos = nl + 1;
-  }
-  return closed && textBytes <= DEGRADED_TEXT_LIMIT;
-}
 type InternalEntry = { type: 'text'; value: string } | { type: 'subMessage'; value: Email };
 type InternalParser = { textTypes: Set<string>; textMap: Map<unknown, { plain?: InternalEntry[]; html?: InternalEntry[] }> };
-const escapeBudgetStore = new AsyncLocalStorage<{ count: number; raw?: Uint8Array }>();
+const escapeBudgetStore = new AsyncLocalStorage<{ count: number }>();
 const postalProto = PostalMime.prototype as unknown as {
   parse?: (this: unknown, buf: unknown) => Promise<Email>;
   renderTextContent?: (this: InternalParser) => void;
 };
 const origParse = postalProto.parse;
 const origRenderTextContent = postalProto.renderTextContent;
-const escapeGuardInstalled = typeof origRenderTextContent === 'function' && typeof origParse === 'function';
 let escapeGuardWarned = false;
-function warnMissingEscapeGuard(reason: 'missing_hook' | 'unexpected_state') {
+function warnMissingEscapeGuard() {
   if (escapeGuardWarned) return;
   escapeGuardWarned = true;
-  log('warn', { code: 'MAILBOX_MIME_ESCAPE_GUARD_UNAVAILABLE', reason });
+  log('warn', { code: 'MAILBOX_MIME_ESCAPE_GUARD_UNAVAILABLE' });
 }
-if (escapeGuardInstalled) {
-  postalProto.parse = function (buf: unknown) {
-    return escapeBudgetStore.getStore() ? origParse!.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse!.call(this, buf));
-  };
-  postalProto.renderTextContent = function () {
-    if (!(this.textTypes instanceof Set) || !(this.textMap instanceof Map)) {
-      warnMissingEscapeGuard('unexpected_state');
-      const store = escapeBudgetStore.getStore();
-      if (!store?.raw || !withinDegradedTextLimit(store.raw)) throw new RangeError('MIME entity expansion guard unavailable');
-      return origRenderTextContent!.call(this);
-    }
-    if (this.textTypes.has('html')) {
-      const budget = escapeBudgetStore.getStore() ?? { count: 0 };
-      let count = budget.count;
-      for (const entry of this.textMap.values()) {
-        const own = entry.html;
-        for (const item of own || entry.plain || []) {
-          count = item.type === 'subMessage' ? countHeaderEscaped(item.value, count) : !own ? countEscaped(item.value, count) : count;
-          if (count > PARSE_ESCAPE_LIMIT) { budget.count = count; throw new RangeError('MIME entity expansion limit exceeded'); }
-        }
+const guardedRenderTextContent = function (this: InternalParser) {
+  if (this.textTypes.has('html')) {
+    const budget = escapeBudgetStore.getStore() ?? { count: 0 };
+    let count = budget.count;
+    for (const entry of this.textMap.values()) {
+      const own = entry.html;
+      for (const item of own || entry.plain || []) {
+        count = item.type === 'subMessage' ? countHeaderEscaped(item.value, count) : !own ? countEscaped(item.value, count) : count;
+        if (count > PARSE_ESCAPE_LIMIT) { budget.count = count; throw new RangeError('MIME entity expansion limit exceeded'); }
       }
-      budget.count = count;
     }
-    return origRenderTextContent!.call(this);
-  };
-}
-export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled;
+    budget.count = count;
+  }
+  return origRenderTextContent!.call(this);
+};
+const escapeGuardInstalled = (() => {
+  try {
+    if (typeof origParse !== 'function' || typeof origRenderTextContent !== 'function') return false;
+    const probe = new PostalMime() as unknown as Partial<InternalParser>;
+    if (!(probe.textTypes instanceof Set) || !(probe.textMap instanceof Map)) return false;
+    postalProto.parse = function (buf: unknown) {
+      return escapeBudgetStore.getStore() ? origParse.call(this, buf) : escapeBudgetStore.run({ count: 0 }, () => origParse.call(this, buf));
+    };
+    postalProto.renderTextContent = guardedRenderTextContent;
+    return true;
+  } catch {
+    return false;
+  }
+})();
+if (!escapeGuardInstalled) warnMissingEscapeGuard();
+export const isPostalMimeEscapeGuardInstalled = () => escapeGuardInstalled && postalProto.renderTextContent === guardedRenderTextContent;
 export async function parseInboundMime(raw: Uint8Array): Promise<Email | null> {
   if (raw.byteLength > PARSE_LIMIT || !withinLineLimit(raw)) return null;
-  if (!escapeGuardInstalled) {
-    warnMissingEscapeGuard('missing_hook');
-    if (!withinDegradedTextLimit(raw)) return null;
+  if (!isPostalMimeEscapeGuardInstalled()) {
+    warnMissingEscapeGuard();
+    if (raw.byteLength > DEGRADED_PARSE_LIMIT) return null;
   }
-  try { return await escapeBudgetStore.run({ count: 0, raw }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
+  try { return await escapeBudgetStore.run({ count: 0 }, () => PostalMime.parse(raw, { attachmentEncoding: 'arraybuffer' })); }
   catch { return null; }
 }
 
