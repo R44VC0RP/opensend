@@ -8,7 +8,7 @@ import { FetchHttpHandler } from '@smithy/fetch-http-handler';
 import { ApiError, assertSesConfigured, log, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { mailboxDomains, mailboxRegions,type MxReport } from './db/mailbox.js';
-import { enqueue, MAX_ATTEMPTS } from './jobs.js';
+import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { checkMx } from './mailbox-dns.js';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
@@ -325,27 +325,42 @@ export async function saveMailboxMx(db:DbExecutor,wid:string,domainId:string,mx:
     status=CASE WHEN status NOT IN ('waiting_for_mx','active') OR ${hold} THEN status WHEN ${active} THEN 'active' ELSE 'waiting_for_mx' END
     WHERE workspace_id=${wid} AND domain_id=${domainId} AND parent_id IS NULL`);
 }
-/** Hourly: refresh MX state for receiving domains so status follows DNS changes. */
-export async function refreshMailboxDns(runtime: Runtime, limit = 50) {
-  if (runtime.config.multiTenant) {
-    // Rotate DNS upkeep for receiving and proven sending claims, including sending-only regional bindings.
-    const batch=Math.max(1,Math.min(50,limit));
-    await runtime.db.execute(sql`WITH due AS (SELECT dc.token,dc.workspace_id,d.domain_id AS id,j.created_at FROM domain_claims dc
-      JOIN domain_sending_bindings d ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.connection_id=dc.connection_id
+// One hourly pass through the binding index, in resumable pages. At most 600 bindings
+// read and 50 DNS jobs written per step: 12 healthy rounds cover even a full page,
+// with 36 hours of slack before DMARC expiry. Sparse pages retain hourly checks.
+const dnsSweep='maintenance.domainDns', dnsBatch=50, dnsPage=dnsBatch*12;
+const scheduleDnsPage:JobHandler=async(runtime,payload)=>{
+  if(!runtime.config.multiTenant) return;
+  const after=typeof payload.after==='string' ? sql`WHERE domain_id>${payload.after}` : sql``;
+  const {rows:[next]}=await runtime.db.execute<{after:string}>(sql`WITH page AS MATERIALIZED (
+      SELECT domain_id,connection_id,workspace_id,name,region FROM domain_sending_bindings ${after} ORDER BY domain_id LIMIT ${dnsPage}
+    ), due AS (SELECT dc.token,dc.workspace_id,d.domain_id AS id,coalesce(j.created_at,dc.created_at) AS last_attempt FROM page d
+      JOIN domain_claims dc ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.connection_id=dc.connection_id
       JOIN regional_connections pc ON pc.id=d.connection_id AND pc.region=d.region AND ${connectionReady()}
       LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND (${claimReceivable()} OR dc.sending_state IN ('verified','lost')) AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
-      ORDER BY j.created_at NULLS FIRST,dc.token LIMIT ${batch})
+      ORDER BY last_attempt,j.created_at NULLS FIRST,dc.token LIMIT ${dnsBatch}), queued AS (
       INSERT INTO jobs(id,type,workspace_id,payload,available_at)
       SELECT 'domain.mx:'||token,'domain.mx',workspace_id,jsonb_build_object('domainId',id,'token',token),
-        now()+interval '1 hour'*(row_number() OVER(ORDER BY created_at NULLS FIRST,token)-1)/${batch} FROM due
-      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status NOT IN ('pending','running')`);
+        now()+interval '1 hour'*(row_number() OVER(ORDER BY last_attempt,token)-1)/${dnsBatch} FROM due
+      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status NOT IN ('pending','running') AND jobs.created_at<=now()-interval '50 minutes')
+    SELECT max(domain_id) AS after FROM page HAVING count(*)=${dnsPage}`);
+  if(next) throw new JobDeferred(new Date().toISOString(),{after:next.after});
+};
+
+/** Hourly: refresh DNS for receiving and proven sending domains. */
+export async function refreshMailboxDns(runtime: Runtime) {
+  if (runtime.config.multiTenant) {
+    // Duplicate ticks must not reset an in-progress cursor or start a second sweep.
+    await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${dnsSweep},${dnsSweep},${runtime.config.workspaceId},'{}')
+      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload='{}',available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL
+      WHERE jobs.status NOT IN ('pending','running') AND jobs.created_at<=now()-interval '50 minutes'`);
     return;
   }
-  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(limit);
+  const rows = await runtime.db.select().from(mailboxDomains).where(and(isNull(mailboxDomains.parentId), inArray(mailboxDomains.status, ['waiting_for_mx', 'active']), sql`(${mailboxDomains.checkedAt} IS NULL OR ${mailboxDomains.checkedAt} < now() - interval '50 minutes')`)).limit(50);
   for (const row of rows) {
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(runtime.db,row.workspaceId,row.domainId,mx);
   }
 }
 
-export const mailboxSetupJobs: Record<string, JobHandler> = { 'mailbox.reconcile': reconcileJob };
+export const mailboxSetupJobs: Record<string, JobHandler> = { 'mailbox.reconcile': reconcileJob, [dnsSweep]:retryDatabaseFailures(scheduleDnsPage) };

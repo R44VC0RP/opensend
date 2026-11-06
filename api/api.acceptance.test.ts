@@ -1342,14 +1342,40 @@ describe('Google dashboard sessions and current-policy authorization', () => {
             await expireGrace();await mxCheck();assert.equal(await probe(custom),0,'An expired MX grace revokes routing while sending stays verified.');
             assert.deepEqual(await claimState(),{...steady,receiving_state:'pending',receiving_host:null});
             assert.equal(ok(await local('GET',detail,undefined,b.cookie)).sending,'verified');
-            // Exercise the hourly scheduler inside an isolated transaction: one job per claim, spread over the hour.
-            const {refreshMailboxDns}=await import('./src/mailbox-setup.js'),{sql}=await import('drizzle-orm');
-            const abort=new Error('rollback scheduled fixtures');await assert.rejects(runtime.db.transaction(async tx=>{
-              const rows=async()=>(await tx.execute<{at:string}>(sql`SELECT available_at AS at FROM jobs WHERE type='domain.mx' ORDER BY available_at`)).rows;
-              await refreshMailboxDns({...runtime,db:tx},1);assert.equal((await rows()).length,1);
-              await tx.execute(sql`DELETE FROM jobs WHERE type='domain.mx'`);await refreshMailboxDns({...runtime,db:tx},2);const queued=await rows();assert.equal(queued.length,2);assert.notEqual(queued[0]!.at,queued[1]!.at);
-              await refreshMailboxDns({...runtime,db:tx},2);assert.deepEqual(await rows(),queued);throw abort;
-            }),e=>e===abort);
+            await it.test('Hourly DNS upkeep covers 2,501 active claims within 12 rounds in bounded pages',async()=>{
+              const {refreshMailboxDns,mailboxSetupJobs}=await import('./src/mailbox-setup.js'),{sql}=await import('drizzle-orm');
+              const abort=new Error('rollback scheduled fixtures');await assert.rejects(runtime.db.transaction(async tx=>{
+                const rt={...runtime,db:tx},type='maintenance.domainDns';
+                await tx.execute(sql`INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,identity)
+                  SELECT workspace_id,'rotate-'||n||'.invalid',connection_id,'verified','{}'::jsonb FROM domain_claims CROSS JOIN generate_series(1,2501) n WHERE workspace_id=${b.org.id} AND name=${domain}`);
+                await tx.execute(sql`INSERT INTO operation_domains(id,workspace_id,name,region) SELECT 'rotate-'||name,workspace_id,name,${region} FROM domain_claims WHERE workspace_id=${b.org.id} AND name LIKE 'rotate-%.invalid'`);
+                for(let hour=0;hour<12;hour++) {
+                  await refreshMailboxDns(rt);
+                  const sweep=(await tx.execute<{status:string;payload:Json}>(sql`SELECT status,payload FROM jobs WHERE id=${type}`)).rows[0]!;
+                  assert.equal(sweep.status,'pending');assert.deepEqual(sweep.payload,{});
+                  let payload=sweep.payload,scheduled=0;
+                  for(let step=0;;step++) {
+                    assert.ok(step<6,'Cursor must advance through the binding index.');
+                    let next:Json|undefined;
+                    try {await mailboxSetupJobs[type]!(rt,payload,{id:type,attempts:1,workspaceId:rt.config.workspaceId});}
+                    catch(e) {if(!(e instanceof JobDeferred))throw e;next=e.payload;assert.ok(next?.after);}
+                    const count=(await tx.execute<{n:number}>(sql`SELECT count(*)::int AS n FROM jobs WHERE type='domain.mx' AND status='pending'`)).rows[0]!.n;
+                    assert.ok(count-scheduled<=50,'One step can enqueue at most 50 DNS checks.');scheduled=count;
+                    if(!next) break;
+                    assert.notEqual(next.after,payload.after);payload=next;
+                  }
+                  assert.ok(scheduled>50,'Work increases with the claim population.');
+                  assert.ok((await tx.execute(sql`SELECT 1 FROM jobs WHERE type='domain.mx' AND status='pending' AND available_at>now() AND available_at<now()+interval '1 hour' LIMIT 1`)).rowCount);
+                  // Simulate successful jobs and an hourly tick, without external DNS or wall-clock sleeps.
+                  await tx.execute(sql`UPDATE jobs SET status='completed' WHERE type IN (${type},'domain.mx')`);
+                  await refreshMailboxDns(rt);assert.equal((await tx.execute(sql`SELECT 1 FROM jobs WHERE id=${type} AND status='completed'`)).rowCount,1,'Duplicate tick cannot restart the sweep.');
+                  await tx.execute(sql`UPDATE jobs SET created_at=created_at-interval '1 hour' WHERE type IN (${type},'domain.mx')`);
+                  await tx.execute(sql`UPDATE domain_claims SET created_at=created_at-interval '1 hour' WHERE workspace_id=${b.org.id} AND name LIKE 'rotate-%.invalid'`);
+                }
+                assert.equal((await tx.execute(sql`SELECT 1 FROM jobs WHERE type='domain.mx' AND payload->>'domainId' LIKE 'rotate-%'`)).rowCount,2501);
+                throw abort;
+              }),e=>e===abort);
+            });
             ok(await local('DELETE',`/v1/domains/${other.id}`,undefined,a.cookie));
           });
           error(await send(`hi@not${domain}`),403,'SENDER_DOMAIN_NOT_VERIFIED');
