@@ -107,6 +107,13 @@ export function AppShell() {
       </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
       </div>
     </aside>
-    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}<Suspense fallback={<RouteSkeleton />}>{needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} /> : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton /> : needsRegion && !enabled.length ? <EmptyState title="No enabled regions" action={<Link to="/settings">Set up SES</Link>} /> : <Outlet />}</Suspense></main>
+    <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
+      <Suspense fallback={<RouteSkeleton />}>
+        {needsRegion && regions.isError && !regions.data ? <ErrorState error={regions.error} onRetry={() => regions.refetch()} />
+          : needsRegion && (regions.isPending ? !regionId : !current && enabled.length > 0) ? <RouteSkeleton />
+          : needsRegion && regions.data && !enabled.length ? <EmptyState title="No enabled regions" action={!access.multiTenant && <Link to="/settings">Set up SES</Link>} />
+          : <Outlet />}
+      </Suspense>
+    </main>
   </div>
 }

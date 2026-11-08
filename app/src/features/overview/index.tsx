@@ -9,7 +9,7 @@ import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import { campaignEditable, type ChartPoint, type SesDiscovery, type TimeRange } from '../../data/types'
 import { Button, DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { date, number, percent, label } from '../../lib/format'
-import { OverviewBodySkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
+import { OverviewBodySkeleton, OverviewRouteSkeleton, recentCampaignColumns, RegionStatus } from './skeletons'
 
 export function OverviewPage() {
   const { regionId } = useRegion()
@@ -38,6 +38,7 @@ export function OverviewPage() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const discovery = useRegionDiscovery(multiTenant ? undefined : current)
   const data = query.data
+  if (multiTenant && query.isPending) return <OverviewRouteSkeleton />
   const filterBar = <div className="overview-toolbar"><Tabs value={range} onValueChange={v => setRange(v as TimeRange)} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label">{data && `${date(data.periodStart, { month: 'short', day: 'numeric', timeZone: 'UTC' })} – ${date(data.periodEnd)}`}</span><Select aria-label="Email stream" value={stream} onValueChange={setStream} options={[{ value: 'all', label: 'All emails' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div></div>
   return <><PageHeader title="Overview" actions={<div className="cluster"><ReputationSummary report={discovery.data} regionId={regionId} />{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus current={current} /></div>} />{filterBar}
     {query.isPending ? <OverviewBodySkeleton range={range} live={live} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : data && <div className="overview-content">

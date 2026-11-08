@@ -2,7 +2,7 @@ import { ArrowUpRight } from 'lucide-react'
 import { useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import type { RegionCatalogEntry, TimeRange } from '../../data/types'
 import { label } from '../../lib/format'
-import { Button, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
+import { Button, ControlSkeleton, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, StatusBadge, TableSkeleton, Tabs } from '../../components/ui'
 import './overview.css'
 
 // Hosted mail manages its region, so it shows no status; a bring-your-own connection shows its own state,
@@ -26,6 +26,9 @@ export function OverviewBodySkeleton({ range = '24h', live = false }: { range?: 
 export function OverviewRouteSkeleton() {
   const { regionId } = useRegion()
   // The sidebar's region selector names the region for admins; members have no selector.
-  const { canAdminister } = useWorkspaceAccess()
+  const { multiTenant, canAdminister } = useWorkspaceAccess()
+  // Keep the same placeholder through region selection, route loading and the first metrics response.
+  // The chart and table heights depend on the data; only reserve the controls whose layout is known.
+  if (multiTenant) return <><PageHeader title="Overview" /><LoadingRegion label="Loading overview"><div className="overview-toolbar"><ControlSkeleton width={200} /><ControlSkeleton width={138} /></div></LoadingRegion></>
   return <><PageHeader title="Overview" actions={<div className="cluster">{!canAdminister && <span className="muted">{regionId}</span>}<RegionStatus /></div>} /><div className="overview-toolbar"><Tabs value="24h" onValueChange={() => {}} items={[{ value: '24h', label: '24 hours' }, { value: '7d', label: '7 days' }, { value: '30d', label: '30 days' }]} /><div className="cluster"><span className="range-label"><Skeleton width={195} /></span><Select aria-label="Email stream" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: 'All emails' }]} /></div></div><OverviewBodySkeleton /></>
 }
