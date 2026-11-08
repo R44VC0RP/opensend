@@ -24,7 +24,7 @@ export async function setDomainPool(db:Client,args:string[],env:Record<string,st
     // The release checker uses a platform-owned fixture. Never relax the public reserved-name
     // filter. Only its pinned Ohio workspace may reserve this exact sibling (normal TXT still required).
     if (canary && !(await db.query(`SELECT FROM domain_sending_bindings b JOIN domain_claims dc USING(workspace_id,name,connection_id)
-      WHERE b.workspace_id=$1 AND b.connection_id=$2 AND b.name='e2e.opensend.mx' AND b.region='us-east-2' AND b.domain_id='dom_97087da408314135a3f6278da0e1aa80' AND dc.sending_state='verified'`,[wid,c.id])).rowCount) throw new Error('Not the verified Ohio release-canary workspace.');
+      WHERE b.workspace_id=$1 AND b.connection_id=$2 AND b.name='e2e.opensend.mx' AND b.region='us-east-2' AND b.domain_id='dom_1aa89a5a687348e89699f5cd97f5496b' AND dc.sending_state='verified'`,[wid,c.id])).rowCount) throw new Error('Not the verified Ohio release-canary workspace.');
     if (!prepare) {
       const bound=(await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0];
       if (bound && bound.region!==(tier==='trusted'?'us-east-1':'us-east-2')) throw new Error('Already bound in another region. A staged and drained migration is required.');

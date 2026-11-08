@@ -41,7 +41,7 @@ const SKIP: Partial<Record<Op, string>> = {
 
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
-const domain = 'e2e.opensend.mx', domainId = 'dom_97087da408314135a3f6278da0e1aa80', region = 'us-east-2';
+const domain = 'e2e.opensend.mx', domainId = 'dom_1aa89a5a687348e89699f5cd97f5496b', region = 'us-east-2';
 const from = `${prefix}@${domain}`, inbox = `${prefix}-in@${domain}`;
 // SES supports +labels on all three mailboxes. Never reuse a real contact or retained suppression.
 const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${kind}+${prefix}${label}@simulator.amazonses.com`;
@@ -133,7 +133,7 @@ async function listed<T extends { id: string }>(id: string, read: (cursor?: stri
   throw new Error(`run-owned record not listed: ${id}`);
 }
 async function workspaceReads() {
-  check((await api('getWorkspaceSettings', {})).name === "Ryan Vogel's Organization", 'unexpected workspace name');
+  check((await api('getWorkspaceSettings', {})).name === 'E2E', 'unexpected workspace name');
   const catalog = await api('listRegions', {});
   check(catalog.data.some(r => r.region === region && r.enabled) && catalog.data.some(r => r.region === catalog.defaultRegion && r.isDefault), 'invalid regional catalog');
   const tokens = await api('listAgentTokens', { query: { includeInactive: 'false', limit: 1 } });

@@ -16,7 +16,7 @@ const documents = render(manifest), [primary, ...companions] = names;
 const adopted = documents[primary].Statement.find(s => s.Sid === 'ProtectAdoptedIdentities').Resource;
 const ohio = 'us-east-2', virginia = 'us-east-1', regions = [ohio, virginia];
 const user = 'opensend-mx', principal = `arn:aws:iam::${account}:user/${user}`, arn = name => `arn:aws:iam::${account}:policy/${name}`;
-const origin = 'https://opensend.mx', domain = 'iam-check.testing.mx.vogel.dev', fixtureId = 'dom_97087da408314135a3f6278da0e1aa80';
+const origin = 'https://opensend.mx', domain = 'iam-check.testing.mx.vogel.dev', fixtureId = 'dom_1aa89a5a687348e89699f5cd97f5496b';
 const run = randomUUID(), key = process.env.OPENSEND_E2E_API_KEY, stop = new AbortController();
 const tags = {'opensend:owner': 'mx', 'opensend:installation-id': 'opensend-mx:pool', 'opensend:purpose': 'domain-identity', 'opensend:domain-claim': run};
 let armed = false, activationAttempted = false, iamWritePending = false, createdId, pendingIdentity;
