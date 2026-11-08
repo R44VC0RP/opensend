@@ -34,9 +34,6 @@
     "DISPATCH_SHARDS": "4",
     "DISPATCH_RATE_FACTOR": "1.1",
     "API_RATE_LIMIT_PER_MINUTE": "10000",
-    // Jev content screen on OpenCode's free tier; the Console key is the TYPESAFE_API_KEY secret.
-    "JEV_ENDPOINT": "https://opencode.ai/inference/systemone/v1/systemone",
-    "JEV_MODEL": "jev-1.13-free",
     "WORK_QUEUE_NAME": "opensend-mx-production-work",
     "FEEDBACK_QUEUE_NAME": "opensend-mx-production-feedback"
   },
