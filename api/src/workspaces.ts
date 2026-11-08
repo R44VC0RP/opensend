@@ -3,7 +3,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { ApiError, errors, id, IdParams, json, notFound, response, type App, type Ctx, type DbExecutor } from './core.js';
 import { authUser } from './db/google-auth.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
-import { invitationRecipient } from './google-auth.js';
+import { approvedGoogleIdentity, invitationRecipient } from './google-auth.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -36,17 +36,31 @@ export async function claimInvitation(db: DbExecutor, userId: string, email: str
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string }, allowSignup: boolean, region: string, invitationId: string | null) {
   if (!allowSignup) return !!invitationId && !!await claimInvitation(db, user.id, user.email, invitationId);
-  const workspaceId = id('ws'), name = `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`;
-  const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
-  await db.execute(sql`WITH created AS (
-    INSERT INTO workspaces(id, name, slug) VALUES (${workspaceId}, ${name}, ${slug}) RETURNING id
-  ), region_settings AS (
-    INSERT INTO ses_installation_settings(workspace_id, installation_id, default_region, enabled_regions)
-    SELECT id, ${id('install')}, ${region}, ${JSON.stringify([region])}::jsonb FROM created
-  ) INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${user.id}, 'owner' FROM created`);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email.split('@')[0]!).slice(0, 105)}'s Organization`, region);
   if (invitationId) await claimInvitation(db, user.id, user.email, invitationId);
   return true;
 }
+
+// One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
+// nothing is inserted once the user already owns that many workspaces (the caller holds the user lock)
+// or is no longer a member of `memberOf`, the workspace the request authenticated through.
+async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }) {
+  const workspaceId = id('ws');
+  const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
+  const result = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH created AS (
+    INSERT INTO workspaces(id, name, slug) SELECT ${workspaceId}, ${name}, ${slug}
+    ${limit === undefined ? sql`` : sql`WHERE (SELECT count(*) FROM workspace_members WHERE user_id = ${userId} AND role = 'owner') < ${limit.ownedBelow}
+      AND EXISTS(SELECT 1 FROM workspace_members WHERE user_id = ${userId} AND workspace_id = ${limit.memberOf})`}
+    RETURNING id, name, slug
+  ), region_settings AS (
+    INSERT INTO ses_installation_settings(workspace_id, installation_id, default_region, enabled_regions)
+    SELECT id, ${id('install')}, ${region}, ${JSON.stringify([region])}::jsonb FROM created
+  ), owner AS (
+    INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${userId}, 'owner' FROM created
+  ) SELECT id, name, slug FROM created`);
+  return result.rows[0];
+}
+const maxOwnedWorkspaces = 10;
 
 function dashboard(c: Ctx, manage = false) {
   if (!c.env.config.multiTenant) return notFound('Endpoint');
@@ -104,6 +118,22 @@ export function registerWorkspaces(app: App) {
     const a = dashboard(c);
     const rows = await c.env.db.select({ id: workspaces.id, name: workspaces.name, slug: workspaces.slug, role: workspaceMembers.role }).from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId)).where(eq(workspaceMembers.userId, a.userId)).orderBy(workspaces.name, workspaces.id);
     return c.json({ data: rows.map(row => Workspace.parse(row)) }, 200);
+  });
+  app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
+    description: `Create another workspace you own, for example to keep separate products, teams or billing apart. It starts like a new signup: connect sending, then add a domain. Requires an account approved for sign-up; each account can own up to ${maxOwnedWorkspaces} workspaces. Select it with X-OpenSend-Workspace.`,
+    request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
+    const a = dashboard(c), { name } = c.req.valid('json');
+    const created = await c.env.db.transaction(async db => {
+      // Lock the user so concurrent creates count each other's workspaces.
+      const [user] = await db.select({ email: authUser.email, verified: authUser.emailVerified, hd: authUser.googleHostedDomain }).from(authUser).where(eq(authUser.id, a.userId)).for('update');
+      if (!user || !approvedGoogleIdentity(c.env, user.email, user.verified, user.hd)) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
+      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId });
+      if (row) return row;
+      const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
+      if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your Google account.');
+      throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
+    });
+    return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {
     const { name } = c.req.valid('json');

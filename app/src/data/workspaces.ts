@@ -5,6 +5,7 @@ import type { WorkspaceInvitation, WorkspaceMember, WorkspaceMembership, Workspa
 const current = '/v1/workspaces/current'
 export const workspaceApi = {
   list: async (signal?: AbortSignal) => (await request<{ data: WorkspaceMembership[] }>('/v1/workspaces', { signal })).data,
+  create: (name: string) => request<WorkspaceMembership>('/v1/workspaces', { method: 'POST', body: { name } }),
   rename: (name: string) => request<WorkspaceMembership>(current, { method: 'PATCH', body: { name } }),
   members: async (signal?: AbortSignal) => (await request<{ data: WorkspaceMember[] }>(`${current}/members`, { signal })).data,
   updateMember: (id: string, role: WorkspaceRole) => request<{ id: string; role: WorkspaceRole }>(`${current}/members/${encodeURIComponent(id)}`, { method: 'PATCH', body: { role } }),

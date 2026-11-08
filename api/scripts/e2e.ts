@@ -19,7 +19,7 @@ const SKIP: Partial<Record<Op, string>> = {
   listMcpConnections: dashboard, revokeMcpConnection: dashboard,
   createAgentToken: 'Only an MCP OAuth principal can mint an agent token.',
   revokeAgentToken: 'Manage keys can revoke, but cannot mint a run-owned OAuth agent token to revoke.',
-  listWorkspaces: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
+  listWorkspaces: dashboard, createWorkspace: dashboard, renameCurrentWorkspace: shared, listWorkspaceMembers: dashboard,
   inviteWorkspaceMember: dashboard, createWorkspaceInvitation: dashboard, listWorkspaceInvitations: dashboard,
   revokeWorkspaceInvitation: dashboard, updateWorkspaceMember: dashboard, removeWorkspaceMember: dashboard,
   acceptWorkspaceInvitation: dashboard,

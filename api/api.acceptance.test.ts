@@ -693,6 +693,21 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       assert.equal(joined.find((w:Json)=>w.id===b.org.id)?.role,'member');
       assert.equal(ok(await local('GET','/v1/me',undefined,invitedCookie)).workspaceId,b.org.id);
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${linked.id}/accept`,undefined,invitedCookie)).workspaceId,b.org.id);
+      const extra = ok(await local('POST', '/v1/workspaces', { name: ' Automated ' }, b.cookie), 201); workspaces.push(extra.id);
+      assert.equal(extra.name, 'Automated'); assert.equal(extra.role, 'owner'); assert.notEqual(extra.id, b.org.id);
+      const extraMe = ok(await local('GET', '/v1/me', undefined, b.cookie, select(extra.id)));
+      assert.equal(extraMe.workspaceId, extra.id); assert.equal(extraMe.role, 'owner'); assert.notEqual(extraMe.connection?.state, 'ready');
+      assert.equal((await pool.query('SELECT default_region FROM ses_installation_settings WHERE workspace_id = $1', [extra.id])).rows[0]?.default_region, runtime.config.regions[0]);
+      const burst = await Promise.all(Array.from({ length: 9 }, (_, i) => local('POST', '/v1/workspaces', { name: `Burst ${i}` }, b.cookie)));
+      for (const reply of burst) if (reply.status === 201) workspaces.push(reply.body.id);
+      assert.deepEqual(burst.map(reply => reply.status).sort(), [...Array(8).fill(201), 409], 'Concurrent creates stop at ten owned workspaces.');
+      error(await local('POST', '/v1/workspaces', { name: 'Eleventh' }, b.cookie), 409, 'WORKSPACE_LIMIT');
+      // Later steps use b's original workspace: reselect it and drop the extras.
+      ok(await local('GET', '/v1/me', undefined, b.cookie, select(b.org.id)));
+      for (const wid of workspaces.splice(workspaces.indexOf(extra.id))) {
+        await pool.query('DELETE FROM ses_installation_settings WHERE workspace_id = $1', [wid]);
+        await pool.query('DELETE FROM workspaces WHERE id = $1', [wid]);
+      }
       runtime.config.allowedDomains = []; // A real callback still admits the invitee, not an arbitrary verified address.
       await login({ allowed: false, email: `${unique('mx-denied')}@outside.invalid`, verified: true });
       const invitation = ok(await local('POST', `${base}/invitations`, { email: guestEmail, role: 'member' }, a.cookie), 201);
@@ -703,6 +718,7 @@ describe('Google dashboard sessions and current-policy authorization', () => {
       const guest = await login({ allowed: true, email: guestEmail, verified: true, sub: guestSub }, invitation.acceptUrl);
       const me = ok(await local('GET', '/v1/me', undefined, guest));
       assert.equal(me.workspaceId, a.org.id); assert.equal(me.role, 'member'); assert.deepEqual(me.permissions, ['read','send']);
+      error(await local('POST', '/v1/workspaces', { name: 'Guest workspace' }, guest), 403, 'SIGNUP_NOT_APPROVED');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
