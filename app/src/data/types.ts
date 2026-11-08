@@ -145,7 +145,8 @@ export interface ReceivedEmailDetail extends ReceivedEmail {
 }
 export interface WebhookDelivery { id: string; at: ISODate; regionId: RegionId; event: WebhookEvent; response: number | null; attempts: number; status: 'delivered' | 'retry_pending' | 'pending' | 'failed' | 'paused'; payload: Record<string, unknown> }
 export interface Webhook { id: string; name: string; url: string; regionIds: RegionId[] | 'all'; events: WebhookEvent[]; status: 'active' | 'paused'; secretHint: string; headers: WebhookHeaderView[]; deliveries: WebhookDelivery[]; nextCursor?: string | null }
-export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'regionIds' | 'events'> & { id?: string; headers?: WebhookHeaderInput[] }
+// An update without regionIds keeps the endpoint's saved region scope.
+export type WebhookInput = Pick<Webhook, 'name' | 'url' | 'events'> & { regionIds?: Webhook['regionIds']; id?: string; headers?: WebhookHeaderInput[] }
 export interface ImportRow { email: string; name?: string; country?: string; subscribed?: boolean }
 export interface ImportResult { created: number; matched: number; skipped: number; issues: { row: number; message: string }[] }
 export class ApiError extends Error {

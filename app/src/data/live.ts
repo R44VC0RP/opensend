@@ -139,7 +139,7 @@ export function createLiveApi(): OpenSendApi {
     workspace: { get: getWorkspace, update: async (input, signal) => { await call('/settings/workspace', 'PATCH', input, signal); return getWorkspace(signal) } },
     overview: { get: async (input, signal) => {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
-      const params = new URLSearchParams({ region: input.regionId, from: start.toISOString(), to: end.toISOString() })
+      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
       if (input.stream) params.set('stream', input.stream)
       const hourly = input.range !== '30d'
       // One request returns the chart buckets, the previous period's totals and each stream's totals.
@@ -250,7 +250,7 @@ export function createLiveApi(): OpenSendApi {
       remove: async (id, signal) => { await call(`/templates/${idPath(id)}`, 'DELETE', undefined, signal) },
       preview: (id, published = false, signal) => call(`/templates/${idPath(id)}/preview?published=${published}`, 'GET', undefined, signal),
     },
-    domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)), remove: async (id, signal) => { await call(`/domains/${idPath(id)}`, 'DELETE', undefined, signal) } },
+    domains: { list: (input, signal) => page('/domains', input, mapDomain, {region: input.regionId, refresh: input.refresh === false ? 'false' : undefined}, signal), get: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapDomain(await call('/domains', 'POST', {name: input.name, region: input.regionId || undefined}, signal)), configureMailFrom: async (id, mailFromDomain, signal) => mapDomain(await call(`/domains/${idPath(id)}/mail-from`, 'POST', {mailFromDomain}, signal)), verify: async (id, signal) => mapDomain(await call(`/domains/${idPath(id)}/verify`, 'POST', undefined, signal)), remove: async (id, signal) => { await call(`/domains/${idPath(id)}`, 'DELETE', undefined, signal) } },
     mailboxes: {
       domains: async signal => (await inboundCall<{ data: MailboxDomain[] }>('/domains', 'GET', undefined, signal)).data,
       domain: (id, signal) => inboundCall<MailboxDomain>(`/domains/${idPath(id)}`, 'GET', undefined, signal),
@@ -287,7 +287,7 @@ export function createLiveApi(): OpenSendApi {
     webhooks: {
       list: async (signal, cursor) => {const result = await call(`/webhooks?limit=20${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data.map(mapWebhook), {nextCursor: result.nextCursor})},
       get: async (id, signal) => { const [row, history] = await Promise.all([call(`/webhooks/${idPath(id)}`, 'GET', undefined, signal), deliveries(id)]); return {...mapWebhook(row), deliveries: history.items, nextCursor: history.nextCursor} },
-      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url, regions: input.regionIds === 'all' ? null : input.regionIds, eventTypes: input.events, headers: input.headers}, signal)),
+      save: async (input, signal) => mapWebhook(await call(input.id ? `/webhooks/${idPath(input.id)}` : '/webhooks', input.id ? 'PATCH' : 'POST', {description: input.name, url: input.url, ...(input.regionIds === undefined ? {} : {regions: input.regionIds === 'all' ? null : input.regionIds}), eventTypes: input.events, headers: input.headers}, signal)),
       setStatus: async (id, status, signal) => mapWebhook(await call(`/webhooks/${idPath(id)}`, 'PATCH', {paused: status === 'paused'}, signal)),
       test: async (id, signal) => { const queued = await call(`/webhooks/${idPath(id)}/test`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(queued.id)}`, 'GET', undefined, signal)) },
       retry: async (id, deliveryId, signal) => { await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}/retry`, 'POST', undefined, signal); return mapDelivery(await call(`/webhooks/${idPath(id)}/deliveries/${idPath(deliveryId)}`, 'GET', undefined, signal)) },

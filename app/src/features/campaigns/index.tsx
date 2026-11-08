@@ -45,14 +45,16 @@ const campaignInput = (campaign: Campaign): CampaignInput => ({
 export function CampaignEditorPage() {
   const { id } = useParams()
   const { regionId } = useRegion()
-  const regions = useRegionCatalog({ enabled: !id })
-  const fallbackRegion = regionId || regions.data?.defaultRegion || ''
+  // Hosted campaigns follow their From domain's region, so a new draft needs no region at all.
+  const { multiTenant } = useWorkspaceAccess()
+  const regions = useRegionCatalog({ enabled: !id && !multiTenant })
+  const fallbackRegion = multiTenant ? '' : regionId || regions.data?.defaultRegion || ''
   const scope = useRef({ id, key: id ?? 'new', createdId: null as string | null })
   if (scope.current.id !== id) {
     const ownCreation = !scope.current.id && id === scope.current.createdId
     scope.current = { id, key: ownCreation ? scope.current.key : id ?? 'new', createdId: null }
   }
-  if (!id && !fallbackRegion) return <CampaignRouteSkeleton kind="editor" isNew />
+  if (!id && !multiTenant && !fallbackRegion) return <CampaignRouteSkeleton kind="editor" isNew />
   return <CampaignEditorLoader key={scope.current.key} id={id} fallbackRegion={fallbackRegion} preserveEditor={next => {scope.current.createdId = next.id}} />
 }
 
@@ -83,6 +85,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
 
 function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: Campaign | null; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
   const toast = useToast()
+  const { multiTenant } = useWorkspaceAccess()
   const api = useApi()
   const navigate = useNavigate()
   const [accepted, setAccepted] = useState(initial)
@@ -216,7 +219,7 @@ function CampaignEditor({ initial, fallbackRegion, preserveEditor }: { initial: 
     const validation = !input.name.trim() ? 'Enter a campaign name.'
       : continuing && !input.subject.trim() ? 'Enter a subject before continuing.'
       : (continuing || input.fromEmail.trim()) && !emailIsValid(input.fromEmail.trim()) ? 'Enter a valid sender email address.'
-      : !input.regionId.trim() || input.regionId.trim().length > 40 ? 'Enter a region identifier of 1–40 characters.'
+      : !multiTenant && (!input.regionId.trim() || input.regionId.trim().length > 40) ? 'Enter a region identifier of 1–40 characters.'
       : continuing && !input.listId ? 'Choose a recipient list before continuing.' : ''
     if (validation) { if (!automatic) reportError(validation); return }
     guard.current = true
@@ -367,7 +370,8 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const [testOpen, setTestOpen] = useState(false)
   const [pace, setPace] = useState({ limit: false, perDay: '50000', autoPause: true, share: '50' })
   const guard = useRef(false)
-  const { canAdminister } = useWorkspaceAccess()
+  const { canAdminister, multiTenant } = useWorkspaceAccess()
+  const origin = multiTenant ? '' : ` from ${campaign.regionId}`
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
   const readinessError = campaignReadinessError(campaign)
@@ -460,7 +464,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
       {!canAdminister && <Alert tone="info">Only owners and admins can send or schedule campaigns.</Alert>}
       <div className="campaign-delivery-actions"><Button variant="secondary" disabled={sendMutation.isPending} onClick={() => navigate(campaignRoute(campaign, 'edit'))}>Back to draft</Button><Button variant="primary" loading={sendMutation.isPending} disabled={!canAdminister || Boolean(readinessError) || Boolean(audience.data && !audience.data.eligible)} onClick={requestConfirmation}>{mode === 'schedule' ? 'Schedule campaign' : 'Send campaign now'}</Button></div>
     </section>}
-    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `Send “${campaign.name}” from ${campaign.regionId} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
+    <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? 'Schedule this campaign?' : 'Send this campaign now?'} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} on ${date(confirmation.scheduledAt)} at ${time(confirmation.scheduledAt!)} UTC.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery.` : `Send “${campaign.name}”${origin} to ${audience.data ? `${number(audience.data.eligible)} eligible recipients` : `the selected audience (${campaign.listId})`} now.${paceSummary(confirmation)} OpenSend validates the complete audience before delivery; this action cannot be undone.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Confirm schedule' : 'Confirm send'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog id={campaign.id} open={testOpen} onOpenChange={setTestOpen} />}
   </div>
 }

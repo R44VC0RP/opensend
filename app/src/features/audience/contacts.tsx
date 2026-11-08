@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { Plus } from 'lucide-react'
-import { useApiMutation, useApiDef, useApiQuery, useRegion, useApi } from '../../data/context'
+import { useApiMutation, useApiDef, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ContactStatus, ConsentInput } from '../../data/types'
 import { Alert, Button, Checkbox, ConfirmDialog, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
@@ -90,10 +90,11 @@ function ContactDetails({ contact }: { contact: Contact }) {
 }
 function ContactActivity({ email }: { email: string }) {
   const { regionId } = useRegion()
+  const { multiTenant } = useWorkspaceAccess()
   const [page, setPage] = useState(1)
   const params = { search: email, page, pageSize: 5, regionId }
   const query = useApiQuery(['emails', 'contact-activity', params], (api, signal) => api.emails.list(params, signal))
-  return <section className="section"><SectionHeader title="Matching emails" /><p className="muted">Emails in {regionId}</p>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable rows={query.data?.items || []} loading={query.isPending} skeletonRows={5} minRows={5} rowKey={row => row.id} empty={<EmptyState title="No email activity" />} columns={[{ ...activityColumns[0], render: row => <Link className="audience-cell-text" title={row.subject} to={`/logs/${row.id}`}>{row.subject}</Link> }, { ...activityColumns[1], render: row => <StatusBadge status={row.status} /> }, { ...activityColumns[2], render: row => date(row.sentAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={5} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</section>
+  return <section className="section"><SectionHeader title="Matching emails" />{!multiTenant && <p className="muted">Emails in {regionId}</p>}{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable rows={query.data?.items || []} loading={query.isPending} skeletonRows={5} minRows={5} rowKey={row => row.id} empty={<EmptyState title="No email activity" />} columns={[{ ...activityColumns[0], render: row => <Link className="audience-cell-text" title={row.subject} to={`/logs/${row.id}`}>{row.subject}</Link> }, { ...activityColumns[1], render: row => <StatusBadge status={row.status} /> }, { ...activityColumns[2], render: row => date(row.sentAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={5} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</section>
 }
 
 function ConsentHistory({id}: {id: string}) {

@@ -1,37 +1,40 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge } from '../../components/ui'
-import { useApiMutation, useApiDef, useApiQuery, useApi } from '../../data/context'
+import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
 import { date, label, number, time } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import { fieldError, MutationError, SecretDialog } from './shared'
-import { settingsColumns, SettingsRouteSkeleton, WebhookBodySkeleton } from './skeletons'
+import { deliveryColumns, SettingsRouteSkeleton, WebhookBodySkeleton, webhookColumns } from './skeletons'
 import { headerDraftErrors, HeaderNames, headerPayload, WebhookHeadersField, type HeaderDraft } from './webhook-headers'
 
 const events: WebhookEvent[] = ['email.sent', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'email.rendering_failed', 'email.delivery_delayed', 'email.opened', 'email.clicked', 'contact.subscription_changed']
 const blankEndpoint: WebhookInput = { name: '', url: '', regionIds: 'all', events: [...events] }
+const column = (columns: ReturnType<typeof webhookColumns>, key: string) => columns.find(item => item.key === key)!
 const eventLabel = (event: string) => label(event.replace(/^email\./, '').replace('.', '_'))
-function scopeText(scope: WebhookInput['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }
+function scopeText(scope: Webhook['regionIds']) { return scope === 'all' ? 'All regions' : scope.join(', ') }
 function validate(input: WebhookInput) {
   const errors: Record<string, string> = {}
   if (!input.name.trim()) errors.name = 'Enter an endpoint name.'
   try { const url = new URL(input.url.trim()); if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) errors.url = 'Enter an HTTPS URL without embedded credentials.' } catch { errors.url = 'Enter a valid HTTPS endpoint URL.' }
-  if (input.regionIds !== 'all' && (input.regionIds.length === 0 || input.regionIds.some(region => !region.trim()))) errors.regionIds = 'Choose at least one region.'
+  if (input.regionIds && input.regionIds !== 'all' && (input.regionIds.length === 0 || input.regionIds.some(region => !region.trim()))) errors.regionIds = 'Choose at least one region.'
   if (input.events.length === 0) errors.events = 'Choose at least one event.'
   return errors
 }
 
 function EndpointFields({ input, onChange, regions, errors, apiError, disabled, headers }: { input: WebhookInput; onChange: (input: WebhookInput) => void; regions: RegionCatalogEntry[]; errors: Record<string, string>; apiError: unknown; disabled: boolean; headers: { current: Webhook['headers']; draft: HeaderDraft; onChange: (draft: HeaderDraft) => void } }) {
+  // Hosted endpoints leave regionIds out: they cover every region and an update keeps the saved scope.
+  const scope = input.regionIds
   return <div className="stack">
     <div className="form-grid">
       <Field label="Name" htmlFor="endpoint-name" error={errors.name || fieldError(apiError, 'name')}><Input id="endpoint-name" value={input.name} onChange={event => onChange({ ...input, name: event.target.value })} required disabled={disabled} placeholder="Support notifications" /></Field>
       <Field label="Endpoint URL" htmlFor="endpoint-url" error={errors.url || fieldError(apiError, 'url')}><Input id="endpoint-url" type="url" value={input.url} onChange={event => onChange({ ...input, url: event.target.value })} required disabled={disabled} placeholder="https://support.acme.com/hooks/email" /></Field>
     </div>
-    <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={input.regionIds === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={input.regionIds === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
-    {input.regionIds !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = input.regionIds !== 'all' && input.regionIds.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => { const selected = input.regionIds === 'all' ? [] : input.regionIds; onChange({ ...input, regionIds: next ? [...selected, region.region] : selected.filter(id => id !== region.region) }) }} /> })}</div>}</div>
+    {scope !== undefined && <div className="stack settings-region-scope"><Field label="Region scope" htmlFor="endpoint-scope" error={errors.regionIds || fieldError(apiError, 'regionIds')} hint={scope === 'all' ? 'Includes future regions.' : undefined}><Select id="endpoint-scope" value={scope === 'all' ? 'all' : 'selected'} onValueChange={value => onChange({ ...input, regionIds: value === 'all' ? 'all' : regions.filter(region => region.enabled).map(region => region.region) })} disabled={disabled} options={[{ value: 'all', label: 'All regions' }, { value: 'selected', label: 'Selected regions' }]} /></Field>
+    {scope !== 'all' && <div className="settings-choices" role="group" aria-label="Selected regions">{regions.map(region => { const checked = scope.includes(region.region); return <Checkbox key={region.region} label={`${region.region}${region.enabled ? '' : ' · Disabled'}`} checked={checked} disabled={disabled || (!region.enabled && !checked)} onCheckedChange={next => onChange({ ...input, regionIds: next ? [...scope, region.region] : scope.filter(id => id !== region.region) })} /> })}</div>}</div>}
     <div className="ui-field"><div id="endpoint-events-label" className="ui-field__label">Events</div><div className="settings-choices" role="group" aria-labelledby="endpoint-events-label" aria-describedby={errors.events || fieldError(apiError, 'events') ? 'endpoint-events-error' : undefined}>{events.map(event => <Checkbox key={event} label={eventLabel(event)} checked={input.events.includes(event)} disabled={disabled} onCheckedChange={checked => onChange({ ...input, events: checked ? [...input.events, event] : input.events.filter(current => current !== event) })} />)}</div>{(errors.events || fieldError(apiError, 'events')) && <div id="endpoint-events-error" className="ui-field__error" role="alert">{errors.events || fieldError(apiError, 'events')}</div>}</div>
     <WebhookHeadersField current={headers.current} draft={headers.draft} onChange={headers.onChange} errors={errors} apiError={apiError} disabled={disabled} />
   </div>
@@ -42,14 +45,16 @@ export function WebhooksSection() {
   const navigate = useNavigate()
   const pagination = useCursorPagination()
   const webhooks = useWebhooks(pagination.cursor)
+  const { multiTenant } = useWorkspaceAccess()
+  const columns = webhookColumns(multiTenant)
   return <section id="webhooks" className="section stack settings-group settings-rule">
     <SectionHeader title="Webhooks" actions={<Button onClick={() => navigate('/settings/webhooks/new')}>Add webhook</Button>} />
     {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable className="settings-webhooks-table" loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={webhook => webhook.id} onRowClick={webhook => navigate(`/settings/webhooks/${webhook.id}`)} empty={<EmptyState title="No webhooks" />} columns={[
-      { ...settingsColumns.webhooks[0], render: webhook => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
-      { ...settingsColumns.webhooks[1], render: webhook => scopeText(webhook.regionIds) },
-      { ...settingsColumns.webhooks[2], render: webhook => <span title={webhook.events.map(eventLabel).join(', ')}>{number(webhook.events.length)}</span> },
-      { ...settingsColumns.webhooks[3], render: webhook => <HeaderNames headers={webhook.headers} /> },
-      { ...settingsColumns.webhooks[4], render: webhook => <StatusBadge status={label(webhook.status)} /> },
+      { ...column(columns, 'name'), render: (webhook: Webhook) => <div className="settings-webhook-name"><Link to={`/settings/webhooks/${webhook.id}`} title={webhook.name}>{webhook.name}</Link><span className="muted" title={webhook.url}>{webhook.url}</span></div> },
+      ...multiTenant ? [] : [{ ...column(columns, 'scope'), render: (webhook: Webhook) => scopeText(webhook.regionIds) }],
+      { ...column(columns, 'events'), render: (webhook: Webhook) => <span title={webhook.events.map(eventLabel).join(', ')}>{number(webhook.events.length)}</span> },
+      { ...column(columns, 'headers'), render: (webhook: Webhook) => <HeaderNames headers={webhook.headers} /> },
+      { ...column(columns, 'status'), render: (webhook: Webhook) => <StatusBadge status={label(webhook.status)} /> },
     ]} />}
     {webhooks.data && <Pagination page={pagination.page} pageSize={20} nextCursor={webhooks.data.nextCursor} onPageChange={next => pagination.onPageChange(next, webhooks.data.nextCursor)} />}
   </section>
@@ -57,9 +62,11 @@ export function WebhooksSection() {
 
 function NewWebhook() {
   const navigate = useNavigate()
-  const regions = useRegionCatalog()
+  const { multiTenant } = useWorkspaceAccess()
+  const regions = useRegionCatalog({ enabled: !multiTenant })
   const save = useApiMutation((api, input: WebhookInput) => api.webhooks.save(input), 'Webhook endpoint created')
-  const [input, setInput] = useState<WebhookInput>(blankEndpoint)
+  // Hosted endpoints are created without a region scope, so they cover every region.
+  const [input, setInput] = useState<WebhookInput>(() => multiTenant ? { name: '', url: '', events: [...events] } : blankEndpoint)
   const [headers, setHeaders] = useState<HeaderDraft>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   async function submit(event: FormEvent) {
@@ -71,9 +78,9 @@ function NewWebhook() {
   }
   return <div className="stack settings-page">
     <PageHeader title="Add webhook" backTo="/settings#webhooks" />
-    {regions.isPending ? <WebhookBodySkeleton isNew /> : regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
+    {!multiTenant && regions.isPending ? <WebhookBodySkeleton isNew /> : !multiTenant && regions.error ? <ErrorState error={regions.error} onRetry={() => void regions.refetch()} /> : <form className="stack" onSubmit={submit} noValidate>
       <MutationError error={save.error} />
-      <EndpointFields input={input} onChange={setInput} regions={regions.data.data} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
+      <EndpointFields input={input} onChange={setInput} regions={regions.data?.data ?? []} errors={errors} apiError={save.error} disabled={save.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
       <div className="cluster"><Button disabled={save.isPending} onClick={() => navigate('/settings#webhooks')}>Cancel</Button><Button variant="primary" type="submit" loading={save.isPending}>Add endpoint</Button></div>
     </form>}
   </div>
@@ -81,15 +88,19 @@ function NewWebhook() {
 
 function ExistingWebhook({ id }: { id: string }) {
   const webhook = useApiQuery(['webhook', id], (api, signal) => api.webhooks.get(id, signal))
-  const regions = useRegionCatalog()
-  if (webhook.isPending || regions.isPending) return <SettingsRouteSkeleton kind="webhook" />
-  if (webhook.error || regions.error) return <ErrorState error={webhook.error || regions.error} onRetry={() => { void webhook.refetch(); void regions.refetch() }} />
-  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data.data} />
+  const { multiTenant } = useWorkspaceAccess()
+  const regions = useRegionCatalog({ enabled: !multiTenant })
+  if (webhook.isPending || (!multiTenant && regions.isPending)) return <SettingsRouteSkeleton kind="webhook" />
+  if (webhook.error || (!multiTenant && regions.error)) return <ErrorState error={webhook.error || regions.error} onRetry={() => { void webhook.refetch(); if (!multiTenant) void regions.refetch() }} />
+  return <WebhookEditor key={id} webhook={webhook.data} regions={regions.data?.data ?? []} />
 }
 
 function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: RegionCatalogEntry[] }) {
   const navigate = useNavigate()
-  const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: webhook.url, regionIds: webhook.regionIds, events: webhook.events })
+  const { multiTenant } = useWorkspaceAccess()
+  // Hosted users can't change the region scope, so their updates leave it out and keep the saved one.
+  const [input, setInput] = useState<WebhookInput>({ id: webhook.id, name: webhook.name, url: webhook.url, ...multiTenant ? {} : { regionIds: webhook.regionIds }, events: webhook.events })
+  const deliveryColumnSet = deliveryColumns(multiTenant)
   const [headers, setHeaders] = useState<HeaderDraft>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [action, setAction] = useState<'pause' | 'resume' | 'rotate' | 'delete' | null>(null)
@@ -139,19 +150,19 @@ function WebhookEditor({ webhook, regions }: { webhook: Webhook; regions: Region
     <section className="section stack settings-rule"><SectionHeader title="Signing secret" actions={<><Button disabled={pending} onClick={() => setAction('rotate')}>Rotate</Button><Button loading={test.isPending} disabled={pending || webhook.status === 'paused'} title={webhook.status === 'paused' ? 'Resume this endpoint to test delivery' : undefined} onClick={async () => { try { await test.mutateAsync(webhook.id); setHistory(null) } catch { /* Shown inline. */ } }}>Test endpoint</Button></>} /><code>{webhook.secretHint}</code><MutationError error={test.error} /></section>
     <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><MutationError error={retry.error} />
       <DataTable minRows={3} rows={history?.items ?? webhook.deliveries} rowKey={delivery => delivery.id} empty={<EmptyState title="No deliveries yet" />} columns={[
-        { ...settingsColumns.deliveries[0], render: delivery => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
-        { ...settingsColumns.deliveries[1], render: delivery => delivery.regionId },
-        { ...settingsColumns.deliveries[2], render: delivery => eventLabel(delivery.event) },
-        { ...settingsColumns.deliveries[3], render: delivery => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
-        { ...settingsColumns.deliveries[4], render: delivery => number(delivery.attempts) },
-        { ...settingsColumns.deliveries[5], render: delivery => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
+        { ...column(deliveryColumnSet, 'time'), render: (delivery: WebhookDelivery) => <div>{time(delivery.at)}<div className="muted">{date(delivery.at)}</div></div> },
+        ...multiTenant ? [] : [{ ...column(deliveryColumnSet, 'region'), render: (delivery: WebhookDelivery) => delivery.regionId }],
+        { ...column(deliveryColumnSet, 'event'), render: (delivery: WebhookDelivery) => eventLabel(delivery.event) },
+        { ...column(deliveryColumnSet, 'status'), render: (delivery: WebhookDelivery) => <div className="settings-cell-stack"><div>{delivery.response || 'No response'}</div><StatusBadge status={label(delivery.status)} /></div> },
+        { ...column(deliveryColumnSet, 'attempts'), render: (delivery: WebhookDelivery) => number(delivery.attempts) },
+        { ...column(deliveryColumnSet, 'actions'), render: (delivery: WebhookDelivery) => <div className="cluster settings-row-actions">{['retry_pending', 'failed'].includes(delivery.status) && <Button disabled={pending || webhook.status === 'paused'} loading={retry.isPending && retry.variables?.deliveryId === delivery.id} onClick={async () => { try { await retry.mutateAsync({ id: webhook.id, deliveryId: delivery.id }); setHistory(null); historyPagination.reset() } catch { /* Shown inline. */ } }}>Retry now</Button>}<Button variant="ghost" onClick={() => setInspected(delivery)}>Inspect</Button></div> },
       ]} />
       <MutationError error={historyError} />{api.webhookDeliveries && (historyBusy ? <PaginationSkeleton /> : <Pagination page={historyPagination.page} pageSize={20} nextCursor={currentHistoryCursor} onPageChange={next => void changeHistoryPage(next)} />)}
     </section>
     <div><Button variant="danger" disabled={pending} onClick={() => setAction('delete')}>Delete endpoint</Button></div>
     <ConfirmDialog open={action !== null} onOpenChange={open => { if (!open) setAction(null) }} title={actionTitle} description={actionDescription} confirmLabel={action === 'rotate' ? 'Rotate secret' : action === 'delete' ? 'Delete endpoint' : action === 'pause' ? 'Pause endpoint' : 'Resume endpoint'} danger={action === 'delete' || action === 'rotate'} pending={pending} onConfirm={confirm} />
     <SecretDialog secret={secret} title={`${webhook.name} · New signing secret`} onClose={() => { setSecret(null); rotate.reset() }} />
-    <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title="Delivery payload" description={inspected ? `${eventLabel(inspected.event)} · ${inspected.regionId} · ${label(inspected.status)}` : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
+    <Dialog open={inspected !== null} onOpenChange={open => { if (!open) setInspected(null) }} title="Delivery payload" description={inspected ? [eventLabel(inspected.event), ...multiTenant ? [] : [inspected.regionId], label(inspected.status)].join(' · ') : undefined} footer={<Button onClick={() => setInspected(null)}>Close</Button>}><pre className="settings-payload">{JSON.stringify(inspected?.payload ?? {}, null, 2)}</pre></Dialog>
   </div>
 }
 

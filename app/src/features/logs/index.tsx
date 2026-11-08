@@ -28,9 +28,10 @@ export function LogsPage() {
 function LogsHeader({ regionId, view }: { regionId: string; view: 'sent' | 'received' }) {
   const [params, setParams] = useSearchParams()
   const selected = useRegion().regionId
-  const { canAdminister } = useWorkspaceAccess()
+  const { canAdminister, multiTenant } = useWorkspaceAccess()
   // The sidebar's region selector already names the region; repeat it only when it is hidden or a campaign filter shows another region.
-  return <><PageHeader title="Logs" actions={!canAdminister || regionId !== selected ? <span className="muted">{regionId}</span> : undefined} />
+  // Hosted logs span every region and name none.
+  return <><PageHeader title="Logs" actions={!multiTenant && (!canAdminister || regionId !== selected) ? <span className="muted">{regionId}</span> : undefined} />
     <Tabs label="Log type" value={view} onValueChange={value => { const next = new URLSearchParams(params); if (value === 'received') next.set('view', 'received'); else next.delete('view'); setParams(next) }} items={[{ value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]} /></>
 }
 function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?: string }) {
@@ -45,13 +46,14 @@ function RegionalLogs({ regionId, campaignId }: { regionId: string; campaignId?:
   const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
   useEffect(() => setPage(1), [pageSize])
   const navigate = useNavigate()
+  const { multiTenant } = useWorkspaceAccess()
   const params = { ...(campaignId ? { campaignId } : { regionId }), search, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, page, pageSize }
   const query = useApiDef(queries.emails(params), { interval: 30_000, enabled: measured, keepPrevious: true })
   return <div className="logs-page"><LogsHeader regionId={campaign.data?.regionId ?? regionId} view="sent" />
     <div className="data-toolbar"><div className="cluster">{campaignId && <Button variant="secondary" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign}>Campaign: {campaign.data?.name ?? campaignId}<X size={14} aria-hidden /></Button>}<div className="search-box"><Search size={16} /><Input type="search" aria-label="Search email logs" placeholder="Search logs" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
       <Select aria-label="Email status" value={status} onValueChange={value => { setStatus(value); setPage(1) }} options={['all', 'queued', 'attempting', 'accepted', 'sent', 'delivered', 'bounced', 'complained', 'rejected', 'rendering_failed', 'delayed', 'suppressed', 'canceled', 'acceptance_unknown', 'simulated'].map(value => ({ value, label: value === 'all' ? 'All statuses' : label(value) }))} />
       <Select aria-label="Email stream filter" value={stream} onValueChange={value => { setStream(value); setPage(1) }} options={[{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]} /></div>
-      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `opensend-${campaignId}-logs-page.csv` : 'opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', 'Region'], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, email.regionId])])}><Download size={16} />Export page</Button>
+      <Button disabled={!query.data?.items.length} onClick={() => downloadCsv(campaignId ? `opensend-${campaignId}-logs-page.csv` : 'opensend-logs-page.csv', [['Status', 'Recipient', 'Subject', 'Stream', 'Created at', ...multiTenant ? [] : ['Region']], ...(query.data?.items ?? []).map(email => [email.status, email.to, email.subject, email.stream, email.sentAt, ...multiTenant ? [] : [email.regionId]])])}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<Email> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/${row.id}`)} columns={[
@@ -71,6 +73,7 @@ const receivedColumns = [{ key: 'time', label: 'Received · UTC', width: 150 }, 
 const mailboxLabel = (row: ReceivedEmail) => row.addresses.map(mailbox => mailbox.address).join(', ') || 'Unrouted'
 function ReceivedLogs({ regionId }: { regionId: string }) {
   const navigate = useNavigate()
+  const { multiTenant } = useWorkspaceAccess()
   const [search, setSearch] = useState('')
   const pagination = useCursorPagination()
   const { pageSize, tableRef, measured } = useAdaptivePageSize(5, 100)
@@ -78,7 +81,7 @@ function ReceivedLogs({ regionId }: { regionId: string }) {
   const query = useApiQuery(['received', regionId, search, cursor, pageSize], (api, signal) => api.mailboxes.received({ regionId, search: search.trim() || undefined, cursor, pageSize }, signal), { interval: 30_000, enabled: measured })
   return <div className="logs-page"><LogsHeader regionId={regionId} view="received" />
     <div className="data-toolbar"><div className="cluster"><div className="search-box"><Search size={16} /><Input type="search" aria-label="Search received email" placeholder="Search received mail" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div></div>
-      <Button disabled={!query.data?.length} onClick={() => downloadCsv('opensend-received-page.csv', [['Received at', 'From', 'To', 'Address', 'Subject', 'Spam', 'Region'], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', row.region ?? ''])])}><Download size={16} />Export page</Button>
+      <Button disabled={!query.data?.length} onClick={() => downloadCsv('opensend-received-page.csv', [['Received at', 'From', 'To', 'Address', 'Subject', 'Spam', ...multiTenant ? [] : ['Region']], ...(query.data ?? []).map(row => [row.receivedAt, row.from.address, row.envelopeTo.join(' '), mailboxLabel(row), row.subject, row.spam ? 'yes' : 'no', ...multiTenant ? [] : [row.region ?? '']])])}><Download size={16} />Export page</Button>
     </div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
       <DataTable<ReceivedEmail> className="logs-table" tableRef={tableRef} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rows={query.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/logs/received/${row.id}`)} columns={[
@@ -106,6 +109,7 @@ export function ReceivedEmailDetailPage() {
   return <ReceivedEmailDetailView email={query.data} />
 }
 function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
+  const { multiTenant } = useWorkspaceAccess()
   const [view, setView] = useState('preview')
   // Inline images reference attachments by Content-ID; point them at the signed S3 links.
   const html = email.attachments.reduce((value, file) => file.contentId && file.url ? value.split(`cid:${file.contentId}`).join(file.url) : value, email.html ?? '')
@@ -134,7 +138,7 @@ function ReceivedEmailDetailView({ email }: { email: ReceivedEmailDetail }) {
         <Paperclip size={14} aria-hidden />{file.url ? <a href={file.url} target="_blank" rel="noreferrer">{file.filename}</a> : <span>{file.filename}</span>}<span className="muted">{fileSize(file.size)}{file.disposition === 'inline' ? ' · inline' : ''}</span>
       </li>)}</ul></div>}
     </section></div>
-    <div className="message-identifiers"><span className="cluster">Message ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy message ID" /></span>{email.messageId && <span className="cluster">Message-ID <span className="identifier" title={email.messageId}>{email.messageId}</span><CopyButton value={email.messageId} label="Copy Message-ID header" /></span>}<span>SES · {email.region ?? '—'}</span></div>
+    <div className="message-identifiers"><span className="cluster">Message ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy message ID" /></span>{email.messageId && <span className="cluster">Message-ID <span className="identifier" title={email.messageId}>{email.messageId}</span><CopyButton value={email.messageId} label="Copy Message-ID header" /></span>}{!multiTenant && <span>SES · {email.region ?? '—'}</span>}</div>
   </div>
 }
 
@@ -149,6 +153,7 @@ export function EmailDetailPage() {
 }
 function EmailDetail({ email }: { email: Email }) {
   const navigate = useNavigate()
+  const { multiTenant } = useWorkspaceAccess()
   const api = useApi()
   const [events, setEvents] = useState(email.events)
   const [cursor, setCursor] = useState(email.eventsNextCursor)
@@ -168,7 +173,7 @@ function EmailDetail({ email }: { email: Email }) {
     <div className="email-detail-grid"><section><Tabs value={view} onValueChange={setView} items={[{ value: 'preview', label: 'Preview' }, { value: 'html', label: 'HTML' }, { value: 'plain', label: 'Plain text' }]} />
       {view === 'preview' ? hasHtml ? <EmailPreview html={email.html} title="Email message preview" attachmentIds={email.attachments} remoteImages /> : hasPlainText ? <pre className="plain-text-preview">{plainText}</pre> : <EmptyState title="No message snapshot available" /> : <pre className="message-source">{view === 'html' ? email.html || 'No HTML snapshot available.' : hasPlainText ? plainText : 'No plain-text snapshot available.'}</pre>}
     </section><section className="delivery-timeline"><SectionHeader title="Delivery timeline" actions={<span className="muted">UTC</span>} /><ol>{events.map(event => <li key={event.id}><span className={`timeline-dot ui-tone--${eventTone(event.type)}`} /><div><div className="cluster between"><span>{eventLabel(event.type)}</span><time className="muted">{time(event.at)}</time></div><p className="muted">{event.description}</p>{event.diagnostic && <pre className="diagnostic">{event.diagnostic}</pre>}</div></li>)}</ol>{eventError && <Alert tone="danger">{eventError}</Alert>}{cursor && api.emailEvents && <Button loading={eventBusy} onClick={async () => {setEventBusy(true); setEventError(''); try {const next = await api.emailEvents!(email.id, cursor); setEvents(previous => [...previous, ...next.items]); setCursor(next.nextCursor)} catch (error) {setEventError(error instanceof Error ? error.message : 'Could not load events.')} finally {setEventBusy(false)}}}>Load more events</Button>}</section></div>
-    <div className="message-identifiers"><span className="cluster">Email ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy email ID" /></span><span>Created {date(email.sentAt)} · {time(email.sentAt)} UTC</span><span>SES · {email.regionId}</span></div>
+    <div className="message-identifiers"><span className="cluster">Email ID <span className="identifier">{email.id}</span><CopyButton value={email.id} label="Copy email ID" /></span><span>Created {date(email.sentAt)} · {time(email.sentAt)} UTC</span>{!multiTenant && <span>SES · {email.regionId}</span>}</div>
   </div>
 }
 

@@ -14,14 +14,15 @@ export const routeChunks: Record<string, () => Promise<unknown>> = {}
 type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean }
 // The first screen of each page with its default filters: exactly what the page asks for when it opens.
 function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Scope): QueryDef<unknown>[] {
+  const scoped = multiTenant || Boolean(regionId)
   switch (path) {
-    case '/': return regionId ? [queries.overview(regionId, '24h', 'all')] : []
-    case '/logs': { const pageSize = rememberedPageSize('logs'); return regionId && pageSize ? [queries.emails({ regionId, search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
+    case '/': return scoped ? [queries.overview(regionId, '24h', 'all')] : []
+    case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.emails({ regionId, search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
     case '/inbound': return [queries.inboundAddressOptions(), queries.inboundThreads(undefined, 'inbox', '', undefined)]
     case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
     // Self-hosted domain reads call SES for every identity (the list refreshes by default), so only hosted workspaces warm it.
-    case '/domains': return multiTenant && canAdminister && regionId ? [queries.domains(regionId, 1)] : []
+    case '/domains': return multiTenant && canAdminister ? [queries.domains(regionId, 1)] : []
     case '/api-keys': return canAdminister ? [queries.keys(undefined, false), queries.agentTokens(false), queries.mcpConnections(), queries.mailboxKeys(false), queries.inboundAddressOptions()] : []
     // Self-hosted settings load their own region and workspace data.
     case '/settings': return !multiTenant ? [] : canAdminister ? [queries.connection(), queries.webhooks(), queries.workspaces(), queries.workspaceMembers(), queries.workspaceInvitations()] : [queries.workspaces()]

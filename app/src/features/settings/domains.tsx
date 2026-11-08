@@ -8,7 +8,7 @@ import { label } from '../../lib/format'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
 import { receivingStatus } from '../inbound/status'
 import { fieldError, MutationError } from './shared'
-import { DomainDetailSkeleton, settingsColumns } from './skeletons'
+import { DomainDetailSkeleton, domainColumns, settingsColumns } from './skeletons'
 import { DnsRecordTable, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
@@ -29,6 +29,7 @@ function setupSummary(domain: Domain) {
 
 export function DomainsPage() {
   const { regionId } = useRegion()
+  const { multiTenant } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState({ regionId, page: 1 })
   const page = pageState.regionId === regionId ? pageState.page : 1
@@ -51,10 +52,10 @@ export function DomainsPage() {
   return <div className="stack">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate}>Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title="No domains in this region" action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+      <DataTable loading={domains.isPending} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/domains/${row.id}`)} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
         { ...settingsColumns.domains[0], render: row => <Link to={`/domains/${row.id}`}>{row.name}</Link> },
-        { ...settingsColumns.domains[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus)) && <div className="muted">{setupSummary(row)}</div>}</div> },
-        { ...settingsColumns.domains[2], render: row => row.regionId },
+        { ...domainColumns(multiTenant)[1], render: row => <div className="settings-cell-stack"><StatusBadge status={label(row.status)} tone={row.status === 'issue' ? 'danger' : undefined} />{(row.status !== 'verified' || ['pending', 'failed'].includes(row.mailFromStatus)) && <div className="muted">{setupSummary(row)}</div>}</div> },
+        ...multiTenant ? [] : [{ ...settingsColumns.domains[2], render: (row: Domain) => row.regionId }],
       ]} />
       {domains.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={10} total={domains.data.total} nextCursor={domains.data.nextCursor} onPageChange={next => setPageState({ regionId, page: next })} />}
     </>}
@@ -62,7 +63,7 @@ export function DomainsPage() {
       <form id="add-domain" className="stack" onSubmit={submit} noValidate>
         <MutationError error={create.error} />
         <Field label="Domain name" htmlFor="domain-name" error={invalid || fieldError(create.error, 'name')}><Input id="domain-name" autoFocus required value={name} onChange={event => setName(event.target.value)} disabled={create.isPending} placeholder="updates.acme.com" /></Field>
-        <Field label="Sending region" htmlFor="domain-region"><Input id="domain-region" value={regionId} readOnly /></Field>
+        {!multiTenant && <Field label="Sending region" htmlFor="domain-region"><Input id="domain-region" value={regionId} readOnly /></Field>}
       </form>
     </Dialog>
   </div>
@@ -108,10 +109,10 @@ export function DomainDetailPage() {
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error} />
-    {regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
+    {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <dl className="settings-facts domain-facts">
       <div><dt>Status</dt><dd><StatusBadge status={state.status} tone={state.tone} /></dd></div>
-      <div><dt>Region</dt><dd>{current.regionId}</dd></div>
+      {!multiTenant && <div><dt>Region</dt><dd>{current.regionId}</dd></div>}
     </dl>
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
@@ -140,6 +141,7 @@ export function DomainDetailPage() {
 const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state === 'active' ? 'success' : state === 'missing' || state === 'error' ? 'info' : 'warning'
 
 function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
+  const { multiTenant } = useWorkspaceAccess()
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
   const enable = useApiMutation((api, force: boolean) => api.mailboxes.enableDomain(domainId, { force }), 'Receiving setup started')
   const disable = useApiMutation((api, _: void) => api.mailboxes.disableDomain(domainId), 'Receiving turned off')
@@ -169,7 +171,7 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
         <div><dt>Receiving</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
         <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_address' ? 'Create an address' : 'Store as unrouted'}</dd></div>
         <div><dt>Addresses</dt><dd><Link to="/inbound/addresses">{state.addressCount}</Link></dd></div>
-        <div><dt>Region</dt><dd>{state.region}</dd></div>
+        {!multiTenant && <div><dt>Region</dt><dd>{state.region}</dd></div>}
       </dl>
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}
       {state.status === 'provisioning' && <Alert tone="info">Creating the S3 bucket, SNS topic and SES receipt rule. This usually takes under a minute.</Alert>}

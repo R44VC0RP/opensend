@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { useApi, useApiMutation, useApiQuery, useRegion } from '../../data/context'
+import { useApi, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
 import type { CampaignTemplate, CampaignTemplateDraft } from '../../data/types'
 import { Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, Select, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
@@ -19,6 +19,8 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 export function TemplatesPage() {
   const navigate = useNavigate()
   const { regionId } = useRegion()
+  // Hosted campaigns follow their From domain's region, so they need no selected region.
+  const { multiTenant } = useWorkspaceAccess()
   const toast = useToast()
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
@@ -47,7 +49,7 @@ export function TemplatesPage() {
         {...templateColumns[0], render: row => <div className="campaign-row-name"><Link to={`/campaigns/templates/${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{row.name}</Link><span className="muted">{row.subject || row.description || 'No subject yet'}</span></div>},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => <span className="muted campaign-activity" title={`${date(row.updatedAt)} · ${time(row.updatedAt)} UTC`}>{shortDateTime(row.updatedAt)}</span>},
-        {...templateColumns[3], render: row => row.published && !archived ? <Button size="sm" variant="secondary" disabled={instantiate.isPending || !regionId} onClick={() => void createCampaign(row)}>Create campaign</Button> : null},
+        {...templateColumns[3], render: row => row.published && !archived ? <Button size="sm" variant="secondary" disabled={instantiate.isPending || (!regionId && !multiTenant)} onClick={() => void createCampaign(row)}>Create campaign</Button> : null},
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
     </>}

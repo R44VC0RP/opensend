@@ -162,7 +162,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const connectionState: ConnectionState | 'creating' = awsPhase === 'connected' ? 'ready' : current?.kind === 'byo' ? current.state : 'creating'
   const imported = importedCount(connection.data)
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
-    ready={stage.step === 'domain'} region={identity?.connection?.region ?? ''}
+    ready={stage.step === 'domain'}
     onAdded={id => setDomainStep(workspaceId, id)} onFinish={() => setDomainStep(workspaceId, null)} />
   let view: View, content: ReactNode
   if (stage.step === 'setup-required') { view = 'admin'; content = <AdminSetupRequired /> }
@@ -358,12 +358,12 @@ function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count:
 
 const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i
 
-type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; region: string; onAdded: (id: string) => void; onFinish: () => void }
+type AddDomainProps = { draft: string; onDraftChange: (value: string) => void; queued: boolean; onQueuedChange: (queued: boolean) => void; ready: boolean; onAdded: (id: string) => void; onFinish: () => void }
 // Before the connection is ready, a valid domain waits and is added as soon as it is.
-function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, region, onAdded, onFinish }: AddDomainProps) {
+function AddDomain({ draft, onDraftChange, queued, onQueuedChange, ready, onAdded, onFinish }: AddDomainProps) {
   const api = useApi()
   const client = useQueryClient()
-  const create = useApiMutation((api, name: string) => api.domains.create({ regionId: region, name }), undefined, true)
+  const create = useApiMutation((api, name: string) => api.domains.create({ regionId: '', name }), undefined, true)
   const [invalid, setInvalid] = useState('')
   const value = draft.trim().toLowerCase()
   async function add() {

@@ -39,8 +39,8 @@ export function agentPrompt({ origin, domain, email, multiTenant }: { origin: st
   const verified = domain.status === 'verified'
   const to = email ?? 'an address I control (ask me which)'
   lines.push(
-    `- Sending domain: ${domain.name} (region ${domain.regionId}, status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
-    `- Send a test email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send), region "${domain.regionId}" and an Idempotency-Key header. 202 means queued, not delivered.`,
+    `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
+    `- Send a test email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. 202 means queued, not delivered.`,
   )
   const mx = receivingMx(domain)
   if (mx) lines.push(multiTenant

@@ -18,7 +18,8 @@ export function AppShell() {
   const session = useSession()
   const access = useWorkspaceAccess()
   const location = useLocation()
-  const needsRegion = location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path))
+  // Hosted workspaces view every region at once, so no page waits on a selected region.
+  const needsRegion = !access.multiTenant && (location.pathname === '/' || ['/logs', '/domains'].some(path => location.pathname.startsWith(path)))
   const regions = useRegionCatalog()
   const enabled = regions.data?.data.filter(region => region.enabled) ?? []
   const current = regions.data?.data.find(region => region.region === regionId && region.enabled)
@@ -37,7 +38,7 @@ export function AppShell() {
   // first-screen queries, one request set per page, nothing already fresh). Hovering a link does the same at once.
   const warming = useRef(false)
   const content = useRef<HTMLElement>(null)
-  const regionReady = Boolean(current)
+  const regionReady = access.multiTenant || Boolean(current)
   useEffect(() => {
     const saveData = (navigator as { connection?: { saveData?: boolean } }).connection?.saveData
     if (warming.current || api.mode !== 'live' || !regionReady || saveData) return
@@ -71,8 +72,8 @@ export function AppShell() {
   }, [location.pathname])
   useEffect(() => {
     const preferred = regions.data?.defaultRegion
-    if (regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
-  }, [regions.data, current, enabled, setRegionId])
+    if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
+  }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   useEffect(() => { document.title = `${navigation.find(([path]) => path === '/' ? location.pathname === '/' : location.pathname.startsWith(path))?.[1] ?? 'opensend'} · opensend` }, [location.pathname])
   function changeRegion(id: string) {
     setRegionId(id)
@@ -93,8 +94,8 @@ export function AppShell() {
       <ThemeToggle />
       <div className="sidebar-context">
         {access.multiTenant && <WorkspaceSwitcher />}
-        {access.canAdminister && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
-        {access.canAdminister && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
+        {access.canAdminister && !access.multiTenant && <Select id="sidebar-view-region" aria-label="Viewing region" value={current?.region ?? ''} onValueChange={changeRegion} options={enabled.map(region => ({ value: region.region, label: region.region }))} disabled={regions.isPending || !enabled.length} placeholder={regions.isPending ? 'Loading regions…' : 'No enabled regions'} />}
+        {access.canAdminister && !access.multiTenant && regions.isError && <Button variant="ghost" onClick={() => regions.refetch()}>Retry regions</Button>}
         {api.mode === 'demo' && <span className="demo-indicator" title="Sample data; no external requests.">Demo mode</span>}
       </div>
       <nav className="main-navigation" aria-label="Main navigation">{navigation.filter(([path]) => access.canAdminister || !adminOnly.has(path)).map(([path, title]) => <NavLink key={path} to={path} end={path === '/'} {...intent(path)}>{title}</NavLink>)}</nav>

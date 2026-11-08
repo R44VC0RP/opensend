@@ -1,5 +1,6 @@
 import { Fragment } from 'react'
 import { ControlSkeleton, FieldSkeleton, Input, LoadingRegion, PageHeader, SectionHeader, Select, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn } from '../../components/ui'
+import { useWorkspaceAccess } from '../../data/context'
 import { AudienceHeader } from './header'
 import './audience.css'
 
@@ -50,10 +51,11 @@ export function AudiencePreviewSkeleton() {
   return <LoadingRegion label="Loading audience preview"><AudienceSummarySkeleton /><TableSkeleton columns={memberColumns} rows={8} /></LoadingRegion>
 }
 export function ContactDetailBodySkeleton() {
+  const { multiTenant } = useWorkspaceAccess()
   return <><div className="audience-summary cluster"><SkeletonText width={240} /><SkeletonText width={94} /></div>
     <div className="section form-grid audience-properties">{[{ title: 'Properties', labels: ['Full name', 'Country', 'Created', 'Last opened'] }, { title: 'Marketing consent', labels: ['Consent source', 'Confirmed', 'Suppression'] }].map(group => <section key={group.title}><SectionHeader title={group.title} /><dl>{group.labels.map(label => <Fragment key={label}><dt>{label}</dt><dd><SkeletonText width="65%" /></dd></Fragment>)}</dl></section>)}</div>
     <section className="section"><SectionHeader title="Lists" actions={<ControlSkeleton width={111} />} /><SkeletonText width={170} /></section>
-    <section className="section"><SectionHeader title="Matching emails" /><p className="muted"><SkeletonText width={110} /></p><TableSkeleton columns={activityColumns} rows={5} pagination /></section>
+    <section className="section"><SectionHeader title="Matching emails" />{!multiTenant && <p className="muted"><SkeletonText width={110} /></p>}<TableSkeleton columns={activityColumns} rows={5} pagination /></section>
   </>
 }
 export function SegmentEditorBodySkeleton() {

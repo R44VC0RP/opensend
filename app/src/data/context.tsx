@@ -224,8 +224,12 @@ export function RegionProvider({ children }: { children: ReactNode }) {
   }
   return <RegionContext.Provider value={{ regionId, setRegionId }}>{children}</RegionContext.Provider>
 }
+// Hosted workspaces send from a region the platform picks per sender, so they view every region at once:
+// an empty region omits the filter from every request.
+const allRegions = { regionId: '', setRegionId: () => {} }
 export function useRegion() {
   const region = useContext(RegionContext)
+  const multiTenant = useContext(SessionContext)?.identity?.multiTenant === true
   if (!region) throw new Error('RegionProvider is required')
-  return region
+  return multiTenant ? allRegions : region
 }
