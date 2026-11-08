@@ -80,6 +80,7 @@ export interface MailboxDomain {
   dns: { type: 'MX'; name: string; value: string; priority: number }[]
   mx: { state: 'active' | 'missing' | 'conflict' | 'mixed' | 'wrong_region' | 'null_mx' | 'cname' | 'error'; message: string; providers: string[]; checkedAt: ISODate } | null
   lastError: string | null; enabledAt: ISODate | null; checkedAt: ISODate | null; addressCount: number
+  subdomains?: { enabled: boolean; count: number; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
 }
 export interface Mailbox { id: string; address: string; displayName: string | null; domain: string; aliases: string[]; rules: string[]; origin: 'api' | 'auto'; createdAt: ISODate; updatedAt: ISODate; stats: { threads: number; unreadThreads: number; lastMessageAt: ISODate | null }; publicAddress?: string | null; expiresAt?: ISODate | null }
 export interface MailAddress { name: string | null; address: string }

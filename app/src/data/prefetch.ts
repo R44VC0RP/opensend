@@ -7,7 +7,7 @@ import type { OpenSendApi } from './types'
 
 // A warmed result stays fresh this long, so repeated hovers and the idle sweep never refetch it.
 const FRESH = 30_000
-export const sidebarPaths = ['/', '/logs', '/inbound', '/campaigns', '/audience', '/domains', '/api-keys', '/settings'] as const
+export const sidebarPaths = ['/', '/logs', '/receiving', '/campaigns', '/audience', '/domains', '/api-keys', '/settings'] as const
 // Filled by App.tsx with each route's chunk preload.
 export const routeChunks: Record<string, () => Promise<unknown>> = {}
 
@@ -18,7 +18,9 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister }: Sco
   switch (path) {
     case '/': return scoped ? [queries.overview(regionId, '24h', 'all')] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.emails({ regionId, search: '', status: undefined, stream: undefined, page: 1, pageSize })] : [] }
-    case '/inbound': return [queries.inboundAddressOptions(), queries.inboundThreads(undefined, 'inbox', '', undefined)]
+    // Receiving domains and inbound webhooks are admin-only reads.
+    case '/receiving': return [queries.inboundAddressOptions(), ...(canAdminister ? [queries.inboundDomains(), queries.inboundWebhooks()] : [])]
+    case '/receiving/inbox': return [queries.inboundAddressOptions(), queries.inboundThreads(undefined, 'inbox', '', undefined)]
     case '/campaigns': return [queries.campaigns({ search: '', archived: false, status: undefined, page: 1, pageSize: 10 })]
     case '/audience': { const pageSize = rememberedPageSize('contacts'); return [queries.audienceLists(), ...(pageSize ? [queries.contacts({ page: 1, pageSize, search: '', status: '', listId: '' })] : [])] }
     // Self-hosted domain reads call SES for every identity (the list refreshes by default), so only hosted workspaces warm it.

@@ -1,5 +1,3 @@
-.mailbox-domains { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-20); margin: 0; padding: 0; list-style: none; }
-.mailbox-domains li { display: inline-flex; align-items: center; gap: var(--space-8); }
 .mailbox-address { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
 
 /* Inbound reader: conversations on the left, the open conversation on the right. */
@@ -144,3 +142,20 @@ ul.mailbox-attachments button:hover { background: var(--color-hover); }
   .alias-list__note { grid-area: 2 / 1; }
   .alias-list .ui-icon-button { grid-area: 1 / 2 / 3 / 3; }
 }
+
+/* Receiving: domains, routes and addresses as hairline-separated sections. Two-line rows render 53px; skeletons match. */
+.receiving-sections { display: flex; flex-direction: column; min-width: 0; }
+.receiving-sections > .section { margin-block: 0; }
+.receiving-sections > .section:not(:first-child) { margin-top: var(--space-24); padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+.receiving-sections .ui-table-scroll { --table-row-height: 53px; }
+.receiving-search { width: 240px; }
+.receiving-clip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.receiving-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-16); min-height: 24px; margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.receiving-foot > .ui-button--ghost:first-child { margin-inline-start: -9px; }
+.receiving-records { gap: 0; }
+.receiving-records__title { margin: 0 0 var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.receiving-record { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: var(--space-4) var(--space-12); margin: 0; padding-block: var(--space-12); border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.receiving-record dt { color: var(--color-muted); font-size: var(--text-xs); }
+.receiving-record dd { min-width: 0; min-height: 28px; display: flex; align-items: center; margin: 0; }
+.receiving-record dd.settings-copy-cell { justify-content: space-between; }
+@media (max-width: 720px) { .receiving-search { width: 100%; } }

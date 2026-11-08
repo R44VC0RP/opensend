@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router'
 import { Archive, ArrowLeft, Inbox, Mail, MailOpen, Paperclip, Reply, Search, Star, Trash2, Undo2, X } from 'lucide-react'
 import { Alert, Button, Checkbox, ConfirmDialog, Dialog, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, Select, SkeletonText, StatusBadge, Tabs, Textarea, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
-import { useApi, useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useApiMutation, useApiQuery } from '../../data/context'
 import { queries } from '../../data/queries'
 import { ApiError, type InboundAddress, type InboundMessage, type InboundThread, type InboundThreadDetail, type InboundThreadPatch, type InboundThreadView, type MailAddress } from '../../data/types'
 import { date, label, time } from '../../lib/format'
@@ -277,7 +277,6 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
 }
 
 export function InboundPage() {
-  const { canAdminister } = useWorkspaceAccess()
   const [params, setParams] = useSearchParams()
   const addressId = params.get('address') || undefined
   const view = (views.some(item => item.value === params.get('view')) ? params.get('view') : 'inbox') as InboundThreadView
@@ -299,11 +298,7 @@ export function InboundPage() {
   }
   const filterAddress = (value: string) => { pagination.reset(); change({ address: value || null, thread: null, message: null }) }
   return <div className="mailbox-page" data-thread-open={threadId ? true : undefined}>
-    <PageHeader title="Inbound" actions={<>
-      <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/addresses">Addresses</Link>
-      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>}
-      <Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>
-    </>} />
+    <PageHeader title="Inbox" backTo="/receiving" actions={<Button variant="primary" disabled={!addresses.size} onClick={() => setComposing(true)}>New message</Button>} />
     <div className="mailbox-layout">
       <aside className="mailbox-list" aria-label="Conversations">
         <div className="inbound-filter"><Select aria-label="Filter by address" value={addressId ?? ''} onValueChange={filterAddress} disabled={addressList.isPending} placeholder="All addresses"
@@ -315,7 +310,7 @@ export function InboundPage() {
           : threads.data.length ? <>
             <ul className="mailbox-threads">{threads.data.map(item => <ThreadRow key={item.id} thread={item} addresses={addresses} showAddresses={!addressId || item.addressIds.length > 1} selected={item.id === threadId} onSelect={() => change({ thread: item.id, message: null })} />)}</ul>
             {(pagination.page > 1 || threads.data.nextCursor) && <Pagination page={pagination.page} pageSize={50} nextCursor={threads.data.nextCursor} onPageChange={next => pagination.onPageChange(next, threads.data.nextCursor)} />}
-          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/inbound/addresses">Create an address</Link> : undefined} />}
+          </> : <EmptyState title={q ? 'No matching conversations' : `Nothing in ${views.find(item => item.value === view)!.label.toLowerCase()}`} description={!q && !addresses.size && !addressList.isPending ? 'Create an address to start receiving mail.' : undefined} action={!q && !addresses.size && !addressList.isPending ? <Link to="/receiving">Create an address</Link> : undefined} />}
       </aside>
       <div className="mailbox-reader">
         {!threadId ? <EmptyState title="Select a conversation" />

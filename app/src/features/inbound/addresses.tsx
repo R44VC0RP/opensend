@@ -1,30 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
+import { queries } from '../../data/queries'
 import { useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { date, number } from '../../lib/format'
 import { useCursorPagination } from '../../lib/pagination'
 import type { InboundAddress, InboundAddressInput, InboundAddressPatch, MailboxDomain } from '../../data/types'
 import { fieldError, MutationError } from '../settings/shared'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
-import { receivingStatus } from './status'
 import '../settings/settings.css'
 import './inbound.css'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const lifetimes = [{ value: '', label: 'Permanent' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
-const receivingDomains = (domains: MailboxDomain[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
+export const receivingDomains = (domains: MailboxDomain[]) => domains.filter(domain => !['off', 'disabled'].includes(domain.status))
 
-function ReceivingDomains({ domains }: { domains: MailboxDomain[] }) {
-  const receiving = receivingDomains(domains)
-  if (!receiving.length) return <Alert tone="info">No domain receives mail yet. Open a verified domain in <Link to="/domains">Domains</Link> and choose Enable receiving.</Alert>
-  return <ul className="mailbox-domains" aria-label="Receiving domains">{receiving.map(domain => <li key={domain.id}>
-    <Link to={`/domains/${domain.id}`}>{domain.name}</Link>
-    <StatusBadge status={receivingStatus[domain.status].label} tone={receivingStatus[domain.status].tone} />
-  </li>)}</ul>
-}
-
-function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; onOpenChange: (open: boolean) => void; domains: MailboxDomain[] }) {
+export function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; onOpenChange: (open: boolean) => void; domains: MailboxDomain[] }) {
   const navigate = useNavigate()
   const [address, setAddress] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -47,7 +38,7 @@ function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; o
     else if (sender && EMAIL.test(value) && (sender.split('@')[0] !== value.split('@')[0] || !value.split('@')[1]!.endsWith(`.${sender.split('@')[1]}`))) next.publicAddress = `Use ${value.split('@')[0]}@ on a parent domain of ${value.split('@')[1]}.`
     setErrors(next)
     if (Object.keys(next).length) return
-    try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/inbound/addresses/${row.id}`) } catch { /* Shown in the form. */ }
+    try { const row = await create.mutateAsync({ address: value, displayName: displayName.trim() || null, ...(sender ? { publicAddress: sender } : {}), ...(lifetime ? { ttlSeconds: Number(lifetime) } : {}) }); onOpenChange(false); navigate(`/receiving/addresses/${row.id}`) } catch { /* Shown in the form. */ }
   }
   return <Dialog open={open} onOpenChange={next => { if (!create.isPending) onOpenChange(next) }} title="Create address" footer={<><Button disabled={create.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form="inbound-create-address" loading={create.isPending}>Create address</Button></>}>
     <form id="inbound-create-address" className="stack" onSubmit={submit} noValidate>
@@ -66,36 +57,42 @@ function CreateAddressDialog({ open, onOpenChange, domains }: { open: boolean; o
   </Dialog>
 }
 
-export function InboundAddressesPage() {
+const routing = (row: InboundAddress) => [
+  row.displayName,
+  row.aliases.length ? `${row.aliases.length} alias${row.aliases.length === 1 ? '' : 'es'}` : null,
+  row.rules.length ? `${row.rules.length} rule${row.rules.length === 1 ? '' : 's'}` : null,
+  row.publicAddress ? `sends as ${row.publicAddress}` : null,
+].filter(Boolean).join(' · ')
+
+export function AddressesSection({ domains }: { domains?: MailboxDomain[] }) {
   const { canAdminister } = useWorkspaceAccess()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
   const pagination = useCursorPagination()
   const cursor = pagination.cursor
-  const addresses = useApiQuery(['inbound-addresses', search, cursor], (api, signal) => api.inbound.addresses({ search: search.trim() || undefined, cursor }, signal), { interval: 60_000 })
-  const domains = useApiQuery(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal))
-  return <div className="stack inbound-stack">
-    <PageHeader title="Addresses" backTo="/inbound" actions={<>
+  const q = search.trim()
+  // The unfiltered first page is the same request as the address options the routes use.
+  const addresses = useApiQuery(q || cursor ? ['inbound-addresses', q, cursor] : queries.inboundAddressOptions().key, (api, signal) => api.inbound.addresses({ search: q || undefined, cursor }, signal), { interval: 60_000 })
+  return <section className="section stack" aria-labelledby="receiving-addresses">
+    <SectionHeader title={<span id="receiving-addresses">Addresses</span>} actions={<>
+      <Input className="receiving-search" type="search" aria-label="Search addresses" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
       {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/api-keys">Inbound keys</Link>}
-      {canAdminister && <Link className="ui-button ui-button--secondary ui-button--md" to="/inbound/webhooks">Webhooks</Link>}
-      <Button variant="primary" disabled={!domains.data || !receivingDomains(domains.data).length} onClick={() => setCreating(true)}>Create address</Button>
+      {canAdminister && <Button disabled={!domains || !receivingDomains(domains).length} onClick={() => setCreating(true)}>Create address</Button>}
     </>} />
-    {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : domains.isPending ? <SkeletonText width={260} /> : <ReceivingDomains domains={domains.data} />}
-    <div className="data-toolbar"><Input className="audience-search" aria-label="Search addresses" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} /></div>
     {addresses.error ? <ErrorState error={addresses.error} onRetry={() => void addresses.refetch()} /> : <>
-      <DataTable loading={addresses.isPending} skeletonRows={5} minRows={3} rows={addresses.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/inbound/addresses/${row.id}`)}
-        empty={<EmptyState title={search ? 'No matching addresses' : 'No addresses yet'} description={search ? undefined : 'Create one, or let a catch-all create them as mail arrives.'} />}
+      <DataTable loading={addresses.isPending} skeletonRows={3} minRows={3} rows={addresses.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/addresses/${row.id}`)}
+        empty={<EmptyState title={q ? 'No matching addresses' : 'No addresses yet'} description={q ? undefined : 'Create one, or let a catch-all create them as mail arrives.'} />}
         columns={[
-          { key: 'address', label: 'Address', width: '44%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link to={`/inbound/addresses/${row.id}`}>{row.address}</Link>{row.origin === 'auto' && <StatusBadge status="Auto" tone="neutral" />}</span>{(row.displayName || row.aliases.length > 0) && <span className="muted">{[row.displayName, row.aliases.length ? `+${row.aliases.length} alias${row.aliases.length === 1 ? '' : 'es'}` : null].filter(Boolean).join(' · ')}</span>}</div> },
-          { key: 'threads', label: 'Threads', align: 'right', width: '12%', render: row => <Link to={`/inbound?address=${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{number(row.stats.threads)}</Link> },
+          { key: 'address', label: 'Address', width: '44%', render: row => <div className="settings-cell-stack"><span className="mailbox-address"><Link to={`/receiving/addresses/${row.id}`}>{row.address}</Link>{row.origin === 'auto' && <StatusBadge status="Auto" tone="neutral" />}</span>{routing(row) && <span className="muted receiving-clip">{routing(row)}</span>}</div> },
+          { key: 'threads', label: 'Threads', align: 'right', width: '12%', render: row => <Link to={`/receiving/inbox?address=${encodeURIComponent(row.id)}`} onClick={event => event.stopPropagation()}>{number(row.stats.threads)}</Link> },
           { key: 'unread', label: 'Unread', align: 'right', width: '12%', render: row => row.stats.unreadThreads ? <strong>{number(row.stats.unreadThreads)}</strong> : <span className="muted">0</span> },
           { key: 'last', label: 'Last message', align: 'right', render: row => row.stats.lastMessageAt ? date(row.stats.lastMessageAt) : <span className="muted">None yet</span> },
         ]} />
       {addresses.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={100} nextCursor={addresses.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, addresses.data?.nextCursor)} />}
     </>}
-    <CreateAddressDialog open={creating} onOpenChange={setCreating} domains={domains.data ?? []} />
-  </div>
+    <CreateAddressDialog open={creating} onOpenChange={setCreating} domains={domains ?? []} />
+  </section>
 }
 
 // `base` is the saved address the edit started from, so a just-saved form doesn't wait on the refetch.
@@ -113,7 +110,7 @@ export function InboundAddressDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const current = address.data
   const input = edited ?? (current ? formOf(current) : null)
-  if (address.error) return <><PageHeader title="Address" backTo="/inbound/addresses" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
+  if (address.error) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
   const base = input?.base
   const dirty = !!base && !!input && (input.displayName.trim() !== (base.displayName ?? '') || !sameList(input.aliases.list, base.aliases) || !!input.aliases.draft.trim())
   async function submit(event: FormEvent) {
@@ -129,8 +126,8 @@ export function InboundAddressDetailPage() {
     try { setInput(formOf(await save.mutateAsync(patch))) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? current.address : <SkeletonText width={240} lineHeight={28} />} backTo="/inbound/addresses" actions={current && <>
-      <Link className="ui-button ui-button--secondary ui-button--md" to={`/inbound?address=${encodeURIComponent(current.id)}`}>Open conversations</Link>
+    <PageHeader title={current ? current.address : <SkeletonText width={240} lineHeight={28} />} backTo="/receiving" actions={current && <>
+      <Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving/inbox?address=${encodeURIComponent(current.id)}`}>Open in inbox</Link>
       <Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete</Button>
     </>} />
     {current && <>
@@ -153,7 +150,7 @@ export function InboundAddressDetailPage() {
         </form>}
       </section>
     </>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="The address and its aliases are released, and its read, star and archive state is removed. Stored messages are kept; future mail to these addresses follows the domain’s routing." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/inbound/addresses') }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${current?.address ?? 'this address'}?`} description="The address and its aliases are released, and its read, star and archive state is removed. Stored messages are kept; future mail to these addresses follows the domain’s routing." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
   </div>
 }
 

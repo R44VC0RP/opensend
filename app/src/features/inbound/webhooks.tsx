@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Alert, Button, Checkbox, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, SectionHeader, Select, SkeletonText, StatusBadge } from '../../components/ui'
-import { useApiDef, useApiMutation, useApiQuery } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { inboundEventTypes, type InboundAddress, type InboundWebhook, type InboundWebhookInput, type MailboxEventType } from '../../data/types'
 import { date, time } from '../../lib/format'
@@ -45,7 +45,14 @@ function WebhookFields({ input, onChange, addresses, errors, apiError, disabled,
   </div>
 }
 
-export function InboundWebhooksPage() {
+// Inbound webhooks are admin-only; members get a calm notice instead of requests that would be refused.
+function AdminOnly({ title, backTo }: { title: string; backTo: string }) {
+  return <div className="stack inbound-stack"><PageHeader title={title} backTo={backTo} /><EmptyState title="Only owners and admins can manage webhooks" /></div>
+}
+export function InboundWebhooksPage() { return useWorkspaceAccess().canAdminister ? <WebhooksList /> : <AdminOnly title="Inbound webhooks" backTo="/receiving" /> }
+export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Inbound webhook" backTo="/receiving" /> }
+
+function WebhooksList() {
   const navigate = useNavigate()
   const webhooks = useApiQuery(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal))
   const addresses = useApiDef(queries.inboundAddressOptions())
@@ -63,12 +70,12 @@ export function InboundWebhooksPage() {
     try { const result = await create.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim(), headers: headerPayload(headers) }); setOpen(false); setSecret({ value: result.secret, id: result.webhook.id }) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title="Inbound webhooks" backTo="/inbound" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
+    <PageHeader title="Inbound webhooks" backTo="/receiving" actions={<Button variant="primary" onClick={openCreate}>Add webhook</Button>} />
     <p className="muted inbound-note">Signed POST requests (Standard Webhooks) for mail events. Without a public URL, long-poll <code>GET /v1/inbound/events</code>.</p>
-    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/inbound/webhooks/${row.id}`)}
+    {webhooks.error ? <ErrorState error={webhooks.error} onRetry={() => void webhooks.refetch()} /> : <DataTable loading={webhooks.isPending} skeletonRows={2} minRows={2} rows={webhooks.data ?? []} rowKey={row => row.id} onRowClick={row => navigate(`/receiving/webhooks/${row.id}`)}
       empty={<EmptyState title="No inbound webhooks" description="Get a POST when mail arrives or a sent message is delivered." action={<Button onClick={openCreate}>Add webhook</Button>} />}
       columns={[
-        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/inbound/webhooks/${row.id}`}>{row.description || new URL(row.url).host}</Link><span className="muted settings-break">{row.url}</span></div> },
+        { key: 'endpoint', label: 'Endpoint', width: '34%', render: row => <div className="settings-cell-stack"><Link to={`/receiving/webhooks/${row.id}`}>{row.description || new URL(row.url).host}</Link><span className="muted settings-break">{row.url}</span></div> },
         { key: 'addresses', label: 'Addresses', width: '20%', render: row => <span className="settings-break">{scopeText(row, addresses.data)}</span> },
         { key: 'events', label: 'Events', width: '14%', render: row => <span title={row.eventTypes.join(', ')}>{row.eventTypes.length === 1 ? row.eventTypes[0] : row.eventTypes.length}</span> },
         { key: 'headers', label: 'Headers', width: '16%', render: row => <HeaderNames headers={row.headers} /> },
@@ -80,11 +87,11 @@ export function InboundWebhooksPage() {
         <WebhookFields input={input} onChange={setInput} addresses={addresses.data} errors={errors} apiError={create.error} disabled={create.isPending} headers={{ current: [], draft: headers, onChange: setHeaders }} />
       </form>
     </Dialog>
-    <SecretDialog secret={secret?.value ?? null} title="Signing secret" onClose={() => { const target = secret?.id; setSecret(null); if (target) navigate(`/inbound/webhooks/${target}`) }} />
+    <SecretDialog secret={secret?.value ?? null} title="Signing secret" onClose={() => { const target = secret?.id; setSecret(null); if (target) navigate(`/receiving/webhooks/${target}`) }} />
   </div>
 }
 
-export function InboundWebhookDetailPage() {
+function WebhookDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const webhook = useApiQuery(['inbound-webhook', id], (api, signal) => api.inbound.webhook(id, signal))
@@ -99,7 +106,7 @@ export function InboundWebhookDetailPage() {
   const [secret, setSecret] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<'rotate' | 'delete' | null>(null)
   useEffect(() => { if (webhook.data && !input) setInput({ url: webhook.data.url, description: webhook.data.description, eventTypes: webhook.data.eventTypes, addressIds: webhook.data.addressIds }) }, [webhook.data, input])
-  if (webhook.error) return <><PageHeader title="Inbound webhook" backTo="/inbound/webhooks" /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
+  if (webhook.error) return <><PageHeader title="Inbound webhook" backTo="/receiving/webhooks" /><ErrorState error={webhook.error} onRetry={() => void webhook.refetch()} /></>
   const current = webhook.data
   // The saved response is newer than the cached endpoint until the refetch lands.
   const currentHeaders = save.data?.headers ?? current?.headers ?? []
@@ -111,7 +118,7 @@ export function InboundWebhookDetailPage() {
     try { await save.mutateAsync({ ...input, url: input.url.trim(), description: input.description.trim(), headers: headerPayload(headers, currentHeaders) }); setHeaders(null) } catch { /* Shown in the form. */ }
   }
   return <div className="stack inbound-stack">
-    <PageHeader title={current ? current.description || new URL(current.url).host : <SkeletonText width={220} lineHeight={28} />} backTo="/inbound/webhooks" actions={current && <>
+    <PageHeader title={current ? current.description || new URL(current.url).host : <SkeletonText width={220} lineHeight={28} />} backTo="/receiving/webhooks" actions={current && <>
       <Button onClick={() => void save.mutateAsync({ paused: !current.paused }).catch(() => undefined)} loading={save.isPending && !dirty}>{current.paused ? 'Resume' : 'Pause'}</Button>
       <Button onClick={() => setConfirm('rotate')}>Rotate secret</Button>
       <Button variant="danger" onClick={() => setConfirm('delete')}>Delete</Button>
@@ -143,7 +150,7 @@ export function InboundWebhookDetailPage() {
       </section>
     </>}
     <ConfirmDialog open={confirm === 'rotate'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Rotate signing secret?" description="The old secret stops working immediately. Update your endpoint with the new secret right away." confirmLabel="Rotate secret" pending={rotate.isPending} onConfirm={async () => { setSecret((await rotate.mutateAsync()).secret) }} />
-    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped. Events stay available through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/inbound/webhooks') }} />
+    <ConfirmDialog open={confirm === 'delete'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Delete this webhook?" description="Pending deliveries are dropped. Events stay available through the events API." confirmLabel="Delete webhook" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving/webhooks') }} />
     <SecretDialog secret={secret} title="New signing secret" onClose={() => setSecret(null)} />
   </div>
 }

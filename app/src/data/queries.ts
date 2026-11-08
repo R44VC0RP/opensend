@@ -10,6 +10,8 @@ const def = <T>(key: readonly unknown[], read: QueryDef<T>['read']): QueryDef<T>
 export const queries = {
   overview: (regionId: string, range: TimeRange, stream: Stream | 'all') => def(['overview', regionId, range, stream], (api, signal) => api.overview.get({ regionId, range, stream: stream === 'all' ? undefined : stream }, signal)),
   emails: (params: PageRequest) => def(['emails', params], (api, signal) => api.emails.list(params, signal)),
+  inboundDomains: () => def(['mailbox-domains'], (api, signal) => api.mailboxes.domains(signal)),
+  inboundWebhooks: () => def(['inbound-webhooks'], (api, signal) => api.inbound.webhooks(signal)),
   inboundAddressOptions: () => def(['inbound-addresses', 'options'], (api, signal) => api.inbound.addresses({}, signal)),
   inboundThreads: (addressId: string | undefined, view: InboundThreadView, q: string, cursor: string | undefined) => def(['inbound-threads', addressId ?? null, view, q, cursor ?? null], (api, signal) => api.inbound.threads({ addressId, view, q: q || undefined, cursor }, signal)),
   campaigns: (request: PageRequest & { archived?: boolean }) => def(['campaigns', request], (api, signal) => api.campaigns.list(request, signal)),

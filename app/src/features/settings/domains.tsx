@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, type Tone } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { label } from '../../lib/format'
-import { ApiError, type DnsRecord, type Domain, type MailboxDomain } from '../../data/types'
-import { receivingStatus } from '../inbound/status'
+import { ApiError, type DnsRecord, type Domain } from '../../data/types'
+import { catchAllLabel, mxTone, receivingStatus } from '../inbound/status'
 import { fieldError, MutationError } from './shared'
 import { DomainDetailSkeleton, domainColumns, settingsColumns } from './skeletons'
 import { DnsRecordTable, DomainRecords, domainState, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
@@ -138,8 +138,6 @@ export function DomainDetailPage() {
   </div>
 }
 
-const mxTone = (state: NonNullable<MailboxDomain['mx']>['state']): Tone => state === 'active' ? 'success' : state === 'missing' || state === 'error' ? 'info' : 'warning'
-
 function MailboxReceiving({ domainId, domainName, verified }: { domainId: string; domainName: string; verified: boolean }) {
   const { multiTenant } = useWorkspaceAccess()
   const receiving = useApiQuery(['mailbox-domain', domainId], (api, signal) => api.mailboxes.domain(domainId, signal), { interval: state => state && ['provisioning', 'waiting_for_mx', 'disabling'].includes(state.status) ? 30_000 : false })
@@ -152,13 +150,13 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     try { await enable.mutateAsync(false) }
     catch (error) { if (error instanceof ApiError && error.code === 'MX_CONFLICT') { enable.reset(); setConflict(error.message.replace(/ Retry with force=true to continue anyway\. \[MX_CONFLICT\].*$/, '')) } }
   }
-  if (receiving.error) return <section className="section stack"><SectionHeader title="Inbound" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
+  if (receiving.error) return <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={receiving.error} onRetry={() => void receiving.refetch()} /></section>
   const state = receiving.data
   const on = !!state && !['off', 'disabled'].includes(state.status)
   const status = state ? receivingStatus[state.status] : null
   const records: DnsRecord[] = (state?.dns ?? []).map((record, index) => ({ id: `mx_${index}`, type: 'MX', name: record.name, value: `${record.priority} ${record.value}`, status: state?.mx?.state === 'active' ? 'verified' : 'pending' }))
   return <section className="section stack">
-    <div className="ui-section-header"><div className="domain-group-title"><h2>Inbound</h2><p className="muted">Receive mail on {domainName}. Conversations appear in <Link to="/inbound">Inbound</Link>.</p></div>
+    <div className="ui-section-header"><div className="domain-group-title"><h2>Receiving</h2><p className="muted">Receive mail on {domainName}. Manage addresses in <Link to="/receiving">Receiving</Link>.</p></div>
       <div className="cluster">{on ? <>
         <Button loading={check.isPending} onClick={async () => { try { await check.mutateAsync() } catch { /* Shown inline. */ } }}>Check MX</Button>
         {state!.status !== 'disabling' && <Button onClick={() => setDisableOpen(true)}>Turn off</Button>}
@@ -168,9 +166,9 @@ function MailboxReceiving({ domainId, domainName, verified }: { domainId: string
     {!verified && !on && <p className="muted">Verify the domain before enabling receiving.</p>}
     {state && status && on && <>
       <dl className="settings-facts domain-facts">
-        <div><dt>Receiving</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
-        <div><dt>Unknown addresses</dt><dd>{state.catchAll === 'create_address' ? 'Create an address' : 'Store as unrouted'}</dd></div>
-        <div><dt>Addresses</dt><dd><Link to="/inbound/addresses">{state.addressCount}</Link></dd></div>
+        <div><dt>Status</dt><dd><StatusBadge status={status.label} tone={status.tone} /></dd></div>
+        <div><dt>Unknown addresses</dt><dd>{catchAllLabel[state.catchAll]}</dd></div>
+        <div><dt>Addresses</dt><dd><Link to="/receiving">{state.addressCount}</Link></dd></div>
         {!multiTenant && <div><dt>Region</dt><dd>{state.region}</dd></div>}
       </dl>
       {state.lastError && <Alert tone="danger">{state.lastError}</Alert>}

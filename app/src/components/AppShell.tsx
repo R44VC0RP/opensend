@@ -11,7 +11,7 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
-const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/inbound', 'Inbound'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']] as const
+const navigation = [['/', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']] as const
 export function AppShell() {
   const api = useApi()
   const { regionId, setRegionId } = useRegion()
