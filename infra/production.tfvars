@@ -15,4 +15,5 @@ dns_records = [
   { zone_id = "ab14f406b3316dcfc3e2de7b379fffad", type = "CNAME", name = "a65huxiqe3fnztksugtxdofprx4kobg4._domainkey.e2e.opensend.mx", content = "a65huxiqe3fnztksugtxdofprx4kobg4.dkim.amazonses.com" },
   { zone_id = "ab14f406b3316dcfc3e2de7b379fffad", type = "TXT", name = "_opensend.e2e.opensend.mx", content = "40967c88-95de-499a-ae24-9fd5e7aad31b" },
   { zone_id = "ab14f406b3316dcfc3e2de7b379fffad", type = "MX", name = "e2e.opensend.mx", content = "inbound-smtp.us-east-2.amazonaws.com", priority = 10 },
+  { zone_id = "ab14f406b3316dcfc3e2de7b379fffad", type = "TXT", name = "_dmarc.opensend.mx", content = "v=DMARC1; p=none" },
 ]
