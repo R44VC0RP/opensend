@@ -3,10 +3,9 @@ import type { EmailSnapshot } from './db/sending.js';
 import { formattedSender } from './sending.js';
 
 // Opt-in content screen for live transactional mail (`screen: true`): asks Jev, TypeSafe AI's decision
-// model, how likely a message is advertising smuggled into a transactional template (for example a
+// model (directly or through OpenCode's inference gateway, per JEV_ENDPOINT), how likely a message is advertising smuggled into a transactional template (for example a
 // gambling ad set as a workspace name in an invitation). The dispatcher decides what to do with the score.
 
-const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const MAX_BODY = 8000;
 const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
@@ -34,12 +33,13 @@ function body(snapshot: EmailSnapshot) {
   const source = snapshot.text ?? (snapshot.html ? textOf(snapshot.html) : snapshot.raw ? textOf(snapshot.raw) : '');
   return source.replace(/\s+/g, ' ').trim().slice(0, MAX_BODY);
 }
-async function evaluate(apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
+async function evaluate(endpoint: string, apiKey: string, model: string, state: unknown): Promise<ScreenResult> {
   // The deadline includes reading the response body. Never retry inside a send lease.
   let response: Response;
   try {
-    response = await fetch(ENDPOINT, {
-      method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    response = await fetch(endpoint, {
+      // Never follow a redirect: the key and the message body go only to the configured endpoint.
+      method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model, state, questions: QUESTIONS }), signal: AbortSignal.timeout(DEADLINE_MS),
     });
   } catch {
@@ -60,14 +60,14 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot):
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName), text = body(snapshot);
-  const key = await digest(`${settings.model}|${from}|${snapshot.subject}|${text}`);
+  const key = await digest(`${settings.endpoint}|${settings.model}|${from}|${snapshot.subject}|${text}`);
   const now = Date.now();
   const hit = cache.get(key);
   if (hit && hit.expires > now) return hit.result;
   if (hit) cache.delete(key);
   const state = { now: new Date(now).toISOString(), email: { from, subject: snapshot.subject, body: text }, signals: { recipients: snapshot.to.length + snapshot.cc.length + snapshot.bcc.length } };
   // Concurrent copies share one request; failures are not cached so the next copy retries.
-  const result = evaluate(settings.apiKey, settings.model, state);
+  const result = evaluate(settings.endpoint, settings.apiKey, settings.model, state);
   const entry = { expires: now + TTL_MS, result };
   cache.set(key, entry);
   result.catch(() => { if (cache.get(key) === entry) cache.delete(key); });

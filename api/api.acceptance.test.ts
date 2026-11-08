@@ -7524,11 +7524,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ]);
       const base = { BETTER_AUTH_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN };
       assert.equal(loadConfig(base).screen, undefined, 'Without TYPESAFE_API_KEY the screen is off.');
-      assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
+      assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
+      assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
       // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
       runtime.config.liveEnabled = true;
       runtime.config.aws = { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' };
-      runtime.config.screen = { apiKey: 'synthetic-typesafe-key', model: 'jev-test', mode: 'reject', threshold: 0.7 };
+      runtime.config.screen = { apiKey: 'synthetic-typesafe-key', endpoint: 'https://jev.synthetic.invalid/v1/systemone', model: 'jev-test', mode: 'reject', threshold: 0.7 };
       const topic = `arn:aws:sns:${REGION}:111122223333:synthetic-feedback`;
       await db.query(`INSERT INTO ses_region_discovery(workspace_id, region, report, credentials_fingerprint, public_url, trusted_account_id, trusted_topic_arn)
         VALUES ($1, $2, $3, $4, $5, '111122223333', $6)`, [runtime.config.workspaceId, REGION,
@@ -7549,8 +7550,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const passthrough = globalThis.fetch;
       t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-        if (!url.startsWith('https://api.typesafe.ai/')) return passthrough(input, init);
-        assert.equal(url, 'https://api.typesafe.ai/v1/systemone');
+        if (!url.startsWith('https://jev.synthetic.invalid/')) return passthrough(input, init);
+        assert.equal(url, 'https://jev.synthetic.invalid/v1/systemone');
         assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer synthetic-typesafe-key');
         const request = JSON.parse(String(init?.body));
         assert.equal(request.model, 'jev-test');
