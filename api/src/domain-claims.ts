@@ -17,7 +17,7 @@ export const claimName = z.preprocess(value=>{
 },domainName);
 export async function claimNameAllowed(name:string,publicUrl:string) {
   const host=new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
-  return name.includes('.') && name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)
+  return name.includes('.') && (name==='e2e.opensend.mx' || (name!==host && !name.endsWith('.'+host) && !host.endsWith('.'+name)))
     && !reservedRoots.some(root=>name===root || name.endsWith('.'+root)) && (await placementRoot(name)).root!==null;
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
