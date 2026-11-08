@@ -38,8 +38,9 @@ async function evaluate(endpoint: string, apiKey: string, model: string, state: 
   let response: Response;
   try {
     response = await fetch(endpoint, {
-      // Never follow a redirect: the key and the message body go only to the configured endpoint.
-      method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      // Never follow a redirect: the key and the message body go only to the configured endpoint. Workers
+      // reject redirect: 'error', so use 'manual'; a 3xx is not ok and counts as unavailable below.
+      method: 'POST', redirect: 'manual', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model, state, questions: QUESTIONS }), signal: AbortSignal.timeout(DEADLINE_MS),
     });
   } catch {
