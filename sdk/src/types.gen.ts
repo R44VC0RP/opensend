@@ -1048,7 +1048,7 @@ export type CampaignPacing = {
      */
     perDay?: number | null;
     /**
-     * Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).
+     * Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted). Hosted shared sending requires true; false is rejected.
      */
     autoPause?: boolean;
     /**
@@ -1073,7 +1073,7 @@ export type CampaignCanceled = {
 export type CampaignPacingUpdate = {
     perDay: number | null;
     /**
-     * Omit to keep the current setting.
+     * Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.
      */
     autoPause?: boolean;
     /**

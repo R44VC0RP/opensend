@@ -5126,6 +5126,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         [wid,{sendCap:null,pendingCap:null},{sendCap:11001,pendingCap:10001}], [wid,{sendCap:11001,pendingCap:10001},{sendCap:null,pendingCap:null}],
       ]);
 
+      const {setWorkspaceExemption}=await import('./scripts/set-workspace-exemption.js');
+      await setWorkspaceExemption(db,[wid,'on','--reason','Synthetic backlog']);
+      const extra=ok(await send(),202); // Already above both ordinary defaults.
+      await limits('100','10000');
+      error(await send(),429,'SEND_LIMIT_REACHED');
+      error(await send(simulator),429,'PENDING_EMAIL_LIMIT_EXCEEDED');
+      await db.query("UPDATE sending_emails SET status='canceled' WHERE id=$1",[extra.id]);
+      await limits('default','default');
+      await setWorkspaceExemption(db,[wid,'off','--reason','Restore ordinary limits']);
+
       await db.query(`UPDATE sending_emails SET snapshot='{"kind":"marketing"}' WHERE workspace_id=$1 AND actor_key_id='fixture'`,[wid]);
       ok(await send(simulator),202);
       const mixedBatch=await request('POST','/v1/emails/batch',key,{emails:[mail({from,to:simulator}),mail({from,to:simulator,kind:'marketing'})]});
@@ -5206,7 +5216,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // 99 real recipients already admitted. 112 minus the 12-recipient reserve leaves one marketing slot.
       const {setHostedLimits}=await import('./scripts/set-hosted-limits.js');
       await setHostedLimits(db,[wid,'--send-cap','112','--pending-cap','default']);
-      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),202);
+      error(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision,pacing:{autoPause:false}}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
+      ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);
+      error(await local('POST',`/v1/campaigns/${c.id}/pacing`,{perDay:null,autoPause:false}),422,'HOSTED_AUTO_PAUSE_REQUIRED');
       await run('campaign.run');
       const campaign = ok(await local('GET',`/v1/campaigns/${c.id}`));
       assert.equal(campaign.state,'sending'); assert.equal(campaign.delivery.waiting.reason,'hosted_daily_quota'); assert.equal(campaign.delivery.expanded,1);
@@ -5230,8 +5242,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await batch(100),202);
       await db.query(`UPDATE sending_emails SET status='delivered' WHERE workspace_id=$1 AND id<>$2 AND status='queued'`,[wid,queued]);
 
-      await (await import('./scripts/set-hosted-limits.js')).setHostedLimits(db,[wid,'--send-cap','100000','--pending-cap','25000']);
-      // An operator override does not exempt this workspace from bounce or complaint holds.
+      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise uncapped reputation checks']);
+      // An uncapped workspace is still subject to bounce and complaint holds.
       // Synthetic feedback uses the production event vocabulary, including delayed and duplicate outcomes.
       const event = async (type:string, start:number, end:number, data:Json={}, age='0 hours', simulated=false) => {
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,data,simulated,created_at)
@@ -5257,9 +5269,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (cmd instanceof GetAccountCommand) return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:10000,SentLast24Hours:0}};
         assert.ok(cmd instanceof SendEmailCommand); return {MessageId:unique('fake-ses')};
       });
+      await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES('suppressed-fixture',$1,'blocked@example.net',true)`,[wid]);
+      const blocked=ok(await send({to:'blocked@example.net'}),202);
       assert.equal((await runDispatcher(runtime,{region:REGION,accountId:pool})).sent,1); assert.equal(ses.mock.callCount(),2);
+      assert.equal(ok(await local('GET',`/v1/emails/${blocked.id}`)).status,'suppressed');
       await event('complaint',1,2); await checkHostedHealth(runtime); assert.equal(await pause(),null);
       await event('complaint',2,3); await checkHostedHealth(runtime); assert.match((await pause()).reason,/complaint/);
+      error(await send(),409,'HOSTED_SENDING_PAUSED');
       await runtime.db.execute(resumeHostedSending(wid));
       await db.query(`DELETE FROM sending_email_events WHERE workspace_id=$1`,[wid]);
       // At 200 sends, six hard bounces are exactly 3% (not over); seven exceed the rate despite being <10.
@@ -5276,6 +5292,57 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       error(await local('DELETE','/v1/connection'),409,'HOSTED_SENDING_PAUSED'); // No self-service unpause via disconnect.
     });
   });
+  test('MX: a workspace-only exemption admits all sending paths without resetting usage or disabling campaign health', async t => {
+    await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
+      const {setWorkspaceExemption}=await import('./scripts/set-workspace-exemption.js'), {createMailbox}=await import('./src/mailbox-store.js');
+      const wid=runtime.config.workspaceId, account='111122223333', domain='exempt.example', from=`sender@${domain}`;
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'}});
+      runtime.config.hostedSendCaps.firstWeek=2;
+      const set=(state:string,reason:string)=>setWorkspaceExemption(db,[wid,state,'--reason',reason]);
+      await assert.rejects(set('on',''),/Usage:/); await assert.rejects(set('on','No connection'),/No Hosted connection/);
+      const other=ok(await local('POST','/v1/workspaces',{name:'Other synthetic workspace'}),201).id;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:feedback`]);
+      for (const [workspace,host] of [[wid,domain],[other,'ordinary.example']]) {
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[workspace,REGION,account]);
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`,[host,workspace]);
+      }
+      const post=(path:string,body:Json,workspace=wid)=>local('POST',path,body,'live',{'X-OpenSend-Workspace':workspace});
+      const send=()=>post('/v1/emails/send',mail({from}));
+      const md=unique('mdom');
+      await db.query(`INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$3,$4,$5,'active')`,[md,wid,unique('domain'),domain,REGION]);
+      const box=await createMailbox(runtime.db,{workspaceId:wid},{domainId:md,domainName:domain,address:from,origin:'api'});
+      const parent=ok(await post('/v1/inbound/threads',{addressId:box.id,to:['reply@example.net'],subject:'Fixture',text:'Thread parent'}),202);
+      await db.query(`UPDATE mail_messages SET message_id='fixture-parent@example.net' WHERE id=$1`,[parent.id]);
+      ok(await send(),202); error(await send(),429,'SEND_LIMIT_REACHED');
+      await set('on','Synthetic exemption');
+      ok(await send(),202);
+      ok(await post('/v1/emails/batch',{emails:[mail({from}),mail({from,kind:'marketing'})]}),202);
+      const reply=ok(await post(`/v1/inbound/threads/${parent.threadId}/reply`,{addressId:box.id,replyToMessageId:parent.id,text:'Reply'}),202);
+      assert.equal(reply.inReplyTo,'fixture-parent@example.net');
+      const otherSend=()=>post('/v1/emails/send',mail({from:'staff@ordinary.example'}),other);
+      ok(await otherSend(),202);ok(await otherSend(),202);error(await otherSend(),429,'SEND_LIMIT_REACHED');
+      const list=ok(await post('/v1/lists',{name:'Synthetic exempt audience'}),201);
+      await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('exempt-contact',$1,'subscriber@example.net','subscribed') RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`,[wid,list.id]);
+      const c=ok(await post('/v1/campaigns',{name:'Synthetic exempt campaign',from,subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201), path=`/v1/campaigns/${c.id}`;
+      ok(await post(`${path}/test`,{to:'test@example.net'}),202);
+      ok(await post(`${path}/send`,{revision:c.revision}),202);
+      // Older Hosted campaigns could persist auto_pause=false. Real accepted statuses above the threshold still stop release.
+      await db.query('UPDATE sending_campaigns SET auto_pause=false WHERE id=$1',[c.id]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,campaign_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+        SELECT 'history-'||n,$1,$2,$3,'fixture',$4,'["older@example.net"]','[]','[]','Historical fixture','{}',false,CASE WHEN n<=21 THEN 'bounced' ELSE 'delivered' END,now()-interval '2 days' FROM generate_series(1,1000)n`,[wid,c.id,REGION,from]);
+      const view=async()=>ok(await local('GET',path,undefined,'live',{'X-OpenSend-Workspace':wid}));
+      await run('campaign.run'); assert.equal((await view()).delivery.pauseReason.code,'BOUNCE_RATE_HIGH');
+      ok(await post(`${path}/resume`,{})); await run('campaign.run');
+      assert.equal((await view()).delivery.expanded,1); assert.equal((await view()).delivery.waiting,null);
+      await set('off','Completed review');
+      // At seven prior direct recipients plus one campaign recipient, a freshly raised ordinary cap of eight is still full.
+      runtime.config.hostedSendCaps.firstWeek=8;
+      error(await send(),429,'SEND_LIMIT_REACHED');
+      assert.deepEqual((await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-workspace-exemption'`,[wid])).rows.map(r=>r.details).sort((a,b)=>Number(a.old)-Number(b.old)),
+        [{old:false,new:true,reason:'Synthetic exemption'},{old:true,new:false,reason:'Completed review'}]);
+    });
+  });
   test('MX: multi-recipient SES feedback uses real destinations, yesterday’s volume and the last operator resume', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const { ingestFeedbackBatch } = await import('./src/operations.js');
@@ -5285,6 +5352,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,topicArn]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
+      await (await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[wid,'on','--reason','Exercise real SES feedback ingestion']);
       const bcc=Array.from({length:49},(_,i)=>`bcc${i}@example.net`), simulator='success+fixture@simulator.amazonses.com';
       // 100 accepted envelopes yesterday: 4,999 real recipients plus one simulator. No sends today.
       await db.query(`WITH sent AS (INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,feedback_topic_arn,created_at)
@@ -5436,6 +5504,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[shared,REGION,pool]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,external_id,template_version,platform_principal_arn,role_arn,feedback_topic_arn)
         VALUES ($1,$1,$2,'ready','byo',$3,$4,'v1',$5,$6,$7)`,[byo,REGION,account,externalId,`arn:aws:iam::${pool}:user/test`,role,byoTopic]);
+      // A Hosted exemption surviving a switch to BYO neither supplies policy nor permits operator edits here.
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1',[byo]);
+      assert.equal((await db.query('SELECT allowance FROM hosted_allowance($1,1,0,100,1000,10000,10)',[byo])).rowCount,0);
+      await assert.rejects((await import('./scripts/set-workspace-exemption.js')).setWorkspaceExemption(db,[byo,'off','--reason','BYO fixture']),/No Hosted connection/);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('pool.example',$1,$1,'verified'),('customer.example',$2,$2,'verified')",[shared,byo]);
       const assumptions = t.mock.method(STSClient.prototype,'send', async (cmd: any) => {
         assert.ok(cmd instanceof AssumeRoleCommand); assert.equal(cmd.input.RoleArn,role); assert.equal(cmd.input.ExternalId,externalId);

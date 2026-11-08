@@ -8,7 +8,7 @@ export const realDestination = (address: string) => !address.toLowerCase().endsW
 export const hostedCost = (to: string | string[], cc: string[] = [], bcc: string[] = []) =>
   [to].flat().concat(cc, bcc).filter(realDestination).length;
 
-export type HostedAllowance = { cap: number; marketingCap: number; used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null };
+export type HostedAllowance = ({ cap: number; marketingCap: number } | { cap: null; marketingCap: null }) & { used: number; resetAt: string | null; nextChangeAt: string; pauseReason: string | null; pendingCapOverride: number | null; exemptHostedQuotas: boolean };
 // The current UTC hour plus the preceding 23 buckets. The same statement as admission,
 // independent of how many envelopes or destinations were admitted in those hours.
 export function hostedAllowance(config: Config, wid: string, incoming: number, marketing = 0) {
@@ -19,6 +19,7 @@ export function hostedAllowance(config: Config, wid: string, incoming: number, m
 export function assertHostedAllowance(allowance: HostedAllowance | null, incoming: number, marketing = 0) {
   if (!allowance) return;
   if (allowance.pauseReason) throw new ApiError(409, 'HOSTED_SENDING_PAUSED', allowance.pauseReason);
+  if (allowance.cap === null) return;
   const reserved = marketing > 0 && marketing + allowance.used > allowance.marketingCap;
   if (incoming && (incoming + allowance.used > allowance.cap || reserved)) {
     const resetAt = allowance.resetAt ? new Date(allowance.resetAt).toISOString() : undefined;

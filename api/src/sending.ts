@@ -32,10 +32,12 @@ const MAX_BODY = 512 * 1024;
 // Outstanding (queued or attempting) mail per workspace is capped by the account's SES 24-hour quota, which
 // the dispatcher keeps synced in the limits tables: a day of backlog is plenty, the floor keeps sandbox and
 // brand-new accounts usable, and the ceiling bounds queue bloat. Shared-pool workspaces never inherit the
-// pool's quota: they use the floor unless an operator sets a cap. BYO and self-hosted use their own account's.
+// pool's quota: the operator override wins, then the ceiling for exempt workspaces or the floor otherwise.
 const SENDING_LIMITS = { pendingFloor: 10000, pendingCeiling: 200000, storedAttachmentBytes: 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
 const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'regional_workspace_limits' : 'sending_region_limits');
-const pendingCap = (quota: number | string | null, hosted: HostedAllowance | null) => hosted?.pendingCapOverride ?? Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
+const pendingCap = (quota: number | string | null, hosted: HostedAllowance | null) => hosted
+  ? hosted.pendingCapOverride ?? (hosted.exemptHostedQuotas ? SENDING_LIMITS.pendingCeiling : SENDING_LIMITS.pendingFloor)
+  : Math.min(SENDING_LIMITS.pendingCeiling, Math.max(SENDING_LIMITS.pendingFloor, Math.floor(Number(quota) || 0)));
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
 const CAMPAIGN_PREPARE_ROWS = 20000;
@@ -167,7 +169,7 @@ const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('Ca
 const CampaignContentGuide = z.object({ format: z.literal('markdown'), markdown: z.string() }).openapi('CampaignContentGuide');
 const CampaignPreview = z.object({ html: z.string().describe('Complete rendered email document; empty when the draft has no content.'), text: z.string() }).openapi('CampaignPreview');
 const CampaignPreviewImage = z.object({ data: z.string().describe('Canonical base64 PNG screenshot.'), mimeType: z.literal('image/png') }).openapi('CampaignPreviewImage');
-const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted).'),
+const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullable().optional().describe('Release at most this many recipients per rolling 24-hour window. Omit or null for no daily cap. Delivery always also respects the SES 24-hour quota.'), autoPause: z.boolean().default(true).describe('Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted). Hosted shared sending requires true; false is rejected.'),
   rateShare: z.number().min(0.05).max(1).optional().describe('Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.') }).strict().openapi('CampaignPacing');
 const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional() }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
@@ -735,6 +737,7 @@ async function admitEmails(c: Ctx, a: Actor, input: SendRequest | { emails: Send
         SELECT m.id,m.hash,m.email,${regional ? sql`m.snapshot||jsonb_build_object('region',coalesce(route->>'region',''),'binding',route->'binding')` : sql`jsonb_set(m.snapshot,'{region}',to_jsonb(coalesce(nullif(m.snapshot->>'region',''),s->>'default_region')))`} snapshot
         FROM state,jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) m(id text,hash text,email text,snapshot jsonb) ${regional ? sql`CROSS JOIN LATERAL (SELECT s->'routes'->lower(split_part(m.snapshot->>'from','@',2)) AS route) r` : sql``} WHERE s->>'default_region' IS NOT NULL
           AND (s->>'projected')::int <= coalesce((s#>>'{hosted,pendingCapOverride}')::int,
+            CASE WHEN (s#>>'{hosted,exemptHostedQuotas}')::boolean THEN ${SENDING_LIMITS.pendingCeiling}::int END,
             least(${SENDING_LIMITS.pendingCeiling}, greatest(${SENDING_LIMITS.pendingFloor}, floor((s->>'quota')::numeric))))
           AND s#>>'{hosted,pauseReason}' IS NULL AND (s#>>'{hosted,cap}' IS NULL OR ${cost}::int=0 OR (
             (s#>>'{hosted,used}')::bigint + ${cost} <= (s#>>'{hosted,cap}')::int AND (${marketing}::int=0 OR
@@ -1195,10 +1198,11 @@ export function registerSending(app: App) {
     await db.execute(queueCampaignRun(ref, campaign.requestId ? { requestId: campaign.requestId } : {}, next === 'scheduled' ? campaign.scheduledAt : null));
     a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1);
   }));
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pacing', operationId: 'setCampaignPacing', description: 'Change the daily cap or automatic pause of a scheduled or sending campaign, for example to raise 50,000 to 100,000 per day. Takes effect on the next release.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({ perDay: Pacing.shape.perDay.unwrap(), autoPause: z.boolean().optional().describe('Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected.'), rateShare: z.number().min(0.05).max(1).optional().describe('Omit to keep the current setting.') }).strict().openapi('CampaignPacingUpdate')) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (campaign.expanded >= campaign.total) throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'This campaign has finished releasing recipients.');
     if (campaign.state === 'failed') throw new ApiError(409, 'CAMPAIGN_NOT_SENDING', 'Resume this campaign before changing its pacing.');
     const input = c.req.valid('json'), ref = { workspaceId: a.workspaceId, id: campaign.id };
+    if (input.autoPause === false && c.env.config.multiTenant && (await db.execute(sql`SELECT 1 WHERE ${sharedConnection(a.workspaceId)}`)).rowCount) throw hostedAutoPauseRequired();
     await db.execute(setCampaignPacing(ref, { pacePerDay: input.perDay ?? null, autoPause: input.autoPause ?? campaign.autoPause, rateShare: input.rateShare ?? campaign.rateShare }));
     // A release waiting for the next window or quota rechecks now under the new settings.
     if (campaign.state === 'sending') { await db.execute(wakeCampaignRun(ref)); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
@@ -1206,6 +1210,8 @@ export function registerSending(app: App) {
 }
 
 const campaignRef = (a: Pick<Actor, 'workspaceId'>, campaignId: string) => ({ workspaceId: a.workspaceId, id: campaignId });
+const sharedConnection = (wid: string) => sql`EXISTS (SELECT 1 FROM provider_connections WHERE workspace_id=${wid} AND kind='shared')`;
+const hostedAutoPauseRequired = () => new ApiError(422, 'HOSTED_AUTO_PAUSE_REQUIRED', 'Automatic bounce and complaint pauses cannot be disabled on Hosted shared sending.', 'autoPause');
 async function checkCampaignCapacity(db: DbExecutor, a: Actor, incoming: number) {
   await lockAdmission(db, a);
   // Unreleased intents of every active or resumable campaign plus its email rows still in the dispatch queue, each counted
@@ -1254,6 +1260,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (a.role === 'member') throw new ApiError(403, 'PERMISSION_DENIED', 'Only workspace owners and admins can send campaigns.');
   const row = await findCampaign(db, a, campaignId, true); editable(row, input.revision);
   const draft = readyCampaign(row.draft); const route=await sendingRegion(runtime, db, a, draft.from, campaignSendRegion(runtime,row.draft),true);
+  if (input.pacing?.autoPause === false && runtime.config.multiTenant && a.dispatchAccount?.kind === 'shared') throw hostedAutoPauseRequired();
   if (!isSimulatedSes(runtime) && !runtime.config.multiTenant) await assertLiveRegionReady(runtime, db, draft.region, 'marketing', false, a.workspaceId);
   const rendered = renderCampaignContent(runtime, draft);
   const reviewId = id('review');
@@ -1636,6 +1643,7 @@ type RunRow = typeof campaigns.$inferSelect & { reviewDraft: CampaignDraft | nul
 async function readRun(runtime: Runtime, a: Actor, campaignId: string): Promise<RunRow | undefined> {
   const limits = limitsTable(runtime), region = sql`${campaignReviews.draft}->>'region'`;
   const [row] = await runtime.db.select({ ...getTableColumns(campaigns), reviewDraft: campaignReviews.draft, reviewRendered: campaignReviews.rendered,
+    autoPause: runtime.config.multiTenant ? sql<boolean>`${campaigns.autoPause} OR ${sharedConnection(a.workspaceId)}` : campaigns.autoPause,
     account: runtime.config.multiTenant ? sql<RunAccount>`(SELECT jsonb_build_object('aws_account_id', aws_account_id, 'kind', kind, 'pauseReason', pause_reason,'generation',generation) FROM ${sendingConnections(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region})` : sql<null>`NULL`,
     rate: sql<number>`coalesce((SELECT max_send_rate FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
     max24: sql<number>`coalesce((SELECT max_24_hour_send FROM ${limits} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)`,
@@ -1790,7 +1798,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (!recipients.length || recipients.some((recipient, index) => !recipient.content_hash || recipient.subject === null || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     const allowance = buffer!.hosted;
     let hostedUntil: string | null = null;
-    if (allowance && !campaign.simulated) {
+    if (allowance && allowance.marketingCap !== null && !campaign.simulated) {
       let left = allowance.marketingCap - allowance.used;
       const blocked = recipients.findIndex(r => hostedCost(r.recipient.email) > 0 && --left < 0);
       if (blocked >= 0) {

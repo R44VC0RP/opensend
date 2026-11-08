@@ -4111,7 +4111,7 @@
           "autoPause": {
             "type": "boolean",
             "default": true,
-            "description": "Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted)."
+            "description": "Pause automatically if the bounce rate exceeds 2% (after 1,000 accepted) or the complaint rate exceeds 0.08% (after 5,000 accepted). Hosted shared sending requires true; false is rejected."
           },
           "rateShare": {
             "type": "number",
@@ -4182,7 +4182,7 @@
           },
           "autoPause": {
             "type": "boolean",
-            "description": "Omit to keep the current setting."
+            "description": "Omit to keep the current setting. Hosted shared sending always enforces automatic pause; false is rejected."
           },
           "rateShare": {
             "type": "number",
